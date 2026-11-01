@@ -1,0 +1,20 @@
+# Example automation definition, not enabled or scheduled.
+id: automation-sentry-health
+name: Daily Infrastructure Health Check
+status: draft
+trigger:
+  type: cron
+  expression: "0 8 * * *"
+  timezone: Asia/Manila
+  missed_policy: once
+  overlap_policy: skip
+execution:
+  agent_ref: sentry
+  project_ref: infrastructure
+  template_task: "Read approved monitoring sources and summarize health. Do not modify systems."
+  requires_background_entitlement: true
+  max_concurrency: 1
+  max_attempts: 2
+  mode: read_only
+  approval_required_for_writes: true
+  allow_paid_api_fallback: false

@@ -1,0 +1,20 @@
+# Example MCP connection. It is not live or authenticated.
+slug: second-brain-read
+kind: mcp
+transport: stdio  # or supported Streamable HTTP version
+command_ref: approved-internal-binary-id  # NOT arbitrary shell command
+url_ref: null
+secret_ref: null
+protocol_version: verify-with-installed-sdk
+status: draft
+allowed_tools:
+  - knowledge_search
+  - knowledge_read
+risk_level: read_only
+scopes:
+  - global-approved
+  - project-specific-when-granted
+policy:
+  tool_schemas_must_be_pinned: true
+  audit_invocations: true
+  no_write_by_default: true
