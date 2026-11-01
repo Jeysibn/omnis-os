@@ -3,19 +3,19 @@
 - Product: **Omnis OS**
 - Repository slug: `omnis-os`
 - Refreshed: **2026-11-02** after recording Phase 0 evidence.
-- Inventoried files: **51** (manifest excluded to avoid a self-referential hash).
+- Inventoried files: **55** (manifest excluded to avoid a self-referential hash).
 - Windows `Zone.Identifier` metadata sidecars are preserved in the workspace but intentionally excluded from source control and these hashes.
 - Hashes are SHA-256 of file bytes.
 
 | Relative path | SHA-256 | Bytes |
 |---|---|---:|
-| `.gitignore` | `ac7a9db9bb0c6de1d877aeb33b87db4d28285b18ca31602342b32d15ee458d32` | 90 |
+| `.gitignore` | `d8ab0e6f4b12cbb03ead74ea33102bb4df368efa70f9d9be95bb3dbcfe058dca` | 107 |
 | `AGENTS.md` | `17853c6c80d535336d053b63afaab5fce4ea08eaab45b988d84ee5dd589bf0ca` | 1120 |
 | `CHANGELOG.md` | `2f13120f6fd8d7c62956af7b5a08649f2c38fdb3dcd4dba8fc8220c026d8125e` | 1060 |
 | `CONTEXT.md` | `2348f4fa9009ce8c8f62b8df9241d49c5ca8e900a1dd77d1133fec03349a2c3c` | 1244 |
 | `MASTER_PLAN.md` | `083bfcb55b8e04261e79c0b834909a724a5b1639e3c385e4721110c6efcf2cf4` | 7913 |
 | `PRODUCT.md` | `e1cc34e306f3aef08e937e880ece071d833c7cfd66e31510a2773bfc23cc0270` | 2558 |
-| `README.md` | `d66e0010c75341ffe123391589f8a38601cc38f3db6dd2e878911f2ca9ffbee6` | 1169 |
+| `README.md` | `02925148a119de63dc11119b84879f22589eeef5f79556d9877680f91282466c` | 1647 |
 | `START_HERE.md` | `8f76c52db75197c2713d29d7964c9ba454be295d3847ac1acaaca70a408e4aeb` | 4261 |
 | `docs/01-product/PRD.md` | `b704320ce847f8511225fcc345dba26bf43e3c2ef3dabfe6b56092e2bdd5ecf8` | 9508 |
 | `docs/01-product/SCOPE_MATRIX.md` | `d308e57173b4dc30aae5025d4e67d7957676492716ffc30f654399408a283a3f` | 2646 |
@@ -42,7 +42,7 @@
 | `docs/06-delivery/PHASE_0_1_HANDOFF.md` | `9a27c2cbef0d984efbe14d7ea8f70612bc4b6558d87f063177ad3ef106d7a2a7` | 6111 |
 | `docs/06-delivery/ROADMAP.md` | `151ca6fc1008d2d06805a01e6c35789d6c3a804cfdde8b1d18d6ca28766c9793` | 3598 |
 | `docs/06-delivery/TEST_PLAN.md` | `1ab581fea7ab71a1d26dd467cbaea41e261036aae0c4dfd184fe5d2d140e0952` | 3897 |
-| `docs/07-governance/DECISIONS_RISKS.md` | `064d67efb9918e10e85390ae52d3fde44159b655e988ebc85cc2825050761659` | 6496 |
+| `docs/07-governance/DECISIONS_RISKS.md` | `93bda5a41eec1c85dd2aa3417105b683e68a6ef4abe74999436ee8a31c804be4` | 7612 |
 | `docs/07-governance/INTEGRATION_NOTES.md` | `3f40264f32f36272d36b0be2e51e9931bb945ceb8fda2c5aabf8d3f00702109b` | 3427 |
 | `docs/07-governance/REFERENCES.md` | `839ca6f729897d64e649f99936f2e604f96d90c1f05bcf2c807977f50c0464a7` | 3466 |
 | `docs/07-governance/adr/0001-custom-control-plane-modular-monolith.md` | `ec33e0322f6321e678aca78ce5606251550909ec5a450af93ce778e368335dc2` | 1566 |
@@ -51,6 +51,10 @@
 | `docs/07-governance/adr/0004-knowledge-scope.md` | `77eebae399fdcde4e4b5464d2eecc24efc38d9ba4832a07125dd87b3e02bcf24` | 1332 |
 | `docs/07-governance/adr/0005-3d-simulation-projection.md` | `97ae873ca36430011bf25bf00dacd9c73a82849eb9c26aac662507268bc0cf03` | 1201 |
 | `docs/07-governance/adr/0006-private-chat-separation.md` | `50a7c453f7d3567059e54c589e366b07affe1d99ae4f5bb4f309358aaa669223` | 1321 |
+| `docs/07-governance/adr/0007-loopback-mock-functional-gate.md` | `de0bdc1bbb40777bf1565d941a84415acdcb7ed860be5c8d4d1a27bf29ba97cb` | 1714 |
+| `docs/07-governance/evidence/MOCK_RUN_PROOF.md` | `06ade105bffba5699a20878bb2fab12911ad4faf7cafab358f0567320129be3c` | 2231 |
+| `docs/07-governance/evidence/command-center-desktop.png` | `85ef9bfd3afdddd7a8f279b1ddd718f0f31da30247d8743b845842f97f6fe1eb` | 131101 |
+| `docs/07-governance/evidence/command-center-mobile.png` | `5dfb122d177b06a5a2be053ac40f983286be0382d3a9fda8215a6243c5bac84f` | 121265 |
 | `docs/08-templates/ADR.template.md` | `45376b3c796485985bbb81c88695e3ed8108798bda95d3059f6d805be07e446d` | 475 |
 | `docs/08-templates/AGENT_PROFILE.example.yaml` | `56811d08a2b4724531e09bc0488823e88efa09441742e6e35913c0f4ea871c18` | 947 |
 | `docs/08-templates/AUTOMATION.example.yaml` | `0923380f3e3a7a927bb7bb7cbeae8ec01951e67571346157dec42440c1c51705` | 584 |

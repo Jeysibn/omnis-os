@@ -1,0 +1,16 @@
+{
+  "name": "@omnis/api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch --experimental-strip-types --env-file=../../.env src/server.ts",
+    "build": "pnpm typecheck",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --experimental-strip-types --test src/auth.test.ts src/session-store.test.ts"
+  },
+  "dependencies": {
+    "@omnis/contracts": "workspace:*",
+    "fastify": "5.12.7",
+    "zod": "4.6.7"
+  }
+}

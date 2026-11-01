@@ -1,0 +1,17 @@
+{
+  "name": "@omnis/worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch --experimental-strip-types --env-file=../../.env src/server.ts",
+    "build": "pnpm typecheck",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --experimental-strip-types --test src/run-coordinator.test.ts"
+  },
+  "dependencies": {
+    "@omnis/contracts": "workspace:*",
+    "@omnis/policy": "workspace:*",
+    "@omnis/runtime-adapters": "workspace:*",
+    "fastify": "5.12.7"
+  }
+}

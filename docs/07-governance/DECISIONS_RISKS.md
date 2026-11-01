@@ -26,9 +26,9 @@
 | Hermes bearer auth, capabilities, isolated read-only request, SSE, stop | Blocked | Hermes API docs describe `API_SERVER_KEY` bearer auth and `/v1/capabilities`, run submission/status/SSE/stop. The documented API server has access to the full agent toolset, including terminal commands. No read-only tool profile or isolation was demonstrated for this installed configuration. API server is not listening at :8642. No inference request or server startup was made. |
 | Codex non-interactive interface, token events, session isolation, policy | Partially verified; integration blocked | Local CLI provides `codex exec` and `codex app-server`. Official app-server integration streams `item/agentMessage/delta` and uses explicit thread IDs for start/resume. Official Sign in with ChatGPT guidance requires supported OAuth, local user-controlled persistent token storage, user-triggered or expressly authorized automation, one connected-app boundary, and no charge/upgrade requirement. The installed CLI login is not a substitute for Omnis OS OAuth/consent. No token was reused and no inference was sent. |
 | Claude CLI integration and subscription/Agent SDK policy | Partially verified; background integration blocked | Local Team-authenticated Claude Code 2.1.316 supports `-p` non-interactive CLI mode. Official Anthropic docs distinguish Claude Code plan usage from Console/API usage; the current Agent SDK/team policy and permission model for Omnis OS background operation has not received owner/legal review. Background Claude remains disabled. |
-| Web auth, runtime secret storage, sandbox, network | Open | Single-owner local auth, session/CSRF/secure-cookie policy, token storage, worker isolation, and network egress rules are not implemented or approved yet. No real runtime is enabled. |
+| Web auth, runtime secret storage, sandbox, network | Partially implemented | Loopback-only API and worker, owner password login, signed HttpOnly SameSite=Strict session cookie, Origin + CSRF checks on mutations, and a generated local internal token are implemented. This is a local mock gate only; persistent secret storage, worker OS isolation, egress controls, and remote deployment policy remain open. |
 | One supported real R1 runtime, exact command/endpoint/version | Not established | No real runtime passed the policy and isolation gates. |
-| Build proof and no-cost guarantees | Not established | No provider inference or Docker-backed build was attempted. No cost guarantee is claimed. |
+| Build proof and no-cost guarantees | Mock proof complete; infrastructure proof blocked | Strict TypeScript checks, ESLint, Vite production build, 13 Node interface/unit tests, API security/idempotency/SSE/stop integration smoke, and browser login/task/run/cancel/reload smoke passed using cached host dependencies. pnpm was unavailable and registry access timed out, so a clean pnpm install and lockfile were not verified. Docker socket access prevented PostgreSQL validation. No provider inference was sent and no cost guarantee is claimed. See [mock run proof](evidence/MOCK_RUN_PROOF.md). |
 
 ## Risks and blockers
 
@@ -37,6 +37,7 @@
 3. **Claude automation policy:** subscription authentication exists on the machine, but this does not approve reuse by an app-owned unattended worker. Keep disabled until reviewed.
 4. **Host infrastructure:** Docker socket access is denied. PostgreSQL Compose and DB integration cannot be validated until Docker permissions or an approved local PostgreSQL service are available.
 5. **Repository baseline:** workspace was empty and had no `.git`, source documentation pack, or existing implementation to preserve. The initial documentation commit records the handoff before code is added.
+6. **Dependency reproducibility:** package versions are exact in manifests, but no pnpm lockfile could be generated because the package registry was unreachable during this gate. CI currently installs without frozen-lockfile enforcement until the first lockfile can be committed.
 
 ## Owner decisions still needed
 
@@ -45,3 +46,5 @@
 - Approve the real runtime and documented tool permissions after isolated proof.
 - Review Claude Team/Agent SDK terms and any background use before enabling it.
 - Provide/approve Docker socket access or choose a supported PostgreSQL path.
+- Confirm exact package-manager and dependency pins after a successful pnpm install and lockfile review.
+- Review [ADR-0007](adr/0007-loopback-mock-functional-gate.md) before any real runtime or non-loopback access is enabled.

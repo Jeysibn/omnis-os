@@ -1,0 +1,12 @@
+{
+  "name": "@omnis/runtime-adapters",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "build": "pnpm typecheck",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --experimental-strip-types --test src/index.test.ts"
+  },
+  "dependencies": { "@omnis/contracts": "workspace:*" }
+}
