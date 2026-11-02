@@ -25,6 +25,20 @@ The repository pins pnpm `12.16.1` and Node `>=24`. Run `pnpm install --frozen-l
 
 Docker group membership is root-equivalent. The worker uses the trusted rootful daemon to create containers; the sandbox container itself receives no socket, mount, or environment credentials. On the tested WSL host, rootless Docker/userns remapping and AppArmor were unavailable. Keep provider runtimes disabled until their authenticated connector and untrusted-tool sandbox are separately reviewed.
 
+### PostgreSQL backup and isolated restore
+
+Use PostgreSQL custom-format logical dumps for local recovery. Keep the `.dump` and adjacent `.dump.manifest.json` outside the repository in an owner-only directory (`0700` directory, `0600` files). The manifest stores counts, migration IDs, sequence checks and record fingerprints; it contains no database password. Set `OMNIS_BACKUP_DATABASE` to the source database name when it is not `omnis`.
+
+```sh
+mkdir -m 700 -p "$HOME/omnis-backups"
+OMNIS_BACKUP_DATABASE=omnis pnpm db:backup "$HOME/omnis-backups/omnis-$(date -u +%Y%m%dT%H%M%SZ).dump"
+OMNIS_BACKUP_DATABASE=omnis pnpm db:restore:verify "$HOME/omnis-backups/<backup>.dump" omnis_restore_drill
+```
+
+The restore command refuses an existing target and only permits names under `omnis_restore_`; it creates a new database and does not drop it on error. It compares schema/migration state, row counts, status and event distributions, per-record fingerprints, sequence invariants and safe terminal state. For an application smoke check, point a temporary local `OMNIS_DATABASE_URL` at the restored database and run `pnpm integration:mock` with a disposable database name ending in `test` or `tests`. Do not start production workers against a restore until its states and any external side effects have been reviewed.
+
+The scripts do not encrypt artifacts. Backups containing real data must be encrypted before leaving the protected host, and encryption keys must be stored separately. A proposed policy is daily backups with seven daily and four weekly copies, a restore drill at least weekly during private alpha, RPO under 24 hours and RTO under four hours. These are planning targets, not guarantees. A single small local restore measurement excludes provisioning, transfer, encryption-key recovery and service validation. On failure, preserve the original archive, use a new isolated target name, inspect the redacted command error, and do not overwrite the source database.
+
 ## Network
 
 - Bind dashboard, API, worker and database to localhost/private interfaces during development.

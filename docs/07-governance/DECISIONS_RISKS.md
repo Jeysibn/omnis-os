@@ -60,6 +60,10 @@ The PostgreSQL-backed mock lifecycle is implemented and its local code, database
 
 The mock execution path now uses an ephemeral Docker container, with actual-container negative tests run on the WSL2 development host. Tests demonstrated no-network behavior, filesystem and credential denial, no Docker socket, non-root identity, dropped capabilities, resource/time limits, cancellation, and scoped orphan cleanup. PostgreSQL, API/worker integration, SSE replay, and browser regressions passed locally. This is a local mock-only gate: the tested host uses a rootful Docker daemon, AppArmor and rootless/userns modes were unavailable, and remote CI has not run. No real model inference or runtime credential access was enabled. See [ADR-0008](adr/0008-container-isolated-mock-execution.md) and [R1-G2 evidence](evidence/R1_G2_SANDBOX_SECURITY.md).
 
+## R1-G3 status — 2026-11-02
+
+R1-G3 work adds pinned least-privilege CI, PostgreSQL custom-format backup and isolated restore verification, and hard worker/sandbox/database failure injection. Backup and restore were exercised locally with synthetic data, and the restored database served the existing API/worker integration smoke. The final recovery integration result and clean-clone verification are recorded in [R1-G3 evidence](evidence/R1_G3_CI_RECOVERY.md). GitHub Actions remains unverified remotely until the repository URL is supplied and a review-branch push is authorized. Shared Docker-daemon interruption is intentionally untested because unrelated services share that daemon. A worker process may exit during a database outage; the recovery drill requires a replacement worker after PostgreSQL returns. Real AI runtimes remain disabled.
+
 ## Owner decisions still needed
 
 - Approve the technology/version proposals before production use.

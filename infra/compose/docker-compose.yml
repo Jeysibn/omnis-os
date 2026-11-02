@@ -4,15 +4,17 @@ services:
   postgres:
     image: postgres:17.6-alpine
     environment:
-      POSTGRES_DB: omnis
+      POSTGRES_DB: ${OMNIS_DB_NAME:-omnis}
       POSTGRES_USER: omnis
       POSTGRES_PASSWORD: ${OMNIS_DB_PASSWORD:?Create local secrets with pnpm configure:owner}
     ports:
-      - '127.0.0.1:5432:5432'
+      - '127.0.0.1:${OMNIS_DB_PORT:-5432}:5432'
+    labels:
+      com.omnis.os.r1g3-disposable: '${OMNIS_R1G3_DISPOSABLE:-false}'
     volumes:
       - omnis-postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U omnis -d omnis']
+      test: ['CMD-SHELL', 'pg_isready -U omnis -d ${OMNIS_DB_NAME:-omnis}']
       interval: 5s
       timeout: 3s
       retries: 12

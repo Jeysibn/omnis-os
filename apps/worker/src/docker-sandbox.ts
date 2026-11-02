@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
-import { access, chmod, lstat, mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
+import { access, chmod, lstat, mkdir, mkdtemp, readdir, realpath, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { ChildProcess } from 'node:child_process';
@@ -145,7 +145,24 @@ export class DockerSandboxExecutor implements SandboxExecutor {
         }
         containers.push({ id: containerId!, runId: runId! });
       }
-      const candidates = [...new Set(containers.map((container) => container.runId))];
+      const workspaceEntries = await readdir(this.workspaceRoot, { withFileTypes: true }).catch(
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === 'ENOENT') return [];
+          throw error;
+        },
+      );
+      const orphanableWorkspaces = workspaceEntries.flatMap((entry) => {
+        const match = /^run-(run-[0-9]{4,})-[A-Za-z0-9_-]{6}$/.exec(entry.name);
+        return entry.isDirectory() && match
+          ? [{ path: path.join(this.workspaceRoot, entry.name), runId: match[1]! }]
+          : [];
+      });
+      const candidates = [
+        ...new Set([
+          ...containers.map((container) => container.runId),
+          ...orphanableWorkspaces.map((workspace) => workspace.runId),
+        ]),
+      ];
       const activeIds = new Set(await resolveActiveRunIds(candidates));
       if (
         activeIds.size > candidates.length ||
@@ -155,6 +172,9 @@ export class DockerSandboxExecutor implements SandboxExecutor {
       }
       for (const container of containers) {
         if (!activeIds.has(container.runId)) await this.removeContainer(container.id, cliConfig);
+      }
+      for (const workspace of orphanableWorkspaces) {
+        if (!activeIds.has(workspace.runId)) await this.removePrivateDirectory(workspace.path);
       }
     } finally {
       await this.removePrivateDirectory(cliConfig);

@@ -46,7 +46,9 @@ const sandboxScope = createHash('sha256')
   .digest('hex')
   .slice(0, 24);
 const sandbox = new DockerSandboxExecutor({ scopeId: sandboxScope });
-const runtime = new SandboxedMockRuntimeAdapter(sandbox);
+const mockDelayMs =
+  process.env.NODE_ENV === 'test' ? Number(process.env.OMNIS_MOCK_TEST_DELAY_MS ?? 500) : 500;
+const runtime = new SandboxedMockRuntimeAdapter(sandbox, mockDelayMs);
 const coordinator = new RunCoordinator(store, boss, runtime);
 await coordinator.reconcileExpiredRuns();
 await boss.work(queueName, { batchSize: 1, localConcurrency: 1 }, async ([job]) => {
