@@ -3,6 +3,7 @@
 - **Review date:** 2026-11-02
 - **Audited base revision:** `708d0f5e9b6083da852e26c0643c60c0f5879f85`
 - **Working branch:** `security/post-audit-remediation`
+- **Verified implementation revision:** `0d92af6d98d5dca8dc4210d5569a5b4d4d992bd9`
 - **Scope:** remediation of confirmed audit hypotheses and safe mock-only runtime foundations.
 - **Data:** synthetic test fixtures only; no provider inference or provider credentials used.
 
@@ -10,7 +11,7 @@
 
 The audit’s workspace, SSE, authentication, sandbox-test, migration, database-role, lease-fencing, and backup findings were confirmed in the current source. Their fixes were exercised against disposable PostgreSQL 17.6 and the local Docker daemon. The worker now connects only as `omnis_runtime`; a separate one-shot migration command uses `omnis_migrator`, and the database administrator credential is kept in a separate local environment file. pg-boss migrations and queue operations were verified with those roles.
 
-Fresh migration, upgrade from the prior checksum-less R1 ledger, repeat/concurrent migration, checksum drift rejection, runtime privilege denial, two-worker claim fencing, recovery, backup rejection for queued work, backup/restore, actual sandbox namespace/security checks, synthetic canary sinks, and Firefox browser smoke all passed locally. `pnpm check`, production build, and frozen installation passed on the final implementation tree. GitHub Actions has **not yet been verified** on this branch; until remote CI passes, the milestone gate remains **Conditional**, not Passed. No real AI runtime is authorized or enabled.
+Fresh migration, upgrade from the prior checksum-less R1 ledger, repeat/concurrent migration, checksum drift rejection, runtime privilege denial, two-worker claim fencing, recovery, backup rejection for queued work, backup/restore, actual sandbox namespace/security checks, synthetic canary sinks, and Firefox browser smoke all passed locally. `pnpm check`, production build, and frozen installation passed. GitHub Actions passed for the verified implementation revision; the milestone gate is **Passed for mock-only remediation verification**. No real AI runtime is authorized or enabled.
 
 ## Audit finding disposition
 
@@ -57,19 +58,18 @@ Fresh migration, upgrade from the prior checksum-less R1 ledger, repeat/concurre
 | Mock lifecycle/recovery | `integration:mock` and final `integration:recovery` passed with restricted runtime credentials. Covered API/worker restarts, abrupt worker kill, sandbox crash cleanup, PostgreSQL stop/start of the labeled disposable container, and no unsafe replay. |
 | Backup/restore | Safe snapshot backup passed. A real backup rejected a queued run and left no archive/manifest. Restore to `omnis_restore_verify2` preserved record fingerprints and event sequences; restricted-role insert/sequence access passed in a rollback-only probe. Disposable artifacts were deleted. |
 | Browser smoke | Firefox 156.0 via Playwright CLI: owner sign-in, login throttling, task creation, completed mock run/SSE trail, cancellation, reload/reconnect. At 390px and 1440px, document width matched viewport; zero browser console errors. |
-| GitHub Actions | **Pending** branch push/workflow run. CI now triggers on `security/post-audit-remediation`; no repository settings or main-branch changes were made. |
+| GitHub Actions | **Passed** on `0d92af6d98d5dca8dc4210d5569a5b4d4d992bd9`: [run 41452709617](https://github.com/Jeysibn/omnis-os/actions/runs/41452709617). Frozen install, restricted-role provisioning, `pnpm check`, production build, and PostgreSQL recovery integration all passed. No repository settings or main-branch changes were made. |
 | Independent Claude review | Not run. No external Claude process, model inference, or provider credentials were used. |
 
 ## Remaining risks and unverified controls
 
-1. **Remote CI:** local checks passed, but the remediation branch still needs a passing GitHub Actions run for the verified SHA. Until then, the overall gate is conditional.
-2. **Sandbox isolation:** WSL uses rootful Docker with the worker's host UID and no demonstrated disk quota or separate user namespace. These tests do not establish production-grade arbitrary-code isolation. General-purpose agent tools remain prohibited.
-3. **Worker supervision:** the worker can exit during PostgreSQL outages. Recovery was verified after a controlled restart, but no persistent service supervisor/restart policy was added; avoid restart storms and unsafe replay.
-4. **Backup protection:** manifests detect archive changes but do not authenticate archives. Scripts do not encrypt them. Approve key management, off-host retention, and recovery objectives before storing real data off-host.
-5. **API protections:** bounded pagination/query limits, SSE subscriber limits/backpressure, HTTPS cookie deployment, host allowlisting, and append-only actor attribution remain open before any non-loopback exposure.
-6. **Repository controls:** prior read-only GitHub API review on 2026-11-02 found `main` unprotected and no rulesets; Actions allow all actions; secret scanning and push protection are enabled; Dependabot security updates and non-provider pattern scanning are disabled. No settings were changed and plan-level eligibility was not established.
-7. **Future runtime policy:** durable authorization, approvals, append-only audit, provider-policy review, connector credential revocation, egress policy, and per-run authorization remain mandatory. No Hermes, Codex, or Claude inference is enabled.
+1. **Sandbox isolation:** WSL uses rootful Docker with the worker's host UID and no demonstrated disk quota or separate user namespace. These tests do not establish production-grade arbitrary-code isolation. General-purpose agent tools remain prohibited.
+2. **Worker supervision:** the worker can exit during PostgreSQL outages. Recovery was verified after a controlled restart, but no persistent service supervisor/restart policy was added; avoid restart storms and unsafe replay.
+3. **Backup protection:** manifests detect archive changes but do not authenticate archives. Scripts do not encrypt them. Approve key management, off-host retention, and recovery objectives before storing real data off-host.
+4. **API protections:** bounded pagination/query limits, SSE subscriber limits/backpressure, HTTPS cookie deployment, host allowlisting, and append-only actor attribution remain open before any non-loopback exposure.
+5. **Repository controls:** prior read-only GitHub API review on 2026-11-02 found `main` unprotected and no rulesets; Actions allow all actions; secret scanning and push protection are enabled; Dependabot security updates and non-provider pattern scanning are disabled. No settings were changed and plan-level eligibility was not established.
+6. **Future runtime policy:** durable authorization, approvals, append-only audit, provider-policy review, connector credential revocation, egress policy, and per-run authorization remain mandatory. No Hermes, Codex, or Claude inference is enabled.
 
 ## Readiness recommendation
 
-**Local remediation verification: conditional on remote CI.** PostgreSQL, Docker, backup/restore, worker recovery, canary, and browser checks passed in the disposable local environment. Mark the milestone Passed only after GitHub Actions passes on the exact remediation branch SHA and the evidence includes its run URL. **R1-G4 is not ready.** Any future runtime additionally requires durable authorization/audit, stronger isolation and egress controls, a trusted credential broker, provider-policy approval, and explicit owner authorization. This document grants no authorization to run models.
+**Post-audit remediation verification: Passed for the mock-only implementation at `0d92af6d98d5dca8dc4210d5569a5b4d4d992bd9`.** Local PostgreSQL, Docker, backup/restore, worker recovery, canary, browser, build, and test checks passed; GitHub Actions passed on that implementation revision. **R1-G4 is not ready.** Any future runtime additionally requires durable authorization/audit, stronger isolation and egress controls, a trusted credential broker, provider-policy approval, and explicit owner authorization. This document grants no authorization to run models.
