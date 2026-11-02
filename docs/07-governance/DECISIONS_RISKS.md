@@ -49,7 +49,7 @@
 | PostgreSQL migrations and persistence | Verified locally | Migration `0001_initial.sql`, transaction rollback, task/run/event persistence, queue admission, lease recovery, and cancellation were tested against real PostgreSQL. See [R1-G1 persistence evidence](evidence/R1_G1_PERSISTENCE.md). |
 | API/worker restart and SSE replay | Verified locally | Process integration stopped/restarted the API and worker, reconstructed task/run state, replayed events from `Last-Event-ID`, and checked interrupted work was not replayed. |
 | Web browser | Verified locally | Playwright CLI smoke covered owner login, task creation, completed mock run, stop, SSE trail, browser reload, and 1440px/390px layouts. Screenshots and command notes are in the R1-G1 evidence report. |
-| Clean worktree and CI | Pending final verification | The committed lockfile is frozen-install tested. GitHub Actions itself was not run from this local environment. |
+| Clean worktree and CI | Clean committed-worktree verification passed | Frozen install, formatting, lint, type checks, 26 tests, production build, and PostgreSQL-backed API/worker restart integration passed in a detached worktree at `2451e1e`. GitHub Actions itself was not run from this local environment. |
 
 ## R1-G1 status
 
