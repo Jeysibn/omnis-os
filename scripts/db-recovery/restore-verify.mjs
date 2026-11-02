@@ -8,7 +8,13 @@ import { pipeline } from 'node:stream/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertValidMetrics, metricsMatch, metricsQuery } from './metrics.mjs';
-import { aclSnapshotQuery, aclSnapshotsMatch, assertRuntimeAclPolicy } from './acl-integrity.mjs';
+import {
+  aclSnapshotQuery,
+  assertRestoreDatabaseClosed,
+  assertRuntimeAclPolicy,
+  restoreAclSnapshotsMatch,
+} from './acl-integrity.mjs';
+import { assertRestoreRoleSecurity, restoreRoleSecurityQuery } from './role-integrity.mjs';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const legacyRestoreAclScript = path.join(
@@ -35,6 +41,14 @@ if (!/^omnis_restore_[a-z0-9_]{1,48}$/.test(targetDatabase)) {
 if (process.env.OMNIS_TRUSTED_ARCHIVE_ACKNOWLEDGED !== 'true') {
   throw new Error(
     'This verifier accepts only operator-vetted trusted archives. Its digest is not authentication; do not restore untrusted archives or use this path in production.',
+  );
+}
+if (
+  process.env.OMNIS_RESTORE_TEST_FAIL_CLEANUP === 'true' &&
+  process.env.OMNIS_R1G3_DISPOSABLE !== 'true'
+) {
+  throw new Error(
+    'Restore cleanup failure injection is allowed only for disposable integration tests.',
   );
 }
 
@@ -87,19 +101,9 @@ if (existence.trim() !== 'f') {
 }
 
 const restoreStartedAt = process.hrtime.bigint();
-await dockerChecked([
-  ...composeArgs,
-  'exec',
-  '-T',
-  'postgres',
-  'createdb',
-  '--no-password',
-  '--username=omnis',
-  '--maintenance-db=postgres',
-  '--template=template0',
-  targetDatabase,
-]);
-
+const restoreMarker = randomBytes(16).toString('hex');
+const unverifiedComment = `omnis-restore:${restoreMarker}:unverified`;
+let targetCreated = false;
 try {
   await dockerChecked([
     ...composeArgs,
@@ -113,7 +117,24 @@ try {
     '--username=omnis',
     '--dbname=postgres',
     '--command',
-    `GRANT CONNECT, CREATE ON DATABASE "${targetDatabase}" TO omnis_migrator; GRANT CONNECT ON DATABASE "${targetDatabase}" TO omnis_runtime;`,
+    `CREATE DATABASE "${targetDatabase}" TEMPLATE template0 ALLOW_CONNECTIONS=false`,
+  ]);
+  targetCreated = true;
+
+  // The database is born closed. Only the migrator can connect while the archive is applied.
+  await dockerChecked([
+    ...composeArgs,
+    'exec',
+    '-T',
+    'postgres',
+    'psql',
+    '-X',
+    '--no-psqlrc',
+    '--set=ON_ERROR_STOP=1',
+    '--username=omnis',
+    '--dbname=postgres',
+    '--command',
+    `COMMENT ON DATABASE "${targetDatabase}" IS '${unverifiedComment}'; REVOKE CONNECT ON DATABASE "${targetDatabase}" FROM PUBLIC, omnis_runtime; GRANT CONNECT, CREATE ON DATABASE "${targetDatabase}" TO omnis_migrator; ALTER DATABASE "${targetDatabase}" ALLOW_CONNECTIONS=true;`,
   ]);
 
   await dockerFromFile(
@@ -168,13 +189,32 @@ try {
     aclSnapshotQuery,
   ]);
   const restoredAclSnapshot = JSON.parse(restoredAclText.trim());
+  assertRestoreDatabaseClosed(restoredAclSnapshot);
   assertRuntimeAclPolicy(restoredAclSnapshot);
   if (
     manifest.format === 'postgres-custom-acl-v1' &&
-    !aclSnapshotsMatch(manifest.aclSnapshot, restoredAclSnapshot)
+    !restoreAclSnapshotsMatch(manifest.aclSnapshot, restoredAclSnapshot)
   ) {
     throw new Error('Restored PostgreSQL ACLs do not match the source ACL snapshot.');
   }
+
+  const roleSecurityText = await dockerOutput([
+    ...composeArgs,
+    'exec',
+    '-T',
+    'postgres',
+    'psql',
+    '-X',
+    '--no-psqlrc',
+    '--set=ON_ERROR_STOP=1',
+    '--tuples-only',
+    '--no-align',
+    '--username=omnis',
+    `--dbname=${targetDatabase}`,
+    '--command',
+    restoreRoleSecurityQuery,
+  ]);
+  assertRestoreRoleSecurity(JSON.parse(roleSecurityText.trim()));
 
   const restoredText = await dockerOutput([
     ...composeArgs,
@@ -209,10 +249,11 @@ try {
     '-X',
     '--no-psqlrc',
     '--set=ON_ERROR_STOP=1',
-    '--username=omnis_runtime',
+    '--username=omnis',
     `--dbname=${targetDatabase}`,
     '--command',
-    `DO $restore_probe$
+    `SET ROLE omnis_runtime;
+     DO $restore_probe$
      DECLARE task_identifier text; run_identifier text;
      BEGIN
        INSERT INTO omnis.tasks (id, title, detail)
@@ -225,7 +266,8 @@ try {
        RETURNING id INTO run_identifier;
        UPDATE omnis.runs SET status = 'completed' WHERE id = run_identifier;
      END
-     $restore_probe$;`,
+     $restore_probe$;
+     RESET ROLE;`,
   ]);
 
   const probeText = await dockerOutput([
@@ -291,6 +333,24 @@ try {
   ) {
     throw new Error('Post-restore task/run creation changed unexpected data or left active work.');
   }
+
+  // Publish the verified state and open runtime access atomically. A crash before COMMIT leaves
+  // the target unavailable to runtime clients and visibly marked unverified.
+  await dockerChecked([
+    ...composeArgs,
+    'exec',
+    '-T',
+    'postgres',
+    'psql',
+    '-X',
+    '--no-psqlrc',
+    '--set=ON_ERROR_STOP=1',
+    '--username=omnis',
+    '--dbname=postgres',
+    '--command',
+    `BEGIN; GRANT CONNECT ON DATABASE "${targetDatabase}" TO omnis_runtime; COMMENT ON DATABASE "${targetDatabase}" IS 'omnis-restore:${restoreMarker}:verified'; COMMIT;`,
+  ]);
+
   process.stdout.write(
     `Restore verified in isolated database ${targetDatabase}; source counts and fingerprints matched before the runtime probe: ${JSON.stringify(restored)}\n` +
       `Post-restore runtime ACL policy passed; ${manifest.format === 'postgres-custom-acl-v1' ? 'source/restored ACL comparison matched' : 'legacy ACL-free baseline was rebuilt securely'}.\n` +
@@ -298,10 +358,84 @@ try {
       `Restricted runtime durably created task ${probe.taskId} and completed mock run ${probe.runId}; post-insert sequence invariants passed. No worker was started against the target.\n`,
   );
 } catch (error) {
-  process.stderr.write(
-    `Restore verification failed. The isolated target ${targetDatabase} was created and may be partial; it was not dropped automatically.\n`,
-  );
+  if (!targetCreated) throw error;
+  try {
+    const disposition = await containFailedRestoreTarget(targetDatabase, restoreMarker);
+    process.stderr.write(
+      `Restore rejected. The target ${targetDatabase} was ${disposition}; no restored data or credentials were printed.\n`,
+    );
+  } catch (containmentError) {
+    process.stderr.write(
+      `CRITICAL: restore rejected and automatic cleanup did not complete for ${targetDatabase}. The target remains quarantined if the quarantine step succeeded; do not connect clients. Inspect it using the documented recovery procedure.\n`,
+    );
+    throw new AggregateError(
+      [error, containmentError],
+      'Restore failed and cleanup requires operator action.',
+      { cause: containmentError },
+    );
+  }
   throw error;
+}
+
+async function containFailedRestoreTarget(database, marker) {
+  const statusText = await dockerOutput([
+    ...composeArgs,
+    'exec',
+    '-T',
+    'postgres',
+    'psql',
+    '-X',
+    '--no-psqlrc',
+    '--set=ON_ERROR_STOP=1',
+    '--tuples-only',
+    '--no-align',
+    '--username=omnis',
+    '--dbname=postgres',
+    '--command',
+    `SELECT COALESCE(shobj_description(oid, 'pg_database'), '') || '|' || datallowconn::text || '|' || pg_get_userbyid(datdba) FROM pg_database WHERE datname = '${database}'`,
+  ]);
+  if (statusText.trim() === '') return 'already absent';
+  const [ownership, allowConnections, owner] = statusText.trim().split('|');
+  if (ownership !== `omnis-restore:${marker}:unverified`) {
+    if (allowConnections === 'false' && owner === 'omnis')
+      return 'quarantined (connections remain disabled)';
+    throw new Error(
+      'Restore target ownership marker was absent or changed; refusing to alter or delete it.',
+    );
+  }
+
+  await dockerChecked([
+    ...composeArgs,
+    'exec',
+    '-T',
+    'postgres',
+    'psql',
+    '-X',
+    '--no-psqlrc',
+    '--set=ON_ERROR_STOP=1',
+    '--username=omnis',
+    '--dbname=postgres',
+    '--command',
+    `ALTER DATABASE "${database}" ALLOW_CONNECTIONS=false; REVOKE CONNECT ON DATABASE "${database}" FROM PUBLIC, omnis_runtime, omnis_migrator; SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${database}' AND pid <> pg_backend_pid();`,
+  ]);
+
+  if (process.env.OMNIS_RESTORE_TEST_FAIL_CLEANUP === 'true') {
+    throw new Error('Injected failure after restore-target quarantine.');
+  }
+
+  await dockerChecked([
+    ...composeArgs,
+    'exec',
+    '-T',
+    'postgres',
+    'dropdb',
+    '--force',
+    '--no-password',
+    '--username=omnis',
+    '--maintenance-db=postgres',
+    database,
+  ]);
+  return 'quarantined and removed';
 }
 
 async function openArchiveMagic(filePath) {

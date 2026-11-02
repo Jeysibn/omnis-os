@@ -16,6 +16,10 @@ const legacyRestoreDatabase = `omnis_restore_acl_free_${randomSuffix}`;
 const deniedGrantDatabase = `omnis_restore_bad_grant_${randomSuffix}`;
 const mismatchedAclDatabase = `omnis_restore_bad_acl_${randomSuffix}`;
 const unacknowledgedDatabase = `omnis_restore_unacknowledged_${randomSuffix}`;
+const commandFailureDatabase = `omnis_restore_command_failure_${randomSuffix}`;
+const cleanupFailureDatabase = `omnis_restore_cleanup_failure_${randomSuffix}`;
+const roleFailureDatabase = `omnis_restore_role_failure_${randomSuffix}`;
+const existingTargetDatabase = `omnis_restore_existing_${randomSuffix}`;
 const directory = await mkdtemp(path.join(tmpdir(), 'omnis-backup-restore-'));
 const envPath = path.join(directory, 'postgres.env');
 const dumpPath = path.join(directory, 'synthetic.dump');
@@ -128,6 +132,10 @@ try {
   );
   await verifyRestoreRejectsUnauthorizedGrant(adminUrl, deniedGrantDatabase);
   await verifyRestoreRejectsMismatchedSnapshot(mismatchedAclDatabase);
+  await verifyRestoreRejectsCommandFailure(commandFailureDatabase);
+  await verifyRestoreQuarantinesWhenCleanupFails(cleanupFailureDatabase);
+  await verifyRestoreRejectsEscalatedRuntimeRole(roleFailureDatabase);
+  await verifyExistingRestoreTargetIsUntouched(existingTargetDatabase);
 
   const legacyDumpPath = path.join(directory, 'acl-free-legacy.dump');
   await createAclFreeLegacyArchive(legacyDumpPath);
@@ -170,6 +178,10 @@ try {
       deniedGrantDatabase,
       mismatchedAclDatabase,
       unacknowledgedDatabase,
+      commandFailureDatabase,
+      cleanupFailureDatabase,
+      roleFailureDatabase,
+      existingTargetDatabase,
     ]) {
       run(
         'docker',
@@ -404,6 +416,7 @@ async function verifyRestoreRejectsUnauthorizedGrant(adminUrl, targetDatabase) {
   );
   assert.notEqual(result.status, 0, 'restore must reject an archive that grants schema_migrations');
   assert.match(result.output, /schema_migrations/);
+  await assertTargetAbsentOrQuarantined(targetDatabase);
 }
 
 async function verifyRestoreRejectsMismatchedSnapshot(targetDatabase) {
@@ -437,6 +450,121 @@ async function verifyRestoreRejectsMismatchedSnapshot(targetDatabase) {
     'restore must reject a manifest with a mismatched ACL snapshot',
   );
   assert.match(result.output, /do not match the source ACL snapshot/i);
+  await assertTargetAbsentOrQuarantined(targetDatabase);
+}
+
+async function verifyRestoreRejectsCommandFailure(targetDatabase) {
+  const archivePath = await writeInvalidRestoreArchive('restore-command-failure');
+  const result = run(
+    process.execPath,
+    ['scripts/db-recovery/restore-verify.mjs', archivePath, targetDatabase],
+    { env: baseEnv, allowFailure: true },
+  );
+  assert.notEqual(result.status, 0, 'restore-command failure must reject the archive');
+  assert.match(result.output, /Restore rejected/);
+  await assertTargetAbsentOrQuarantined(targetDatabase);
+}
+
+async function verifyRestoreQuarantinesWhenCleanupFails(targetDatabase) {
+  const archivePath = await writeInvalidRestoreArchive('restore-cleanup-failure');
+  const result = run(
+    process.execPath,
+    ['scripts/db-recovery/restore-verify.mjs', archivePath, targetDatabase],
+    {
+      env: { ...baseEnv, OMNIS_RESTORE_TEST_FAIL_CLEANUP: 'true' },
+      allowFailure: true,
+    },
+  );
+  assert.notEqual(result.status, 0, 'injected cleanup failure must remain a failed restore');
+  assert.match(result.output, /CRITICAL: restore rejected and automatic cleanup did not complete/);
+  await assertTargetAbsentOrQuarantined(targetDatabase, { requireQuarantine: true });
+}
+
+async function verifyRestoreRejectsEscalatedRuntimeRole(targetDatabase) {
+  const { createPool } = await import('../../packages/db/src/index.ts');
+  const admin = createPool(adminUrl);
+  try {
+    await admin.query('ALTER ROLE omnis_runtime CREATEROLE');
+    const result = run(
+      process.execPath,
+      ['scripts/db-recovery/restore-verify.mjs', dumpPath, targetDatabase],
+      { env: baseEnv, allowFailure: true },
+    );
+    assert.notEqual(result.status, 0, 'restore must reject an escalated runtime role');
+    assert.match(result.output, /omnis_runtime has unsafe createRole/);
+    await assertTargetAbsentOrQuarantined(targetDatabase);
+  } finally {
+    await admin.query('ALTER ROLE omnis_runtime NOCREATEROLE');
+    await admin.end();
+  }
+}
+
+async function verifyExistingRestoreTargetIsUntouched(targetDatabase) {
+  const { createPool } = await import('../../packages/db/src/index.ts');
+  const admin = createPool(adminUrl);
+  try {
+    await admin.query(`CREATE DATABASE "${targetDatabase}"`);
+    await admin.query(`COMMENT ON DATABASE "${targetDatabase}" IS 'pre-existing-test-fixture'`);
+    const result = run(
+      process.execPath,
+      ['scripts/db-recovery/restore-verify.mjs', dumpPath, targetDatabase],
+      { env: baseEnv, allowFailure: true },
+    );
+    assert.notEqual(result.status, 0, 'restore must refuse to overwrite an existing target');
+    assert.match(result.output, /already exists|refusing to overwrite/i);
+    const { rows } = await admin.query(
+      `SELECT datallowconn, shobj_description(oid, 'pg_database') AS marker
+         FROM pg_database WHERE datname = $1`,
+      [targetDatabase],
+    );
+    assert.deepEqual(rows[0], { datallowconn: true, marker: 'pre-existing-test-fixture' });
+  } finally {
+    await admin.end();
+  }
+}
+
+async function writeInvalidRestoreArchive(label) {
+  const archivePath = path.join(directory, `${label}.dump`);
+  const invalidArchive = Buffer.from('PGDMPsynthetic-invalid-restore-payload');
+  await writeFile(archivePath, invalidArchive, { mode: 0o600, flag: 'wx' });
+  const sourceManifest = JSON.parse(await readFile(`${dumpPath}.manifest.json`, 'utf8'));
+  await writeFile(
+    `${archivePath}.manifest.json`,
+    `${JSON.stringify({
+      ...sourceManifest,
+      dumpBytes: invalidArchive.length,
+      dumpSha256: createHash('sha256').update(invalidArchive).digest('hex'),
+    })}\n`,
+    { mode: 0o600, flag: 'wx' },
+  );
+  return archivePath;
+}
+
+async function assertTargetAbsentOrQuarantined(database, { requireQuarantine = false } = {}) {
+  const { createPool } = await import('../../packages/db/src/index.ts');
+  const admin = createPool(adminUrl);
+  try {
+    const { rows } = await admin.query(
+      `SELECT datallowconn,
+              has_database_privilege('omnis_runtime', oid, 'CONNECT') AS runtime_connect,
+              has_database_privilege('omnis_migrator', oid, 'CONNECT') AS migrator_connect
+         FROM pg_database WHERE datname = $1`,
+      [database],
+    );
+    if (rows.length === 0) {
+      assert.equal(
+        requireQuarantine,
+        false,
+        'cleanup failure should retain a quarantined database',
+      );
+      return;
+    }
+    assert.equal(rows[0].datallowconn, false, 'rejected target must reject all new connections');
+    assert.equal(rows[0].runtime_connect, false, 'runtime must not connect to a rejected target');
+    assert.equal(rows[0].migrator_connect, false, 'migrator must not connect to a rejected target');
+  } finally {
+    await admin.end();
+  }
 }
 
 async function verifyRestoreRequiresTrustedArchiveAcknowledgement(targetDatabase) {
@@ -453,6 +581,7 @@ async function verifyRestoreRequiresTrustedArchiveAcknowledgement(targetDatabase
     'restore must require an explicit trusted-input acknowledgement',
   );
   assert.match(result.output, /operator-vetted trusted archives/i);
+  await assertTargetAbsentOrQuarantined(targetDatabase);
 }
 
 async function verifyLegacyRuntimeAclParity(sourceUrl, restoredUrl) {

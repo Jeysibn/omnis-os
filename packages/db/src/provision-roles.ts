@@ -41,7 +41,7 @@ export async function provisionDatabaseRoles(
       $provision$
     `);
     await admin.query(
-      `ALTER ROLE ${role} WITH LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD ${quoted.rows[0]!.literal}`,
+      `ALTER ROLE ${role} WITH LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD ${quoted.rows[0]!.literal}`,
     );
   }
 

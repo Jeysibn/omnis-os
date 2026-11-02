@@ -176,6 +176,38 @@ export function runtimeAclSnapshotsMatch(source, restored) {
   return JSON.stringify(runtimeEntries(source)) === JSON.stringify(runtimeEntries(restored));
 }
 
+const deferredDatabaseConnectGrantees = new Set(['PUBLIC', 'omnis_runtime']);
+
+export function assertRestoreDatabaseClosed(snapshot) {
+  for (const entry of normalizeAclSnapshot(snapshot)) {
+    if (
+      entry.objectType === 'database' &&
+      entry.privilege === 'CONNECT' &&
+      deferredDatabaseConnectGrantees.has(entry.grantee)
+    ) {
+      throw new Error(
+        `Unverified restore database grants CONNECT to ${entry.grantee}; target must remain closed.`,
+      );
+    }
+  }
+}
+
+export function restoreAclSnapshotsMatch(source, restored) {
+  const withoutDeferredConnect = (snapshot) =>
+    normalizeAclSnapshot(snapshot).filter(
+      (entry) =>
+        !(
+          entry.objectType === 'database' &&
+          entry.privilege === 'CONNECT' &&
+          deferredDatabaseConnectGrantees.has(entry.grantee)
+        ),
+    );
+  return (
+    JSON.stringify(withoutDeferredConnect(source)) ===
+    JSON.stringify(withoutDeferredConnect(restored))
+  );
+}
+
 export function assertRuntimeAclPolicy(snapshot) {
   for (const entry of normalizeAclSnapshot(snapshot)) {
     if (!knownRoles.has(entry.grantee)) {
