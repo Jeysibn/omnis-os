@@ -40,6 +40,7 @@ type RunRow = QueryResultRow & {
   task_title: string;
   status: Run['status'];
   lease_owner: string | null;
+  execution_generation: number;
   lease_expires_at: Date | string | null;
   runtime_kind: 'mock';
   synthetic: true;
@@ -90,10 +91,10 @@ export class PostgresRunStore {
     return inTransaction(this.pool, async (client) => {
       const result = await client.query<TaskRow>(
         `
-          INSERT INTO omnis.tasks (id, title, detail, status)
+          INSERT INTO omnis.tasks (id, title, detail)
           VALUES (
             'task-' || lpad(nextval('omnis.task_id_seq')::text, 4, '0'),
-            $1, $2, 'open'
+            $1, $2
           )
           RETURNING id, title, detail, status, created_at
         `,
@@ -177,15 +178,10 @@ export class PostgresRunStore {
 
       const created = await client.query<RunRow>(
         `
-          INSERT INTO omnis.runs (
-            id, task_id, task_title, status, runtime_kind, synthetic, usage,
-            retry_count, retry_policy, execution_generation
-          )
+          INSERT INTO omnis.runs (id, task_id, task_title)
           VALUES (
             'run-' || lpad(nextval('omnis.run_id_seq')::text, 4, '0'),
-            $1, $2, 'queued', 'mock', TRUE,
-            '{"quality":"unknown","inputTokens":null,"outputTokens":null,"cost":null}'::jsonb,
-            0, 'never', 0
+            $1, $2
           )
           RETURNING id, task_id, task_title, status, runtime_kind, synthetic, usage,
             created_at, updated_at
@@ -251,6 +247,7 @@ export class PostgresRunStore {
     run: Run;
     started: boolean;
     events: DurableEvent[];
+    generation: number;
   }> {
     return inTransaction(this.pool, async (client) => {
       const current = await lockRun(client, runId);
@@ -272,9 +269,20 @@ export class PostgresRunStore {
           'run.cancelled',
           'Mock worker acknowledged cancellation before execution.',
         );
-        return { run: mapRun(result.rows[0]!), started: false, events: [{ runId, event }] };
+        return {
+          run: mapRun(result.rows[0]!),
+          started: false,
+          generation: current.execution_generation,
+          events: [{ runId, event }],
+        };
       }
-      if (current.status !== 'queued') return { run: mapRun(current), started: false, events: [] };
+      if (current.status !== 'queued')
+        return {
+          run: mapRun(current),
+          started: false,
+          generation: current.execution_generation,
+          events: [],
+        };
 
       const result = await client.query<RunRow>(
         `
@@ -292,18 +300,29 @@ export class PostgresRunStore {
         'run.started',
         'Mock runtime started this synthetic run.',
       );
-      return { run: mapRun(result.rows[0]!), started: true, events: [{ runId, event }] };
+      return {
+        run: mapRun(result.rows[0]!),
+        started: true,
+        generation: result.rows[0]!.execution_generation,
+        events: [{ runId, event }],
+      };
     });
   }
 
   async appendOutput(
     runId: string,
     workerId: string,
+    generation: number,
     message: string,
   ): Promise<RunEvent | undefined> {
     return inTransaction(this.pool, async (client) => {
       const current = await lockRun(client, runId);
-      if (current.status !== 'running' || current.lease_owner !== workerId) return undefined;
+      if (
+        current.status !== 'running' ||
+        current.lease_owner !== workerId ||
+        current.execution_generation !== generation
+      )
+        return undefined;
       return appendEvent(client, runId, 'run.output', message);
     });
   }
@@ -311,21 +330,22 @@ export class PostgresRunStore {
   async renewLease(
     runId: string,
     workerId: string,
+    generation: number,
     leaseSeconds: number,
   ): Promise<boolean | 'stop_requested'> {
     const result = await this.pool.query(
       `
         UPDATE omnis.runs
-        SET lease_expires_at = now() + ($3::int * interval '1 second'), updated_at = now()
-        WHERE id = $1 AND lease_owner = $2 AND status = 'running'
+        SET lease_expires_at = now() + ($4::int * interval '1 second'), updated_at = now()
+        WHERE id = $1 AND lease_owner = $2 AND execution_generation = $3 AND status = 'running'
           AND lease_expires_at > now()
       `,
-      [runId, workerId, leaseSeconds],
+      [runId, workerId, generation, leaseSeconds],
     );
     if (result.rowCount === 1) return true;
     const current = await this.pool.query(
-      'SELECT status FROM omnis.runs WHERE id = $1 AND lease_owner = $2',
-      [runId, workerId],
+      'SELECT status FROM omnis.runs WHERE id = $1 AND lease_owner = $2 AND execution_generation = $3',
+      [runId, workerId, generation],
     );
     if (current.rows[0]?.status === 'stopping') return 'stop_requested';
     return false;
@@ -361,11 +381,22 @@ export class PostgresRunStore {
   async completeRun(
     runId: string,
     workerId: string,
+    generation: number,
     output: string,
     evidenceRefs: string[] = [],
   ): Promise<{ run: Run; events: DurableEvent[] }> {
     return inTransaction(this.pool, async (client) => {
       const current = await lockRun(client, runId);
+      if (
+        current.status === 'stopping' &&
+        (current.lease_owner !== workerId || current.execution_generation !== generation)
+      ) {
+        throw new StoreError(
+          'conflict',
+          'The current worker does not own this execution generation.',
+          409,
+        );
+      }
       if (current.status === 'stopping') {
         const cancelled = await client.query<RunRow>(
           `
@@ -386,7 +417,11 @@ export class PostgresRunStore {
         );
         return { run: mapRun(cancelled.rows[0]!), events: [{ runId, event }] };
       }
-      if (current.status !== 'running' || current.lease_owner !== workerId) {
+      if (
+        current.status !== 'running' ||
+        current.lease_owner !== workerId ||
+        current.execution_generation !== generation
+      ) {
         throw new StoreError(
           'invalid_transition',
           `The worker no longer owns this execution (state=${current.status}, ownerMatches=${current.lease_owner === workerId}).`,
@@ -398,9 +433,9 @@ export class PostgresRunStore {
           UPDATE omnis.runs SET status = 'completed', result_output = $3,
             result_evidence_refs = $4::jsonb, lease_owner = NULL,
             lease_expires_at = NULL, updated_at = now()
-          WHERE id = $1 AND lease_owner = $2 RETURNING ${runColumns}
+          WHERE id = $1 AND lease_owner = $2 AND execution_generation = $5 RETURNING ${runColumns}
         `,
-        [runId, workerId, output, JSON.stringify(evidenceRefs)],
+        [runId, workerId, output, JSON.stringify(evidenceRefs), generation],
       );
       await client.query("UPDATE omnis.tasks SET status = 'completed' WHERE id = $1", [
         current.task_id,
@@ -410,7 +445,11 @@ export class PostgresRunStore {
     });
   }
 
-  async cancelRun(runId: string, workerId: string): Promise<{ run: Run; events: DurableEvent[] }> {
+  async cancelRun(
+    runId: string,
+    workerId: string,
+    generation: number,
+  ): Promise<{ run: Run; events: DurableEvent[] }> {
     return inTransaction(this.pool, async (client) => {
       const current = await lockRun(client, runId);
       if (current.status !== 'stopping') {
@@ -423,7 +462,7 @@ export class PostgresRunStore {
           409,
         );
       }
-      if (current.lease_owner && current.lease_owner !== workerId) {
+      if (current.lease_owner !== workerId || current.execution_generation !== generation) {
         throw new StoreError('conflict', 'The current worker does not own this run.', 409);
       }
       const updated = await client.query<RunRow>(
@@ -448,12 +487,26 @@ export class PostgresRunStore {
   async failRun(
     runId: string,
     workerId: string,
+    generation: number,
     message: string,
   ): Promise<{ run: Run; events: DurableEvent[] }> {
     return inTransaction(this.pool, async (client) => {
       const current = await lockRun(client, runId);
-      if (current.status === 'stopping') return this.cancelLocked(client, current);
-      if (current.status !== 'running' || current.lease_owner !== workerId) {
+      if (current.status === 'stopping') {
+        if (current.lease_owner !== workerId || current.execution_generation !== generation) {
+          throw new StoreError(
+            'conflict',
+            'The current worker does not own this execution generation.',
+            409,
+          );
+        }
+        return this.cancelLocked(client, current);
+      }
+      if (
+        current.status !== 'running' ||
+        current.lease_owner !== workerId ||
+        current.execution_generation !== generation
+      ) {
         throw new StoreError(
           'invalid_transition',
           'The worker no longer owns this execution.',
@@ -477,12 +530,14 @@ export class PostgresRunStore {
   async interruptRun(
     runId: string,
     workerId: string,
+    generation: number,
     message = 'The worker stopped before the run reached a terminal state.',
   ): Promise<{ run: Run; events: DurableEvent[] } | undefined> {
     return inTransaction(this.pool, async (client) => {
       const current = await lockRun(client, runId);
       if (!['running', 'stopping'].includes(current.status)) return undefined;
-      if (current.lease_owner && current.lease_owner !== workerId) return undefined;
+      if (current.lease_owner !== workerId || current.execution_generation !== generation)
+        return undefined;
       const updated = await client.query<RunRow>(
         `
           UPDATE omnis.runs SET status = 'interrupted', lease_owner = NULL,
@@ -626,7 +681,7 @@ export class PostgresRunStore {
   }
 }
 
-const runColumns = `id, task_id, task_title, status, lease_owner, lease_expires_at,
+const runColumns = `id, task_id, task_title, status, lease_owner, lease_expires_at, execution_generation,
   runtime_kind, synthetic, usage, created_at, updated_at`;
 const runSelect = `SELECT ${runColumns} FROM omnis.runs r`;
 
@@ -667,8 +722,8 @@ async function appendEvent(
   });
   await client.query(
     `
-      INSERT INTO omnis.run_events (id, run_id, sequence, event_type, at, source, synthetic, message)
-      VALUES ($1, $2, $3, $4, $5, 'mock', TRUE, $6)
+    INSERT INTO omnis.run_events (id, run_id, sequence, event_type, at, message)
+    VALUES ($1, $2, $3, $4, $5, $6)
     `,
     [event.id, event.runId, event.sequence, event.type, event.at, event.message],
   );

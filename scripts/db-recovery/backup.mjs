@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { pipeline } from 'node:stream/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { metricsQuery, parseMetrics } from './metrics.mjs';
+import { assertBackupSafe, metricsQuery, parseMetrics } from './metrics.mjs';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const composeArgs = createComposeArgs();
@@ -69,6 +69,7 @@ try {
   );
 
   const sourceReport = await querySnapshotMetrics(sourceDatabase, exporter.snapshot);
+  assertBackupSafe(sourceReport);
   await finishSnapshotExport(exporter);
   exportedSnapshot = undefined;
 
@@ -284,7 +285,7 @@ function createComposeArgs() {
     throw new Error('OMNIS_COMPOSE_PROJECT_NAME is invalid.');
   }
   const envFile = path.resolve(
-    process.env.OMNIS_COMPOSE_ENV_FILE ?? path.join(repositoryRoot, '.env'),
+    process.env.OMNIS_COMPOSE_ENV_FILE ?? path.join(repositoryRoot, '.env.db-admin'),
   );
   return [
     'compose',

@@ -13,7 +13,7 @@ import {
   type RunEvent,
   type Task,
 } from '@omnis/contracts';
-import { evaluateAllowedUse } from '@omnis/policy';
+import { evaluateAllowedUse, StaticRuntimeAuthorizer, type RuntimeAuthorizer } from '@omnis/policy';
 import type { RuntimeAdapter } from '@omnis/runtime-adapters';
 import { SandboxError } from './docker-sandbox.ts';
 
@@ -40,6 +40,36 @@ export const queueName = z
   .parse(process.env.OMNIS_QUEUE_NAME ?? 'omnis-mock-run');
 const runLeaseSeconds = 30;
 const leaseHeartbeatMs = 5_000;
+const defaultMockAuthorization = new StaticRuntimeAuthorizer([
+  {
+    id: 'local-mock-owner-v1',
+    actorId: 'owner',
+    runtimeId: 'mock',
+    operation: 'start_task',
+    capabilities: ['mock.execute'],
+    scope: { kind: 'all_tasks' },
+    approvalRequired: false,
+    status: 'authorized',
+    policyVersion: 'mock-only-v1',
+    expiresAt: Number.MAX_SAFE_INTEGER,
+    revokedAt: null,
+    provenance: 'Omnis OS local mock policy',
+  },
+  {
+    id: 'local-mock-owner-v1',
+    actorId: 'owner',
+    runtimeId: 'mock',
+    operation: 'execute_task',
+    capabilities: ['mock.execute'],
+    scope: { kind: 'all_tasks' },
+    approvalRequired: false,
+    status: 'authorized',
+    policyVersion: 'mock-only-v1',
+    expiresAt: Number.MAX_SAFE_INTEGER,
+    revokedAt: null,
+    provenance: 'Omnis OS local mock policy',
+  },
+]);
 
 type AbortCause = 'cancel-requested' | 'claim-lost' | 'worker-shutdown' | 'persistence-failed';
 type ActiveExecution = { controller: AbortController; promise: Promise<void> };
@@ -49,6 +79,7 @@ export class RunCoordinator {
   private readonly workerId = randomUUID();
   private readonly active = new Map<string, ActiveExecution>();
   private readonly runtime: RuntimeAdapter;
+  private readonly authorizer: RuntimeAuthorizer;
   private shuttingDown = false;
   private readonly store: PostgresRunStore;
   private readonly heartbeatIntervalMs: number;
@@ -65,11 +96,13 @@ export class RunCoordinator {
     queue: RunCoordinator['queue'],
     runtime: RuntimeAdapter,
     heartbeatIntervalMs = leaseHeartbeatMs,
+    authorizer: RuntimeAuthorizer = defaultMockAuthorization,
   ) {
     this.store = store;
     this.queue = queue;
     this.heartbeatIntervalMs = heartbeatIntervalMs;
     this.runtime = runtime;
+    this.authorizer = authorizer;
   }
 
   async createTask(input: CreateTaskInput): Promise<Task> {
@@ -83,6 +116,20 @@ export class RunCoordinator {
   }
 
   async startRun(taskId: string, idempotencyKey: string): Promise<{ run: Run; created: boolean }> {
+    const authorization = this.authorizer.authorize({
+      actorId: 'owner',
+      runtimeId: 'mock',
+      operation: 'start_task',
+      requiredCapabilities: ['mock.execute'],
+      taskId,
+    });
+    if (!authorization) {
+      throw new CoordinatorError(
+        'invalid_transition',
+        'Runtime authorization is missing or invalid.',
+        409,
+      );
+    }
     if (
       !evaluateAllowedUse(this.runtime.discoverCapabilities().allowedUse, 'interactive').allowed
     ) {
@@ -197,16 +244,34 @@ export class RunCoordinator {
     controller: AbortController,
     claimWasLost: () => boolean,
   ): Promise<void> {
+    const queued = await this.store.getRun(runId);
+    if (!queued) throw new CoordinatorError('not_found', 'Run was not found.', 404);
+    const authorization = this.authorizer.authorize({
+      actorId: 'owner',
+      runtimeId: 'mock',
+      operation: 'execute_task',
+      requiredCapabilities: ['mock.execute'],
+      taskId: queued.taskId,
+    });
+    if (!authorization) {
+      const denied = await this.store.interruptQueuedRun(
+        runId,
+        'Runtime authorization expired or was revoked before execution.',
+      );
+      if (denied) this.publish(denied.events);
+      return;
+    }
     const begun = await this.store.beginExecution(runId, this.workerId, runLeaseSeconds);
     this.publish(begun.events);
     if (!begun.started) return;
+    const generation = begun.generation;
 
     let heartbeatBusy = false;
     const heartbeat = setInterval(() => {
       if (heartbeatBusy || controller.signal.aborted) return;
       heartbeatBusy = true;
       void this.store
-        .renewLease(runId, this.workerId, runLeaseSeconds)
+        .renewLease(runId, this.workerId, generation, runLeaseSeconds)
         .then((renewed) => {
           if (renewed === 'stop_requested' && !controller.signal.aborted) {
             controller.abort('cancel-requested' satisfies AbortCause);
@@ -236,7 +301,12 @@ export class RunCoordinator {
           signal: controller.signal,
           emit: (event) => {
             eventWrites = eventWrites.then(async () => {
-              const durable = await this.store.appendOutput(runId, this.workerId, event.message);
+              const durable = await this.store.appendOutput(
+                runId,
+                this.workerId,
+                generation,
+                event.message,
+              );
               if (durable) this.publish([{ runId, event: durable }]);
             });
             void eventWrites.catch(() => {
@@ -254,6 +324,7 @@ export class RunCoordinator {
           const result = await this.store.interruptRun(
             runId,
             this.workerId,
+            generation,
             'The sandbox stop could not be confirmed. The run was interrupted for safety.',
           );
           if (result) this.publish(result.events);
@@ -262,12 +333,13 @@ export class RunCoordinator {
         if (controller.signal.aborted) {
           const cause = controller.signal.reason as AbortCause | undefined;
           if (cause === 'cancel-requested') {
-            const result = await this.store.cancelRun(runId, this.workerId);
+            const result = await this.store.cancelRun(runId, this.workerId, generation);
             this.publish(result.events);
           } else {
             const result = await this.store.interruptRun(
               runId,
               this.workerId,
+              generation,
               claimWasLost()
                 ? 'The durable job lease was lost. The run was not retried automatically.'
                 : 'The worker stopped before the run reached a terminal state. The run was not retried automatically.',
@@ -277,7 +349,7 @@ export class RunCoordinator {
           return;
         }
         const message = safeRuntimeFailureMessage(runtimeError);
-        const failed = await this.store.failRun(runId, this.workerId, message);
+        const failed = await this.store.failRun(runId, this.workerId, generation, message);
         this.publish(failed.events);
         return;
       }
@@ -285,16 +357,16 @@ export class RunCoordinator {
       if (controller.signal.aborted) {
         const cause = controller.signal.reason as AbortCause | undefined;
         if (cause === 'cancel-requested') {
-          const result = await this.store.cancelRun(runId, this.workerId);
+          const result = await this.store.cancelRun(runId, this.workerId, generation);
           this.publish(result.events);
         } else {
-          const result = await this.store.interruptRun(runId, this.workerId);
+          const result = await this.store.interruptRun(runId, this.workerId, generation);
           if (result) this.publish(result.events);
         }
         return;
       }
 
-      const completed = await this.store.completeRun(runId, this.workerId, output, []);
+      const completed = await this.store.completeRun(runId, this.workerId, generation, output, []);
       this.publish(completed.events);
     } finally {
       clearInterval(heartbeat);

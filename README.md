@@ -18,7 +18,7 @@ pnpm db:up
 pnpm dev
 ```
 
-Run Docker commands from a fresh WSL login shell with the existing Docker group membership. Docker group access is root-equivalent. The worker applies committed SQL migrations before it starts. Compose exposes PostgreSQL only on `127.0.0.1:5432` and stores data in the `omnis-os_omnis-postgres-data` named volume. Use `pnpm db:down` to stop the service while retaining that volume. Integration tests require `OMNIS_TEST_DATABASE_URL` to point to a disposable database whose name ends in `test` or `tests`. `pnpm --filter @omnis/worker test:sandbox` runs the actual-container negative security suite.
+Run `pnpm configure:owner` once to create separate private `.env`, `.env.worker`, `.env.migration`, and `.env.db-admin` files. The API and worker do not receive the database administrator password. Start PostgreSQL with `pnpm db:up`, provision the migration/runtime roles with `pnpm db:roles`, then apply application and pg-boss migrations with `pnpm db:migrate`; `pnpm dev` applies pending migrations before starting local services. PostgreSQL is bound to loopback and stored in a named volume. Docker group access is root-equivalent. Integration tests use `OMNIS_TEST_ADMIN_DATABASE_URL`, `OMNIS_TEST_MIGRATION_DATABASE_URL`, and `OMNIS_TEST_DATABASE_URL` for separate disposable admin, migration, and runtime roles; the database name must end in `test` or `tests`. `pnpm --filter @omnis/worker test:sandbox` runs the actual-container negative security suite.
 
 ## Safety boundary
 

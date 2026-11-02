@@ -1,6 +1,6 @@
 import { constants as fsConstants } from 'node:fs';
 import { createReadStream } from 'node:fs';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { lstat, open, readFile } from 'node:fs/promises';
 import { once } from 'node:events';
 import { spawn } from 'node:child_process';
@@ -10,6 +10,10 @@ import { fileURLToPath } from 'node:url';
 import { assertValidMetrics, metricsMatch, metricsQuery } from './metrics.mjs';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+const runtimePrivilegesMigration = path.join(
+  repositoryRoot,
+  'packages/db/migrations/0003_runtime_privileges.sql',
+);
 const composeArgs = createComposeArgs();
 const sourceDatabase = process.env.OMNIS_BACKUP_DATABASE ?? 'omnis';
 if (!/^omnis(?:_[a-z0-9_]+)?$/.test(sourceDatabase)) {
@@ -90,6 +94,21 @@ await dockerChecked([
 ]);
 
 try {
+  await dockerChecked([
+    ...composeArgs,
+    'exec',
+    '-T',
+    'postgres',
+    'psql',
+    '-X',
+    '--no-psqlrc',
+    '--set=ON_ERROR_STOP=1',
+    '--username=omnis',
+    '--dbname=postgres',
+    '--command',
+    `GRANT CONNECT, CREATE ON DATABASE "${targetDatabase}" TO omnis_migrator; GRANT CONNECT ON DATABASE "${targetDatabase}" TO omnis_runtime;`,
+  ]);
+
   await dockerFromFile(
     [
       ...composeArgs,
@@ -98,6 +117,7 @@ try {
       'postgres',
       'pg_restore',
       '--exit-on-error',
+      '--role=omnis_migrator',
       '--no-owner',
       '--no-acl',
       '--username=omnis',
@@ -105,6 +125,132 @@ try {
     ],
     archivePath,
   );
+
+  await dockerFromFile(
+    [
+      ...composeArgs,
+      'exec',
+      '-T',
+      'postgres',
+      'psql',
+      '-X',
+      '--no-psqlrc',
+      '--set=ON_ERROR_STOP=1',
+      '--username=omnis',
+      `--dbname=${targetDatabase}`,
+      '--file=-',
+    ],
+    runtimePrivilegesMigration,
+  );
+
+  await dockerChecked([
+    ...composeArgs,
+    'exec',
+    '-T',
+    'postgres',
+    'psql',
+    '-X',
+    '--no-psqlrc',
+    '--set=ON_ERROR_STOP=1',
+    '--username=omnis',
+    `--dbname=${targetDatabase}`,
+    '--command',
+    `GRANT USAGE ON SCHEMA pgboss TO omnis_runtime;
+     GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA pgboss TO omnis_runtime;
+     GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA pgboss TO omnis_runtime;
+     ALTER DEFAULT PRIVILEGES FOR ROLE omnis_migrator IN SCHEMA pgboss
+       GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO omnis_runtime;
+     ALTER DEFAULT PRIVILEGES FOR ROLE omnis_migrator IN SCHEMA pgboss
+       GRANT USAGE, SELECT ON SEQUENCES TO omnis_runtime;`,
+  ]);
+
+  const restoredText = await dockerOutput([
+    ...composeArgs,
+    'exec',
+    '-T',
+    'postgres',
+    'psql',
+    '-X',
+    '--no-psqlrc',
+    '--set=ON_ERROR_STOP=1',
+    '--tuples-only',
+    '--no-align',
+    '--username=omnis',
+    `--dbname=${targetDatabase}`,
+    '--command',
+    metricsQuery,
+  ]);
+  const restored = JSON.parse(restoredText.trim());
+  if (!metricsMatch(manifest.snapshotMetrics, restored) || restored.unsafeRunStates !== 0) {
+    throw new Error(
+      'Restored database failed count, sequence, runtime, active-run, or schema invariants.',
+    );
+  }
+
+  const probeTitle = `Restore verification task ${targetDatabase}_${randomBytes(8).toString('hex')}`;
+  await dockerChecked([
+    ...composeArgs,
+    'exec',
+    '-T',
+    'postgres',
+    'psql',
+    '-X',
+    '--no-psqlrc',
+    '--set=ON_ERROR_STOP=1',
+    '--username=omnis_runtime',
+    `--dbname=${targetDatabase}`,
+    '--command',
+    `DO $restore_probe$
+     DECLARE task_identifier text; run_identifier text;
+     BEGIN
+       INSERT INTO omnis.tasks (id, title, detail)
+       VALUES ('task-' || lpad(nextval('omnis.task_id_seq')::text, 4, '0'),
+         '${probeTitle}', 'Committed synthetic post-restore verification.')
+       RETURNING id INTO task_identifier;
+       INSERT INTO omnis.runs (id, task_id, task_title)
+       VALUES ('run-' || lpad(nextval('omnis.run_id_seq')::text, 4, '0'),
+         task_identifier, '${probeTitle}')
+       RETURNING id INTO run_identifier;
+       UPDATE omnis.runs SET status = 'completed' WHERE id = run_identifier;
+     END
+     $restore_probe$;`,
+  ]);
+
+  const probeText = await dockerOutput([
+    ...composeArgs,
+    'exec',
+    '-T',
+    'postgres',
+    'psql',
+    '-X',
+    '--no-psqlrc',
+    '--set=ON_ERROR_STOP=1',
+    '--tuples-only',
+    '--no-align',
+    '--username=omnis',
+    `--dbname=${targetDatabase}`,
+    '--command',
+    `SELECT json_build_object(
+       'taskId', task.id,
+       'runId', run.id,
+       'status', run.status,
+       'runtimeKind', run.runtime_kind,
+       'synthetic', run.synthetic
+     )
+     FROM omnis.tasks task
+     JOIN omnis.runs run ON run.task_id = task.id
+     WHERE task.title = '${probeTitle}' AND run.task_title = '${probeTitle}'`,
+  ]);
+  const probe = JSON.parse(probeText.trim());
+  if (
+    !/^task-[0-9]+$/.test(probe.taskId) ||
+    !/^run-[0-9]+$/.test(probe.runId) ||
+    probe.status !== 'completed' ||
+    probe.runtimeKind !== 'mock' ||
+    probe.synthetic !== true
+  ) {
+    throw new Error('Restricted runtime could not persist a safe post-restore task and run.');
+  }
 
   const reportText = await dockerOutput([
     ...composeArgs,
@@ -123,15 +269,20 @@ try {
     metricsQuery,
   ]);
   const report = JSON.parse(reportText.trim());
-  if (!metricsMatch(manifest.snapshotMetrics, report) || report.unsafeRunStates !== 0) {
-    throw new Error(
-      'Restored database failed count, sequence, runtime, active-run, or schema invariants.',
-    );
+  assertValidMetrics(report);
+  if (
+    report.tasks !== manifest.snapshotMetrics.tasks + 1 ||
+    report.runs !== manifest.snapshotMetrics.runs + 1 ||
+    report.events !== manifest.snapshotMetrics.events ||
+    report.idempotencyRecords !== manifest.snapshotMetrics.idempotencyRecords ||
+    report.unsafeRunStates !== 0
+  ) {
+    throw new Error('Post-restore task/run creation changed unexpected data or left active work.');
   }
   process.stdout.write(
-    `Restore verified in isolated database ${targetDatabase}; source and target counts match: ${JSON.stringify(report)}\n` +
+    `Restore verified in isolated database ${targetDatabase}; source counts and fingerprints matched before the runtime probe: ${JSON.stringify(restored)}\n` +
       `Restore and validation duration: ${Number(process.hrtime.bigint() - restoreStartedAt) / 1_000_000} ms.\n` +
-      'The target database is not configured as the application database; no worker was started against it.\n',
+      `Restricted runtime durably created task ${probe.taskId} and completed mock run ${probe.runId}; post-insert sequence invariants passed. No worker was started against the target.\n`,
   );
 } catch (error) {
   process.stderr.write(
@@ -163,7 +314,7 @@ function createComposeArgs() {
     throw new Error('OMNIS_COMPOSE_PROJECT_NAME is invalid.');
   }
   const envFile = path.resolve(
-    process.env.OMNIS_COMPOSE_ENV_FILE ?? path.join(repositoryRoot, '.env'),
+    process.env.OMNIS_COMPOSE_ENV_FILE ?? path.join(repositoryRoot, '.env.db-admin'),
   );
   return [
     'compose',

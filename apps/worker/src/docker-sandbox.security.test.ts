@@ -25,7 +25,6 @@ describe(
       const dummyCredential = path.join(hostOnly, 'dummy-credential.txt');
       const otherRunFile = path.join(otherRun, 'unrelated-run.txt');
       await writeFile(hostOnlyFile, 'synthetic host-only fixture');
-      await writeFile(dummyCredential, 'synthetic dummy credential');
       await writeFile(otherRunFile, 'synthetic unrelated run fixture');
 
       const hostLoopback = await listenOnLoopback();
@@ -34,7 +33,9 @@ describe(
       const runId = `run-${Date.now()}${Math.floor(Math.random() * 1_000_000)}`;
       const hostSecretName = `OMNIS_DUMMY_SECRET_${randomUUID().replaceAll('-', '')}`;
       const previousHostSecret = process.env[hostSecretName];
-      process.env[hostSecretName] = 'synthetic-test-only-secret';
+      const canary = `OMNIS_SYNTHETIC_SECRET_${randomUUID().replaceAll('-', '')}`;
+      await writeFile(dummyCredential, canary);
+      process.env[hostSecretName] = canary;
       const executor = new DockerSandboxExecutor({ workspaceRoot: sandboxRoot });
 
       try {
@@ -48,15 +49,69 @@ describe(
           postgresPort: 5432,
           peerIp: peer.ip,
         });
-        const result = await executor.execute({
+        const execution = executor.execute({
           runId,
           argv: ['node', '-e', script],
           timeoutMs: 10_000,
           signal: new AbortController().signal,
         });
+        await waitForSandboxRun(runId);
+        const containerIds = sandboxRunContainerIds(runId);
+        assert.equal(containerIds.length, 1, 'exactly one scoped container should run');
+        const inspected = JSON.parse(docker(['inspect', containerIds[0]!]))[0] as {
+          Config: { Image: string; Env: string[] };
+          HostConfig: {
+            Binds: string[] | null;
+            ReadonlyRootfs: boolean;
+            NetworkMode: string;
+            CapDrop: string[];
+            SecurityOpt: string[] | null;
+            Init: boolean;
+          };
+          Mounts: Array<{ Type: string; Source: string; Destination: string }>;
+        };
+        assertSandboxConfiguration(inspected, canary);
+        const result = await execution;
         const observation = JSON.parse(result.stdout.trim()) as Record<string, unknown>;
 
         assert.equal(result.exitCode, 0);
+        assert.equal(result.stdout.includes(canary), false);
+        assert.equal(result.stderr.includes(canary), false);
+        const mountInfo = String(observation.mountInfo);
+        const allowedMount = (mountpoint: string) =>
+          mountpoint === '/' ||
+          mountpoint === '/workspace' ||
+          mountpoint === '/tmp' ||
+          mountpoint === '/sbin/docker-init' ||
+          mountpoint === '/dev' ||
+          mountpoint.startsWith('/dev/') ||
+          mountpoint === '/proc' ||
+          mountpoint.startsWith('/proc/') ||
+          mountpoint === '/sys' ||
+          mountpoint.startsWith('/sys/') ||
+          ['/etc/hosts', '/etc/hostname', '/etc/resolv.conf'].includes(mountpoint);
+        const unexpectedMounts = mountInfo
+          .split('\n')
+          .filter(Boolean)
+          .map((line) => line.split(' ')[4] ?? '')
+          .filter((mountpoint) => !allowedMount(mountpoint));
+        const dockerInitMount = mountInfo
+          .split('\n')
+          .find((line) => line.split(' ')[4] === '/sbin/docker-init');
+        assert.ok(dockerInitMount, 'Docker --init may mount only its runtime init executable');
+        assert.match(
+          dockerInitMount,
+          /\/docker-init \/sbin\/docker-init /,
+          'the Docker init mount must be its dedicated init executable',
+        );
+        assert.deepEqual(
+          unexpectedMounts,
+          [],
+          'mount namespace must contain only the root, workspace, and standard pseudo-filesystems',
+        );
+        assert.equal(mountInfo.includes('/var/run/docker.sock'), false);
+        assert.equal(observation.tmpWriteAllowed, true);
+        assert.equal(observation.varTmpWriteDenied, true);
         assert.equal(observation.uid, process.getuid?.());
         assert.ok(Number(observation.uid) > 0, 'workload must not run as root');
         assert.equal(observation.noNewPrivs, '1');
@@ -87,11 +142,19 @@ describe(
         assert.equal(network.dns, false);
         assert.equal(network.defaultRoute, false);
 
-        const workspaceEntries = await readdir(sandboxRoot).catch(() => []);
+        const scopeEntries = await readdir(sandboxRoot).catch(() => []);
         assert.deepEqual(
-          workspaceEntries,
+          scopeEntries,
+          ['000000000000000000000000'],
+          'the only retained directory may be the current environment scope',
+        );
+        const runWorkspaceEntries = await readdir(
+          path.join(sandboxRoot, '000000000000000000000000'),
+        ).catch(() => []);
+        assert.deepEqual(
+          runWorkspaceEntries,
           [],
-          'per-run workspace and temporary Docker config must be removed',
+          'per-run workspaces must be removed after container completion',
         );
       } finally {
         if (previousHostSecret === undefined) delete process.env[hostSecretName];
@@ -392,6 +455,10 @@ async function waitForSandboxRun(runId: string): Promise<void> {
 }
 
 async function sandboxRunExists(runId: string): Promise<boolean> {
+  return sandboxRunContainerIds(runId).length > 0;
+}
+
+function sandboxRunContainerIds(runId: string): string[] {
   const rows = docker([
     'ps',
     '--all',
@@ -400,9 +467,12 @@ async function sandboxRunExists(runId: string): Promise<boolean> {
     '--filter',
     'label=com.omnis.os.scope=000000000000000000000000',
     '--format',
-    '{{.Label "com.omnis.os.run-id"}}',
+    '{{.ID}}|{{.Label "com.omnis.os.run-id"}}',
   ]);
-  return rows.split(/\r?\n/).includes(runId);
+  return rows
+    .split(/\r?\n/)
+    .filter((row) => row.split('|')[1] === runId)
+    .map((row) => row.split('|')[0]!);
 }
 
 function securityProbeScript(input: {
@@ -454,6 +524,9 @@ function securityProbeScript(input: {
         defaultRoute: fs.readFileSync('/proc/net/route', 'utf8').trim().split('\\n').slice(1).some((row) => row.trim().split(/\\s+/)[1] === '00000000'),
       };
       const cgroupValue = (file) => { try { return fs.readFileSync(file, 'utf8').trim(); } catch { return ''; } };
+      let tmpWriteAllowed = false;
+      try { fs.writeFileSync('/tmp/omnis-tmp-write.txt', 'allowed'); tmpWriteAllowed = true; } catch {}
+      const varTmpWriteDenied = denied(() => fs.writeFileSync('/var/tmp/omnis-var-tmp-write-denied.txt', 'blocked'));
       let workspaceWriteAllowed = false;
       try { fs.writeFileSync('/workspace/inside-workspace.txt', 'allowed'); workspaceWriteAllowed = true; } catch {}
       const rootWriteDenied = denied(() => fs.writeFileSync('/etc/omnis-sandbox-write-denied.txt', 'blocked'));
@@ -470,6 +543,9 @@ function securityProbeScript(input: {
         otherRunDenied: !canRead(fixture.otherRunFile),
         dockerSocketAbsent: !fs.existsSync('/var/run/docker.sock'),
         hostSecretAbsent,
+        mountInfo: fs.readFileSync('/proc/self/mountinfo', 'utf8'),
+        tmpWriteAllowed,
+        varTmpWriteDenied,
         hostProcessDenied,
         privilegeEscalationDenied,
         pidsMax: cgroupValue('/sys/fs/cgroup/pids.max'),
@@ -481,3 +557,71 @@ function securityProbeScript(input: {
     })().catch(() => process.exit(91));
   `;
 }
+
+function assertSandboxConfiguration(
+  inspected: {
+    Config: { Image: string; Env: string[] };
+    HostConfig: {
+      Binds: string[] | null;
+      ReadonlyRootfs: boolean;
+      NetworkMode: string;
+      CapDrop: string[];
+      SecurityOpt: string[] | null;
+      Init: boolean;
+    };
+    Mounts: Array<{ Type: string; Source: string; Destination: string }>;
+  },
+  canary: string,
+): void {
+  assert.equal(inspected.Config.Image, SANDBOX_IMAGE_REF);
+  assert.equal(inspected.HostConfig.ReadonlyRootfs, true);
+  assert.equal(inspected.HostConfig.NetworkMode, 'none');
+  assert.equal(inspected.HostConfig.Init, true);
+  assert.deepEqual(inspected.HostConfig.CapDrop, ['ALL']);
+  const securityOptions = inspected.HostConfig.SecurityOpt ?? [];
+  assert.ok(securityOptions.includes('no-new-privileges:true'));
+  assert.ok(!securityOptions.some((item) => /seccomp/i.test(item)));
+  const bindMounts = inspected.Mounts.filter((mount) => mount.Type === 'bind');
+  assert.deepEqual(
+    bindMounts.map((mount) => mount.Destination),
+    ['/workspace'],
+  );
+  assert.ok(
+    !(inspected.HostConfig.Binds ?? []).some((mount) => /docker\.sock|\/home\//i.test(mount)),
+  );
+  assert.ok(inspected.Config.Env.every((entry) => !entry.includes(canary)));
+}
+
+describe('sandbox inspection assertions', () => {
+  it('rejects an unexpected bind mount and synthetic credential in a controlled fixture', () => {
+    const canary = 'OMNIS_SYNTHETIC_SECRET_FIXTURE_ONLY';
+    const safe = {
+      Config: { Image: SANDBOX_IMAGE_REF, Env: ['PATH=/usr/local/bin:/usr/bin'] },
+      HostConfig: {
+        Binds: null,
+        ReadonlyRootfs: true,
+        NetworkMode: 'none',
+        CapDrop: ['ALL'],
+        SecurityOpt: ['no-new-privileges:true'],
+        Init: true,
+      },
+      Mounts: [{ Type: 'bind', Source: '/tmp/approved-run', Destination: '/workspace' }],
+    };
+    assert.doesNotThrow(() => assertSandboxConfiguration(safe, canary));
+    assert.throws(() =>
+      assertSandboxConfiguration(
+        {
+          ...safe,
+          Mounts: [...safe.Mounts, { Type: 'bind', Source: '/host', Destination: '/mnt/host' }],
+        },
+        canary,
+      ),
+    );
+    assert.throws(() =>
+      assertSandboxConfiguration(
+        { ...safe, Config: { ...safe.Config, Env: [...safe.Config.Env, `TOKEN=${canary}`] } },
+        canary,
+      ),
+    );
+  });
+});

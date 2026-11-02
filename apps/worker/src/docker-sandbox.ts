@@ -101,6 +101,7 @@ process.once('SIGINT', forceKill);
 export class DockerSandboxExecutor implements SandboxExecutor {
   private readonly dockerPath: string;
   private readonly workspaceRoot: string;
+  private readonly scopeRoot: string;
   private readonly uid: number;
   private readonly gid: number;
   private readonly maxOutputBytes: number;
@@ -114,6 +115,7 @@ export class DockerSandboxExecutor implements SandboxExecutor {
     this.maxOutputBytes = dependencies.maxOutputBytes ?? defaultMaxOutputBytes;
     this.scopeId = dependencies.scopeId ?? '000000000000000000000000';
     if (!/^[0-9a-f]{24}$/.test(this.scopeId)) throw new SandboxError('launch_failed');
+    this.scopeRoot = path.join(this.workspaceRoot, this.scopeId);
   }
 
   async cleanupOrphanedContainers(
@@ -145,7 +147,9 @@ export class DockerSandboxExecutor implements SandboxExecutor {
         }
         containers.push({ id: containerId!, runId: runId! });
       }
-      const workspaceEntries = await readdir(this.workspaceRoot, { withFileTypes: true }).catch(
+      await ensurePrivateRoot(this.workspaceRoot);
+      await ensurePrivateRoot(this.scopeRoot);
+      const workspaceEntries = await readdir(this.scopeRoot, { withFileTypes: true }).catch(
         (error: NodeJS.ErrnoException) => {
           if (error.code === 'ENOENT') return [];
           throw error;
@@ -154,7 +158,7 @@ export class DockerSandboxExecutor implements SandboxExecutor {
       const orphanableWorkspaces = workspaceEntries.flatMap((entry) => {
         const match = /^run-(run-[0-9]{4,})-[A-Za-z0-9_-]{6}$/.exec(entry.name);
         return entry.isDirectory() && match
-          ? [{ path: path.join(this.workspaceRoot, entry.name), runId: match[1]! }]
+          ? [{ path: path.join(this.scopeRoot, entry.name), runId: match[1]! }]
           : [];
       });
       const candidates = [
@@ -369,7 +373,8 @@ export class DockerSandboxExecutor implements SandboxExecutor {
 
   private async createPrivateDirectory(prefix: string): Promise<string> {
     await ensurePrivateRoot(this.workspaceRoot);
-    const directory = await mkdtemp(path.join(this.workspaceRoot, prefix));
+    await ensurePrivateRoot(this.scopeRoot);
+    const directory = await mkdtemp(path.join(this.scopeRoot, prefix));
     await chmod(directory, 0o700);
     const info = await lstat(directory);
     if (
@@ -385,12 +390,13 @@ export class DockerSandboxExecutor implements SandboxExecutor {
   }
 
   private async removePrivateDirectory(directory: string): Promise<void> {
-    const root = await realpath(this.workspaceRoot);
+    const root = await realpath(this.scopeRoot);
     const entry = await lstat(directory).catch(() => undefined);
     if (!entry) return;
     if (
       !entry.isDirectory() ||
       entry.isSymbolicLink() ||
+      path.dirname(directory) !== this.scopeRoot ||
       !(await realpath(directory)).startsWith(`${root}${path.sep}`)
     ) {
       throw new SandboxError('launch_failed');
