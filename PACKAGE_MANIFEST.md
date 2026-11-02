@@ -55,7 +55,7 @@
 | `docs/07-governance/adr/0008-container-isolated-mock-execution.md` | `49a46f869df6b8d52c0390ff96cbf06e2af426ddfae3c7826654fd8aea155560` | 3624 |
 | `docs/07-governance/evidence/MOCK_RUN_PROOF.md` | `06ade105bffba5699a20878bb2fab12911ad4faf7cafab358f0567320129be3c` | 2231 |
 | `docs/07-governance/evidence/R1_G1_PERSISTENCE.md` | `6fbaed5e55635ed21b31eac1c6166d7f56e5026cae1555f7f1124ccf3cc35a67` | 7008 |
-| `docs/07-governance/evidence/R1_G2_SANDBOX_SECURITY.md` | `5d7f5f054ab66407bd0179cb66ed79d326eba1c5f3b4f16ffc5adefe9edcd089` | 10801 |
+| `docs/07-governance/evidence/R1_G2_SANDBOX_SECURITY.md` | `e5051b2246ff889151dc6095739412d03ac1b99705e97a43b476864835b62171` | 11023 |
 | `docs/07-governance/evidence/command-center-desktop.png` | `85ef9bfd3afdddd7a8f279b1ddd718f0f31da30247d8743b845842f97f6fe1eb` | 131101 |
 | `docs/07-governance/evidence/command-center-mobile.png` | `5dfb122d177b06a5a2be053ac40f983286be0382d3a9fda8215a6243c5bac84f` | 121265 |
 | `docs/07-governance/evidence/r1-g1-desktop.png` | `647acb295f232a66b7aef71601901a27d4d02a394cbdaba2679782e6f3376646` | 141217 |
