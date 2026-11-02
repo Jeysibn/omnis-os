@@ -42,7 +42,7 @@
 | `docs/06-delivery/PHASE_0_1_HANDOFF.md` | `9a27c2cbef0d984efbe14d7ea8f70612bc4b6558d87f063177ad3ef106d7a2a7` | 6111 |
 | `docs/06-delivery/ROADMAP.md` | `834233fbe0b1374a57a9c399fa9950fa76d80324d500cde31ac60368b30b8081` | 3930 |
 | `docs/06-delivery/TEST_PLAN.md` | `bdcde833b298f7b8bc39b11dc97cbc6eb1e46136e01e06a471fe07af391637c5` | 4647 |
-| `docs/07-governance/DECISIONS_RISKS.md` | `9fd1b6d7d39527fb456baa7896628dbd19424c61c88d5b8be487e1dd84af8fc4` | 9975 |
+| `docs/07-governance/DECISIONS_RISKS.md` | `8af49e8a20bca1ca56e22a1a8798d9ab61d7ab4dcabe411c77bb0df3f54dbdcb` | 10116 |
 | `docs/07-governance/INTEGRATION_NOTES.md` | `3f40264f32f36272d36b0be2e51e9931bb945ceb8fda2c5aabf8d3f00702109b` | 3427 |
 | `docs/07-governance/REFERENCES.md` | `839ca6f729897d64e649f99936f2e604f96d90c1f05bcf2c807977f50c0464a7` | 3466 |
 | `docs/07-governance/adr/0001-custom-control-plane-modular-monolith.md` | `ec33e0322f6321e678aca78ce5606251550909ec5a450af93ce778e368335dc2` | 1566 |
@@ -53,7 +53,7 @@
 | `docs/07-governance/adr/0006-private-chat-separation.md` | `50a7c453f7d3567059e54c589e366b07affe1d99ae4f5bb4f309358aaa669223` | 1321 |
 | `docs/07-governance/adr/0007-loopback-mock-functional-gate.md` | `de0bdc1bbb40777bf1565d941a84415acdcb7ed860be5c8d4d1a27bf29ba97cb` | 1714 |
 | `docs/07-governance/evidence/MOCK_RUN_PROOF.md` | `06ade105bffba5699a20878bb2fab12911ad4faf7cafab358f0567320129be3c` | 2231 |
-| `docs/07-governance/evidence/R1_G1_PERSISTENCE.md` | `7549a6721b34652e906b9bc2d4c9611cff8891eba31e68f6be9a1404d87b4c24` | 6287 |
+| `docs/07-governance/evidence/R1_G1_PERSISTENCE.md` | `6fbaed5e55635ed21b31eac1c6166d7f56e5026cae1555f7f1124ccf3cc35a67` | 7008 |
 | `docs/07-governance/evidence/command-center-desktop.png` | `85ef9bfd3afdddd7a8f279b1ddd718f0f31da30247d8743b845842f97f6fe1eb` | 131101 |
 | `docs/07-governance/evidence/command-center-mobile.png` | `5dfb122d177b06a5a2be053ac40f983286be0382d3a9fda8215a6243c5bac84f` | 121265 |
 | `docs/07-governance/evidence/r1-g1-desktop.png` | `647acb295f232a66b7aef71601901a27d4d02a394cbdaba2679782e6f3376646` | 141217 |
