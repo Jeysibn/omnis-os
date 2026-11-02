@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { createServer } from 'node:net';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,6 +12,7 @@ const randomSuffix = randomBytes(6).toString('hex');
 const projectName = `omnis-backup-ci-${randomSuffix}`;
 const databaseName = 'omnis_backup_test';
 const restoreDatabase = `omnis_restore_ci_${randomSuffix}`;
+const legacyRestoreDatabase = `omnis_restore_acl_free_${randomSuffix}`;
 const directory = await mkdtemp(path.join(tmpdir(), 'omnis-backup-restore-'));
 const envPath = path.join(directory, 'postgres.env');
 const dumpPath = path.join(directory, 'synthetic.dump');
@@ -101,6 +102,21 @@ try {
     connectionUrl('omnis_runtime', runtimePassword, port, restoreDatabase),
     randomSuffix,
   );
+  await assertUnauthorizedGrantRejected(
+    connectionUrl('omnis', adminPassword, port, restoreDatabase),
+  );
+
+  const legacyDumpPath = path.join(directory, 'acl-free-legacy.dump');
+  await createAclFreeLegacyArchive(legacyDumpPath);
+  run(
+    process.execPath,
+    ['scripts/db-recovery/restore-verify.mjs', legacyDumpPath, legacyRestoreDatabase],
+    { env: baseEnv },
+  );
+  await verifyLegacyAclBaseline(
+    connectionUrl('omnis_runtime', runtimePassword, port, legacyRestoreDatabase),
+    randomSuffix,
+  );
 
   process.stdout.write(
     `Disposable PostgreSQL backup/restore integration passed for ${projectName}; archive and credentials were kept private and removed.\n`,
@@ -120,6 +136,22 @@ try {
         '--username=omnis',
         '--maintenance-db=postgres',
         restoreDatabase,
+      ],
+      { env: baseEnv, allowFailure: true },
+    );
+    run(
+      'docker',
+      [
+        ...composeArgs,
+        'exec',
+        '-T',
+        'postgres',
+        'dropdb',
+        '--if-exists',
+        '--force',
+        '--username=omnis',
+        '--maintenance-db=postgres',
+        legacyRestoreDatabase,
       ],
       { env: baseEnv, allowFailure: true },
     );
@@ -229,6 +261,75 @@ async function verifyRestoredMigrationAcl(runtimeUrl, suffix) {
   }
 }
 
+async function assertUnauthorizedGrantRejected(adminUrl) {
+  const { createPool } = await import('../../packages/db/src/index.ts');
+  const { aclSnapshotQuery, assertRuntimeAclPolicy } =
+    await import('../../scripts/db-recovery/acl-integrity.mjs');
+  const admin = createPool(adminUrl);
+  try {
+    await admin.query('GRANT DELETE ON TABLE omnis.tasks TO omnis_runtime');
+    const aclResult = await admin.query(aclSnapshotQuery);
+    assert.throws(
+      () => assertRuntimeAclPolicy(aclResult.rows[0]?.acl_snapshot),
+      /DELETE is prohibited on omnis\.tasks/,
+      'post-restore ACL validation must fail closed on unauthorized DML grants',
+    );
+  } finally {
+    await admin
+      .query('REVOKE DELETE ON TABLE omnis.tasks FROM omnis_runtime')
+      .catch(() => undefined);
+    await admin.end();
+  }
+}
+
+async function createAclFreeLegacyArchive(destination) {
+  const binary = runBinary('docker', [
+    ...composeArgs,
+    'exec',
+    '-T',
+    'postgres',
+    'pg_dump',
+    '--format=custom',
+    '--no-owner',
+    '--no-acl',
+    '--username=omnis',
+    `--dbname=${databaseName}`,
+  ]);
+  await writeFile(destination, binary, { mode: 0o600, flag: 'wx' });
+  const currentManifest = JSON.parse(await readFile(`${dumpPath}.manifest.json`, 'utf8'));
+  const legacyManifest = {
+    format: 'postgres-custom',
+    sourceDatabase: databaseName,
+    dumpBytes: binary.length,
+    dumpSha256: createHash('sha256').update(binary).digest('hex'),
+    snapshotMetrics: currentManifest.snapshotMetrics,
+  };
+  await writeFile(`${destination}.manifest.json`, `${JSON.stringify(legacyManifest)}\n`, {
+    mode: 0o600,
+    flag: 'wx',
+  });
+}
+
+async function verifyLegacyAclBaseline(runtimeUrl, suffix) {
+  const { createPool } = await import('../../packages/db/src/index.ts');
+  const runtime = createPool(runtimeUrl);
+  try {
+    assert.ok((await runtime.query('SELECT id FROM omnis.tasks LIMIT 1')).rowCount >= 1);
+    await assert.rejects(
+      runtime.query(`SELECT id FROM omnis.future_acl_${suffix}`),
+      /permission denied/,
+      'ACL-free restore must not invent later migration privileges',
+    );
+    await assert.rejects(
+      runtime.query(`SELECT nextval('omnis.future_acl_seq_${suffix}')`),
+      /permission denied/,
+      'ACL-free restore must not expose future sequences',
+    );
+  } finally {
+    await runtime.end();
+  }
+}
+
 async function setSequenceState(adminUrl, stale) {
   const { createPool } = await import('../../packages/db/src/index.ts');
   const admin = createPool(adminUrl);
@@ -277,6 +378,18 @@ function run(command, args, { env = process.env, allowFailure = false } = {}) {
     );
   }
   return { status: result.status, output: `${result.stdout ?? ''}${result.stderr ?? ''}` };
+}
+
+function runBinary(command, args) {
+  const result = spawnSync(command, args, {
+    cwd: repositoryRoot,
+    env: baseEnv,
+    maxBuffer: 32 * 1024 * 1024,
+  });
+  if (result.error || result.status !== 0) {
+    throw new Error(`${command} ${args[0] ?? ''} failed while generating the legacy archive.`);
+  }
+  return result.stdout;
 }
 
 async function freePort() {

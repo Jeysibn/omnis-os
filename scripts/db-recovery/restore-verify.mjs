@@ -8,11 +8,12 @@ import { pipeline } from 'node:stream/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertValidMetrics, metricsMatch, metricsQuery } from './metrics.mjs';
+import { aclSnapshotQuery, aclSnapshotsMatch, assertRuntimeAclPolicy } from './acl-integrity.mjs';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const runtimePrivilegesMigration = path.join(
+const legacyRestoreAclScript = path.join(
   repositoryRoot,
-  'packages/db/migrations/0003_runtime_privileges.sql',
+  'scripts/db-recovery/restore-legacy-acls.sql',
 );
 const composeArgs = createComposeArgs();
 const sourceDatabase = process.env.OMNIS_BACKUP_DATABASE ?? 'omnis';
@@ -51,7 +52,8 @@ if (
   manifest.dumpBytes !== archiveInfo.size ||
   manifest.dumpSha256 !== (await sha256(archivePath)) ||
   !manifest.snapshotMetrics ||
-  manifest.snapshotMetrics.unsafeRunStates !== 0
+  manifest.snapshotMetrics.unsafeRunStates !== 0 ||
+  (manifest.format === 'postgres-custom-acl-v1' && !Array.isArray(manifest.aclSnapshot))
 ) {
   throw new Error('Backup archive/manifest mismatch or unsafe active run state; refusing restore.');
 }
@@ -140,29 +142,33 @@ try {
         `--dbname=${targetDatabase}`,
         '--file=-',
       ],
-      runtimePrivilegesMigration,
+      legacyRestoreAclScript,
     );
+  }
 
-    await dockerChecked([
-      ...composeArgs,
-      'exec',
-      '-T',
-      'postgres',
-      'psql',
-      '-X',
-      '--no-psqlrc',
-      '--set=ON_ERROR_STOP=1',
-      '--username=omnis',
-      `--dbname=${targetDatabase}`,
-      '--command',
-      `GRANT USAGE ON SCHEMA pgboss TO omnis_runtime;
-     GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA pgboss TO omnis_runtime;
-     GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA pgboss TO omnis_runtime;
-     ALTER DEFAULT PRIVILEGES FOR ROLE omnis_migrator IN SCHEMA pgboss
-       GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO omnis_runtime;
-     ALTER DEFAULT PRIVILEGES FOR ROLE omnis_migrator IN SCHEMA pgboss
-       GRANT USAGE, SELECT ON SEQUENCES TO omnis_runtime;`,
-    ]);
+  const restoredAclText = await dockerOutput([
+    ...composeArgs,
+    'exec',
+    '-T',
+    'postgres',
+    'psql',
+    '-X',
+    '--no-psqlrc',
+    '--set=ON_ERROR_STOP=1',
+    '--tuples-only',
+    '--no-align',
+    '--username=omnis',
+    `--dbname=${targetDatabase}`,
+    '--command',
+    aclSnapshotQuery,
+  ]);
+  const restoredAclSnapshot = JSON.parse(restoredAclText.trim());
+  assertRuntimeAclPolicy(restoredAclSnapshot);
+  if (
+    manifest.format === 'postgres-custom-acl-v1' &&
+    !aclSnapshotsMatch(manifest.aclSnapshot, restoredAclSnapshot)
+  ) {
+    throw new Error('Restored PostgreSQL ACLs do not match the source ACL snapshot.');
   }
 
   const restoredText = await dockerOutput([
@@ -282,6 +288,7 @@ try {
   }
   process.stdout.write(
     `Restore verified in isolated database ${targetDatabase}; source counts and fingerprints matched before the runtime probe: ${JSON.stringify(restored)}\n` +
+      `Post-restore runtime ACL policy passed; ${manifest.format === 'postgres-custom-acl-v1' ? 'source/restored ACL comparison matched' : 'legacy ACL-free baseline was rebuilt securely'}.\n` +
       `Restore and validation duration: ${Number(process.hrtime.bigint() - restoreStartedAt) / 1_000_000} ms.\n` +
       `Restricted runtime durably created task ${probe.taskId} and completed mock run ${probe.runId}; post-insert sequence invariants passed. No worker was started against the target.\n`,
   );
@@ -350,7 +357,7 @@ async function dockerOutput(args) {
   let output = '';
   child.stdout?.on('data', (chunk) => {
     output += chunk.toString('utf8');
-    if (output.length > 16 * 1024) child.kill('SIGKILL');
+    if (output.length > 4 * 1024 * 1024) child.kill('SIGKILL');
   });
   child.stderr?.resume();
   const [code] = await once(child, 'close');

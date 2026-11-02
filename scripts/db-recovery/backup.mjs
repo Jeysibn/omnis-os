@@ -8,6 +8,7 @@ import { pipeline } from 'node:stream/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertBackupSafe, metricsQuery, parseMetrics } from './metrics.mjs';
+import { aclSnapshotQuery, assertRuntimeAclPolicy } from './acl-integrity.mjs';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const composeArgs = createComposeArgs();
@@ -69,6 +70,8 @@ try {
 
   const sourceReport = await querySnapshotMetrics(sourceDatabase, exporter.snapshot);
   assertBackupSafe(sourceReport);
+  const sourceAclSnapshot = await querySnapshotAcl(sourceDatabase, exporter.snapshot);
+  assertRuntimeAclPolicy(sourceAclSnapshot);
   await finishSnapshotExport(exporter);
   exportedSnapshot = undefined;
 
@@ -96,6 +99,7 @@ try {
     dumpBytes: fileInfo.size,
     dumpSha256: hash,
     snapshotMetrics: sourceReport,
+    aclSnapshot: sourceAclSnapshot,
   };
   const manifestFile = await open(
     manifestPath,
@@ -205,6 +209,33 @@ COMMIT;`;
   return parseMetrics(result);
 }
 
+async function querySnapshotAcl(database, snapshot) {
+  const sql = `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
+SET TRANSACTION SNAPSHOT '${snapshot}';
+${aclSnapshotQuery}
+COMMIT;`;
+  const result = await dockerOutput([
+    ...composeArgs,
+    'exec',
+    '-T',
+    'postgres',
+    'psql',
+    '-X',
+    '--no-psqlrc',
+    '--quiet',
+    '--tuples-only',
+    '--no-align',
+    '--set=ON_ERROR_STOP=1',
+    '--username=omnis',
+    `--dbname=${database}`,
+    '--command',
+    sql,
+  ]);
+  const aclSnapshot = JSON.parse(result.trim());
+  assertRuntimeAclPolicy(aclSnapshot);
+  return aclSnapshot;
+}
+
 async function dockerOutput(args) {
   const child = spawn('/usr/bin/docker', args, {
     cwd: repositoryRoot,
@@ -214,7 +245,7 @@ async function dockerOutput(args) {
   let output = '';
   child.stdout?.on('data', (chunk) => {
     output += chunk.toString('utf8');
-    if (output.length > 16 * 1024) child.kill('SIGKILL');
+    if (output.length > 4 * 1024 * 1024) child.kill('SIGKILL');
   });
   child.stderr?.resume();
   const [code] = await once(child, 'close');
