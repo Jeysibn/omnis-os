@@ -227,7 +227,15 @@ try {
   await stopProcess(worker);
   worker = startWorker(envPath);
   await waitForHealth(baseUrl, `http://127.0.0.1:${workerPort}`, internalToken, worker, api);
-  await delay(500);
+  await waitForRunStatus(
+    baseUrl,
+    interruptedRun.id,
+    'interrupted',
+    ownerCookie,
+    worker,
+    api,
+    45_000,
+  );
   const interruptedFinalResponse = await fetch(`${baseUrl}/api/v1/runs/${interruptedRun.id}`, {
     headers: { cookie: ownerCookie },
   });
