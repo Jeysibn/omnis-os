@@ -35,9 +35,25 @@
 1. **Hermes tool scope:** bearer auth protects the API but does not by itself constrain the powerful toolset. Do not call the API with a read-only prompt until a verified tool allowlist and isolated workspace are in force.
 2. **Provider-account usage:** existing local sign-in state is personal account material. Do not pass it into a web/API process or a shared service. Any future background run requires the supported provider authorization flow and explicit user consent.
 3. **Claude automation policy:** subscription authentication exists on the machine, but this does not approve reuse by an app-owned unattended worker. Keep disabled until reviewed.
-4. **Host infrastructure:** Docker socket access is denied. PostgreSQL Compose and DB integration cannot be validated until Docker permissions or an approved local PostgreSQL service are available.
+4. **Host infrastructure:** The original command shell lacked the current Docker supplementary group. A fresh WSL login showed the already-configured `docker` group and successfully ran Compose; no socket permissions or group membership were changed. Docker group membership is root-equivalent and must remain a deliberate host-owner decision.
 5. **Repository baseline:** workspace was empty and had no `.git`, source documentation pack, or existing implementation to preserve. The initial documentation commit records the handoff before code is added.
-6. **Dependency reproducibility:** package versions are exact in manifests, but no pnpm lockfile could be generated because the package registry was unreachable during this gate. CI currently installs without frozen-lockfile enforcement until the first lockfile can be committed.
+6. **Dependency reproducibility:** the initial Phase 0 install could not reach the registry. During R1-G1, the registry responded, pnpm 12.16.1 installed dependencies, `pnpm-lock.yaml` was generated, and CI now uses frozen-lockfile installs. Clean-worktree verification is recorded separately below.
+
+## Phase 1 infrastructure revalidation — 2026-11-02
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Host toolchain | Verified | WSL2 Ubuntu 26.04.1; Node v24.22.1; Docker CLI 29.9.2; Compose v5.6.1. Existing user membership was `docker:x:986:jeysi`; the original process lacked supplementary GID 986. A fresh `wsl.exe -d Ubuntu -u jeysi -- ...` shell had the group and reached the daemon. No permissions changed. |
+| pnpm and registry | Verified locally | pnpm 12.16.1 was obtained through `npx`; the registry returned HTTP 200. Dependency installation and `pnpm install --frozen-lockfile` succeeded. Exact versions and lockfile are committed. |
+| PostgreSQL Compose | Verified locally | `postgres:17.6-alpine` reached healthy status on `127.0.0.1:5432`; named volume `omnis-os_omnis-postgres-data` was used. No unrelated `monikey` containers or data were touched. |
+| PostgreSQL migrations and persistence | Verified locally | Migration `0001_initial.sql`, transaction rollback, task/run/event persistence, queue admission, lease recovery, and cancellation were tested against real PostgreSQL. See [R1-G1 persistence evidence](evidence/R1_G1_PERSISTENCE.md). |
+| API/worker restart and SSE replay | Verified locally | Process integration stopped/restarted the API and worker, reconstructed task/run state, replayed events from `Last-Event-ID`, and checked interrupted work was not replayed. |
+| Web browser | Verified locally | Playwright CLI smoke covered owner login, task creation, completed mock run, stop, SSE trail, browser reload, and 1440px/390px layouts. Screenshots and command notes are in the R1-G1 evidence report. |
+| Clean worktree and CI | Pending final verification | The committed lockfile is frozen-install tested. GitHub Actions itself was not run from this local environment. |
+
+## R1-G1 status
+
+The PostgreSQL-backed mock lifecycle is implemented and its local code, database, process-restart, and browser checks passed. Real Hermes/Codex/Claude inference remains disabled. R1-G1 does not authorize provider use or claim OS-level worker sandboxing or egress enforcement. The exact version pin `pnpm@12.16.1` is in the repository; explicit owner approval of version pins for production remains open.
 
 ## Owner decisions still needed
 
@@ -45,6 +61,5 @@
 - Approve the authentication and token ownership model, including whether Omnis OS will register a Sign in with ChatGPT integration.
 - Approve the real runtime and documented tool permissions after isolated proof.
 - Review Claude Team/Agent SDK terms and any background use before enabling it.
-- Provide/approve Docker socket access or choose a supported PostgreSQL path.
-- Confirm exact package-manager and dependency pins after a successful pnpm install and lockfile review.
+- Review the committed package/image pins before any production deployment; pnpm 12.16.1 and the dependency lockfile now have a local reproducibility proof.
 - Review [ADR-0007](adr/0007-loopback-mock-functional-gate.md) before any real runtime or non-loopback access is enabled.

@@ -1,59 +1,181 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import type { Run, Task } from '@omnis/contracts';
+import type { PostgresRunStore } from '@omnis/db';
 import { CoordinatorError, RunCoordinator } from './run-coordinator.ts';
 
-describe('mock run coordinator', () => {
-  it('keeps request retries on one run and rejects a reused key with different input', () => {
-    const coordinator = new RunCoordinator();
-    const task = coordinator.createTask({
-      title: 'Inspect files',
-      detail: 'List files without changing them.',
-    });
-    const first = coordinator.startRun(task.id, 'idempotency-key-0001');
-    const retry = coordinator.startRun(task.id, 'idempotency-key-0001');
-    assert.equal(first.run.id, retry.run.id);
+describe('durable mock run coordinator', () => {
+  it('admits queue work with automatic retries disabled', async () => {
+    let capturedOptions: unknown;
+    let capturedIdempotencyKey = '';
+    let created = true;
+    const run: Run = {
+      id: 'run-0001',
+      taskId: 'task-0001',
+      taskTitle: 'Inspect files',
+      status: 'queued',
+      runtimeKind: 'mock',
+      synthetic: true,
+      usage: { quality: 'unknown', inputTokens: null, outputTokens: null, cost: null },
+      createdAt: '2026-11-02T00:00:00.000Z',
+      updatedAt: '2026-11-02T00:00:00.000Z',
+    };
+    const store = {
+      admitRun: async (
+        _taskId: string,
+        idempotencyKey: string,
+        enqueue: (tx: never, data: { runId: string }) => Promise<string | null>,
+      ) => {
+        capturedIdempotencyKey = idempotencyKey;
+        const jobId = await enqueue({ executeSql: async () => ({ rows: [] }) } as never, {
+          runId: run.id,
+        });
+        assert.equal(jobId, 'job-0001');
+        return { run, created, events: [] };
+      },
+    } as unknown as PostgresRunStore;
+    const queue = {
+      send: async (_name: string, data: { runId: string }, options: unknown) => {
+        assert.deepEqual(data, { runId: run.id });
+        capturedOptions = options;
+        return 'job-0001';
+      },
+      findJobs: async () => [],
+    };
+    const coordinator = new RunCoordinator(store, queue);
+
+    const first = await coordinator.startRun('task-0001', 'idempotency-key-0001');
+    assert.equal(first.created, true);
+    assert.equal(capturedIdempotencyKey, 'idempotency-key-0001');
+    const options = capturedOptions as {
+      retryLimit: number;
+      retryDelay: number;
+      expireInSeconds: number;
+      heartbeatSeconds: number;
+      db: { executeSql?: unknown };
+    };
+    assert.equal(options.retryLimit, 0);
+    assert.equal(options.retryDelay, 0);
+    assert.equal(options.expireInSeconds, 60);
+    assert.equal(options.heartbeatSeconds, 10);
+    assert.equal(typeof options.db.executeSql, 'function');
+
+    created = false;
+    const retry = await coordinator.startRun('task-0001', 'idempotency-key-0001');
     assert.equal(retry.created, false);
-    assert.equal(coordinator.listRuns().length, 1);
-    assert.throws(
-      () => coordinator.startRun('another-task', 'idempotency-key-0001'),
-      CoordinatorError,
+    assert.equal(retry.run.id, first.run.id);
+  });
+
+  it('rejects malformed durable job payloads before touching the store', async () => {
+    const coordinator = new RunCoordinator({} as PostgresRunStore, {
+      send: async () => null,
+      findJobs: async () => [],
+    });
+    await assert.rejects(
+      coordinator.handleQueueJob({ runId: '../../anything' }),
+      /durable mock job payload is invalid/,
     );
   });
 
-  it('records stopping until cancellation has been observed as terminal', async () => {
-    const coordinator = new RunCoordinator();
-    const task = coordinator.createTask({
+  it('rejects a task whose schema is invalid before reaching persistence', async () => {
+    const coordinator = new RunCoordinator({} as PostgresRunStore, {
+      send: async () => null,
+      findJobs: async () => [],
+    });
+    await assert.rejects(
+      coordinator.createTask({ title: 'x', detail: '' }),
+      (error: unknown) => error instanceof CoordinatorError && error.code === 'invalid_input',
+    );
+  });
+
+  it('marks a lost queued job interrupted instead of allowing an automatic retry', async () => {
+    let interruptedRunId = '';
+    const event = {
+      id: 'evt-run-0001-0001',
+      runId: 'run-0001',
+      sequence: 1,
+      at: '2026-11-02T00:00:00.000Z',
+      type: 'run.interrupted' as const,
+      source: 'mock' as const,
+      synthetic: true as const,
+      message: 'The durable queue job failed before starting.',
+    };
+    const store = {
+      reconcileExpiredRuns: async () => [],
+      listQueuedJobs: async () => [{ runId: 'run-0001', status: 'queued', jobId: 'job-0001' }],
+      interruptQueuedRun: async (runId: string) => {
+        interruptedRunId = runId;
+        return { run: {} as Run, events: [{ runId, event }] };
+      },
+    } as unknown as PostgresRunStore;
+    const queue = {
+      send: async () => null,
+      findJobs: async () => [{ id: 'job-0001', state: 'failed' as const }],
+    };
+    const coordinator = new RunCoordinator(store, queue);
+
+    await coordinator.reconcileExpiredRuns();
+    assert.equal(interruptedRunId, 'run-0001');
+  });
+
+  it('acknowledges stopping work after the queue confirms its job is terminal', async () => {
+    let acknowledgedRunId = '';
+    const store = {
+      reconcileExpiredRuns: async () => [],
+      listQueuedJobs: async () => [{ runId: 'run-0001', status: 'stopping', jobId: 'job-0001' }],
+      cancelRunAfterQueueTerminal: async (runId: string) => {
+        acknowledgedRunId = runId;
+        return { run: {} as Run, events: [] };
+      },
+    } as unknown as PostgresRunStore;
+    const queue = {
+      send: async () => null,
+      findJobs: async () => [{ id: 'job-0001', state: 'failed' as const }],
+    };
+    const coordinator = new RunCoordinator(store, queue);
+
+    await coordinator.reconcileExpiredRuns();
+    assert.equal(acknowledgedRunId, 'run-0001');
+  });
+
+  it('acknowledges a stop observed through the durable lease heartbeat', async () => {
+    const now = '2026-11-02T00:00:00.000Z';
+    const run: Run = {
+      id: 'run-0001',
+      taskId: 'task-0001',
+      taskTitle: 'Inspect files',
+      status: 'running',
+      runtimeKind: 'mock',
+      synthetic: true,
+      usage: { quality: 'unknown', inputTokens: null, outputTokens: null, cost: null },
+      createdAt: now,
+      updatedAt: now,
+    };
+    const task: Task = {
+      id: 'task-0001',
       title: 'Inspect files',
       detail: 'List files without changing them.',
-    });
-    const { run } = coordinator.startRun(task.id, 'idempotency-key-0002');
-    assert.equal(run.status, 'queued');
-    const stopping = coordinator.stopRun(run.id);
-    assert.equal(stopping.status, 'stopping');
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    assert.equal(coordinator.getRun(run.id)?.status, 'cancelled');
-    assert.ok(coordinator.getEvents(run.id).some((event) => event.type === 'run.cancelled'));
-  });
-
-  it('rejects a second active run at the worker concurrency cap', async () => {
-    const coordinator = new RunCoordinator();
-    const firstTask = coordinator.createTask({
-      title: 'First task',
-      detail: 'Inspect the first safe task.',
-    });
-    const secondTask = coordinator.createTask({
-      title: 'Second task',
-      detail: 'Inspect the second safe task.',
-    });
-    coordinator.startRun(firstTask.id, 'idempotency-key-0003');
-    assert.throws(
-      () => coordinator.startRun(secondTask.id, 'idempotency-key-0004'),
-      (error: unknown) =>
-        error instanceof CoordinatorError &&
-        error.code === 'concurrency_limit' &&
-        error.statusCode === 409,
+      status: 'open',
+      createdAt: now,
+    };
+    let cancellationAcknowledged = false;
+    const store = {
+      beginExecution: async () => ({ run, started: true, events: [] }),
+      getTask: async () => task,
+      renewLease: async () => 'stop_requested' as const,
+      cancelRun: async () => {
+        cancellationAcknowledged = true;
+        return { run: { ...run, status: 'cancelled' }, events: [] };
+      },
+      appendOutput: async () => undefined,
+    } as unknown as PostgresRunStore;
+    const coordinator = new RunCoordinator(
+      store,
+      { send: async () => null, findJobs: async () => [] },
+      10,
     );
-    coordinator.stopRun('run-0001');
-    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    await coordinator.handleQueueJob({ runId: run.id });
+    assert.equal(cancellationAcknowledged, true);
   });
 });

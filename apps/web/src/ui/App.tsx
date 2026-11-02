@@ -84,6 +84,8 @@ function statusLabel(status: Run['status']): string {
       return 'Cancelled';
     case 'failed':
       return 'Failed';
+    case 'interrupted':
+      return 'Interrupted';
     case 'unknown':
       return 'Unknown';
   }
@@ -160,6 +162,7 @@ function App() {
       'run.completed',
       'run.cancelled',
       'run.failed',
+      'run.interrupted',
     ];
     const handlers = eventNames.map((name) => {
       const handler = (message: Event) => {
@@ -569,7 +572,7 @@ function App() {
           <ShieldCheck size={14} />
           <span>Mock activity is never provider activity. No model was contacted.</span>
           <span className="foot-divider" />
-          <span>Session data resets when the local worker restarts.</span>
+          <span>Task and run history persists across API and worker restarts.</span>
         </footer>
       </main>
     </div>
@@ -604,7 +607,9 @@ function ErrorNote({ message, onDismiss }: { message: string; onDismiss?: () => 
 }
 
 function EventRow({ event }: { event: RunEvent }) {
-  const terminal = ['run.completed', 'run.cancelled', 'run.failed'].includes(event.type);
+  const terminal = ['run.completed', 'run.cancelled', 'run.failed', 'run.interrupted'].includes(
+    event.type,
+  );
   return (
     <li className={`event-row ${terminal ? 'event-terminal' : ''}`}>
       <span className={`event-marker marker-${event.type.split('.')[1]}`}>

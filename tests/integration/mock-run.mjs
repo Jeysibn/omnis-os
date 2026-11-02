@@ -11,16 +11,23 @@ import { setTimeout as delay } from 'node:timers/promises';
 const scrypt = promisify(scryptCallback);
 const password = 'test-owner-password-2026';
 const origin = 'http://127.0.0.1:5173';
+const databaseUrl = process.env.OMNIS_TEST_DATABASE_URL;
+if (!databaseUrl) throw new Error('Set OMNIS_TEST_DATABASE_URL to a disposable PostgreSQL database.');
+if (!/(?:^|[_-])test(?:s)?$/i.test(new URL(databaseUrl).pathname.slice(1))) {
+  throw new Error('OMNIS_TEST_DATABASE_URL must point to a database ending in test or tests.');
+}
 const tempDirectory = await mkdtemp(join(tmpdir(), 'omnis-os-mock-smoke-'));
 const envPath = join(tempDirectory, 'local.env');
 const apiPort = await freePort();
-const workerPort = await freePort();
+const workerPort = await freePort(new Set([apiPort]));
 const salt = randomBytes(16);
+const internalToken = randomBytes(48).toString('hex');
 const passwordHash = (await scrypt(password, salt, 64)).toString('hex');
 const envLines = [
   `OMNIS_OWNER_PASSWORD_HASH=${salt.toString('hex')}:${passwordHash}`,
   `OMNIS_SESSION_SECRET=${randomBytes(48).toString('hex')}`,
-  `OMNIS_INTERNAL_TOKEN=${randomBytes(48).toString('hex')}`,
+  `OMNIS_INTERNAL_TOKEN=${internalToken}`,
+  `OMNIS_DATABASE_URL=${databaseUrl}`,
   `OMNIS_API_HOST=127.0.0.1`,
   `OMNIS_API_PORT=${apiPort}`,
   `OMNIS_WORKER_HOST=127.0.0.1`,
@@ -30,20 +37,12 @@ const envLines = [
 ];
 await writeFile(envPath, `${envLines.join('\n')}\n`, { mode: 0o600 });
 
-const worker = spawn(
-  process.execPath,
-  ['--experimental-strip-types', `--env-file=${envPath}`, 'src/server.ts'],
-  { cwd: new URL('../../apps/worker/', import.meta.url), stdio: 'ignore' },
-);
-const api = spawn(
-  process.execPath,
-  ['--experimental-strip-types', `--env-file=${envPath}`, 'src/server.ts'],
-  { cwd: new URL('../../apps/api/', import.meta.url), stdio: 'ignore' },
-);
+let worker = startWorker(envPath);
+let api = startApi(envPath);
 
 try {
   const baseUrl = `http://127.0.0.1:${apiPort}`;
-  await waitForHealth(baseUrl, worker, api);
+  await waitForHealth(baseUrl, `http://127.0.0.1:${workerPort}`, internalToken, worker, api);
 
   const health = await fetch(`${baseUrl}/api/v1/health`);
   assert.equal(health.status, 200);
@@ -69,22 +68,7 @@ try {
   });
   assert.equal(blockedMutation.status, 401);
 
-  const login = await fetch(`${baseUrl}/api/v1/auth/login`, {
-    method: 'POST',
-    headers: {
-      cookie: anonCookie,
-      origin,
-      'x-omnis-csrf': csrf,
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify({ password }),
-  });
-  assert.equal(login.status, 200);
-  const ownerCookie = cookieValue(login);
-  const ownerCsrfResponse = await fetch(`${baseUrl}/api/v1/auth/csrf`, {
-    headers: { cookie: ownerCookie },
-  });
-  const ownerCsrf = (await ownerCsrfResponse.json()).csrfToken;
+  let { ownerCookie, ownerCsrf } = await signInOwner(baseUrl);
   assert.equal(
     (await fetch(`${baseUrl}/api/v1/me`, { headers: { cookie: ownerCookie } })).status,
     200,
@@ -122,7 +106,7 @@ try {
     cookie: ownerCookie,
     origin,
     'x-omnis-csrf': ownerCsrf,
-    'idempotency-key': 'mock-run-idempotency-key-0001',
+    'idempotency-key': `mock-run-idempotency-key-${randomBytes(16).toString('hex')}`,
     'content-type': 'application/json',
   };
   const runResponse = await fetch(`${baseUrl}/api/v1/runs`, {
@@ -173,8 +157,90 @@ try {
   const unauthorizedStop = await fetch(`${baseUrl}/api/v1/runs/${run.id}/stop`, { method: 'POST' });
   assert.equal(unauthorizedStop.status, 401);
 
+  await stopProcess(api);
+  api = startApi(envPath);
+  await waitForHealth(baseUrl, `http://127.0.0.1:${workerPort}`, internalToken, worker, api);
+  ({ ownerCookie, ownerCsrf } = await signInOwner(baseUrl));
+  const recoveredTasksResponse = await fetch(`${baseUrl}/api/v1/tasks`, {
+    headers: { cookie: ownerCookie },
+  });
+  const recoveredTasks = await recoveredTasksResponse.json();
+  assert.equal(recoveredTasksResponse.status, 200);
+  assert.ok(recoveredTasks.some((entry) => entry.id === task.id));
+  const recoveredRunsResponse = await fetch(`${baseUrl}/api/v1/runs`, {
+    headers: { cookie: ownerCookie },
+  });
+  const recoveredRuns = await recoveredRunsResponse.json();
+  assert.equal(recoveredRunsResponse.status, 200);
+  assert.equal(recoveredRuns.find((entry) => entry.id === run.id)?.status, 'cancelled');
+
+  const replayResponse = await fetch(`${baseUrl}/api/v1/runs/${run.id}/events`, {
+    headers: { cookie: ownerCookie, 'last-event-id': '1' },
+  });
+  assert.equal(replayResponse.status, 200);
+  const replayText = await readAll(replayResponse.body);
+  const replayEvents = [...replayText.matchAll(/^data: (.+)$/gm)].map((match) => JSON.parse(match[1]));
+  assert.ok(replayEvents.length >= 2);
+  assert.ok(replayEvents.every((event) => event.sequence > 1));
+  assert.equal(new Set(replayEvents.map((event) => event.id)).size, replayEvents.length);
+
+  await stopProcess(worker);
+  worker = startWorker(envPath);
+  await waitForHealth(baseUrl, `http://127.0.0.1:${workerPort}`, internalToken, worker, api);
+  const afterWorkerRestartResponse = await fetch(`${baseUrl}/api/v1/runs/${run.id}`, {
+    headers: { cookie: ownerCookie },
+  });
+  assert.equal((await afterWorkerRestartResponse.json()).status, 'cancelled');
+
+  const interruptedTaskResponse = await fetch(`${baseUrl}/api/v1/tasks`, {
+    method: 'POST',
+    headers: {
+      cookie: ownerCookie,
+      origin,
+      'x-omnis-csrf': ownerCsrf,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      title: 'Restart recovery check',
+      detail: 'Interrupt one synthetic run during worker shutdown.',
+    }),
+  });
+  assert.equal(interruptedTaskResponse.status, 201);
+  const interruptedTask = await interruptedTaskResponse.json();
+  const interruptedAdmission = await fetch(`${baseUrl}/api/v1/runs`, {
+    method: 'POST',
+    headers: {
+      cookie: ownerCookie,
+      origin,
+      'x-omnis-csrf': ownerCsrf,
+      'idempotency-key': `restart-recovery-${randomBytes(16).toString('hex')}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ taskId: interruptedTask.id }),
+  });
+  assert.equal(interruptedAdmission.status, 201);
+  const interruptedRun = await interruptedAdmission.json();
+  await waitForRunStatus(baseUrl, interruptedRun.id, 'running', ownerCookie, worker, api);
+  await stopProcess(worker);
+  worker = startWorker(envPath);
+  await waitForHealth(baseUrl, `http://127.0.0.1:${workerPort}`, internalToken, worker, api);
+  await delay(500);
+  const interruptedFinalResponse = await fetch(`${baseUrl}/api/v1/runs/${interruptedRun.id}`, {
+    headers: { cookie: ownerCookie },
+  });
+  const interruptedFinal = await interruptedFinalResponse.json();
+  assert.equal(interruptedFinal.status, 'interrupted');
+  const interruptedEventsResponse = await fetch(
+    `${baseUrl}/api/v1/runs/${interruptedRun.id}/events`,
+    { headers: { cookie: ownerCookie } },
+  );
+  const interruptedEventText = await readAll(interruptedEventsResponse.body);
+  const interruptedEvents = [...interruptedEventText.matchAll(/^data: (.+)$/gm)].map((match) => JSON.parse(match[1]));
+  assert.equal(interruptedEvents.filter((event) => event.type === 'run.started').length, 1);
+  assert.equal(interruptedEvents.filter((event) => event.type === 'run.interrupted').length, 1);
+
   console.log(
-    'Mock API integration passed: owner session, CSRF/origin rejection, task, idempotent run, SSE ordering, stop, and terminal reconciliation.',
+    'PostgreSQL-backed mock lifecycle passed: auth/CSRF, task, idempotent admission, durable SSE replay, cancellation, API/worker restarts, and interrupted-run non-replay.',
   );
 } finally {
   await stopProcess(api);
@@ -182,20 +248,44 @@ try {
   await unlink(envPath).catch(() => undefined);
 }
 
-async function freePort() {
-  const server = createServer();
-  await new Promise((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', resolve);
-  });
-  const address = server.address();
-  if (!address || typeof address === 'string')
-    throw new Error('Could not reserve an ephemeral port.');
-  const { port } = address;
-  await new Promise((resolve, reject) =>
-    server.close((error) => (error ? reject(error) : resolve())),
+function startWorker(envFile) {
+  return spawn(
+    process.execPath,
+    ['--experimental-strip-types', `--env-file=${envFile}`, 'src/server.ts'],
+    {
+      cwd: new URL('../../apps/worker/', import.meta.url),
+      stdio: process.env.OMNIS_TEST_DEBUG === '1' ? 'inherit' : 'ignore',
+    },
   );
-  return port;
+}
+
+function startApi(envFile) {
+  return spawn(
+    process.execPath,
+    ['--experimental-strip-types', `--env-file=${envFile}`, 'src/server.ts'],
+    {
+      cwd: new URL('../../apps/api/', import.meta.url),
+      stdio: process.env.OMNIS_TEST_DEBUG === '1' ? 'inherit' : 'ignore',
+    },
+  );
+}
+
+async function freePort(excluded = new Set()) {
+  while (true) {
+    const server = createServer();
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    const address = server.address();
+    if (!address || typeof address === 'string')
+      throw new Error('Could not reserve an ephemeral port.');
+    const { port } = address;
+    await new Promise((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+    if (!excluded.has(port)) return port;
+  }
 }
 
 function cookieValue(response) {
@@ -204,15 +294,20 @@ function cookieValue(response) {
   return cookie;
 }
 
-async function waitForHealth(url, workerProcess, apiProcess) {
+async function waitForHealth(apiUrl, workerUrl, internalToken, workerProcess, apiProcess) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < 8000) {
     if (workerProcess.exitCode !== null || apiProcess.exitCode !== null) {
       throw new Error('The mock API or worker exited before becoming healthy.');
     }
     try {
-      const response = await fetch(`${url}/api/v1/health`);
-      if (response.ok) return;
+      const [apiHealth, workerHealth] = await Promise.all([
+        fetch(`${apiUrl}/api/v1/health`),
+        fetch(`${workerUrl}/internal/v1/health`, {
+          headers: { 'x-omnis-internal-token': internalToken },
+        }),
+      ]);
+      if (apiHealth.ok && workerHealth.ok) return;
     } catch {
       await delay(80);
     }
@@ -230,6 +325,48 @@ async function readAll(body) {
     if (done) return output;
     output += decoder.decode(value, { stream: true });
   }
+}
+
+async function signInOwner(baseUrl) {
+  const csrfResponse = await fetch(`${baseUrl}/api/v1/auth/csrf`);
+  const csrfCookie = cookieValue(csrfResponse);
+  const csrf = (await csrfResponse.json()).csrfToken;
+  const login = await fetch(`${baseUrl}/api/v1/auth/login`, {
+    method: 'POST',
+    headers: {
+      cookie: csrfCookie,
+      origin,
+      'x-omnis-csrf': csrf,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ password }),
+  });
+  assert.equal(login.status, 200);
+  const ownerCookie = cookieValue(login);
+  const ownerCsrfResponse = await fetch(`${baseUrl}/api/v1/auth/csrf`, {
+    headers: { cookie: ownerCookie },
+  });
+  const ownerCsrf = (await ownerCsrfResponse.json()).csrfToken;
+  return { ownerCookie, ownerCsrf };
+}
+
+async function waitForRunStatus(baseUrl, runId, expectedStatus, cookie, workerProcess, apiProcess) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 8000) {
+    if (workerProcess.exitCode !== null || apiProcess.exitCode !== null) {
+      throw new Error('The mock API or worker exited while waiting for a run state.');
+    }
+    try {
+      const response = await fetch(`${baseUrl}/api/v1/runs/${runId}`, {
+        headers: { cookie },
+      });
+      if (response.ok && (await response.json()).status === expectedStatus) return;
+    } catch {
+      await delay(80);
+    }
+    await delay(50);
+  }
+  throw new Error(`The run did not reach expected status: ${expectedStatus}.`);
 }
 
 async function stopProcess(child) {

@@ -73,3 +73,7 @@ Use fictional users, projects, repositories and redacted credentials only. Tests
 - Observable run/event/traces and usage source quality.
 - Accessible keyboard/reduced motion and responsive layouts.
 - Stage-specific acceptance from `ROADMAP.md` checked with evidence.
+
+## R1-G1 verification record
+
+On 2026-11-02, the local PostgreSQL-backed mock suite passed using Node 24.22.1, pnpm 12.16.1, and PostgreSQL 17.6. It covered migration execution, transactional rollback, concurrent/idempotent admission, ordered event replay, lease ownership, cancellation acknowledgement, no automatic replay after interruption, and API/worker process restart. The browser smoke covered owner sign-in, task creation, run completion and stop, SSE events, reload recovery, and desktop/mobile layouts. This is mock-only verification; real runtimes, OS sandboxing, egress restriction, a DB restart drill, and browser automation in CI remain unverified. Exact commands and evidence are in `../07-governance/evidence/R1_G1_PERSISTENCE.md`.

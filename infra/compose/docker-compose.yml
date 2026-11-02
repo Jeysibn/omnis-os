@@ -1,3 +1,5 @@
+name: omnis-os
+
 services:
   postgres:
     image: postgres:17.6-alpine

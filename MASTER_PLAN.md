@@ -63,7 +63,7 @@ Director -> Web UI -> authenticated Fastify control plane -> authorization and b
 ## 6. Release sequence
 
 - **Phase 0: Investigation + guardrails.** Versions, entitlement/policy checks, capability probes, host security, acceptance targets.
-- **Phase 1: Foundation + one real run.** Auth, DB, profile, project/task, Hermes-first adapter if verified, SSE, cancel, persistent history, test harness.
+- **Phase 1: Foundation + one real run.** Auth, DB, profile, project/task, Hermes-first adapter if verified, SSE, cancel, persistent history, test harness. The implemented R1-G1 checkpoint is a persistent mock lifecycle only; it does not complete Phase 1 or authorize a real runtime.
 - **Phase 2: Runtime plurality + isolated chat.** Codex and Claude paths behind capability gates, per-chat sessions, model picker, token measurement.
 - **Phase 3: Skills/MCP + knowledge.** Approved skill snapshots, scoped tool grants, global/project knowledge and write-review flow.
 - **Phase 4: PM + workflows + automation.** Dependencies, milestones, scheduling, retries, announcements, budget controls.

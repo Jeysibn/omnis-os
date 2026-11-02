@@ -1,6 +1,8 @@
 # Data Model - PostgreSQL Source of Truth
 
-**Status:** Logical schema to drive migrations; no physical schema has been executed. Use UUID primary keys, `created_at`, `updated_at`, and `version` (for optimistic locking) on mutable core tables. All timestamps are `timestamptz`/UTC. No provider OAuth tokens or raw CLI credentials are stored here.
+**Status:** The first physical migration is implemented for the operational task/run slice. It creates PostgreSQL tables for tasks, runs, ordered run events, idempotency keys, execution leases, retry metadata, result output, and evidence references. The broader entities below remain the target model, not claims of implemented product modules. All timestamps are `timestamptz`/UTC. No provider OAuth tokens or raw CLI credentials are stored here.
+
+Migration source: `packages/db/migrations/0001_initial.sql`. PostgreSQL is authoritative for this slice; pg-boss stores durable queue jobs in its own schema. The worker commits an event before publishing it to SSE, and a run whose worker lease expires is recorded as `interrupted` without automatic replay.
 
 ## Key relationships
 

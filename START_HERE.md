@@ -1,5 +1,9 @@
 # Omnis OS - Engineering Kickoff
 
+## Current implementation checkpoint
+
+The R1-G1 mock lifecycle now has PostgreSQL persistence, pg-boss admission, restart recovery, SSE replay, and local browser evidence. It does not complete the broader Stage 1 checklist below: no real runtime is authorized, and host sandbox/egress controls remain unverified. See `docs/07-governance/evidence/R1_G1_PERSISTENCE.md` for the verified scope and remaining gates.
+
 ## Mission
 
 Build **Omnis OS** as a private, self-hosted AI organization platform with an operational control plane, isolated personal chat, an agent workforce, Skills/MCP, shared knowledge, task/project orchestration, scheduled work, usage analytics, and a state-driven 3D office. The first deliverable is **one safe, real, traceable agent run**, not the full visual company.

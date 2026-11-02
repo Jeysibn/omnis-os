@@ -19,6 +19,10 @@ No permanent staging required initially. Isolated local/CI test data must never 
 
 Pin dependencies and image digests in actual code; this document intentionally avoids inventing versions or manifests without an inspected environment.
 
+### Current local mock gate
+
+The repository pins pnpm `12.16.1` and Node `>=24`; workspace dependencies and the `postgres:17.6-alpine` development image are declared exactly in the repository. Run `pnpm install --frozen-lockfile`, `pnpm configure:owner`, `pnpm db:up`, and `pnpm dev`. The worker applies SQL migrations at startup. Run DB-backed integration checks only with an `OMNIS_TEST_DATABASE_URL` that targets a disposable database ending in `test` or `tests`. These pins establish reproducibility for the mock gate; they are not a production approval or provider-runtime authorization.
+
 ## Network
 
 - Bind dashboard, API, worker and database to localhost/private interfaces during development.

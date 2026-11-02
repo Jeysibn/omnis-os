@@ -12,6 +12,8 @@ Exit: owner accepts policy limitations and a safe first runtime; no credentials 
 
 Deliverables: typed monorepo, auth/private access, PostgreSQL migrations, Agent/Department/Project/Task/Run entities, Fastify API, one verified runtime adapter, durable events/SSE, cancellation, evidence panel, basic usage event ingestion, initial command center, tests/CI.
 
+**Current checkpoint:** R1-G1 has delivered and locally verified the PostgreSQL-backed mock task/run/event slice. The Phase 1 exit gate remains open: no real runtime is authorized, broader domain entities are not implemented, and OS sandbox/egress requirements are unverified. See `../07-governance/evidence/R1_G1_PERSISTENCE.md`.
+
 Exit: task can complete or fail honestly; browser reload/worker restart preserves state; audit and authorization enforced.
 
 ## Phase 2 - Multi-runtime and AI Chat Workspace

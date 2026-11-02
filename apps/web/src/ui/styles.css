@@ -578,6 +578,9 @@ textarea::placeholder {
 .status-stopping > span {
   background: #f0c37b;
 }
+.status-interrupted > span {
+  background: #e0a6ff;
+}
 .status-completed > span {
   background: #69d7b9;
 }

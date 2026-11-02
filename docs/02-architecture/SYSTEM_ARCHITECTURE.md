@@ -28,6 +28,8 @@ flowchart TD
 
 **Important:** Model providers are accessed by the authenticated runtimes, not by proxying provider OAuth tokens through the control-plane backend.
 
+**Implemented R1-G1 slice:** The current web/API/worker path is local and mock-only. The API proxies owner-authorized task/run commands to the loopback worker; the worker persists state in PostgreSQL and admits synthetic jobs through pg-boss. PostgreSQL-backed event history supports SSE snapshot/replay after API restart. This initial worker has no provider, native shell, or MCP adapter enabled. Process separation is not an OS sandbox; host-level isolation and egress controls remain unverified.
+
 ## Bounded modules inside the control plane
 
 | Module | Owns | Does not own |

@@ -1,4 +1,8 @@
 import { EventEmitter } from 'node:events';
+import { randomUUID } from 'node:crypto';
+import { z } from 'zod';
+import type { FindJobsOptions, JobWithMetadata, SendOptions } from 'pg-boss';
+import { StoreError, type DurableEvent, type PostgresRunStore } from '@omnis/db';
 import {
   CreateTaskSchema,
   RunEventSchema,
@@ -28,58 +32,54 @@ export class CoordinatorError extends Error {
   }
 }
 
-export class RunCoordinator {
-  private readonly tasks = new Map<string, Task>();
-  private readonly runs = new Map<string, Run>();
-  private readonly events = new Map<string, RunEvent[]>();
-  private readonly controllers = new Map<string, AbortController>();
-  private readonly idempotency = new Map<string, { fingerprint: string; runId: string }>();
-  private readonly emitter = new EventEmitter();
-  private taskCount = 0;
-  private runCount = 0;
-  private activeRuns = 0;
-  private readonly runtime = new MockRuntimeAdapter();
+const QueueRunSchema = z.object({ runId: z.string().regex(/^run-[0-9]{4,}$/) });
+export const queueName = z
+  .string()
+  .regex(/^[a-z][a-z0-9_-]{2,63}$/)
+  .parse(process.env.OMNIS_QUEUE_NAME ?? 'omnis-mock-run');
+const runLeaseSeconds = 30;
+const leaseHeartbeatMs = 5_000;
 
-  createTask(input: CreateTaskInput): Task {
+type AbortCause = 'cancel-requested' | 'claim-lost' | 'worker-shutdown' | 'persistence-failed';
+type ActiveExecution = { controller: AbortController; promise: Promise<void> };
+
+export class RunCoordinator {
+  private readonly emitter = new EventEmitter();
+  private readonly workerId = randomUUID();
+  private readonly active = new Map<string, ActiveExecution>();
+  private readonly runtime = new MockRuntimeAdapter();
+  private shuttingDown = false;
+  private readonly store: PostgresRunStore;
+  private readonly heartbeatIntervalMs: number;
+  private readonly queue: {
+    send(name: string, data?: object | null, options?: SendOptions): Promise<string | null>;
+    findJobs(
+      name: string,
+      options?: FindJobsOptions,
+    ): Promise<Array<Pick<JobWithMetadata, 'id' | 'state'>>>;
+  };
+
+  constructor(
+    store: PostgresRunStore,
+    queue: RunCoordinator['queue'],
+    heartbeatIntervalMs = leaseHeartbeatMs,
+  ) {
+    this.store = store;
+    this.queue = queue;
+    this.heartbeatIntervalMs = heartbeatIntervalMs;
+  }
+
+  async createTask(input: CreateTaskInput): Promise<Task> {
     const parsed = CreateTaskSchema.safeParse(input);
     if (!parsed.success) throw new CoordinatorError('invalid_input', 'Task input is invalid.', 400);
-    this.taskCount += 1;
-    const task = TaskSchema.parse({
-      id: `task-${String(this.taskCount).padStart(4, '0')}`,
-      ...parsed.data,
-      status: 'open',
-      createdAt: new Date().toISOString(),
-    });
-    this.tasks.set(task.id, task);
-    return task;
+    return translateStoreError(() => this.store.createTask(parsed.data));
   }
 
-  listTasks(): Task[] {
-    return [...this.tasks.values()].reverse();
+  async listTasks(): Promise<Task[]> {
+    return this.store.listTasks();
   }
 
-  getTask(taskId: string): Task | undefined {
-    return this.tasks.get(taskId);
-  }
-
-  startRun(taskId: string, idempotencyKey: string): { run: Run; created: boolean } {
-    const fingerprint = JSON.stringify({ taskId });
-    const previous = this.idempotency.get(idempotencyKey);
-    if (previous) {
-      if (previous.fingerprint !== fingerprint) {
-        throw new CoordinatorError(
-          'conflict',
-          'Idempotency key was already used for another task.',
-          409,
-        );
-      }
-      const run = this.runs.get(previous.runId);
-      if (!run) throw new CoordinatorError('conflict', 'Prior run state is unavailable.', 409);
-      return { run, created: false };
-    }
-
-    const task = this.tasks.get(taskId);
-    if (!task) throw new CoordinatorError('not_found', 'Task was not found.', 404);
+  async startRun(taskId: string, idempotencyKey: string): Promise<{ run: Run; created: boolean }> {
     if (
       !evaluateAllowedUse(this.runtime.discoverCapabilities().allowedUse, 'interactive').allowed
     ) {
@@ -89,156 +89,217 @@ export class RunCoordinator {
         409,
       );
     }
-    if (this.activeRuns >= 1) {
-      throw new CoordinatorError(
-        'concurrency_limit',
-        'The local mock worker is at its one-run limit.',
-        409,
-      );
-    }
-
-    this.runCount += 1;
-    const now = new Date().toISOString();
-    const run = RunSchema.parse({
-      id: `run-${String(this.runCount).padStart(4, '0')}`,
-      taskId: task.id,
-      taskTitle: task.title,
-      status: 'queued',
-      runtimeKind: 'mock',
-      synthetic: true,
-      usage: { quality: 'unknown', inputTokens: null, outputTokens: null, cost: null },
-      createdAt: now,
-      updatedAt: now,
-    });
-    this.runs.set(run.id, run);
-    this.events.set(run.id, []);
-    this.idempotency.set(idempotencyKey, { fingerprint, runId: run.id });
-    this.appendEvent(
-      run.id,
-      'run.queued',
-      'Admitted by the local mock worker. No external runtime is connected.',
+    const result = await translateStoreError(() =>
+      this.store.admitRun(taskId, idempotencyKey, (db, data) =>
+        this.queue.send(queueName, data, {
+          retryLimit: 0,
+          retryDelay: 0,
+          expireInSeconds: 60,
+          heartbeatSeconds: 10,
+          db,
+        }),
+      ),
     );
-    this.updateTask(task.id, 'in_progress');
-    this.activeRuns += 1;
-    const controller = new AbortController();
-    this.controllers.set(run.id, controller);
-    void this.execute(run.id, task, controller);
-    return { run: this.getRun(run.id)!, created: true };
+    this.publish(result.events);
+    return { run: RunSchema.parse(result.run), created: result.created };
   }
 
-  getRun(runId: string): Run | undefined {
-    return this.runs.get(runId);
+  async getRun(runId: string): Promise<Run | undefined> {
+    return translateStoreError(() => this.store.getRun(runId));
   }
 
-  listRuns(): Run[] {
-    return [...this.runs.values()].reverse();
+  async listRuns(): Promise<Run[]> {
+    return this.store.listRuns();
   }
 
-  getEvents(runId: string, afterSequence = 0): RunEvent[] {
-    if (!this.runs.has(runId)) throw new CoordinatorError('not_found', 'Run was not found.', 404);
-    return (this.events.get(runId) ?? []).filter((event) => event.sequence > afterSequence);
+  async getEvents(runId: string, afterSequence = 0): Promise<RunEvent[]> {
+    return translateStoreError(() => this.store.getEvents(runId, afterSequence));
   }
 
   subscribe(runId: string, listener: (event: RunEvent) => void): () => void {
-    if (!this.runs.has(runId)) throw new CoordinatorError('not_found', 'Run was not found.', 404);
     this.emitter.on(runId, listener);
     return () => this.emitter.off(runId, listener);
   }
 
-  stopRun(runId: string): Run {
-    const run = this.runs.get(runId);
-    if (!run) throw new CoordinatorError('not_found', 'Run was not found.', 404);
-    if (run.status === 'completed' || run.status === 'cancelled' || run.status === 'failed') {
-      throw new CoordinatorError('invalid_transition', `Cannot stop a ${run.status} run.`, 409);
-    }
-    if (run.status !== 'stopping') {
-      this.updateRun(runId, 'stopping');
-      this.appendEvent(
-        runId,
-        'run.stop_requested',
-        'Stop requested; waiting for the mock worker to acknowledge it.',
-      );
-      this.controllers.get(runId)?.abort();
-    }
-    return this.runs.get(runId)!;
+  async stopRun(runId: string): Promise<Run> {
+    const result = await translateStoreError(() => this.store.requestStop(runId));
+    this.publish(result.events);
+    const active = this.active.get(runId);
+    if (active && !active.controller.signal.aborted) active.controller.abort('cancel-requested');
+    return RunSchema.parse(result.run);
   }
 
-  private async execute(runId: string, task: Task, controller: AbortController): Promise<void> {
-    try {
-      await new Promise((resolve) => setTimeout(resolve, 80));
-      if (controller.signal.aborted) throw new DOMException('Run cancelled', 'AbortError');
-      this.updateRun(runId, 'running');
-      this.appendEvent(runId, 'run.started', 'Mock runtime started this synthetic run.');
-      const result = await this.runtime.execute({
-        runId,
-        task,
-        signal: controller.signal,
-        emit: (event) => this.appendEvent(runId, event.type, event.message),
-      });
-      this.updateRun(runId, 'completed');
-      this.appendEvent(runId, 'run.completed', result.output);
-      this.updateTask(task.id, 'completed');
-    } catch (error) {
-      if (controller.signal.aborted) {
-        this.updateRun(runId, 'cancelled');
-        this.appendEvent(runId, 'run.cancelled', 'Mock worker acknowledged cancellation.');
-        this.updateTask(task.id, 'open');
-      } else {
-        this.updateRun(runId, 'failed');
-        this.appendEvent(
-          runId,
-          'run.failed',
-          error instanceof Error ? error.message : 'Unknown mock error.',
-        );
-      }
-    } finally {
-      this.activeRuns -= 1;
-      this.controllers.delete(runId);
-    }
-  }
+  async handleQueueJob(data: unknown, jobSignal?: AbortSignal): Promise<void> {
+    const parsed = QueueRunSchema.safeParse(data);
+    if (!parsed.success) throw new Error('The durable mock job payload is invalid.');
+    const { runId } = parsed.data;
+    if (this.shuttingDown || this.active.has(runId)) return;
 
-  private appendEvent(runId: string, type: RunEvent['type'], message: string): void {
-    const runEvents = this.events.get(runId);
-    if (!runEvents) return;
-    const event = RunEventSchema.parse({
-      id: `evt-${runId}-${String(runEvents.length + 1).padStart(4, '0')}`,
-      runId,
-      sequence: runEvents.length + 1,
-      at: new Date().toISOString(),
-      type,
-      source: 'mock',
-      synthetic: true,
-      message,
-    });
-    runEvents.push(event);
-    this.emitter.emit(runId, event);
-  }
-
-  private updateRun(runId: string, status: Run['status']): void {
-    const run = this.runs.get(runId);
-    if (!run) return;
-    const allowed: Record<Run['status'], Run['status'][]> = {
-      queued: ['running', 'stopping'],
-      running: ['stopping', 'completed', 'failed'],
-      stopping: ['cancelled', 'failed'],
-      completed: [],
-      cancelled: [],
-      failed: [],
-      unknown: [],
+    const controller = new AbortController();
+    let claimWasLost = false;
+    const onJobAbort = () => {
+      claimWasLost = true;
+      if (!controller.signal.aborted) controller.abort('claim-lost' satisfies AbortCause);
     };
-    if (!allowed[run.status].includes(status)) {
-      throw new CoordinatorError(
-        'invalid_transition',
-        `Cannot transition a ${run.status} run to ${status}.`,
-        409,
-      );
+    jobSignal?.addEventListener('abort', onJobAbort, { once: true });
+    const promise = this.execute(runId, controller, () => claimWasLost);
+    this.active.set(runId, { controller, promise });
+    try {
+      await promise;
+    } finally {
+      jobSignal?.removeEventListener('abort', onJobAbort);
+      this.active.delete(runId);
     }
-    this.runs.set(runId, RunSchema.parse({ ...run, status, updatedAt: new Date().toISOString() }));
   }
 
-  private updateTask(taskId: string, status: Task['status']): void {
-    const task = this.tasks.get(taskId);
-    if (!task) return;
-    this.tasks.set(taskId, TaskSchema.parse({ ...task, status }));
+  async reconcileExpiredRuns(): Promise<void> {
+    const events = await this.store.reconcileExpiredRuns();
+    for (const pending of await this.store.listQueuedJobs()) {
+      const jobs = pending.jobId
+        ? await this.queue.findJobs(queueName, { id: pending.jobId, limit: 1 })
+        : [];
+      const job = jobs[0];
+      if (job && ['created', 'active'].includes(job.state)) continue;
+      const message = job
+        ? `The durable queue job entered ${job.state} before execution began. It was not retried automatically.`
+        : 'The durable queue job is missing before execution began. It was not retried automatically.';
+      if (pending.status === 'stopping') {
+        const cancelled = await this.store.cancelRunAfterQueueTerminal(pending.runId);
+        if (cancelled) events.push(...cancelled.events);
+      } else {
+        const interrupted = await this.store.interruptQueuedRun(pending.runId, message);
+        if (interrupted) events.push(...interrupted.events);
+      }
+    }
+    this.publish(events);
+  }
+
+  async shutdown(): Promise<void> {
+    this.shuttingDown = true;
+    for (const execution of this.active.values()) {
+      if (!execution.controller.signal.aborted) {
+        execution.controller.abort('worker-shutdown' satisfies AbortCause);
+      }
+    }
+    await Promise.allSettled([...this.active.values()].map((execution) => execution.promise));
+  }
+
+  private async execute(
+    runId: string,
+    controller: AbortController,
+    claimWasLost: () => boolean,
+  ): Promise<void> {
+    const begun = await this.store.beginExecution(runId, this.workerId, runLeaseSeconds);
+    this.publish(begun.events);
+    if (!begun.started) return;
+
+    let heartbeatBusy = false;
+    const heartbeat = setInterval(() => {
+      if (heartbeatBusy || controller.signal.aborted) return;
+      heartbeatBusy = true;
+      void this.store
+        .renewLease(runId, this.workerId, runLeaseSeconds)
+        .then((renewed) => {
+          if (renewed === 'stop_requested' && !controller.signal.aborted) {
+            controller.abort('cancel-requested' satisfies AbortCause);
+          } else if (!renewed && !controller.signal.aborted) {
+            claimWasLost = () => true;
+            controller.abort('claim-lost' satisfies AbortCause);
+          }
+        })
+        .catch(() => {
+          if (!controller.signal.aborted)
+            controller.abort('persistence-failed' satisfies AbortCause);
+        })
+        .finally(() => {
+          heartbeatBusy = false;
+        });
+    }, this.heartbeatIntervalMs);
+
+    let eventWrites = Promise.resolve();
+    try {
+      let output: string;
+      try {
+        const task = await this.store.getTask(begun.run.taskId);
+        if (!task) throw new Error('The persisted task for this run is missing.');
+        const result = await this.runtime.execute({
+          runId,
+          task: TaskSchema.parse(task),
+          signal: controller.signal,
+          emit: (event) => {
+            eventWrites = eventWrites.then(async () => {
+              const durable = await this.store.appendOutput(runId, this.workerId, event.message);
+              if (durable) this.publish([{ runId, event: durable }]);
+            });
+            void eventWrites.catch(() => {
+              if (!controller.signal.aborted) {
+                controller.abort('persistence-failed' satisfies AbortCause);
+              }
+            });
+          },
+        });
+        output = result.output;
+        await eventWrites;
+      } catch (runtimeError) {
+        await eventWrites;
+        if (controller.signal.aborted) {
+          const cause = controller.signal.reason as AbortCause | undefined;
+          if (cause === 'cancel-requested') {
+            const result = await this.store.cancelRun(runId, this.workerId);
+            this.publish(result.events);
+          } else {
+            const result = await this.store.interruptRun(
+              runId,
+              this.workerId,
+              claimWasLost()
+                ? 'The durable job lease was lost. The run was not retried automatically.'
+                : 'The worker stopped before the run reached a terminal state. The run was not retried automatically.',
+            );
+            if (result) this.publish(result.events);
+          }
+          return;
+        }
+        const message =
+          runtimeError instanceof Error ? runtimeError.message : 'Unknown mock runtime error.';
+        const failed = await this.store.failRun(runId, this.workerId, message);
+        this.publish(failed.events);
+        return;
+      }
+
+      if (controller.signal.aborted) {
+        const cause = controller.signal.reason as AbortCause | undefined;
+        if (cause === 'cancel-requested') {
+          const result = await this.store.cancelRun(runId, this.workerId);
+          this.publish(result.events);
+        } else {
+          const result = await this.store.interruptRun(runId, this.workerId);
+          if (result) this.publish(result.events);
+        }
+        return;
+      }
+
+      const completed = await this.store.completeRun(runId, this.workerId, output, []);
+      this.publish(completed.events);
+    } finally {
+      clearInterval(heartbeat);
+    }
+  }
+
+  private publish(events: DurableEvent[]): void {
+    for (const { runId, event } of events) {
+      // The database commit precedes this call. Subscribers can always recover missed events by cursor.
+      this.emitter.emit(runId, RunEventSchema.parse(event));
+    }
+  }
+}
+
+async function translateStoreError<T>(action: () => Promise<T>): Promise<T> {
+  try {
+    return await action();
+  } catch (error) {
+    if (error instanceof StoreError) {
+      throw new CoordinatorError(error.code, error.message, error.statusCode);
+    }
+    throw error;
   }
 }

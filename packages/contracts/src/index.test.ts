@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { RunEventSchema, RunSchema } from './index.ts';
+import { RunEventSchema, RunSchema, RunStatusSchema } from './index.ts';
 
 describe('run contracts', () => {
   it('accepts only events marked as synthetic mock activity', () => {
@@ -38,5 +38,20 @@ describe('run contracts', () => {
       RunSchema.safeParse({ ...run, usage: { quality: 'measured', inputTokens: 0 } }).success,
       false,
     );
+  });
+
+  it('represents interrupted execution explicitly and as synthetic mock evidence', () => {
+    const event = RunEventSchema.parse({
+      id: 'evt-run-0001-0004',
+      runId: 'run-0001',
+      sequence: 4,
+      at: '2026-11-02T00:00:00.000Z',
+      type: 'run.interrupted',
+      source: 'mock',
+      synthetic: true,
+      message: 'The worker stopped before the run reached a terminal state.',
+    });
+    assert.equal(event.type, 'run.interrupted');
+    assert.equal(RunStatusSchema.parse('interrupted'), 'interrupted');
   });
 });

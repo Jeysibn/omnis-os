@@ -1,6 +1,7 @@
 {
   "name": "omnis-os",
   "private": true,
+  "type": "module",
   "version": "0.1.0",
   "workspaces": [
     "apps/*",
@@ -14,6 +15,8 @@
     "dev": "pnpm --parallel --filter @omnis/worker --filter @omnis/api --filter @omnis/web dev",
     "configure:owner": "node --experimental-strip-types scripts/configure-owner.ts",
     "prepare": "node --experimental-strip-types scripts/configure-hooks.ts",
+    "db:up": "docker compose --env-file .env -f infra/compose/docker-compose.yml up -d postgres",
+    "db:down": "docker compose --env-file .env -f infra/compose/docker-compose.yml down",
     "integration:mock": "node tests/integration/mock-run.mjs",
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",

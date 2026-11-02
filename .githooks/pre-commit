@@ -1,3 +1,7 @@
 #!/bin/sh
 set -eu
-pnpm check
+if command -v pnpm >/dev/null 2>&1; then
+  pnpm check
+else
+  npx --yes pnpm@12.16.1 check
+fi

@@ -7,6 +7,7 @@ export const RunStatusSchema = z.enum([
   'completed',
   'cancelled',
   'failed',
+  'interrupted',
   'unknown',
 ]);
 export type RunStatus = z.infer<typeof RunStatusSchema>;
@@ -58,6 +59,7 @@ export const RunEventTypeSchema = z.enum([
   'run.completed',
   'run.cancelled',
   'run.failed',
+  'run.interrupted',
 ]);
 export type RunEventType = z.infer<typeof RunEventTypeSchema>;
 
