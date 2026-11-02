@@ -111,3 +111,36 @@ This closes N-2, N-3, and M-7 for the locally tested mock-only foundation. SQL g
 No provider adapter or inference was enabled. R1-G4 still requires durable runtime authorization, owner approval, persistent actor-attributed audit, trusted credential broker, effective in-run revocation, approved provider policies/authentication, connector egress restrictions, and trusted-connector canary verification. Rootful Docker/same-host UID, disk quota, and production-grade arbitrary-code isolation remain unverified and general-purpose tools remain prohibited.
 
 **Follow-up result: Passed locally and in GitHub Actions for N-2/N-3/M-7 at implementation revision `900da0c0cb38978d712312a27b5accd09074753d`; draft PR #1 is open and unmerged. This is not authorization for real AI execution.**
+
+## PR #1 reliability follow-up — 2026-11-02
+
+- **Merged baseline:** PR #1 was reviewed at `5a34c42940d378fc06b0a81e799449458a5e5fec`, marked ready, and squash-merged to `main` as `d9c715de80215d74a48ca0eb1d02515fd70fdc0b` with explicit owner authorization. Main CI passed at that SHA in [run 41464559948](https://github.com/Jeysibn/omnis-os/actions/runs/41464559948).
+- **Follow-up branch:** `reliability/n7-backup-restore-ci`, based on the merge commit. Verified implementation revision: `7f701933bf33a7151af04c725a319cd768c7768c`, including the legacy-upgrade expectation for migration `0004`. This follow-up does not enable provider execution.
+
+### N-7 — role reprovisioning safety
+
+**Confirmed and fixed.** `provisionDatabaseRoles()` previously reapplied `0003_runtime_privileges.sql` whenever the application tables existed. That migration's broad `REVOKE` could undo grants from later approved migrations. Provisioning now manages role identity, schema ownership, and pg-boss ACLs only; ordered application migrations remain the authority for application-table grants. Migration `0004_narrow_runtime_sequence_defaults.sql` revokes the `0003` application-schema default sequence grant, while preserving grants on existing application sequences. This prevents new sequences from inheriting runtime access. PostgreSQL integration coverage creates later-migration-style approved and ungranted tables and sequences, re-provisions roles, then verifies approved grants remain, ungranted access is denied, and normal synthetic task/run admission still works.
+
+Restores previously replayed `0003` after restoring ACL-free archives, so that path shared the same latent issue. New backups use a versioned `postgres-custom-acl-v1` manifest and retain PostgreSQL ACLs in the custom archive; restore applies the saved ACLs instead of replaying application grants. Legacy `postgres-custom` archives remain accepted and use the previous compatibility grant restoration. This preserves migration-added grants in new restores while retaining compatibility with older archive format.
+
+### Disposable backup/restore CI
+
+`pnpm integration:backup-restore` creates a unique Docker Compose project with an isolated PostgreSQL 17.6 service, synthetic credentials in mode-0600 temporary files, and a disposable volume. It provisions distinct admin/migrator/runtime roles, applies application and pg-boss migrations, runs the PostgreSQL database test suite, and inserts synthetic pg-boss/task/run/event records. It creates later-migration ACL fixtures to prove new archives preserve approved grants while denied future relations and sequences remain inaccessible after restore. A deliberately stale task sequence must make backup fail and remove partial archive/manifest files. The valid restore checks counts, row fingerprints, event ordering, and sequence safety, then commits a synthetic runtime task and completed mock run. Cleanup removes only the generated project, its volume, target database, and temporary directory; no backup is uploaded as a workflow artifact.
+
+### Verification for this follow-up
+
+| Check | Result |
+|---|---|
+| Main CI after PR #1 merge | Passed for `d9c715de80215d74a48ca0eb1d02515fd70fdc0b`: [run 41464559948](https://github.com/Jeysibn/omnis-os/actions/runs/41464559948). |
+| Frozen installation | `npm exec --yes --package=pnpm@12.16.1 -- pnpm install --frozen-lockfile` — passed; lockfile unchanged. |
+| Formatting, ESLint, TypeScript, unit tests | `pnpm check` — passed. The standalone check reports the database and live-Docker test suites as skipped when no DSNs/integration flag are set; both gated suites were run separately below. |
+| Production build | `pnpm build` — passed. |
+| PostgreSQL and N-7 integration | Passed as part of `pnpm integration:backup-restore` against disposable PostgreSQL 17.6: 20 database tests passed, including grant retention, denial of ungranted future tables/sequences, role re-provisioning, task/run admission, migration checksum/concurrency behavior, and lease fencing. |
+| Backup/restore integration | Passed locally against the disposable Docker Compose project. Stale task sequence rejection and artifact cleanup passed; the ACL-preserving archive restored with matching fingerprints and sequence invariants. Approved future migration grants survived restore, ungranted fixtures stayed inaccessible, and the restricted runtime created a synthetic task and completed mock run. |
+| Docker sandbox negative security test | Passed locally with `OMNIS_SANDBOX_INTEGRATION=1`: 9 tests passed, 0 failed, 0 skipped. This included actual-container mount, canary, identity, resource, process, timeout, and network checks. |
+| API/browser regression | No API or UI behavior changed in this follow-up; no new browser run was performed. |
+| Follow-up GitHub Actions | Passed for implementation revision `7f701933bf33a7151af04c725a319cd768c7768c`: [run 41466299224](https://github.com/Jeysibn/omnis-os/actions/runs/41466299224). Frozen install, role provisioning, `pnpm check` including real-container sandbox tests, production build, legacy upgrade, recovery integration, and disposable backup/restore all passed. |
+
+### Remaining risks and gate
+
+This follow-up changes ACL preservation and reprovisioning behavior, but PostgreSQL ACLs are not a tamper-proof audit trail. Backup encryption and authenticated manifests remain open pending an approved key-management design. Legacy archives without ACL entries use compatibility grant restoration; newly created archives retain ACLs. In-flight executions remain disallowed in backups. N-8 lifecycle constraints, N-9 pg-boss upgrade compatibility, worker supervision, separate sandbox UID and disk quotas, and production host/network isolation remain deferred. R1-G4 still requires durable runtime authorization, owner approval, actor-attributed persistent audit, a trusted credential broker, effective in-run revocation, approved provider policies/authentication, connector egress restrictions, and trusted-connector canary verification. Hermes, Codex, and Claude inference remain disabled.

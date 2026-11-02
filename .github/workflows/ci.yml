@@ -55,3 +55,5 @@ jobs:
       - run: pnpm build
       - run: pnpm integration:legacy-upgrade
       - run: pnpm integration:recovery
+      - name: Verify disposable PostgreSQL backup and restore
+        run: pnpm integration:backup-restore
