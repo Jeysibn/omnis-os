@@ -3,10 +3,81 @@ import { describe, it } from 'node:test';
 import type { Run, Task } from '@omnis/contracts';
 import type { PostgresRunStore } from '@omnis/db';
 import { MockRuntimeAdapter, type RuntimeAdapter } from '@omnis/runtime-adapters';
+import { StaticRuntimeAuthorizer } from '@omnis/policy';
 import { CoordinatorError, RunCoordinator } from './run-coordinator.ts';
 import { SandboxError } from './docker-sandbox.ts';
 
 describe('durable mock run coordinator', () => {
+  it('rejects admission without independent Omnis authorization', async () => {
+    let admissions = 0;
+    const coordinator = new RunCoordinator(
+      {
+        admitRun: async () => {
+          admissions += 1;
+        },
+      } as unknown as PostgresRunStore,
+      { send: async () => 'job', findJobs: async () => [] },
+      new MockRuntimeAdapter(),
+      undefined,
+      new StaticRuntimeAuthorizer([]),
+    );
+    await assert.rejects(
+      coordinator.startRun('task-0001', 'idempotency-key-0001'),
+      (error: unknown) => error instanceof CoordinatorError && error.code === 'invalid_transition',
+    );
+    assert.equal(admissions, 0);
+  });
+
+  it('rechecks authorization before claiming queued work and interrupts a revoked grant', async () => {
+    const authorizer = new StaticRuntimeAuthorizer([
+      ...(['start_task', 'execute_task'] as const).map((operation) => ({
+        id: 'grant-1',
+        actorId: 'owner',
+        runtimeId: 'mock',
+        operation,
+        capabilities: ['mock.execute' as const],
+        scope: { kind: 'all_tasks' as const },
+        approvalRequired: false,
+        status: 'authorized' as const,
+        policyVersion: 'v1',
+        expiresAt: Number.MAX_SAFE_INTEGER,
+        revokedAt: null,
+        provenance: 'test fixture',
+      })),
+    ]);
+    let interrupted = false;
+    const run = {
+      id: 'run-0001',
+      taskId: 'task-0001',
+      taskTitle: 'Test',
+      status: 'queued',
+      runtimeKind: 'mock',
+      synthetic: true,
+      usage: { quality: 'unknown', inputTokens: null, outputTokens: null, cost: null },
+      createdAt: '2026-11-02T00:00:00.000Z',
+      updatedAt: '2026-11-02T00:00:00.000Z',
+    } as Run;
+    const store = {
+      admitRun: async () => ({ run, created: true, events: [] }),
+      getRun: async () => run,
+      interruptQueuedRun: async () => {
+        interrupted = true;
+        return { events: [] };
+      },
+      listActiveRunIds: async () => [],
+    } as unknown as PostgresRunStore;
+    const coordinator = new RunCoordinator(
+      store,
+      { send: async () => 'job', findJobs: async () => [] },
+      new MockRuntimeAdapter(),
+      undefined,
+      authorizer,
+    );
+    await coordinator.startRun(run.taskId, 'idempotency-key-0001');
+    authorizer.revoke('grant-1');
+    await coordinator.handleQueueJob({ runId: run.id });
+    assert.equal(interrupted, true);
+  });
   it('admits queue work with automatic retries disabled', async () => {
     let capturedOptions: unknown;
     let capturedIdempotencyKey = '';
@@ -170,7 +241,8 @@ describe('durable mock run coordinator', () => {
     };
     let cancellationAcknowledged = false;
     const store = {
-      beginExecution: async () => ({ run, started: true, events: [] }),
+      getRun: async () => ({ ...run, status: 'queued' as const }),
+      beginExecution: async () => ({ run, started: true, generation: 1, events: [] }),
       getTask: async () => task,
       renewLease: async () => 'stop_requested' as const,
       cancelRun: async () => {
@@ -373,15 +445,16 @@ function lifecycleHarness(runtime: RuntimeAdapter): {
     interrupted: false,
   };
   const store = {
-    beginExecution: async () => ({ run: lifecycleRun, started: true, events: [] }),
+    getRun: async () => ({ ...lifecycleRun, status: 'queued' as const }),
+    beginExecution: async () => ({ run: lifecycleRun, started: true, generation: 1, events: [] }),
     getTask: async () => lifecycleTask,
     renewLease: async () => 'renewed' as const,
     appendOutput: async () => undefined,
-    completeRun: async (_runId: string, _workerId: string, output: string) => {
+    completeRun: async (_runId: string, _workerId: string, _generation: number, output: string) => {
       state.completedOutput = output;
       return { run: { ...lifecycleRun, status: 'completed' as const }, events: [] };
     },
-    failRun: async (_runId: string, _workerId: string, message: string) => {
+    failRun: async (_runId: string, _workerId: string, _generation: number, message: string) => {
       state.failureMessage = message;
       return { run: { ...lifecycleRun, status: 'failed' as const }, events: [] };
     },
@@ -393,7 +466,12 @@ function lifecycleHarness(runtime: RuntimeAdapter): {
       state.cancelled = true;
       return { run: { ...lifecycleRun, status: 'cancelled' as const }, events: [] };
     },
-    interruptRun: async (_runId: string, _workerId: string, message?: string) => {
+    interruptRun: async (
+      _runId: string,
+      _workerId: string,
+      _generation: number,
+      message?: string,
+    ) => {
       state.interrupted = true;
       if (message !== undefined) state.interruptionMessage = message;
       return { run: { ...lifecycleRun, status: 'interrupted' as const }, events: [] };

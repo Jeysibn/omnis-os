@@ -108,9 +108,9 @@ const postgresSuite = describe('PostgreSQL run store', { skip: !databaseUrl }, (
       await tx.executeSql('INSERT INTO omnis.test_queue_outbox (run_id) VALUES ($1)', [runId]);
       return `job-${runId}`;
     });
-    await store.beginExecution(admitted.run.id, 'worker-test', 30);
+    const claim = await store.beginExecution(admitted.run.id, 'worker-test', 30);
     await store.requestStop(admitted.run.id);
-    const cancelled = await store.cancelRun(admitted.run.id, 'worker-test');
+    const cancelled = await store.cancelRun(admitted.run.id, 'worker-test', claim.generation);
     const events = await store.getEvents(admitted.run.id);
 
     assert.equal(cancelled.run.status, 'cancelled');
@@ -131,11 +131,12 @@ const postgresSuite = describe('PostgreSQL run store', { skip: !databaseUrl }, (
       detail: 'Persist deterministic synthetic output.',
     });
     const admitted = await store.admitRun(task.id, key('complete-owned'), async () => 'job');
-    await store.beginExecution(admitted.run.id, 'worker-owner', 30);
+    const claim = await store.beginExecution(admitted.run.id, 'worker-owner', 30);
 
     const completed = await store.completeRun(
       admitted.run.id,
       'worker-owner',
+      claim.generation,
       'Synthetic result only.',
       [],
     );
@@ -145,9 +146,38 @@ const postgresSuite = describe('PostgreSQL run store', { skip: !databaseUrl }, (
       ['run.queued', 'run.started', 'run.completed'],
     );
     await assert.rejects(
-      store.completeRun(admitted.run.id, 'different-worker', 'Not accepted.', []),
+      store.completeRun(admitted.run.id, 'different-worker', claim.generation, 'Not accepted.', []),
       (error: unknown) => error instanceof StoreError && error.code === 'invalid_transition',
     );
+  });
+
+  it('rejects stale completion after a new worker generation owns the execution', async () => {
+    const task = await store.createTask({
+      title: 'Fence an old worker',
+      detail: 'An old generation cannot finalize a run claimed by another worker.',
+    });
+    const admitted = await store.admitRun(task.id, key('stale-finalizer'), async () => 'job');
+    const staleClaim = await store.beginExecution(admitted.run.id, 'worker-old', 30);
+    await pool!.query(
+      "UPDATE omnis.runs SET execution_generation = execution_generation + 1, lease_owner = 'worker-new' WHERE id = $1",
+      [admitted.run.id],
+    );
+    await assert.rejects(
+      store.completeRun(admitted.run.id, 'worker-old', staleClaim.generation, 'stale output.', []),
+      (error: unknown) => error instanceof StoreError && error.code === 'invalid_transition',
+    );
+    assert.equal(
+      (await store.getEvents(admitted.run.id)).some((event) => event.type === 'run.completed'),
+      false,
+    );
+    const current = await store.completeRun(
+      admitted.run.id,
+      'worker-new',
+      staleClaim.generation + 1,
+      'current output.',
+      [],
+    );
+    assert.equal(current.run.status, 'completed');
   });
 
   it('persists sandbox failure state and a safe ordered failure event', async () => {
@@ -156,11 +186,12 @@ const postgresSuite = describe('PostgreSQL run store', { skip: !databaseUrl }, (
       detail: 'The trusted worker owns this task and failure state.',
     });
     const admitted = await store.admitRun(task.id, key('sandbox-failure'), async () => 'job');
-    await store.beginExecution(admitted.run.id, 'worker-sandbox', 30);
+    const claim = await store.beginExecution(admitted.run.id, 'worker-sandbox', 30);
 
     const failed = await store.failRun(
       admitted.run.id,
       'worker-sandbox',
+      claim.generation,
       'The sandbox execution exceeded its time limit.',
     );
 
@@ -186,11 +217,17 @@ const postgresSuite = describe('PostgreSQL run store', { skip: !databaseUrl }, (
       detail: 'A second worker process requested cancellation.',
     });
     const admitted = await store.admitRun(task.id, key('cross-worker-stop'), async () => 'job');
-    await store.beginExecution(admitted.run.id, 'worker-owner', 30);
+    const claim = await store.beginExecution(admitted.run.id, 'worker-owner', 30);
     await store.requestStop(admitted.run.id);
 
-    assert.equal(await store.renewLease(admitted.run.id, 'worker-owner', 30), 'stop_requested');
-    assert.equal(await store.renewLease(admitted.run.id, 'other-worker', 30), false);
+    assert.equal(
+      await store.renewLease(admitted.run.id, 'worker-owner', claim.generation, 30),
+      'stop_requested',
+    );
+    assert.equal(
+      await store.renewLease(admitted.run.id, 'other-worker', claim.generation, 30),
+      false,
+    );
   });
 
   it('does not let an expired worker lease be revived by a late heartbeat', async () => {
@@ -203,13 +240,16 @@ const postgresSuite = describe('PostgreSQL run store', { skip: !databaseUrl }, (
       key('expired-lease-heartbeat'),
       async () => 'job',
     );
-    await store.beginExecution(admitted.run.id, 'stale-worker', 30);
+    const claim = await store.beginExecution(admitted.run.id, 'stale-worker', 30);
     await pool!.query(
       "UPDATE omnis.runs SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
       [admitted.run.id],
     );
 
-    assert.equal(await store.renewLease(admitted.run.id, 'stale-worker', 30), false);
+    assert.equal(
+      await store.renewLease(admitted.run.id, 'stale-worker', claim.generation, 30),
+      false,
+    );
     assert.deepEqual(await store.listActiveRunIds([admitted.run.id]), []);
   });
 
