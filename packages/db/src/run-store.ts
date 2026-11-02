@@ -91,10 +91,10 @@ export class PostgresRunStore {
     return inTransaction(this.pool, async (client) => {
       const result = await client.query<TaskRow>(
         `
-          INSERT INTO omnis.tasks (id, title, detail, status)
+          INSERT INTO omnis.tasks (id, title, detail)
           VALUES (
             'task-' || lpad(nextval('omnis.task_id_seq')::text, 4, '0'),
-            $1, $2, 'open'
+            $1, $2
           )
           RETURNING id, title, detail, status, created_at
         `,
@@ -178,15 +178,10 @@ export class PostgresRunStore {
 
       const created = await client.query<RunRow>(
         `
-          INSERT INTO omnis.runs (
-            id, task_id, task_title, status, runtime_kind, synthetic, usage,
-            retry_count, retry_policy, execution_generation
-          )
+          INSERT INTO omnis.runs (id, task_id, task_title)
           VALUES (
             'run-' || lpad(nextval('omnis.run_id_seq')::text, 4, '0'),
-            $1, $2, 'queued', 'mock', TRUE,
-            '{"quality":"unknown","inputTokens":null,"outputTokens":null,"cost":null}'::jsonb,
-            0, 'never', 0
+            $1, $2
           )
           RETURNING id, task_id, task_title, status, runtime_kind, synthetic, usage,
             created_at, updated_at
@@ -727,8 +722,8 @@ async function appendEvent(
   });
   await client.query(
     `
-      INSERT INTO omnis.run_events (id, run_id, sequence, event_type, at, source, synthetic, message)
-      VALUES ($1, $2, $3, $4, $5, 'mock', TRUE, $6)
+    INSERT INTO omnis.run_events (id, run_id, sequence, event_type, at, message)
+    VALUES ($1, $2, $3, $4, $5, $6)
     `,
     [event.id, event.runId, event.sequence, event.type, event.at, event.message],
   );

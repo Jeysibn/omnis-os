@@ -73,3 +73,40 @@ Fresh migration, upgrade from the prior checksum-less R1 ledger, repeat/concurre
 ## Readiness recommendation
 
 **Post-audit remediation verification: Passed for the mock-only implementation at `0d92af6d98d5dca8dc4210d5569a5b4d4d992bd9`.** Local PostgreSQL, Docker, backup/restore, worker recovery, canary, browser, build, and test checks passed; GitHub Actions passed on that implementation revision. **R1-G4 is not ready.** Any future runtime additionally requires durable authorization/audit, stronger isolation and egress controls, a trusted credential broker, provider-policy approval, and explicit owner authorization. This document grants no authorization to run models.
+
+## Database integrity hardening follow-up — 2026-11-02
+
+- **Review base:** `9d50ad1b830a8468a8dd639c069bced8de84cb3a` on `security/post-audit-remediation`.
+- **Scope:** Claude Code follow-up items N-2 (runtime grants), N-3 (legacy upgrade), and M-7 (ID sequence integrity).
+- **Verification data:** synthetic records and disposable PostgreSQL 17.6 only. No provider credentials or inference were used.
+
+### Findings and implementation
+
+| Finding | Disposition | Evidence |
+|---|---|---|
+| N-2 runtime database grants | **Confirmed; fixed and database verified** | New `0003_runtime_privileges.sql` removes broad application-table grants. Runtime receives `SELECT`, task insert columns `(id,title,detail)` and status-only task updates; run inserts are limited to `(id,task_id,task_title)` with mock/synthetic/status/usage defaults; run updates are limited to lifecycle fields; event inserts omit source/synthetic metadata and have no update/delete; idempotency has select/insert only; migration history has no runtime access; application sequences cannot be advanced with `setval`. Negative statements failed with PostgreSQL permission errors while task admission, event append, cancellation, worker execution, and pg-boss operations passed. Administrative, migration, and runtime identities remained distinct. |
+| N-3 pre-role-separation upgrade | **Confirmed; fixed and verified from legacy source** | `tests/integration/legacy-upgrade.mjs` created a disposable database and worktree at `708d0f5e9b6083da852e26c0643c60c0f5879f85`, populated synthetic task/run/event/idempotency/pg-boss records, then ran current provisioning and migrations. Data fingerprints and migration checksums were preserved; relations, sequences, user-defined types, and routines were owned by `omnis_migrator`; the restricted worker completed the legacy queued run and a new post-upgrade run. The drill cleans its own database/worktree. |
+| M-7 restored ID sequence integrity | **Confirmed; fixed and database verified** | Backup metrics now compare each sequence's next value (respecting `is_called` and increment) with the maximum numeric task/run ID, including empty tables, never-called sequences, malformed IDs, and stale task and run states. A real backup rejected a deliberately stale task sequence with a collision-specific error and produced no backup artifact. The safe retry restored to `omnis_restore_final_n2`; 9 tasks, 9 runs, 33 events, and 9 idempotency rows plus fingerprints/event ordering matched. Both rollback-only runtime task and run INSERTs, sequence reads, and post-restore application grants passed; resulting next IDs exceeded restored maxima. |
+
+### Verification for this follow-up
+
+| Check | Result |
+|---|---|
+| Frozen install | `npm exec --yes --package=pnpm@12.16.1 -- pnpm install --frozen-lockfile` — passed; lockfile unchanged. |
+| Formatting, ESLint, TypeScript, tests | `pnpm check` — passed: formatting, ESLint, all workspace TypeScript checks, and 68 tests (3 contracts, 8 API, 19 PostgreSQL, 4 policy, 2 runtime-adapter, 27 worker including actual-container/security cases, 5 backup metrics). No tests were skipped. |
+| Production build | `pnpm build` — passed. |
+| Mock lifecycle and recovery | `pnpm integration:mock` and `pnpm integration:recovery` — passed with restricted runtime credentials and actual Docker sandbox execution. |
+| Legacy upgrade | `pnpm integration:legacy-upgrade` — passed from the exact original revision above, including pg-boss and restricted worker execution. |
+| Backup and restore | Real PostgreSQL backup rejected the intentionally stale task sequence. Valid backup and restore then passed into `omnis_restore_final_n2`; runtime task/run insert and sequence checks passed. The unsafe in-flight rejection remains covered by existing recovery integration and metrics tests. |
+| Browser | No frontend or API contract changed in this follow-up. Existing Firefox owner sign-in, throttling, mock execution, cancellation, SSE reload/reconnect, and responsive checks remain recorded above; database integration reran the affected task/run HTTP path. |
+| GitHub Actions | Pending for the final follow-up commit. The prior run URL above verifies only the earlier revision and does not cover this follow-up. |
+
+The disposable PostgreSQL container was `omnis-db-integrity-20261102-postgres-1`, bound to loopback port `37441`, with a dedicated test volume/network. No unrelated containers or services were changed. The current WSL shell lacked the Docker supplementary group; `sg docker` used existing group membership. No socket, group, daemon, or WSL configuration was modified. Temporary credentials were synthetic, process-scoped or held in mode-0600 files under `/tmp`, and are not committed.
+
+### Remaining requirements and gate
+
+This closes N-2, N-3, and M-7 for the locally tested mock-only foundation. SQL grants constrain ordinary runtime access but do not provide a tamper-proof, actor-attributed audit system. The dump hash and count manifest detect accidental mismatch only: **backup encryption and manifest/archive authentication remain separate open requirements** pending an approved key-management design. Active-run backups remain rejected; operators must quiesce work and confirm settled/lease-free state before backup. A restore is proved using synthetic data and a rollback-only runtime insert probe, not a live production restore.
+
+No provider adapter or inference was enabled. R1-G4 still requires durable runtime authorization, owner approval, persistent actor-attributed audit, trusted credential broker, effective in-run revocation, approved provider policies/authentication, connector egress restrictions, and trusted-connector canary verification. Rootful Docker/same-host UID, disk quota, and production-grade arbitrary-code isolation remain unverified and general-purpose tools remain prohibited.
+
+**Local follow-up result: Passed for N-2/N-3/M-7 on the tested working tree; final milestone/release gate remains conditional on a clean final revision, passing remote GitHub Actions, and the review PR. This is not authorization for real AI execution.**

@@ -10,6 +10,10 @@ import { fileURLToPath } from 'node:url';
 import { assertValidMetrics, metricsMatch, metricsQuery } from './metrics.mjs';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+const runtimePrivilegesMigration = path.join(
+  repositoryRoot,
+  'packages/db/migrations/0003_runtime_privileges.sql',
+);
 const composeArgs = createComposeArgs();
 const sourceDatabase = process.env.OMNIS_BACKUP_DATABASE ?? 'omnis';
 if (!/^omnis(?:_[a-z0-9_]+)?$/.test(sourceDatabase)) {
@@ -122,6 +126,23 @@ try {
     archivePath,
   );
 
+  await dockerFromFile(
+    [
+      ...composeArgs,
+      'exec',
+      '-T',
+      'postgres',
+      'psql',
+      '-X',
+      '--no-psqlrc',
+      '--set=ON_ERROR_STOP=1',
+      '--username=omnis',
+      `--dbname=${targetDatabase}`,
+      '--file=-',
+    ],
+    runtimePrivilegesMigration,
+  );
+
   await dockerChecked([
     ...composeArgs,
     'exec',
@@ -134,13 +155,13 @@ try {
     '--username=omnis',
     `--dbname=${targetDatabase}`,
     '--command',
-    `GRANT USAGE ON SCHEMA omnis, pgboss TO omnis_runtime;
-     GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA omnis, pgboss TO omnis_runtime;
-     GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA omnis, pgboss TO omnis_runtime;
-     ALTER DEFAULT PRIVILEGES FOR ROLE omnis_migrator IN SCHEMA omnis GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO omnis_runtime;
-     ALTER DEFAULT PRIVILEGES FOR ROLE omnis_migrator IN SCHEMA omnis GRANT USAGE, SELECT ON SEQUENCES TO omnis_runtime;
-     ALTER DEFAULT PRIVILEGES FOR ROLE omnis_migrator IN SCHEMA pgboss GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO omnis_runtime;
-     ALTER DEFAULT PRIVILEGES FOR ROLE omnis_migrator IN SCHEMA pgboss GRANT USAGE, SELECT ON SEQUENCES TO omnis_runtime;`,
+    `GRANT USAGE ON SCHEMA pgboss TO omnis_runtime;
+     GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA pgboss TO omnis_runtime;
+     GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA pgboss TO omnis_runtime;
+     ALTER DEFAULT PRIVILEGES FOR ROLE omnis_migrator IN SCHEMA pgboss
+       GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO omnis_runtime;
+     ALTER DEFAULT PRIVILEGES FOR ROLE omnis_migrator IN SCHEMA pgboss
+       GRANT USAGE, SELECT ON SEQUENCES TO omnis_runtime;`,
   ]);
 
   await dockerChecked([
@@ -156,9 +177,15 @@ try {
     `--dbname=${targetDatabase}`,
     '--command',
     `BEGIN;
-     INSERT INTO omnis.tasks (id, title, detail, status)
-     VALUES ('task-' || lpad(nextval('omnis.task_id_seq')::text, 4, '0'),
-       'Restore permission probe', 'Synthetic rollback-only verification.', 'open');
+     WITH inserted_task AS (
+       INSERT INTO omnis.tasks (id, title, detail)
+       VALUES ('task-' || lpad(nextval('omnis.task_id_seq')::text, 4, '0'),
+         'Restore permission probe', 'Synthetic rollback-only verification.')
+       RETURNING id
+     )
+     INSERT INTO omnis.runs (id, task_id, task_title)
+     SELECT 'run-' || lpad(nextval('omnis.run_id_seq')::text, 4, '0'), id,
+       'Restore permission probe' FROM inserted_task;
      ROLLBACK;`,
   ]);
 
@@ -187,7 +214,7 @@ try {
   process.stdout.write(
     `Restore verified in isolated database ${targetDatabase}; source and target counts match: ${JSON.stringify(report)}\n` +
       `Restore and validation duration: ${Number(process.hrtime.bigint() - restoreStartedAt) / 1_000_000} ms.\n` +
-      'Runtime-role INSERT and sequence access passed in a rolled-back transaction; no worker was started against the target.\n',
+      'Runtime-role task/run INSERTs and sequence access passed in a rolled-back transaction; no worker was started against the target.\n',
   );
 } catch (error) {
   process.stderr.write(

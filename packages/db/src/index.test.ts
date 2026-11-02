@@ -7,6 +7,7 @@ import {
   StoreError,
   type PgBossTransaction,
 } from './index.ts';
+import { assertValidMetrics, metricsQuery } from '../../../scripts/db-recovery/metrics.mjs';
 
 const databaseUrl = process.env.OMNIS_TEST_DATABASE_URL;
 const pool = databaseUrl ? createPool(databaseUrl) : undefined;
@@ -82,6 +83,153 @@ const postgresSuite = describe(
         /permission denied/,
       );
       await assert.rejects(pool!.query('SELECT pg_reload_conf()'), /permission denied/);
+      await assert.rejects(
+        pool!.query("SELECT setval('omnis.task_id_seq', 1)"),
+        /permission denied/,
+      );
+    });
+
+    it('limits runtime changes to task/run lifecycle operations and append-only records', async () => {
+      const task = await store.createTask({
+        title: 'Privilege boundary fixture',
+        detail: 'Exercise allowed and prohibited SQL under omnis_runtime.',
+      });
+      const admitted = await store.admitRun(task.id, key('least-privilege'), async () => 'job');
+      const eventId = admitted.events[0]!.event.id;
+
+      await assert.rejects(
+        pool!.query('UPDATE omnis.tasks SET title = $2 WHERE id = $1', [task.id, 'tampered']),
+        /permission denied/,
+      );
+      await assert.rejects(
+        pool!.query(
+          "INSERT INTO omnis.tasks (id, title, detail, status) VALUES ('task-9999', 'Explicit status', 'Must use the database default.', 'open')",
+        ),
+        /permission denied/,
+      );
+      await assert.rejects(
+        pool!.query(
+          'INSERT INTO omnis.runs (id, task_id, task_title, status, runtime_kind, synthetic, usage) VALUES (\'run-9999\', $1, \'Explicit runtime\', \'queued\', \'mock\', TRUE, \'{"quality":"unknown","inputTokens":null,"outputTokens":null,"cost":null}\'::jsonb)',
+          [task.id],
+        ),
+        /permission denied/,
+      );
+      await assert.rejects(
+        pool!.query('UPDATE omnis.runs SET runtime_kind = $2 WHERE id = $1', [
+          admitted.run.id,
+          'real',
+        ]),
+        /permission denied/,
+      );
+      await assert.rejects(
+        pool!.query('UPDATE omnis.runs SET retry_count = 99 WHERE id = $1', [admitted.run.id]),
+        /permission denied/,
+      );
+      await assert.rejects(
+        pool!.query('UPDATE omnis.run_events SET message = $2 WHERE id = $1', [
+          eventId,
+          'tampered',
+        ]),
+        /permission denied/,
+      );
+      await assert.rejects(
+        pool!.query('DELETE FROM omnis.run_events WHERE id = $1', [eventId]),
+        /permission denied/,
+      );
+      await assert.rejects(
+        pool!.query(
+          "INSERT INTO omnis.run_events (id, run_id, sequence, event_type, source, synthetic, message) VALUES ('event-untrusted', $1, 99, 'run.output', 'mock', TRUE, 'Must use database defaults.')",
+          [admitted.run.id],
+        ),
+        /permission denied/,
+      );
+      await assert.rejects(
+        pool!.query(
+          'UPDATE omnis.run_idempotency SET request_fingerprint = $2 WHERE idempotency_key = $1',
+          [key('least-privilege'), 'tampered'],
+        ),
+        /permission denied/,
+      );
+      await assert.rejects(
+        pool!.query('DELETE FROM omnis.run_idempotency WHERE idempotency_key = $1', [
+          key('least-privilege'),
+        ]),
+        /permission denied/,
+      );
+      await assert.rejects(
+        pool!.query("SELECT * FROM omnis.schema_migrations WHERE id = '0001_initial'"),
+        /permission denied/,
+      );
+      await assert.rejects(
+        pool!.query("UPDATE omnis.schema_migrations SET id = 'tampered' WHERE id = '0001_initial'"),
+        /permission denied/,
+      );
+      await assert.rejects(
+        pool!.query("DELETE FROM omnis.schema_migrations WHERE id = '0001_initial'"),
+        /permission denied/,
+      );
+
+      await store.requestStop(admitted.run.id);
+      const cancelled = await store.beginExecution(admitted.run.id, 'cancel-before-claim', 30);
+      assert.equal(cancelled.run.status, 'cancelled');
+      assert.deepEqual(
+        (await store.getEvents(admitted.run.id)).map((event) => event.type),
+        ['run.queued', 'run.stop_requested', 'run.cancelled'],
+      );
+    });
+
+    it('detects deliberately stale task and run sequences against existing identifiers', async () => {
+      const task = await store.createTask({ title: 'Sequence fixture', detail: 'Task ID check.' });
+      const admitted = await store.admitRun(task.id, key('sequence-integrity'), async () => 'job');
+
+      await adminPool!.query("SELECT setval('omnis.task_id_seq', 1, false)");
+      await adminPool!.query("SELECT setval('omnis.run_id_seq', 1, false)");
+      const stale = await adminPool!.query(metricsQuery);
+      const staleMetrics = stale.rows[0]!.json_build_object as Record<string, unknown>;
+      assert.throws(() => assertValidMetrics(staleMetrics), /task ID sequence is stale/i);
+
+      await adminPool!.query("SELECT setval('omnis.task_id_seq', 1, true)");
+      const staleRun = await adminPool!.query(metricsQuery);
+      assert.throws(
+        () => assertValidMetrics(staleRun.rows[0]!.json_build_object as Record<string, unknown>),
+        /run ID sequence is stale/i,
+      );
+
+      await adminPool!.query("SELECT setval('omnis.run_id_seq', 1, true)");
+      const safe = await adminPool!.query(metricsQuery);
+      assert.doesNotThrow(() =>
+        assertValidMetrics(safe.rows[0]!.json_build_object as Record<string, unknown>),
+      );
+      assert.equal(admitted.run.id, 'run-0001');
+    });
+
+    it('accepts empty application tables with task/run sequences not yet called', async () => {
+      const report = await adminPool!.query(metricsQuery);
+      const metrics = report.rows[0]!.json_build_object as Record<string, unknown> & {
+        idSequences: {
+          tasks: { isCalled: boolean };
+          runs: { isCalled: boolean };
+        };
+      };
+      assertValidMetrics(metrics);
+      assert.deepEqual(metrics.idSequences, {
+        tasks: {
+          lastValue: '1',
+          isCalled: false,
+          incrementBy: '1',
+          maxIssued: '0',
+          malformedIds: 0,
+          nextValue: '1',
+        },
+        runs: {
+          lastValue: '1',
+          isCalled: false,
+          incrementBy: '1',
+          maxIssued: '0',
+          malformedIds: 0,
+          nextValue: '1',
+        },
+      });
     });
 
     it('upgrades the released checksum-less migration ledger while preserving application rows', async () => {
@@ -100,13 +248,13 @@ const postgresSuite = describe(
       await migrate(migrationPool!);
 
       assert.equal((await store.getTask(task.id))?.title, 'Upgrade fixture');
-      const upgraded = await pool!.query<{ checksum: string | null }>(
+      const upgraded = await adminPool!.query<{ checksum: string | null }>(
         "SELECT checksum FROM omnis.schema_migrations WHERE id = '0001_initial'",
       );
       assert.equal(upgraded.rows[0]?.checksum, checksum.rows[0]!.checksum);
       assert.equal(
         (
-          await pool!.query(
+          await adminPool!.query(
             "SELECT 1 FROM omnis.schema_migrations WHERE id = '0002_runtime_grants'",
           )
         ).rowCount,

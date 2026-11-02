@@ -31,6 +31,40 @@ export const metricsQuery = `SELECT json_build_object(
       FROM omnis.run_events e WHERE e.run_id = r.id
     ) counts ON true
   ),
+  'idSequences', json_build_object(
+    'tasks', (
+      SELECT json_build_object(
+        'lastValue', sequence_state.last_value::text,
+        'isCalled', sequence_state.is_called,
+        'incrementBy', definition.seqincrement::text,
+        'maxIssued', COALESCE((
+          SELECT max(substring(id from '^task-([0-9]+)$')::numeric)::text
+          FROM omnis.tasks WHERE id ~ '^task-[0-9]+$'
+        ), '0'),
+        'malformedIds', (SELECT count(*) FROM omnis.tasks WHERE id !~ '^task-[0-9]+$'),
+        'nextValue', (sequence_state.last_value::numeric +
+          CASE WHEN sequence_state.is_called THEN definition.seqincrement ELSE 0 END)::text
+      )
+      FROM omnis.task_id_seq AS sequence_state
+      JOIN pg_sequence AS definition ON definition.seqrelid = 'omnis.task_id_seq'::regclass
+    ),
+    'runs', (
+      SELECT json_build_object(
+        'lastValue', sequence_state.last_value::text,
+        'isCalled', sequence_state.is_called,
+        'incrementBy', definition.seqincrement::text,
+        'maxIssued', COALESCE((
+          SELECT max(substring(id from '^run-([0-9]+)$')::numeric)::text
+          FROM omnis.runs WHERE id ~ '^run-[0-9]+$'
+        ), '0'),
+        'malformedIds', (SELECT count(*) FROM omnis.runs WHERE id !~ '^run-[0-9]+$'),
+        'nextValue', (sequence_state.last_value::numeric +
+          CASE WHEN sequence_state.is_called THEN definition.seqincrement ELSE 0 END)::text
+      )
+      FROM omnis.run_id_seq AS sequence_state
+      JOIN pg_sequence AS definition ON definition.seqrelid = 'omnis.run_id_seq'::regclass
+    )
+  ),
   'applicationQueryWorks', (
     SELECT EXISTS (
       SELECT t.id, r.id, r.status, count(e.id)
@@ -57,10 +91,38 @@ export function assertValidMetrics(report) {
     !report.migrations.includes('0001_initial') ||
     report.syntheticOnly !== true ||
     report.sequenceInvariants !== true ||
-    report.applicationQueryWorks !== true
+    report.applicationQueryWorks !== true ||
+    !validIdSequence(report.idSequences?.tasks, 'task') ||
+    !validIdSequence(report.idSequences?.runs, 'run')
   ) {
     throw new Error('Database did not satisfy Omnis backup invariants.');
   }
+}
+
+function validIdSequence(sequence, label) {
+  const integerText = /^-?[0-9]+$/;
+  if (
+    !sequence ||
+    typeof sequence.lastValue !== 'string' ||
+    !integerText.test(sequence.lastValue) ||
+    typeof sequence.incrementBy !== 'string' ||
+    !integerText.test(sequence.incrementBy) ||
+    BigInt(sequence.incrementBy) <= 0n ||
+    typeof sequence.maxIssued !== 'string' ||
+    !integerText.test(sequence.maxIssued) ||
+    typeof sequence.nextValue !== 'string' ||
+    !integerText.test(sequence.nextValue) ||
+    typeof sequence.isCalled !== 'boolean' ||
+    sequence.malformedIds !== 0
+  ) {
+    throw new Error(`Database ${label} ID sequence state is missing or malformed.`);
+  }
+  const nextValue =
+    BigInt(sequence.lastValue) + (sequence.isCalled ? BigInt(sequence.incrementBy) : 0n);
+  if (BigInt(sequence.nextValue) !== nextValue || nextValue <= BigInt(sequence.maxIssued)) {
+    throw new Error(`Database ${label} ID sequence is stale and could generate a collision.`);
+  }
+  return true;
 }
 
 export function assertBackupSafe(report) {

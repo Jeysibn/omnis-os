@@ -1,9 +1,14 @@
+import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import type { Pool } from 'pg';
 
 const databaseRoles = {
   migration: 'omnis_migrator',
   runtime: 'omnis_runtime',
 } as const;
+const runtimePrivilegesMigration = fileURLToPath(
+  new URL('../migrations/0003_runtime_privileges.sql', import.meta.url),
+);
 
 export async function provisionDatabaseRoles(
   admin: Pool,
@@ -81,25 +86,61 @@ export async function provisionDatabaseRoles(
       const objectType = relation.kind === 'S' ? 'SEQUENCE' : 'TABLE';
       await admin.query(`ALTER ${objectType} ${qualified} OWNER TO omnis_migrator`);
     }
+
+    const userTypes = await admin.query<{ name: string }>(
+      `SELECT t.typname AS name
+         FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+        WHERE n.nspname = $1 AND t.typrelid = 0 AND t.typelem = 0
+          AND t.typisdefined AND t.typtype IN ('d', 'e', 'r', 'm')`,
+      [schema],
+    );
+    for (const type of userTypes.rows) {
+      await admin.query(
+        `ALTER TYPE ${quoteIdentifier(schema)}.${quoteIdentifier(type.name)} OWNER TO omnis_migrator`,
+      );
+    }
+
+    const routines = await admin.query<{ name: string; identity_arguments: string }>(
+      `SELECT p.proname AS name, pg_get_function_identity_arguments(p.oid) AS identity_arguments
+         FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = $1 AND p.prokind IN ('f', 'p', 'a', 'w')`,
+      [schema],
+    );
+    for (const routine of routines.rows) {
+      await admin.query(
+        `ALTER ROUTINE ${quoteIdentifier(schema)}.${quoteIdentifier(routine.name)}(${routine.identity_arguments}) OWNER TO omnis_migrator`,
+      );
+    }
   }
 
   await admin.query('GRANT USAGE ON SCHEMA omnis, pgboss TO omnis_runtime');
   await admin.query(
-    'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA omnis, pgboss TO omnis_runtime',
+    'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA pgboss TO omnis_runtime',
   );
   await admin.query(
     'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA omnis, pgboss TO omnis_runtime',
   );
   await admin.query(`
-    ALTER DEFAULT PRIVILEGES FOR ROLE omnis_migrator IN SCHEMA omnis
-      GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO omnis_runtime;
-    ALTER DEFAULT PRIVILEGES FOR ROLE omnis_migrator IN SCHEMA omnis
-      GRANT USAGE, SELECT ON SEQUENCES TO omnis_runtime;
     ALTER DEFAULT PRIVILEGES FOR ROLE omnis_migrator IN SCHEMA pgboss
       GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO omnis_runtime;
     ALTER DEFAULT PRIVILEGES FOR ROLE omnis_migrator IN SCHEMA pgboss
       GRANT USAGE, SELECT ON SEQUENCES TO omnis_runtime;
   `);
+
+  const applicationRelations = await admin.query<{ relation_count: number }>(
+    `SELECT count(*)::integer AS relation_count
+       FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'omnis' AND c.relname = ANY($1::text[]) AND c.relkind IN ('r', 'p')`,
+    [['tasks', 'runs', 'run_events', 'run_idempotency']],
+  );
+  if (applicationRelations.rows[0]?.relation_count === 4) {
+    await admin.query(await readFile(runtimePrivilegesMigration, 'utf8'));
+  } else {
+    await admin.query(`
+      ALTER DEFAULT PRIVILEGES FOR ROLE omnis_migrator IN SCHEMA omnis
+        REVOKE ALL ON TABLES FROM omnis_runtime;
+    `);
+  }
 }
 
 function quoteIdentifier(value: string): string {
