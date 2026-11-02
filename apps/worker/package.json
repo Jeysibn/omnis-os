@@ -14,6 +14,7 @@
     "@omnis/policy": "workspace:*",
     "@omnis/runtime-adapters": "workspace:*",
     "fastify": "5.12.7",
-    "pg-boss": "12.38.0"
+    "pg-boss": "12.38.0",
+    "zod": "4.6.7"
   }
 }
