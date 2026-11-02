@@ -141,11 +141,20 @@ export class PostgresAuthorizationStore {
   }
 
   async revoke(id: string, actor: 'owner'): Promise<RuntimeAuthorizationRecord> {
-    const result = await this.authorizer.query<{ allowed: boolean }>(
-      'SELECT omnis.revoke_run_authorization($1, $2) AS allowed',
-      [id, actor],
-    );
-    if (!result.rows[0]?.allowed) throw new Error('Only an active authorization can be revoked.');
+    let revoked = false;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const result = await this.authorizer.query<{ outcome: string }>(
+        'SELECT omnis.revoke_run_authorization($1, $2) AS outcome',
+        [id, actor],
+      );
+      const outcome = result.rows[0]?.outcome;
+      if (outcome === 'revoked') {
+        revoked = true;
+        break;
+      }
+      if (outcome !== 'retry_consumed' && outcome !== 'retry_unconsumed') break;
+    }
+    if (!revoked) throw new Error('Only an active authorization can be revoked.');
     const updated = await this.get(id);
     if (!updated) throw new Error('Revoked authorization could not be reloaded.');
     return updated;
@@ -160,14 +169,14 @@ export class PostgresAuthorizationStore {
     if (row?.status === 'expired') {
       await this.authorizer.query(
         `INSERT INTO omnis.authorization_audit (
-           id, authorization_id, task_id, event_type, actor_id, effective_identity,
+           authorization_id, task_id, event_type, actor_id, effective_identity,
            capability, correlation_id, outcome, reason_code
-         ) SELECT $1, a.id, a.task_id, 'authorization.expired', 'service:omnis-authorizer',
+         ) SELECT a.id, a.task_id, 'authorization.expired', 'service:omnis-authorizer',
            'service:omnis-worker', 'mock.execute', a.correlation_id, 'recorded', 'time_elapsed'
            FROM omnis.runtime_authorizations a
-          WHERE a.id=$2 AND a.status IN ('pending','authorized') AND a.expires_at<=now()
-         ON CONFLICT (id) DO NOTHING`,
-        [`audit-expired-${id}`, id],
+          WHERE a.id=$1 AND a.status IN ('pending','authorized') AND a.expires_at<=now()
+         ON CONFLICT (authorization_id) WHERE event_type = 'authorization.expired' DO NOTHING`,
+        [id],
       );
     }
     return row ? mapAuthorization(row) : undefined;
@@ -181,16 +190,16 @@ export class PostgresAuthorizationStore {
   ): Promise<void> {
     await this.authorizer.query(
       `INSERT INTO omnis.authorization_audit (
-         id, authorization_id, task_id, event_type, actor_id, effective_identity,
+         authorization_id, task_id, event_type, actor_id, effective_identity,
          capability, correlation_id, outcome, reason_code
-       ) SELECT $1,
-           CASE WHEN EXISTS (SELECT 1 FROM omnis.runtime_authorizations a WHERE a.id=$2 AND a.task_id=$3)
-             THEN $2 ELSE NULL END,
-           CASE WHEN EXISTS (SELECT 1 FROM omnis.tasks t WHERE t.id=$3) THEN $3 ELSE NULL END,
-           'authorization.enforcement_denied',$4,'service:omnis-worker','mock.execute',
-           COALESCE((SELECT a.correlation_id FROM omnis.runtime_authorizations a WHERE a.id=$2 AND a.task_id=$3),$5),
-           'denied',$6`,
-      [randomUUID(), authorizationId, taskId, actor, randomUUID(), reasonCode],
+       ) SELECT
+           CASE WHEN EXISTS (SELECT 1 FROM omnis.runtime_authorizations a WHERE a.id=$1 AND a.task_id=$2)
+             THEN $1 ELSE NULL END,
+           CASE WHEN EXISTS (SELECT 1 FROM omnis.tasks t WHERE t.id=$2) THEN $2 ELSE NULL END,
+           'authorization.enforcement_denied',$3,'service:omnis-worker','mock.execute',
+           COALESCE((SELECT a.correlation_id FROM omnis.runtime_authorizations a WHERE a.id=$1 AND a.task_id=$2),$4),
+           'denied',$5`,
+      [authorizationId, taskId, actor, randomUUID(), reasonCode],
     );
   }
 
@@ -225,23 +234,6 @@ export class PostgresAuthorizationStore {
   }
 }
 
-export async function appendAuthorizationAudit(
-  client: Pick<PoolClient, 'query'>,
-  input: {
-    authorizationId: string;
-    taskId: string;
-    runId: string | null;
-    eventType: string;
-    actorId: string;
-    effectiveIdentity: string;
-    correlationId: string;
-    outcome: 'allowed' | 'denied' | 'recorded';
-    reasonCode?: string | null;
-  },
-): Promise<void> {
-  await appendAudit(client, input);
-}
-
 async function appendAudit(
   client: Pick<PoolClient, 'query'>,
   input: {
@@ -258,11 +250,10 @@ async function appendAudit(
 ): Promise<void> {
   await client.query(
     `INSERT INTO omnis.authorization_audit (
-       id, authorization_id, task_id, run_id, event_type, actor_id,
+       authorization_id, task_id, run_id, event_type, actor_id,
        effective_identity, capability, correlation_id, outcome, reason_code
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,'mock.execute',$8,$9,$10)`,
+     ) VALUES ($1,$2,$3,$4,$5,$6,'mock.execute',$7,$8,$9)`,
     [
-      randomUUID(),
       input.authorizationId,
       input.taskId,
       input.runId ?? null,

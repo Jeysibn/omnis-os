@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { after, beforeEach, describe, it } from 'node:test';
+import type { Pool } from 'pg';
 import {
   createPool,
   migrate,
@@ -221,6 +222,513 @@ const postgresSuite = describe(
           (event) => event.eventType === 'authorization.expired',
         ),
       );
+    });
+
+    it('prevents runtime audit forgery and predictable-ID denial of service', async () => {
+      const task = await store.createTask({
+        title: 'Audit boundary',
+        detail: 'Synthetic regression fixture.',
+      });
+      const grant = await authorizations.request(task.id, 'owner');
+      await authorizations.decide(grant.id, 'owner', 'approve');
+
+      for (const eventType of [
+        'authorization.approved',
+        'authorization.denied',
+        'authorization.revoked',
+      ]) {
+        await assert.rejects(
+          pool!.query(
+            `INSERT INTO omnis.authorization_audit (
+               id, authorization_id, task_id, event_type, actor_id, effective_identity,
+               capability, correlation_id, outcome
+             ) VALUES ($1,$2,$3,$4,'attacker','human:owner','mock.execute','forged','recorded')`,
+            [`audit-${grant.id}-${eventType}`, grant.id, task.id, eventType],
+          ),
+          /permission denied/,
+        );
+      }
+
+      await assert.rejects(
+        pool!.query('SELECT omnis.append_runtime_authorization_audit($1, $2, NULL)', [
+          'run-not-real',
+          'authorization.approved',
+        ]),
+        /runtime audit event type is not permitted/,
+      );
+
+      const catalog = await adminPool!.query<{
+        table_insert: boolean;
+        id_insert: boolean;
+        event_insert: boolean;
+        append_execute: boolean;
+        authorizer_execute: boolean;
+        public_execute: boolean;
+        append_definer: boolean;
+        append_owner: string;
+        append_search_path: string[];
+      }>(`
+        SELECT has_table_privilege('omnis_runtime', 'omnis.authorization_audit', 'INSERT') AS table_insert,
+               has_column_privilege('omnis_runtime', 'omnis.authorization_audit', 'id', 'INSERT') AS id_insert,
+               has_column_privilege('omnis_runtime', 'omnis.authorization_audit', 'event_type', 'INSERT') AS event_insert,
+               has_function_privilege('omnis_runtime', 'omnis.append_runtime_authorization_audit(text,text,text)', 'EXECUTE') AS append_execute,
+               has_function_privilege('omnis_authorizer', 'omnis.append_runtime_authorization_audit(text,text,text)', 'EXECUTE') AS authorizer_execute,
+               EXISTS (
+                 SELECT 1 FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) AS grant_row
+                  WHERE grant_row.grantee=0 AND grant_row.privilege_type='EXECUTE'
+               ) AS public_execute,
+               p.prosecdef AS append_definer,
+               r.rolname AS append_owner,
+               p.proconfig AS append_search_path
+          FROM pg_proc p JOIN pg_roles r ON r.oid=p.proowner
+         WHERE p.oid='omnis.append_runtime_authorization_audit(text,text,text)'::regprocedure
+      `);
+      assert.deepEqual(catalog.rows[0], {
+        table_insert: false,
+        id_insert: false,
+        event_insert: false,
+        append_execute: true,
+        authorizer_execute: false,
+        public_execute: false,
+        append_definer: true,
+        append_owner: 'omnis_migrator',
+        append_search_path: ['search_path=pg_catalog, omnis'],
+      });
+
+      const collisionId = `audit-${grant.id}-revoked`;
+      await assert.rejects(
+        pool!.query(
+          `INSERT INTO omnis.authorization_audit (
+             id, authorization_id, task_id, event_type, actor_id, effective_identity,
+             capability, correlation_id, outcome
+           ) VALUES ($1,$2,$3,'authorization.revoked','attacker','human:owner',
+                    'mock.execute','forged','recorded')`,
+          [collisionId, grant.id, task.id],
+        ),
+        /permission denied/,
+      );
+      const revoked = await authorizations.revoke(grant.id, 'owner');
+      assert.equal(revoked.status, 'revoked');
+      assert.equal(await authorizations.isActive(grant.id, task.id, 'run-unused'), false);
+      const audit = await authorizations.getAudit(grant.id);
+      const revocation = audit.find((event) => event.eventType === 'authorization.revoked');
+      assert.ok(revocation);
+      assert.notEqual(revocation.id, collisionId);
+      assert.equal(revocation.actorId, 'owner');
+      assert.equal(revocation.effectiveIdentity, 'human:owner');
+    });
+
+    it('uses database audit IDs for consumption and expiry and keeps runtime events append-only', async () => {
+      const task = await store.createTask({
+        title: 'Generated audit IDs',
+        detail: 'Synthetic event identity fixture.',
+      });
+      const grant = await authorizations.request(task.id, 'owner');
+      await authorizations.decide(grant.id, 'owner', 'approve');
+      await assert.rejects(
+        pool!.query(
+          `INSERT INTO omnis.authorization_audit (
+             id, authorization_id, task_id, event_type, actor_id, effective_identity,
+             capability, correlation_id, outcome
+           ) VALUES ($1,$2,$3,'authorization.consumed','attacker','service:omnis-worker',
+                    'mock.execute','forged','allowed')`,
+          [`audit-${grant.id}-consumed`, grant.id, task.id],
+        ),
+        /permission denied/,
+      );
+
+      const admitted = await store.admitRun(
+        task.id,
+        key('audit-generated-consume'),
+        grant.id,
+        'owner',
+        async () => 'job',
+      );
+      const started = await store.beginExecution(admitted.run.id, 'audit-worker', 30);
+      assert.equal(started.started, true);
+      await store.completeRun(admitted.run.id, 'audit-worker', started.generation, 'synthetic');
+      await assert.rejects(
+        store.admitRun(task.id, key('audit-consume-twice'), grant.id, 'owner', async () => 'job'),
+        /active task-scoped authorization is required/,
+      );
+      assert.equal(
+        (
+          await adminPool!.query('SELECT count(*)::int AS count FROM omnis.runs WHERE task_id=$1', [
+            task.id,
+          ])
+        ).rows[0]?.count,
+        1,
+      );
+      const operationEvents = (await authorizations.getAudit(grant.id)).filter((event) =>
+        event.eventType.startsWith('operation.'),
+      );
+      assert.deepEqual(
+        operationEvents.map((event) => event.eventType),
+        ['operation.started', 'operation.completed'],
+      );
+      assert.ok(operationEvents.every((event) => event.actorId === 'owner'));
+      assert.ok(
+        operationEvents.every((event) => event.effectiveIdentity === 'service:omnis-runtime'),
+      );
+
+      const expiredTask = await store.createTask({
+        title: 'Expiry audit ID',
+        detail: 'Synthetic expiry fixture.',
+      });
+      const expiredGrant = await authorizations.request(expiredTask.id, 'owner');
+      await adminPool!.query(
+        `UPDATE omnis.runtime_authorizations SET expires_at=now()-interval '1 second' WHERE id=$1`,
+        [expiredGrant.id],
+      );
+      await assert.rejects(
+        pool!.query(
+          `INSERT INTO omnis.authorization_audit (
+             id, authorization_id, task_id, event_type, actor_id, effective_identity,
+             capability, correlation_id, outcome
+           ) VALUES ($1,$2,$3,'authorization.expired','attacker','service:omnis-authorizer',
+                    'mock.execute','forged','recorded')`,
+          [`audit-expired-${expiredGrant.id}`, expiredGrant.id, expiredTask.id],
+        ),
+        /permission denied/,
+      );
+      await authorizations.get(expiredGrant.id);
+      await authorizations.get(expiredGrant.id);
+      const expiryEvents = (await authorizations.getAudit(expiredGrant.id)).filter(
+        (event) => event.eventType === 'authorization.expired',
+      );
+      assert.equal(expiryEvents.length, 1);
+      assert.notEqual(expiryEvents[0]?.id, `audit-expired-${expiredGrant.id}`);
+    });
+
+    it('rolls back grant transitions when a mandatory audit insert fails', async () => {
+      const revokeTask = await store.createTask({
+        title: 'Audit rollback revocation',
+        detail: 'Synthetic forced audit failure.',
+      });
+      const revokeGrant = await authorizations.request(revokeTask.id, 'owner');
+      await authorizations.decide(revokeGrant.id, 'owner', 'approve');
+      const consumeTask = await store.createTask({
+        title: 'Audit rollback consumption',
+        detail: 'Synthetic forced audit failure.',
+      });
+      const consumeGrant = await authorizations.request(consumeTask.id, 'owner');
+      await authorizations.decide(consumeGrant.id, 'owner', 'approve');
+
+      await adminPool!.query(`
+        CREATE FUNCTION omnis.reject_g4_audit_test() RETURNS trigger
+        LANGUAGE plpgsql AS $test$
+        BEGIN
+          IF NEW.event_type IN ('authorization.revoked', 'authorization.consumed') THEN
+            RAISE EXCEPTION 'controlled audit failure';
+          END IF;
+          RETURN NEW;
+        END
+        $test$;
+        CREATE TRIGGER reject_g4_audit_test BEFORE INSERT ON omnis.authorization_audit
+          FOR EACH ROW EXECUTE FUNCTION omnis.reject_g4_audit_test();
+      `);
+      try {
+        await assert.rejects(
+          authorizations.revoke(revokeGrant.id, 'owner'),
+          /controlled audit failure/,
+        );
+        assert.equal((await authorizations.get(revokeGrant.id))?.status, 'authorized');
+        assert.equal(
+          (await authorizations.getAudit(revokeGrant.id)).some(
+            (event) => event.eventType === 'authorization.revoked',
+          ),
+          false,
+        );
+        await assert.rejects(
+          store.admitRun(
+            consumeTask.id,
+            key('mandatory-consume-audit'),
+            consumeGrant.id,
+            'owner',
+            async () => 'job',
+          ),
+          /controlled audit failure/,
+        );
+        assert.equal((await authorizations.get(consumeGrant.id))?.consumedRunId, null);
+        assert.equal(
+          (await adminPool!.query('SELECT 1 FROM omnis.runs WHERE task_id=$1', [consumeTask.id]))
+            .rowCount,
+          0,
+        );
+      } finally {
+        await adminPool!.query(
+          'DROP TRIGGER IF EXISTS reject_g4_audit_test ON omnis.authorization_audit; DROP FUNCTION IF EXISTS omnis.reject_g4_audit_test()',
+        );
+      }
+    });
+
+    it('serializes unconsumed grant revocation with admission in both lock orders', async () => {
+      const iterations = 3;
+      for (let iteration = 0; iteration < iterations; iteration += 1) {
+        const task = await store.createTask({
+          title: 'Admission wins revocation race',
+          detail: `Synthetic lock-order iteration ${iteration}.`,
+        });
+        const grant = await authorizations.request(task.id, 'owner');
+        await authorizations.decide(grant.id, 'owner', 'approve');
+        const admissionPool = createPool({
+          connectionString: databaseUrl!,
+          application_name: 'omnis-g4-admission-wins',
+        });
+        const revokerPool = createPool({
+          connectionString: authorizerUrl!,
+          application_name: 'omnis-g4-admission-wins-revoker',
+        });
+        const admissionStore = new PostgresRunStore(admissionPool);
+        const revoker = new PostgresAuthorizationStore(pool!, revokerPool);
+        const enteredQueue = deferred<void>();
+        const releaseAdmission = deferred<void>();
+        try {
+          const admission = admissionStore.admitRun(
+            task.id,
+            key(`admit-wins-${iteration}`),
+            grant.id,
+            'owner',
+            async () => {
+              enteredQueue.resolve();
+              await releaseAdmission.promise;
+              return 'job';
+            },
+          );
+          await enteredQueue.promise;
+          const revoke = revoker.revoke(grant.id, 'owner');
+          await waitForLockWait(adminPool!, 'omnis-g4-admission-wins-revoker');
+          releaseAdmission.resolve();
+          const admitted = await admission;
+          const revoked = await revoke;
+          assert.equal(admitted.created, true);
+          assert.equal(revoked.status, 'revoked');
+          assert.equal(revoked.consumedRunId, admitted.run.id);
+          const deniedClaim = await admissionStore.beginExecution(
+            admitted.run.id,
+            `g4-race-worker-${iteration}`,
+            30,
+          );
+          assert.equal(deniedClaim.started, false);
+          assert.equal(deniedClaim.run.status, 'interrupted');
+          const audit = await authorizations.getAudit(grant.id);
+          assert.deepEqual(
+            audit
+              .map((event) => event.eventType)
+              .filter((type) => ['authorization.consumed', 'authorization.revoked'].includes(type)),
+            ['authorization.consumed', 'authorization.revoked'],
+          );
+        } finally {
+          releaseAdmission.resolve();
+          await Promise.all([admissionPool.end(), revokerPool.end()]);
+        }
+      }
+
+      for (let iteration = 0; iteration < iterations; iteration += 1) {
+        const task = await store.createTask({
+          title: 'Revocation wins admission race',
+          detail: `Synthetic lock-order iteration ${iteration}.`,
+        });
+        const grant = await authorizations.request(task.id, 'owner');
+        await authorizations.decide(grant.id, 'owner', 'approve');
+        const gateKey = 7046390999911;
+        const blocker = await adminPool!.connect();
+        const admissionPool = createPool({
+          connectionString: databaseUrl!,
+          application_name: 'omnis-g4-revocation-wins-admission',
+        });
+        const revokerPool = createPool({
+          connectionString: authorizerUrl!,
+          application_name: 'omnis-g4-revocation-wins-revoker',
+        });
+        const revoker = new PostgresAuthorizationStore(pool!, revokerPool);
+        const admissionStore = new PostgresRunStore(admissionPool);
+        try {
+          await blocker.query('SELECT pg_advisory_lock($1)', [gateKey]);
+          await adminPool!.query(`
+            CREATE OR REPLACE FUNCTION omnis.g4_revoke_audit_gate() RETURNS trigger
+            LANGUAGE plpgsql AS $gate$
+            BEGIN
+              IF NEW.event_type = 'authorization.revoked' THEN
+                PERFORM pg_advisory_xact_lock(${gateKey});
+              END IF;
+              RETURN NEW;
+            END
+            $gate$;
+            DROP TRIGGER IF EXISTS g4_revoke_audit_gate ON omnis.authorization_audit;
+            CREATE TRIGGER g4_revoke_audit_gate BEFORE INSERT ON omnis.authorization_audit
+              FOR EACH ROW EXECUTE FUNCTION omnis.g4_revoke_audit_gate();
+          `);
+          const revoke = revoker.revoke(grant.id, 'owner');
+          await waitForLockWait(adminPool!, 'omnis-g4-revocation-wins-revoker');
+          const admissionKey = key(`revoke-wins-${iteration}`);
+          const admission = admissionStore
+            .admitRun(task.id, admissionKey, grant.id, 'owner', async () => 'job')
+            .then(
+              (value) => ({ value }),
+              (error: unknown) => ({ error }),
+            );
+          await waitForLockWait(adminPool!, 'omnis-g4-revocation-wins-admission');
+          await blocker.query('SELECT pg_advisory_unlock($1)', [gateKey]);
+          const revoked = await revoke;
+          const admissionResult = await admission;
+          assert.equal(revoked.status, 'revoked');
+          assert.ok('error' in admissionResult);
+          assert.match(String(admissionResult.error), /authorization/i);
+          assert.equal(
+            (await adminPool!.query('SELECT 1 FROM omnis.runs WHERE task_id=$1', [task.id]))
+              .rowCount,
+            0,
+          );
+          assert.equal(
+            (
+              await adminPool!.query(
+                'SELECT 1 FROM omnis.run_idempotency WHERE idempotency_key=$1',
+                [admissionKey],
+              )
+            ).rowCount,
+            0,
+          );
+          assert.ok(
+            (await authorizations.getAudit(grant.id)).some(
+              (event) => event.eventType === 'authorization.revoked',
+            ),
+          );
+        } finally {
+          await blocker.query('SELECT pg_advisory_unlock($1)', [gateKey]).catch(() => undefined);
+          await adminPool!.query(
+            'DROP TRIGGER IF EXISTS g4_revoke_audit_gate ON omnis.authorization_audit; DROP FUNCTION IF EXISTS omnis.g4_revoke_audit_gate()',
+          );
+          blocker.release();
+          await Promise.all([admissionPool.end(), revokerPool.end()]);
+        }
+      }
+    });
+
+    it('serializes direct runtime consumption with revocation at the SQL function boundary', async () => {
+      const iterations = 3;
+      for (let iteration = 0; iteration < iterations; iteration += 1) {
+        const task = await store.createTask({
+          title: 'Direct consume wins',
+          detail: `Synthetic function-boundary iteration ${iteration}.`,
+        });
+        const grant = await authorizations.request(task.id, 'owner');
+        await authorizations.decide(grant.id, 'owner', 'approve');
+        const runId = `run-direct-consume-${nextKey}-${iteration}`;
+        const runtimeDirectPool = createPool({
+          connectionString: databaseUrl!,
+          application_name: 'omnis-g4-direct-consume-wins',
+        });
+        const revokerPool = createPool({
+          connectionString: authorizerUrl!,
+          application_name: 'omnis-g4-direct-consume-wins-revoker',
+        });
+        const revoker = new PostgresAuthorizationStore(pool!, revokerPool);
+        const consumer = await runtimeDirectPool.connect();
+        try {
+          await consumer.query('BEGIN');
+          await consumer.query(
+            'INSERT INTO omnis.runs (id, task_id, task_title) VALUES ($1,$2,$3)',
+            [runId, task.id, task.title],
+          );
+          const consumed = await consumer.query<{ allowed: boolean }>(
+            'SELECT omnis.consume_run_authorization($1,$2,$3,$4,$5) AS allowed',
+            [grant.id, task.id, 'owner', runId, grant.correlationId],
+          );
+          assert.equal(consumed.rows[0]?.allowed, true);
+          const revoke = revoker.revoke(grant.id, 'owner');
+          await waitForLockWait(adminPool!, 'omnis-g4-direct-consume-wins-revoker');
+          await consumer.query('COMMIT');
+          const revoked = await revoke;
+          assert.equal(revoked.status, 'revoked');
+          assert.equal(revoked.consumedRunId, runId);
+          const lifecycle = (await authorizations.getAudit(grant.id)).map(
+            (event) => event.eventType,
+          );
+          assert.ok(lifecycle.includes('authorization.consumed'));
+          assert.ok(lifecycle.includes('authorization.revoked'));
+        } finally {
+          await consumer.query('ROLLBACK').catch(() => undefined);
+          consumer.release();
+          await Promise.all([runtimeDirectPool.end(), revokerPool.end()]);
+        }
+      }
+
+      for (let iteration = 0; iteration < iterations; iteration += 1) {
+        const task = await store.createTask({
+          title: 'Direct revoke wins',
+          detail: `Synthetic function-boundary iteration ${iteration}.`,
+        });
+        const grant = await authorizations.request(task.id, 'owner');
+        await authorizations.decide(grant.id, 'owner', 'approve');
+        const runId = `run-direct-revoke-${nextKey}-${iteration}`;
+        const gateKey = 7046390999912;
+        const blocker = await adminPool!.connect();
+        const runtimeDirectPool = createPool({
+          connectionString: databaseUrl!,
+          application_name: 'omnis-g4-direct-revoke-wins-consumer',
+        });
+        const revokerPool = createPool({
+          connectionString: authorizerUrl!,
+          application_name: 'omnis-g4-direct-revoke-wins-revoker',
+        });
+        const revoker = new PostgresAuthorizationStore(pool!, revokerPool);
+        const consumer = await runtimeDirectPool.connect();
+        try {
+          await blocker.query('SELECT pg_advisory_lock($1)', [gateKey]);
+          await adminPool!.query(`
+            CREATE OR REPLACE FUNCTION omnis.g4_direct_revoke_audit_gate() RETURNS trigger
+            LANGUAGE plpgsql AS $gate$
+            BEGIN
+              IF NEW.event_type = 'authorization.revoked' THEN
+                PERFORM pg_advisory_xact_lock(${gateKey});
+              END IF;
+              RETURN NEW;
+            END
+            $gate$;
+            DROP TRIGGER IF EXISTS g4_direct_revoke_audit_gate ON omnis.authorization_audit;
+            CREATE TRIGGER g4_direct_revoke_audit_gate BEFORE INSERT ON omnis.authorization_audit
+              FOR EACH ROW EXECUTE FUNCTION omnis.g4_direct_revoke_audit_gate();
+          `);
+          await consumer.query('BEGIN');
+          await consumer.query(
+            'INSERT INTO omnis.runs (id, task_id, task_title) VALUES ($1,$2,$3)',
+            [runId, task.id, task.title],
+          );
+          const revoke = revoker.revoke(grant.id, 'owner');
+          await waitForLockWait(adminPool!, 'omnis-g4-direct-revoke-wins-revoker');
+          const consume = consumer.query<{ allowed: boolean }>(
+            'SELECT omnis.consume_run_authorization($1,$2,$3,$4,$5) AS allowed',
+            [grant.id, task.id, 'owner', runId, grant.correlationId],
+          );
+          await waitForLockWait(adminPool!, 'omnis-g4-direct-revoke-wins-consumer');
+          await blocker.query('SELECT pg_advisory_unlock($1)', [gateKey]);
+          const revoked = await revoke;
+          const consumed = await consume;
+          assert.equal(revoked.status, 'revoked');
+          assert.equal(consumed.rows[0]?.allowed, false);
+          await consumer.query('ROLLBACK');
+          assert.equal(
+            (await adminPool!.query('SELECT 1 FROM omnis.runs WHERE id=$1', [runId])).rowCount,
+            0,
+          );
+          assert.equal((await authorizations.get(grant.id))?.consumedRunId, null);
+          const lifecycle = (await authorizations.getAudit(grant.id)).map(
+            (event) => event.eventType,
+          );
+          assert.ok(lifecycle.includes('authorization.revoked'));
+          assert.equal(lifecycle.includes('authorization.consumed'), false);
+        } finally {
+          await consumer.query('ROLLBACK').catch(() => undefined);
+          consumer.release();
+          await blocker.query('SELECT pg_advisory_unlock($1)', [gateKey]).catch(() => undefined);
+          await adminPool!.query(
+            'DROP TRIGGER IF EXISTS g4_direct_revoke_audit_gate ON omnis.authorization_audit; DROP FUNCTION IF EXISTS omnis.g4_direct_revoke_audit_gate()',
+          );
+          blocker.release();
+          await Promise.all([runtimeDirectPool.end(), revokerPool.end()]);
+        }
+      }
     });
 
     it('serializes revocation against completion and prevents a post-revocation success', async () => {
@@ -931,6 +1439,28 @@ void postgresSuite;
 
 function key(prefix: string): string {
   return `${prefix}-${String(nextKey).padStart(4, '0')}-unique`;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+async function waitForLockWait(admin: Pool, applicationName: string): Promise<void> {
+  const deadline = Date.now() + 8_000;
+  while (Date.now() < deadline) {
+    const result = await admin.query<{ wait_event_type: string | null }>(
+      `SELECT wait_event_type FROM pg_stat_activity
+        WHERE application_name=$1 AND state='active'`,
+      [applicationName],
+    );
+    if (result.rows.some((row) => row.wait_event_type === 'Lock')) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`Database session ${applicationName} did not reach the expected lock wait.`);
 }
 
 function assertTestDatabase(connectionString: string): void {

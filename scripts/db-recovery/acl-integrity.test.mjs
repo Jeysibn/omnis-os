@@ -46,6 +46,15 @@ const allowed = [
     'omnis_runtime',
     true,
   ),
+  acl(
+    'routine',
+    'omnis',
+    'append_runtime_authorization_audit(p_run_id text, p_event_type text, p_reason_code text)',
+    'EXECUTE',
+    null,
+    'omnis_runtime',
+    true,
+  ),
   acl('column', 'omnis', 'tasks', 'INSERT', 'id'),
   acl('column', 'omnis', 'tasks', 'UPDATE', 'status'),
   acl('sequence', 'omnis', 'task_id_seq', 'USAGE'),
@@ -89,6 +98,30 @@ describe('post-restore PostgreSQL ACL integrity', () => {
       acl('column', 'omnis', 'runtime_authorizations', 'UPDATE', 'status', 'omnis_authorizer'),
     ];
     assert.doesNotThrow(() => assertRuntimeAclPolicy([...allowed, ...safe]));
+    assert.throws(
+      () =>
+        assertRuntimeAclPolicy([
+          ...allowed,
+          acl('table', 'omnis', 'authorization_audit', 'INSERT'),
+        ]),
+      /Runtime table privilege INSERT is prohibited on omnis\.authorization_audit/,
+    );
+    assert.throws(
+      () =>
+        assertRuntimeAclPolicy([
+          ...allowed,
+          acl(
+            'routine',
+            'omnis',
+            'append_runtime_authorization_audit(p_run_id text, p_event_type text, p_reason_code text)',
+            'EXECUTE',
+            null,
+            'omnis_runtime',
+            false,
+          ),
+        ]),
+      /Runtime routine privilege EXECUTE is prohibited/,
+    );
     assert.throws(
       () =>
         assertRuntimeAclPolicy([

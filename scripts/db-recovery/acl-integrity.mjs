@@ -137,29 +137,11 @@ const applicationColumnPrivileges = new Map([
       ['idempotency_key', 'request_fingerprint', 'run_id'].map((column) => `INSERT:${column}`),
     ),
   ],
-  [
-    'authorization_audit',
-    new Set(
-      [
-        'id',
-        'authorization_id',
-        'task_id',
-        'run_id',
-        'event_type',
-        'actor_id',
-        'effective_identity',
-        'capability',
-        'correlation_id',
-        'outcome',
-        'reason_code',
-        'occurred_at',
-      ].map((column) => `INSERT:${column}`),
-    ),
-  ],
 ]);
 const approvedSecurityDefinerRoutineArities = new Map([
   ['consume_run_authorization', 5],
   ['lock_active_run_authorization', 1],
+  ['append_runtime_authorization_audit', 3],
 ]);
 
 function isApprovedRuntimeSecurityDefiner(entry) {

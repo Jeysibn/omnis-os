@@ -31,16 +31,21 @@ GRANT INSERT (id, run_id, sequence, event_type, at, message)
 GRANT INSERT (idempotency_key, request_fingerprint, run_id)
   ON omnis.run_idempotency TO omnis_runtime;
 GRANT SELECT ON omnis.runtime_authorizations TO omnis_runtime;
-GRANT INSERT (
+REVOKE ALL PRIVILEGES ON TABLE omnis.authorization_audit FROM omnis_runtime;
+REVOKE INSERT (
   id, authorization_id, task_id, run_id, event_type, actor_id,
   effective_identity, capability, correlation_id, outcome, reason_code, occurred_at
-) ON omnis.authorization_audit TO omnis_runtime;
+) ON omnis.authorization_audit FROM omnis_runtime;
 REVOKE ALL ON FUNCTION omnis.consume_run_authorization(text, text, text, text, text)
   FROM PUBLIC, omnis_runtime;
 REVOKE ALL ON FUNCTION omnis.lock_active_run_authorization(text) FROM PUBLIC, omnis_runtime;
 GRANT EXECUTE ON FUNCTION omnis.consume_run_authorization(text, text, text, text, text)
   TO omnis_runtime;
 GRANT EXECUTE ON FUNCTION omnis.lock_active_run_authorization(text) TO omnis_runtime;
+REVOKE ALL ON FUNCTION omnis.append_runtime_authorization_audit(text, text, text)
+  FROM PUBLIC, omnis_authorizer;
+GRANT EXECUTE ON FUNCTION omnis.append_runtime_authorization_audit(text, text, text)
+  TO omnis_runtime;
 REVOKE ALL ON FUNCTION omnis.revoke_run_authorization(text, text)
   FROM PUBLIC, omnis_runtime;
 GRANT EXECUTE ON FUNCTION omnis.revoke_run_authorization(text, text)

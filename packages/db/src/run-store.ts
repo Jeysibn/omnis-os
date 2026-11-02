@@ -12,7 +12,6 @@ import {
 import type { Pool, PoolClient, QueryResultRow } from 'pg';
 import { asPgBossTransaction, inTransaction, type PgBossTransaction } from './database.ts';
 import { randomUUID } from 'node:crypto';
-import { appendAuthorizationAudit } from './authorization-store.ts';
 
 export type StoreErrorCode =
   'invalid_input' | 'not_found' | 'invalid_transition' | 'concurrency_limit' | 'conflict';
@@ -314,7 +313,6 @@ export class PostgresRunStore {
           client,
           runId,
           'authorization.enforcement_denied',
-          'denied',
           'missing_expired_or_revoked',
         );
         const event = await appendEvent(
@@ -341,29 +339,7 @@ export class PostgresRunStore {
         `,
         [runId, workerId, leaseSeconds],
       );
-      const auth = await client.query<{
-        id: string;
-        correlation_id: string;
-        requesting_actor: string;
-      }>(
-        `SELECT id, correlation_id, requesting_actor
-           FROM omnis.runtime_authorizations
-          WHERE consumed_run_id=$1 AND task_id=$2 AND status='authorized'
-            AND expires_at > now() AND revoked_at IS NULL`,
-        [runId, current.task_id],
-      );
-      if (!auth.rows[0])
-        throw new StoreError('invalid_transition', 'Authorization changed during claim.', 409);
-      await appendAuthorizationAudit(client, {
-        authorizationId: auth.rows[0].id,
-        taskId: current.task_id,
-        runId,
-        eventType: 'operation.started',
-        actorId: auth.rows[0].requesting_actor,
-        effectiveIdentity: `worker:${workerId}`,
-        correlationId: auth.rows[0].correlation_id,
-        outcome: 'allowed',
-      });
+      await appendRunAuthorizationAudit(client, runId, 'operation.started');
       const event = await appendEvent(
         client,
         runId,
@@ -490,7 +466,7 @@ export class PostgresRunStore {
           'run.cancelled',
           'Mock worker acknowledged cancellation.',
         );
-        await appendRunAuthorizationAudit(client, runId, 'operation.cancelled', 'recorded');
+        await appendRunAuthorizationAudit(client, runId, 'operation.cancelled');
         return { run: mapRun(cancelled.rows[0]!), events: [{ runId, event }] };
       }
       const authorizationLock = await client.query<{ allowed: boolean }>(
@@ -508,7 +484,6 @@ export class PostgresRunStore {
           client,
           runId,
           'authorization.enforcement_denied',
-          'denied',
           'revoked_before_completion',
         );
         const event = await appendEvent(
@@ -543,7 +518,7 @@ export class PostgresRunStore {
         current.task_id,
       ]);
       const event = await appendEvent(client, runId, 'run.completed', output);
-      await appendRunAuthorizationAudit(client, runId, 'operation.completed', 'allowed');
+      await appendRunAuthorizationAudit(client, runId, 'operation.completed');
       return { run: mapRun(updated.rows[0]!), events: [{ runId, event }] };
     });
   }
@@ -583,7 +558,7 @@ export class PostgresRunStore {
         'run.cancelled',
         'Mock worker acknowledged cancellation.',
       );
-      await appendRunAuthorizationAudit(client, runId, 'operation.cancelled', 'recorded');
+      await appendRunAuthorizationAudit(client, runId, 'operation.cancelled');
       return { run: mapRun(updated.rows[0]!), events: [{ runId, event }] };
     });
   }
@@ -627,13 +602,7 @@ export class PostgresRunStore {
       );
       await client.query("UPDATE omnis.tasks SET status = 'open' WHERE id = $1", [current.task_id]);
       const event = await appendEvent(client, runId, 'run.failed', message);
-      await appendRunAuthorizationAudit(
-        client,
-        runId,
-        'operation.failed',
-        'recorded',
-        'runtime_failed',
-      );
+      await appendRunAuthorizationAudit(client, runId, 'operation.failed', 'runtime_failed');
       return { run: mapRun(updated.rows[0]!), events: [{ runId, event }] };
     });
   }
@@ -659,7 +628,7 @@ export class PostgresRunStore {
       );
       await client.query("UPDATE omnis.tasks SET status = 'open' WHERE id = $1", [current.task_id]);
       const event = await appendEvent(client, runId, 'run.interrupted', message);
-      await appendRunAuthorizationAudit(client, runId, 'operation.interrupted', 'recorded');
+      await appendRunAuthorizationAudit(client, runId, 'operation.interrupted');
       return { run: mapRun(updated.rows[0]!), events: [{ runId, event }] };
     });
   }
@@ -789,7 +758,7 @@ export class PostgresRunStore {
       'run.cancelled',
       'Mock worker acknowledged cancellation.',
     );
-    await appendRunAuthorizationAudit(client, current.id, 'operation.cancelled', 'recorded');
+    await appendRunAuthorizationAudit(client, current.id, 'operation.cancelled');
     return { run: mapRun(updated.rows[0]!), events: [{ runId: current.id, event }] };
   }
 }
@@ -798,32 +767,19 @@ async function appendRunAuthorizationAudit(
   client: PoolClient,
   runId: string,
   eventType: string,
-  outcome: 'allowed' | 'denied' | 'recorded',
   reasonCode: string | null = null,
 ): Promise<void> {
-  const result = await client.query<{
-    id: string;
-    task_id: string;
-    requesting_actor: string;
-    correlation_id: string;
-  }>(
-    `SELECT id, task_id, requesting_actor, correlation_id
-       FROM omnis.runtime_authorizations WHERE consumed_run_id=$1`,
-    [runId],
+  const result = await client.query<{ recorded: boolean }>(
+    'SELECT omnis.append_runtime_authorization_audit($1, $2, $3) AS recorded',
+    [runId, eventType, reasonCode],
   );
-  const authorization = result.rows[0];
-  if (!authorization) return;
-  await appendAuthorizationAudit(client, {
-    authorizationId: authorization.id,
-    taskId: authorization.task_id,
-    runId,
-    eventType,
-    actorId: authorization.requesting_actor,
-    effectiveIdentity: 'service:omnis-worker',
-    correlationId: authorization.correlation_id,
-    outcome,
-    reasonCode,
-  });
+  if (!result.rows[0]?.recorded) {
+    throw new StoreError(
+      'invalid_transition',
+      'The runtime audit event could not be associated with an authorized run.',
+      409,
+    );
+  }
 }
 
 const runColumns = `id, task_id, task_title, status, lease_owner, lease_expires_at, execution_generation,

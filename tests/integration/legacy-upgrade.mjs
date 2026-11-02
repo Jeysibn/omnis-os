@@ -133,6 +133,7 @@ try {
     '0004_narrow_runtime_sequence_defaults',
     '0005_durable_authorization',
     '0006_authorization_revocation_lock_order',
+    '0007_authorization_audit_and_revoke_order',
   ]);
   assert.equal(afterUpgrade.unsafeRunStates, 1);
   assert.equal(
