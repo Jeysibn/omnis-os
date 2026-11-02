@@ -3,7 +3,7 @@
 **Review date:** 2026-11-02  
 **Scope:** reproducible CI, PostgreSQL logical backup/restore, and local failure injection  
 **Base revision inspected:** `e127c9bd556e8c00273786b1fb0b6318160e45ff`  
-**Final revision tested remotely:** `1e2821dad6cf9140bd98ab264654b0a485eb0fb3`
+**Final revision tested remotely:** `621f7509b36f76c6db444b945c8bbc5bb2ae5b81`
 **Data:** synthetic Omnis tasks and mock runs only; no provider inference or credentials
 
 ## Threat model and boundaries
@@ -16,7 +16,7 @@ This milestone exercises worker process loss, sandbox container loss, API restar
 
 The CI workflow pins Node `24.22.1`, pnpm `12.16.1`, PostgreSQL `17.6-alpine` by image digest, the mock sandbox image by digest, and GitHub Actions by commit SHA. It uses `contents: read`, disables persisted checkout credentials, installs with `pnpm install --frozen-lockfile`, and runs formatting, ESLint, TypeScript, tests, production build and recovery integration. Tests use synthetic data and no provider secrets.
 
-Remote GitHub Actions status: **Passed** on `1e2821dad6cf9140bd98ab264654b0a485eb0fb3`: [run 41437576359](https://github.com/Jeysibn/omnis-os/actions/runs/41437576359). GitHub reports all steps successful: pinned checkout/tool setup, sandbox image pull, frozen install, `pnpm check`, production build, `pnpm integration:recovery`, and cleanup. Total job duration was 1m41s. No production secrets or provider credentials were supplied.
+Remote GitHub Actions status: **Passed** on `621f7509b36f76c6db444b945c8bbc5bb2ae5b81`: [run 41437998618](https://github.com/Jeysibn/omnis-os/actions/runs/41437998618). GitHub reports all steps successful: pinned checkout/tool setup, sandbox image pull, frozen install, `pnpm check`, production build, `pnpm integration:recovery`, and cleanup. Total job duration was 1m44s. An earlier run also passed on `1e2821dad6cf9140bd98ab264654b0a485eb0fb3` ([run 41437576359](https://github.com/Jeysibn/omnis-os/actions/runs/41437576359)). No production secrets or provider credentials were supplied.
 
 Clean-clone verification: **Passed locally** on implementation revision `55636c3b999304b94cede48a75b182a1da6bda47` in `/tmp/omnis-os-r1g3-clean-55636c3`, cloned from local Git without build artifacts or `node_modules`. `npx --yes pnpm@12.16.1 install --frozen-lockfile` installed all 209 packages with no download, followed by `pnpm check`, `pnpm build`, and `pnpm integration:mock`. Formatting, ESLint, all TypeScript packages, 42 tests (including 11 real PostgreSQL tests and eight actual Docker sandbox tests), production build, and the API/worker integration smoke passed. The pnpm store used `/tmp/.pnpm-store/v11` because the clone and default store are on different filesystems.
 
@@ -68,7 +68,7 @@ The recovery integration completed with: `PostgreSQL-backed recovery passed: dur
 
 - The worker process is not resilient in place to a PostgreSQL outage; an external process supervisor must restart it. No default systemd/Docker supervisor is configured here.
 - The host uses a rootful Docker daemon. Rootless Docker/user namespaces, AppArmor, a separate host, and shared-daemon failure are unverified. Docker containers do not remove trust in the launcher, Docker daemon, or kernel.
-- GitHub Actions passed remotely on the published final revision. The repository is public at `https://github.com/Jeysibn/omnis-os`.
+- GitHub Actions passed remotely on published `main` at `621f7509b36f76c6db444b945c8bbc5bb2ae5b81`. The repository is public at `https://github.com/Jeysibn/omnis-os`.
 - Clean-clone checks must be recorded against the final committed revision.
 - Backups are not encrypted by these scripts; encryption and off-host retention are operational prerequisites for real data.
 - Hermes, Codex and Claude remain disabled; this evidence grants no model/runtime authorization.
