@@ -4,9 +4,9 @@
 
 - **Scope:** durable, fail-closed authorization and audit for the existing deterministic mock runtime only.
 - **Original implementation base:** PR #5 reviewed head `64cd704a3463b8e0d283710a457cf4c2282631f7` on `security/restore-failure-containment`.
-- **Updated main base:** PR #5 was squash-merged as `9c6281247de9a26a2944c630863ff5d2537416e9`; main CI passed in [run 41496554745](https://github.com/Jeysibn/omnis-os/actions/runs/41496554745). The feature branch is being rebased onto this main revision before publication and the final checks will be rerun.
+- **Updated main base:** PR #5 was squash-merged as `9c6281247de9a26a2944c630863ff5d2537416e9`; main CI passed in [run 41496554745](https://github.com/Jeysibn/omnis-os/actions/runs/41496554745). This branch was rebased onto that main revision at `bb43fb1` and the checks below were rerun on the rebased tree.
 - **Feature branch:** `security/r1g4-durable-authorization-audit`.
-- **Dependency:** The work was initially developed against PR #5's reviewed head. PR #5 has now merged; this branch must be rebased onto the merge commit above and revalidated before independent review.
+- **Dependency:** PR #5 has merged. The branch now uses its main merge commit as parent and has been revalidated locally; final branch CI remains pending publication.
 - **Provider status:** Hermes, Codex, Claude, all other model providers, and arbitrary tool execution remain disabled. No provider credentials were accessed.
 - **Gate:** This work is not a declaration that R1-G4 is complete or real-runtime execution is authorized.
 
@@ -25,17 +25,18 @@ The worker coordinator tests deny missing grants and fail closed when durable lo
 
 ## Verification record
 
-Record exact results only after the final branch revision has been checked:
+Exact local results on the rebased branch tree:
 
 | Check | Result |
 |---|---|
 | Frozen install | `npm exec --yes --package=pnpm@12.16.1 -- pnpm install --frozen-lockfile` — passed; lockfile unchanged. |
 | Formatting, ESLint, TypeScript, tests (`pnpm check`) | Passed against disposable PostgreSQL 17.6 with `OMNIS_SANDBOX_INTEGRATION=1`: format, ESLint, strict TypeScript, API 8, DB 25, worker 28, contracts 3, policy 4, runtime adapter 2, recovery/ACL/role unit tests 26; 0 failures, 0 skipped. The worker count includes 9 actual Docker sandbox tests. |
-| PostgreSQL backup/restore integration | Passed twice against disposable PostgreSQL 17.6; latest run passed with `0006_authorization_revocation_lock_order.sql`, authorizer routine ACL verification, archive restore, and mock task/run post-restore checks. |
-| Legacy upgrade | `pnpm integration:legacy-upgrade` passed from exact revision `708d0f5e9b6083da852e26c0643c60c0f5879f85`; preserved legacy task/run/event/idempotency/pg-boss state and ownership, upgraded migration checksums through `0006`, then restricted pg-boss/worker operations and new task/run creation succeeded. |
-| PostgreSQL worker recovery / API authorization flow | `pnpm integration:recovery` passed against the disposable container with owner sign-in, request/approval/run, SSE/restart recovery, cancellation, sandbox crash cleanup, PostgreSQL outage recovery, and no duplicate execution. Final run after `0006` pending completion below. |
+| PostgreSQL backup/restore integration | Passed against disposable PostgreSQL 17.6 after rebase; latest run passed with `0006_authorization_revocation_lock_order.sql`, authorizer routine ACL verification, archive restore, and mock task/run post-restore checks. |
+| Legacy upgrade | `pnpm integration:legacy-upgrade` passed after rebase from exact revision `708d0f5e9b6083da852e26c0643c60c0f5879f85`; preserved legacy task/run/event/idempotency/pg-boss state and ownership, upgraded migration checksums through `0006`, then restricted pg-boss/worker operations and new task/run creation succeeded. |
+| PostgreSQL worker recovery / API authorization flow | `pnpm integration:recovery` passed after rebase against the disposable container with owner sign-in, request/approval/run, SSE/restart recovery, cancellation, sandbox crash cleanup, PostgreSQL outage recovery, and no duplicate execution. |
 | Docker sandbox integration | Passed as part of final `pnpm check`: 9 actual-container tests, 0 failures, 0 skipped. Verified filesystem, credential, identity, resource, PID, CPU, memory, network, timeout, cancellation, and cleanup boundaries. |
 | Production build | `npm exec --yes --package=pnpm@12.16.1 -- pnpm build` — passed. |
+| Browser UI smoke | Not run. The owner-session and API authorization/run interface were exercised in `integration:recovery`; the updated confirmation dialog was compiled and covered by the production build only. |
 | GitHub Actions | Pending publication of the rebased branch. |
 
 All database and container tests use disposable resources and synthetic records. PostgreSQL ran in a unique, loopback-only container `omnis-r1g4-authz-postgres` on port `55437`, pinned to the CI PostgreSQL 17.6 image digest and labeled for recovery-test control. Only that container was stopped/restarted. Existing MoniKey containers were inspected and left untouched; the disposable container and its volume were removed after final checks. No persistent user database or provider credential was used.
@@ -48,7 +49,7 @@ All database and container tests use disposable resources and synthetic records.
 4. **Medium — revocation is checkpoint-based.** Revocation takes effect at transaction commit and is serialized with claim/completion. It cannot undo an operation completed before that commit or interrupt an external side effect already in progress. The current mock has no external side effects.
 5. **Low — expiry is derived.** PostgreSQL timestamp controls authorization; the `expired` status is derived on reads and audit is emitted when the authorizer store reads the expired row, rather than by a background expiry job.
 6. **Medium — database administrator remains trusted.** Migration ownership, security-definer routines, and audit table integrity depend on the trusted PostgreSQL administrator/migrator boundary.
-7. **Verification dependency.** The implementation was initially tested on PR #5's reviewed head. Rebase onto its squash merge `9c6281247de9a26a2944c630863ff5d2537416e9` and rerun applicable checks before treating branch CI as final.
+7. **Remote verification.** Local checks were rerun on the rebase onto `9c6281247de9a26a2944c630863ff5d2537416e9`. GitHub Actions on the feature branch remains pending until publication.
 
 ## R1-G4 readiness
 
