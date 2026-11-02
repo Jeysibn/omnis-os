@@ -32,6 +32,11 @@ if (!archiveArgument || !targetDatabase || process.argv.length !== 4) {
 if (!/^omnis_restore_[a-z0-9_]{1,48}$/.test(targetDatabase)) {
   throw new Error('Restore target must use the reserved omnis_restore_ prefix.');
 }
+if (process.env.OMNIS_TRUSTED_ARCHIVE_ACKNOWLEDGED !== 'true') {
+  throw new Error(
+    'This verifier accepts only operator-vetted trusted archives. Its digest is not authentication; do not restore untrusted archives or use this path in production.',
+  );
+}
 
 const archivePath = path.resolve(archiveArgument);
 const manifestPath = `${archivePath}.manifest.json`;

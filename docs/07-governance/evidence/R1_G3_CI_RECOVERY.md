@@ -30,7 +30,7 @@ Commands run against the isolated local Compose PostgreSQL 17.6 instance (passwo
 
 ```sh
 node --env-file=/tmp/omnis-r1g3-compose.env scripts/db-recovery/backup.mjs /tmp/omnis-r1g3-backup/omnis-test.dump
-node --env-file=/tmp/omnis-r1g3-compose.env scripts/db-recovery/restore-verify.mjs /tmp/omnis-r1g3-backup/omnis-test.dump omnis_restore_r1g3_test
+OMNIS_TRUSTED_ARCHIVE_ACKNOWLEDGED=true node --env-file=/tmp/omnis-r1g3-compose.env scripts/db-recovery/restore-verify.mjs /tmp/omnis-r1g3-backup/omnis-test.dump omnis_restore_r1g3_test
 ```
 
 The archive was 58,135 bytes, mode `0600`, and its SHA-256 was `646ce0255df7a5bc1b9d44bf1fe55dc28404ddab8704fe6b29fac552fe33e83c`. Its private manifest recorded migration `0001_initial`, two tasks, two runs, six events, terminal cancelled/interrupted history, contiguous event sequences, no active/unknown runs, and matching record fingerprints. Restore and validation took 1,149.64 ms. Counts and fingerprints matched. `pnpm integration:mock` then passed against the restored database, demonstrating application queries and run lifecycle work against restored state. The test did not start a worker until the explicit application smoke.
