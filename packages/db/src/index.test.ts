@@ -7,6 +7,7 @@ import {
   StoreError,
   type PgBossTransaction,
 } from './index.ts';
+import { provisionDatabaseRoles } from './provision-roles.ts';
 import { assertValidMetrics, metricsQuery } from '../../../scripts/db-recovery/metrics.mjs';
 
 const databaseUrl = process.env.OMNIS_TEST_DATABASE_URL;
@@ -87,6 +88,64 @@ const postgresSuite = describe(
         pool!.query("SELECT setval('omnis.task_id_seq', 1)"),
         /permission denied/,
       );
+    });
+
+    it('preserves later migration privileges when runtime roles are re-provisioned', async () => {
+      const laterMigrationTable = 'future_privilege_probe';
+      const ungrantedTable = 'future_ungranted_probe';
+      const laterMigrationSequence = 'future_privilege_sequence';
+      const ungrantedSequence = 'future_ungranted_sequence';
+      try {
+        await migrationPool!.query(`
+          CREATE TABLE omnis.${laterMigrationTable} (id integer PRIMARY KEY);
+          INSERT INTO omnis.${laterMigrationTable} VALUES (7);
+          GRANT SELECT ON omnis.${laterMigrationTable} TO omnis_runtime;
+          CREATE TABLE omnis.${ungrantedTable} (id integer PRIMARY KEY);
+          CREATE SEQUENCE omnis.${laterMigrationSequence};
+          GRANT USAGE, SELECT ON SEQUENCE omnis.${laterMigrationSequence} TO omnis_runtime;
+          CREATE SEQUENCE omnis.${ungrantedSequence};
+        `);
+
+        const migrationConnection = new URL(migrationUrl!);
+        await provisionDatabaseRoles(adminPool!, {
+          migration: decodeURIComponent(migrationConnection.password),
+          runtime: decodeURIComponent(new URL(databaseUrl!).password),
+        });
+
+        assert.equal(
+          (await pool!.query(`SELECT id FROM omnis.${laterMigrationTable}`)).rows[0]?.id,
+          7,
+          'a privilege added by a later migration should survive role reprovisioning',
+        );
+        await assert.rejects(
+          pool!.query(`SELECT id FROM omnis.${ungrantedTable}`),
+          /permission denied/,
+          'reprovisioning must not grant access to future objects without migration approval',
+        );
+        await assert.rejects(
+          pool!.query(`SELECT nextval('omnis.${ungrantedSequence}')`),
+          /permission denied/,
+          'reprovisioning must not grant access to future sequences without migration approval',
+        );
+        assert.equal(
+          (await pool!.query(`SELECT nextval('omnis.${laterMigrationSequence}') AS value`)).rows[0]
+            ?.value,
+          '1',
+          'a later migration sequence grant should survive role reprovisioning',
+        );
+
+        const task = await store.createTask({
+          title: 'Reprovisioning regression',
+          detail: 'Normal task admission remains available.',
+        });
+        const admitted = await store.admitRun(task.id, key('reprovisioning'), async () => 'job');
+        assert.equal(admitted.created, true);
+        assert.equal(admitted.run.runtimeKind, 'mock');
+      } finally {
+        await adminPool!.query(
+          `DROP TABLE IF EXISTS omnis.${laterMigrationTable}, omnis.${ungrantedTable}; DROP SEQUENCE IF EXISTS omnis.${laterMigrationSequence}, omnis.${ungrantedSequence}`,
+        );
+      }
     });
 
     it('limits runtime changes to task/run lifecycle operations and append-only records', async () => {

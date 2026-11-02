@@ -60,7 +60,6 @@ try {
       'pg_dump',
       '--format=custom',
       '--no-owner',
-      '--no-acl',
       `--snapshot=${exporter.snapshot}`,
       '--username=omnis',
       `--dbname=${sourceDatabase}`,
@@ -92,7 +91,7 @@ try {
   }
   const hash = await sha256(outputPath);
   const manifest = {
-    format: 'postgres-custom',
+    format: 'postgres-custom-acl-v1',
     sourceDatabase,
     dumpBytes: fileInfo.size,
     dumpSha256: hash,

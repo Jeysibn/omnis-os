@@ -46,7 +46,7 @@ if (!manifestInfo.isFile() || manifestInfo.isSymbolicLink() || (manifestInfo.mod
 }
 const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
 if (
-  manifest.format !== 'postgres-custom' ||
+  !['postgres-custom', 'postgres-custom-acl-v1'].includes(manifest.format) ||
   manifest.sourceDatabase !== sourceDatabase ||
   manifest.dumpBytes !== archiveInfo.size ||
   manifest.dumpSha256 !== (await sha256(archivePath)) ||
@@ -119,15 +119,31 @@ try {
       '--exit-on-error',
       '--role=omnis_migrator',
       '--no-owner',
-      '--no-acl',
       '--username=omnis',
       `--dbname=${targetDatabase}`,
     ],
     archivePath,
   );
 
-  await dockerFromFile(
-    [
+  if (manifest.format === 'postgres-custom') {
+    await dockerFromFile(
+      [
+        ...composeArgs,
+        'exec',
+        '-T',
+        'postgres',
+        'psql',
+        '-X',
+        '--no-psqlrc',
+        '--set=ON_ERROR_STOP=1',
+        '--username=omnis',
+        `--dbname=${targetDatabase}`,
+        '--file=-',
+      ],
+      runtimePrivilegesMigration,
+    );
+
+    await dockerChecked([
       ...composeArgs,
       'exec',
       '-T',
@@ -138,31 +154,16 @@ try {
       '--set=ON_ERROR_STOP=1',
       '--username=omnis',
       `--dbname=${targetDatabase}`,
-      '--file=-',
-    ],
-    runtimePrivilegesMigration,
-  );
-
-  await dockerChecked([
-    ...composeArgs,
-    'exec',
-    '-T',
-    'postgres',
-    'psql',
-    '-X',
-    '--no-psqlrc',
-    '--set=ON_ERROR_STOP=1',
-    '--username=omnis',
-    `--dbname=${targetDatabase}`,
-    '--command',
-    `GRANT USAGE ON SCHEMA pgboss TO omnis_runtime;
+      '--command',
+      `GRANT USAGE ON SCHEMA pgboss TO omnis_runtime;
      GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA pgboss TO omnis_runtime;
      GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA pgboss TO omnis_runtime;
      ALTER DEFAULT PRIVILEGES FOR ROLE omnis_migrator IN SCHEMA pgboss
        GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO omnis_runtime;
      ALTER DEFAULT PRIVILEGES FOR ROLE omnis_migrator IN SCHEMA pgboss
        GRANT USAGE, SELECT ON SEQUENCES TO omnis_runtime;`,
-  ]);
+    ]);
+  }
 
   const restoredText = await dockerOutput([
     ...composeArgs,
