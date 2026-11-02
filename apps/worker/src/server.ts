@@ -1,7 +1,7 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import Fastify from 'fastify';
 import { PgBoss } from 'pg-boss';
-import { createPool, migrate, PostgresRunStore, StoreError } from '@omnis/db';
+import { createPool, PostgresRunStore, StoreError } from '@omnis/db';
 import { CreateRunSchema, CreateTaskSchema } from '@omnis/contracts';
 import { DockerSandboxExecutor } from './docker-sandbox.ts';
 import { CoordinatorError, queueName, RunCoordinator } from './run-coordinator.ts';
@@ -22,7 +22,6 @@ if (!internalToken || internalToken.length < 64) {
 }
 const connectionString = getDatabaseUrl();
 const pool = createPool({ connectionString, max: 8, application_name: 'omnis-worker' });
-await migrate(pool);
 
 const boss = new PgBoss({
   connectionString,
@@ -30,6 +29,8 @@ const boss = new PgBoss({
   application_name: 'omnis-worker-queue',
   max: 8,
   supervise: true,
+  migrate: false,
+  createSchema: false,
 });
 const app = Fastify({ logger: { redact: ['req.headers.x-omnis-internal-token'] } });
 boss.on('error', (error) => {
@@ -265,9 +266,13 @@ function getDatabaseUrl(): string {
         'The initial worker database must be reachable through approved local Compose networking.',
       );
     }
+    if (parsed.username !== 'omnis_runtime') {
+      throw new Error('The worker database connection must use the restricted omnis_runtime role.');
+    }
     return configured;
   }
-  const password = process.env.OMNIS_DB_PASSWORD;
-  if (!password) throw new Error('OMNIS_DATABASE_URL or OMNIS_DB_PASSWORD must be configured.');
-  return `postgresql://omnis:${encodeURIComponent(password)}@127.0.0.1:5432/omnis`;
+  const password = process.env.OMNIS_RUNTIME_DB_PASSWORD;
+  if (!password)
+    throw new Error('OMNIS_DATABASE_URL or OMNIS_RUNTIME_DB_PASSWORD must be configured.');
+  return `postgresql://omnis_runtime:${encodeURIComponent(password)}@127.0.0.1:5432/omnis`;
 }

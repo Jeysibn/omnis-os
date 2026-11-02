@@ -90,6 +90,21 @@ await dockerChecked([
 ]);
 
 try {
+  await dockerChecked([
+    ...composeArgs,
+    'exec',
+    '-T',
+    'postgres',
+    'psql',
+    '-X',
+    '--no-psqlrc',
+    '--set=ON_ERROR_STOP=1',
+    '--username=omnis',
+    '--dbname=postgres',
+    '--command',
+    `GRANT CONNECT, CREATE ON DATABASE "${targetDatabase}" TO omnis_migrator; GRANT CONNECT ON DATABASE "${targetDatabase}" TO omnis_runtime;`,
+  ]);
+
   await dockerFromFile(
     [
       ...composeArgs,
@@ -98,6 +113,7 @@ try {
       'postgres',
       'pg_restore',
       '--exit-on-error',
+      '--role=omnis_migrator',
       '--no-owner',
       '--no-acl',
       '--username=omnis',
@@ -105,6 +121,46 @@ try {
     ],
     archivePath,
   );
+
+  await dockerChecked([
+    ...composeArgs,
+    'exec',
+    '-T',
+    'postgres',
+    'psql',
+    '-X',
+    '--no-psqlrc',
+    '--set=ON_ERROR_STOP=1',
+    '--username=omnis',
+    `--dbname=${targetDatabase}`,
+    '--command',
+    `GRANT USAGE ON SCHEMA omnis, pgboss TO omnis_runtime;
+     GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA omnis, pgboss TO omnis_runtime;
+     GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA omnis, pgboss TO omnis_runtime;
+     ALTER DEFAULT PRIVILEGES FOR ROLE omnis_migrator IN SCHEMA omnis GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO omnis_runtime;
+     ALTER DEFAULT PRIVILEGES FOR ROLE omnis_migrator IN SCHEMA omnis GRANT USAGE, SELECT ON SEQUENCES TO omnis_runtime;
+     ALTER DEFAULT PRIVILEGES FOR ROLE omnis_migrator IN SCHEMA pgboss GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO omnis_runtime;
+     ALTER DEFAULT PRIVILEGES FOR ROLE omnis_migrator IN SCHEMA pgboss GRANT USAGE, SELECT ON SEQUENCES TO omnis_runtime;`,
+  ]);
+
+  await dockerChecked([
+    ...composeArgs,
+    'exec',
+    '-T',
+    'postgres',
+    'psql',
+    '-X',
+    '--no-psqlrc',
+    '--set=ON_ERROR_STOP=1',
+    '--username=omnis_runtime',
+    `--dbname=${targetDatabase}`,
+    '--command',
+    `BEGIN;
+     INSERT INTO omnis.tasks (id, title, detail, status)
+     VALUES ('task-' || lpad(nextval('omnis.task_id_seq')::text, 4, '0'),
+       'Restore permission probe', 'Synthetic rollback-only verification.', 'open');
+     ROLLBACK;`,
+  ]);
 
   const reportText = await dockerOutput([
     ...composeArgs,
@@ -131,7 +187,7 @@ try {
   process.stdout.write(
     `Restore verified in isolated database ${targetDatabase}; source and target counts match: ${JSON.stringify(report)}\n` +
       `Restore and validation duration: ${Number(process.hrtime.bigint() - restoreStartedAt) / 1_000_000} ms.\n` +
-      'The target database is not configured as the application database; no worker was started against it.\n',
+      'Runtime-role INSERT and sequence access passed in a rolled-back transaction; no worker was started against the target.\n',
   );
 } catch (error) {
   process.stderr.write(
@@ -163,7 +219,7 @@ function createComposeArgs() {
     throw new Error('OMNIS_COMPOSE_PROJECT_NAME is invalid.');
   }
   const envFile = path.resolve(
-    process.env.OMNIS_COMPOSE_ENV_FILE ?? path.join(repositoryRoot, '.env'),
+    process.env.OMNIS_COMPOSE_ENV_FILE ?? path.join(repositoryRoot, '.env.db-admin'),
   );
   return [
     'compose',

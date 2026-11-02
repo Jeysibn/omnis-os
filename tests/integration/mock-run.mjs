@@ -7,28 +7,57 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
+import { createPool } from '../../packages/db/src/index.ts';
 
 const scrypt = promisify(scryptCallback);
 const password = 'test-owner-password-2026';
 const origin = 'http://127.0.0.1:5173';
 const databaseUrl = process.env.OMNIS_TEST_DATABASE_URL;
+const migrationUrl = process.env.OMNIS_TEST_MIGRATION_DATABASE_URL;
 if (!databaseUrl)
   throw new Error('Set OMNIS_TEST_DATABASE_URL to a disposable PostgreSQL database.');
+if (!migrationUrl)
+  throw new Error(
+    'Set OMNIS_TEST_MIGRATION_DATABASE_URL to a disposable migration-role connection.',
+  );
 if (!/(?:^|[_-])test(?:s)?$/i.test(new URL(databaseUrl).pathname.slice(1))) {
   throw new Error('OMNIS_TEST_DATABASE_URL must point to a database ending in test or tests.');
 }
+if (new URL(databaseUrl).username !== 'omnis_runtime') {
+  throw new Error('OMNIS_TEST_DATABASE_URL must use the restricted omnis_runtime role.');
+}
+if (new URL(migrationUrl).username !== 'omnis_migrator') {
+  throw new Error('OMNIS_TEST_MIGRATION_DATABASE_URL must use omnis_migrator.');
+}
+const migration = spawnSync(process.execPath, ['--experimental-strip-types', 'src/migrate.ts'], {
+  cwd: new URL('../../apps/worker/', import.meta.url),
+  env: { ...withoutDatabaseSecrets(process.env), OMNIS_MIGRATION_DATABASE_URL: migrationUrl },
+  encoding: 'utf8',
+});
+if (migration.error || migration.status !== 0) {
+  throw new Error(
+    `Disposable PostgreSQL migrations failed (exit ${migration.status ?? 'unknown'}).`,
+  );
+}
 const tempDirectory = await mkdtemp(join(tmpdir(), 'omnis-os-mock-smoke-'));
-const envPath = join(tempDirectory, 'local.env');
+const workerEnvPath = join(tempDirectory, 'worker.env');
+const apiEnvPath = join(tempDirectory, 'api.env');
+const canaryName = `OMNIS_DUMMY_PROVIDER_SECRET_${randomBytes(12).toString('hex')}`;
+const canary = `OMNIS_SYNTHETIC_CANARY_${randomBytes(24).toString('hex')}`;
+const auditPool = createPool({
+  connectionString: databaseUrl,
+  max: 1,
+  application_name: 'omnis-canary-check',
+});
 const apiPort = await freePort();
 const workerPort = await freePort(new Set([apiPort]));
 const salt = randomBytes(16);
 const internalToken = randomBytes(48).toString('hex');
 const passwordHash = (await scrypt(password, salt, 64)).toString('hex');
-const envLines = [
+const sharedEnvLines = [
   `OMNIS_OWNER_PASSWORD_HASH=${salt.toString('hex')}:${passwordHash}`,
   `OMNIS_SESSION_SECRET=${randomBytes(48).toString('hex')}`,
   `OMNIS_INTERNAL_TOKEN=${internalToken}`,
-  `OMNIS_DATABASE_URL=${databaseUrl}`,
   `OMNIS_API_HOST=127.0.0.1`,
   `OMNIS_API_PORT=${apiPort}`,
   `OMNIS_WORKER_HOST=127.0.0.1`,
@@ -36,10 +65,15 @@ const envLines = [
   `OMNIS_ALLOWED_ORIGIN=${origin}`,
   'OMNIS_SECURE_COOKIES=false',
 ];
-await writeFile(envPath, `${envLines.join('\n')}\n`, { mode: 0o600 });
+await writeFile(apiEnvPath, `${sharedEnvLines.join('\n')}\n`, { mode: 0o600 });
+await writeFile(
+  workerEnvPath,
+  `${[...sharedEnvLines, `OMNIS_DATABASE_URL=${databaseUrl}`].join('\n')}\n`,
+  { mode: 0o600 },
+);
 
-let worker = startWorker(envPath);
-let api = startApi(envPath);
+let worker = startWorker(workerEnvPath);
+let api = startApi(apiEnvPath);
 
 try {
   const baseUrl = `http://127.0.0.1:${apiPort}`;
@@ -68,6 +102,36 @@ try {
     body: JSON.stringify({ title: 'Blocked task', detail: 'This mutation must be denied.' }),
   });
   assert.equal(blockedMutation.status, 401);
+
+  const invalidLogin = () =>
+    fetch(`${baseUrl}/api/v1/auth/login`, {
+      method: 'POST',
+      headers: {
+        cookie: anonCookie,
+        origin,
+        'x-omnis-csrf': csrf,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ password: 'incorrect synthetic password' }),
+    });
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    assert.equal((await invalidLogin()).status, 401);
+  }
+  const throttledInvalid = await invalidLogin();
+  assert.equal(throttledInvalid.status, 429);
+  assert.equal(throttledInvalid.headers.get('retry-after'), '1');
+  const throttledValid = await fetch(`${baseUrl}/api/v1/auth/login`, {
+    method: 'POST',
+    headers: {
+      cookie: anonCookie,
+      origin,
+      'x-omnis-csrf': csrf,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ password }),
+  });
+  assert.equal(throttledValid.status, 429);
+  await delay(1_100);
 
   let { ownerCookie, ownerCsrf } = await signInOwner(baseUrl);
   assert.equal(
@@ -148,7 +212,7 @@ try {
   const sequences = events.map((event) => event.sequence);
   assert.deepEqual(
     sequences,
-    [...sequences].sort((a, b) => a - b),
+    Array.from({ length: sequences.length }, (_, index) => index + 1),
   );
 
   const finalRun = await fetch(`${baseUrl}/api/v1/runs/${run.id}`, {
@@ -159,7 +223,7 @@ try {
   assert.equal(unauthorizedStop.status, 401);
 
   await stopProcess(api);
-  api = startApi(envPath);
+  api = startApi(apiEnvPath);
   await waitForHealth(baseUrl, `http://127.0.0.1:${workerPort}`, internalToken, worker, api);
   ({ ownerCookie, ownerCsrf } = await signInOwner(baseUrl));
   const recoveredTasksResponse = await fetch(`${baseUrl}/api/v1/tasks`, {
@@ -185,10 +249,71 @@ try {
   );
   assert.ok(replayEvents.length >= 2);
   assert.ok(replayEvents.every((event) => event.sequence > 1));
+  assert.deepEqual(
+    replayEvents.map((event) => event.sequence),
+    Array.from(
+      { length: replayEvents.at(-1).sequence - replayEvents[0].sequence + 1 },
+      (_, index) => replayEvents[0].sequence + index,
+    ),
+  );
   assert.equal(new Set(replayEvents.map((event) => event.id)).size, replayEvents.length);
 
+  const canaryTaskResponse = await fetch(`${baseUrl}/api/v1/tasks`, {
+    method: 'POST',
+    headers: {
+      cookie: ownerCookie,
+      origin,
+      'x-omnis-csrf': ownerCsrf,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      title: 'Synthetic credential isolation probe',
+      detail: 'Run the deterministic synthetic fixture and verify credential separation.',
+    }),
+  });
+  const canaryTaskText = await canaryTaskResponse.text();
+  assert.equal(canaryTaskResponse.status, 201);
+  assert.equal(canaryTaskText.includes(canary), false);
+  const canaryTask = JSON.parse(canaryTaskText);
+  const canaryRunResponse = await fetch(`${baseUrl}/api/v1/runs`, {
+    method: 'POST',
+    headers: {
+      cookie: ownerCookie,
+      origin,
+      'x-omnis-csrf': ownerCsrf,
+      'idempotency-key': `canary-probe-${randomBytes(16).toString('hex')}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ taskId: canaryTask.id }),
+  });
+  const canaryRunText = await canaryRunResponse.text();
+  assert.equal(canaryRunResponse.status, 201);
+  assert.equal(canaryRunText.includes(canary), false);
+  const canaryRun = JSON.parse(canaryRunText);
+  await waitForRunStatus(baseUrl, canaryRun.id, 'completed', ownerCookie, worker, api, 20_000);
+  const canaryRunRead = await fetch(`${baseUrl}/api/v1/runs/${canaryRun.id}`, {
+    headers: { cookie: ownerCookie },
+  });
+  const canaryRunReadText = await canaryRunRead.text();
+  assert.equal(canaryRunRead.status, 200);
+  assert.equal(canaryRunReadText.includes(canary), false);
+  const canaryEvents = await fetchRunEvents(baseUrl, canaryRun.id, ownerCookie);
+  assert.equal(JSON.stringify(canaryEvents).includes(canary), false);
+  const persistedRecords = await auditPool.query(`
+    SELECT COALESCE(string_agg(record::text, E'\\n'), '') AS records
+    FROM (
+      SELECT to_jsonb(t) AS record FROM omnis.tasks t
+      UNION ALL SELECT to_jsonb(r) FROM omnis.runs r
+      UNION ALL SELECT to_jsonb(e) FROM omnis.run_events e
+      UNION ALL SELECT to_jsonb(i) FROM omnis.run_idempotency i
+    ) records
+  `);
+  assert.equal(persistedRecords.rows[0]?.records.includes(canary), false);
+  assert.equal(worker.capturedLogs.includes(canary), false);
+  assert.equal(api.capturedLogs.includes(canary), false);
+
   await stopProcess(worker);
-  worker = startWorker(envPath);
+  worker = startWorker(workerEnvPath);
   await waitForHealth(baseUrl, `http://127.0.0.1:${workerPort}`, internalToken, worker, api);
   const afterWorkerRestartResponse = await fetch(`${baseUrl}/api/v1/runs/${run.id}`, {
     headers: { cookie: ownerCookie },
@@ -225,7 +350,7 @@ try {
   const interruptedRun = await interruptedAdmission.json();
   await waitForRunStatus(baseUrl, interruptedRun.id, 'running', ownerCookie, worker, api);
   await stopProcess(worker);
-  worker = startWorker(envPath);
+  worker = startWorker(workerEnvPath);
   await waitForHealth(baseUrl, `http://127.0.0.1:${workerPort}`, internalToken, worker, api);
   await waitForRunStatus(
     baseUrl,
@@ -268,7 +393,7 @@ try {
     await waitForRunStatus(baseUrl, crashedWorkerRun.id, 'running', ownerCookie, worker, api);
     await waitForSandboxContainer(crashedWorkerRun.id);
     await killProcessAbruptly(worker);
-    worker = startWorker(envPath);
+    worker = startWorker(workerEnvPath);
     await waitForHealth(baseUrl, `http://127.0.0.1:${workerPort}`, internalToken, worker, api);
     await waitForRunStatus(
       baseUrl,
@@ -305,7 +430,7 @@ try {
         baseUrl,
         ownerCookie,
         ownerCsrf,
-        envPath,
+        workerEnvPath,
         workerUrl: `http://127.0.0.1:${workerPort}`,
         internalToken,
         worker,
@@ -322,33 +447,74 @@ try {
 } finally {
   await stopProcess(api);
   await stopProcess(worker);
-  await unlink(envPath).catch(() => undefined);
+  await auditPool.end();
+  await unlink(apiEnvPath).catch(() => undefined);
+  await unlink(workerEnvPath).catch(() => undefined);
 }
 
 function startWorker(envFile) {
-  return spawn(
+  const env = withoutDatabaseSecrets(process.env);
+  delete env.OMNIS_TEST_DATABASE_URL;
+  delete env.OMNIS_TEST_MIGRATION_DATABASE_URL;
+  delete env.OMNIS_TEST_ADMIN_DATABASE_URL;
+  env[canaryName] = canary;
+  if (process.env.OMNIS_RECOVERY_INTEGRATION === '1') {
+    env.NODE_ENV = 'test';
+    env.OMNIS_MOCK_TEST_DELAY_MS = '1000';
+  }
+  const child = spawn(
     process.execPath,
     ['--experimental-strip-types', `--env-file=${envFile}`, 'src/server.ts'],
     {
       cwd: new URL('../../apps/worker/', import.meta.url),
-      env:
-        process.env.OMNIS_RECOVERY_INTEGRATION === '1'
-          ? { ...process.env, NODE_ENV: 'test', OMNIS_MOCK_TEST_DELAY_MS: '1000' }
-          : process.env,
-      stdio: process.env.OMNIS_TEST_DEBUG === '1' ? 'inherit' : 'ignore',
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
     },
   );
+  return captureProcessOutput(child);
+}
+
+function withoutDatabaseSecrets(environment) {
+  const clean = { ...environment };
+  for (const key of [
+    'OMNIS_DB_PASSWORD',
+    'OMNIS_RUNTIME_DB_PASSWORD',
+    'OMNIS_DATABASE_URL',
+    'OMNIS_TEST_DATABASE_URL',
+    'OMNIS_ADMIN_DATABASE_URL',
+    'OMNIS_MIGRATION_DATABASE_URL',
+    'OMNIS_MIGRATION_DB_PASSWORD',
+    'OMNIS_TEST_ADMIN_DATABASE_URL',
+    'OMNIS_TEST_MIGRATION_DATABASE_URL',
+  ])
+    delete clean[key];
+  return clean;
 }
 
 function startApi(envFile) {
-  return spawn(
+  const env = withoutDatabaseSecrets(process.env);
+  delete env[canaryName];
+  const child = spawn(
     process.execPath,
     ['--experimental-strip-types', `--env-file=${envFile}`, 'src/server.ts'],
     {
       cwd: new URL('../../apps/api/', import.meta.url),
-      stdio: process.env.OMNIS_TEST_DEBUG === '1' ? 'inherit' : 'ignore',
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
     },
   );
+  return captureProcessOutput(child);
+}
+
+function captureProcessOutput(child) {
+  child.capturedLogs = '';
+  for (const stream of [child.stdout, child.stderr]) {
+    stream?.on('data', (chunk) => {
+      child.capturedLogs = `${child.capturedLogs}${chunk.toString('utf8')}`.slice(-262_144);
+      if (process.env.OMNIS_TEST_DEBUG === '1') process.stderr.write(chunk);
+    });
+  }
+  return child;
 }
 
 async function freePort(excluded = new Set()) {
@@ -612,7 +778,7 @@ async function testDatabaseAvailabilityLoss({
   baseUrl,
   ownerCookie,
   ownerCsrf,
-  envPath,
+  workerEnvPath,
   workerUrl,
   internalToken,
   worker,
@@ -675,7 +841,7 @@ async function testDatabaseAvailabilityLoss({
   }
 
   await waitForPostgresContainer(container);
-  if (worker.exitCode !== null) worker = startWorker(envPath);
+  if (worker.exitCode !== null) worker = startWorker(workerEnvPath);
   await waitForHealth(baseUrl, workerUrl, internalToken, worker, api);
   const startedAt = Date.now();
   let recoveryResponse;

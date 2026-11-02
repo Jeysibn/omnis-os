@@ -25,7 +25,6 @@ export async function migrate(pool: Pool): Promise<void> {
     await client.query('SELECT pg_advisory_lock($1::bigint)', [migrationLock]);
     await client.query('BEGIN');
     try {
-      await client.query('CREATE SCHEMA IF NOT EXISTS omnis');
       await client.query(`
         CREATE TABLE IF NOT EXISTS omnis.schema_migrations (
           id text PRIMARY KEY,

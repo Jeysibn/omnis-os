@@ -25,7 +25,6 @@ describe(
       const dummyCredential = path.join(hostOnly, 'dummy-credential.txt');
       const otherRunFile = path.join(otherRun, 'unrelated-run.txt');
       await writeFile(hostOnlyFile, 'synthetic host-only fixture');
-      await writeFile(dummyCredential, 'synthetic dummy credential');
       await writeFile(otherRunFile, 'synthetic unrelated run fixture');
 
       const hostLoopback = await listenOnLoopback();
@@ -35,6 +34,7 @@ describe(
       const hostSecretName = `OMNIS_DUMMY_SECRET_${randomUUID().replaceAll('-', '')}`;
       const previousHostSecret = process.env[hostSecretName];
       const canary = `OMNIS_SYNTHETIC_SECRET_${randomUUID().replaceAll('-', '')}`;
+      await writeFile(dummyCredential, canary);
       process.env[hostSecretName] = canary;
       const executor = new DockerSandboxExecutor({ workspaceRoot: sandboxRoot });
 
@@ -66,6 +66,7 @@ describe(
             NetworkMode: string;
             CapDrop: string[];
             SecurityOpt: string[] | null;
+            Init: boolean;
           };
           Mounts: Array<{ Type: string; Source: string; Destination: string }>;
         };
@@ -81,6 +82,7 @@ describe(
           mountpoint === '/' ||
           mountpoint === '/workspace' ||
           mountpoint === '/tmp' ||
+          mountpoint === '/sbin/docker-init' ||
           mountpoint === '/dev' ||
           mountpoint.startsWith('/dev/') ||
           mountpoint === '/proc' ||
@@ -93,6 +95,15 @@ describe(
           .filter(Boolean)
           .map((line) => line.split(' ')[4] ?? '')
           .filter((mountpoint) => !allowedMount(mountpoint));
+        const dockerInitMount = mountInfo
+          .split('\n')
+          .find((line) => line.split(' ')[4] === '/sbin/docker-init');
+        assert.ok(dockerInitMount, 'Docker --init may mount only its runtime init executable');
+        assert.match(
+          dockerInitMount,
+          /\/docker-init \/sbin\/docker-init /,
+          'the Docker init mount must be its dedicated init executable',
+        );
         assert.deepEqual(
           unexpectedMounts,
           [],
@@ -131,11 +142,19 @@ describe(
         assert.equal(network.dns, false);
         assert.equal(network.defaultRoute, false);
 
-        const workspaceEntries = await readdir(sandboxRoot).catch(() => []);
+        const scopeEntries = await readdir(sandboxRoot).catch(() => []);
         assert.deepEqual(
-          workspaceEntries,
+          scopeEntries,
+          ['000000000000000000000000'],
+          'the only retained directory may be the current environment scope',
+        );
+        const runWorkspaceEntries = await readdir(
+          path.join(sandboxRoot, '000000000000000000000000'),
+        ).catch(() => []);
+        assert.deepEqual(
+          runWorkspaceEntries,
           [],
-          'per-run workspace and temporary Docker config must be removed',
+          'per-run workspaces must be removed after container completion',
         );
       } finally {
         if (previousHostSecret === undefined) delete process.env[hostSecretName];
@@ -548,6 +567,7 @@ function assertSandboxConfiguration(
       NetworkMode: string;
       CapDrop: string[];
       SecurityOpt: string[] | null;
+      Init: boolean;
     };
     Mounts: Array<{ Type: string; Source: string; Destination: string }>;
   },
@@ -556,6 +576,7 @@ function assertSandboxConfiguration(
   assert.equal(inspected.Config.Image, SANDBOX_IMAGE_REF);
   assert.equal(inspected.HostConfig.ReadonlyRootfs, true);
   assert.equal(inspected.HostConfig.NetworkMode, 'none');
+  assert.equal(inspected.HostConfig.Init, true);
   assert.deepEqual(inspected.HostConfig.CapDrop, ['ALL']);
   const securityOptions = inspected.HostConfig.SecurityOpt ?? [];
   assert.ok(securityOptions.includes('no-new-privileges:true'));
@@ -582,6 +603,7 @@ describe('sandbox inspection assertions', () => {
         NetworkMode: 'none',
         CapDrop: ['ALL'],
         SecurityOpt: ['no-new-privileges:true'],
+        Init: true,
       },
       Mounts: [{ Type: 'bind', Source: '/tmp/approved-run', Destination: '/workspace' }],
     };

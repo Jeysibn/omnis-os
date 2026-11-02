@@ -285,7 +285,7 @@ function createComposeArgs() {
     throw new Error('OMNIS_COMPOSE_PROJECT_NAME is invalid.');
   }
   const envFile = path.resolve(
-    process.env.OMNIS_COMPOSE_ENV_FILE ?? path.join(repositoryRoot, '.env'),
+    process.env.OMNIS_COMPOSE_ENV_FILE ?? path.join(repositoryRoot, '.env.db-admin'),
   );
   return [
     'compose',
