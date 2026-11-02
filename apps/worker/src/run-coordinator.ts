@@ -14,7 +14,8 @@ import {
   type Task,
 } from '@omnis/contracts';
 import { evaluateAllowedUse } from '@omnis/policy';
-import { MockRuntimeAdapter } from '@omnis/runtime-adapters';
+import type { RuntimeAdapter } from '@omnis/runtime-adapters';
+import { SandboxError } from './docker-sandbox.ts';
 
 export class CoordinatorError extends Error {
   readonly code:
@@ -47,7 +48,7 @@ export class RunCoordinator {
   private readonly emitter = new EventEmitter();
   private readonly workerId = randomUUID();
   private readonly active = new Map<string, ActiveExecution>();
-  private readonly runtime = new MockRuntimeAdapter();
+  private readonly runtime: RuntimeAdapter;
   private shuttingDown = false;
   private readonly store: PostgresRunStore;
   private readonly heartbeatIntervalMs: number;
@@ -62,11 +63,13 @@ export class RunCoordinator {
   constructor(
     store: PostgresRunStore,
     queue: RunCoordinator['queue'],
+    runtime: RuntimeAdapter,
     heartbeatIntervalMs = leaseHeartbeatMs,
   ) {
     this.store = store;
     this.queue = queue;
     this.heartbeatIntervalMs = heartbeatIntervalMs;
+    this.runtime = runtime;
   }
 
   async createTask(input: CreateTaskInput): Promise<Task> {
@@ -172,6 +175,11 @@ export class RunCoordinator {
       }
     }
     this.publish(events);
+    if (this.runtime.cleanupOrphanedExecutions) {
+      await this.runtime.cleanupOrphanedExecutions((candidateRunIds) =>
+        this.store.listActiveRunIds(candidateRunIds),
+      );
+    }
   }
 
   async shutdown(): Promise<void> {
@@ -242,6 +250,15 @@ export class RunCoordinator {
         await eventWrites;
       } catch (runtimeError) {
         await eventWrites;
+        if (runtimeError instanceof SandboxError && runtimeError.code === 'termination_failed') {
+          const result = await this.store.interruptRun(
+            runId,
+            this.workerId,
+            'The sandbox stop could not be confirmed. The run was interrupted for safety.',
+          );
+          if (result) this.publish(result.events);
+          return;
+        }
         if (controller.signal.aborted) {
           const cause = controller.signal.reason as AbortCause | undefined;
           if (cause === 'cancel-requested') {
@@ -259,8 +276,7 @@ export class RunCoordinator {
           }
           return;
         }
-        const message =
-          runtimeError instanceof Error ? runtimeError.message : 'Unknown mock runtime error.';
+        const message = safeRuntimeFailureMessage(runtimeError);
         const failed = await this.store.failRun(runId, this.workerId, message);
         this.publish(failed.events);
         return;
@@ -290,6 +306,28 @@ export class RunCoordinator {
       // The database commit precedes this call. Subscribers can always recover missed events by cursor.
       this.emitter.emit(runId, RunEventSchema.parse(event));
     }
+  }
+}
+
+function safeRuntimeFailureMessage(error: unknown): string {
+  if (!(error instanceof SandboxError)) {
+    return 'The mock runtime failed inside its isolated execution environment.';
+  }
+
+  switch (error.code) {
+    case 'timed_out':
+      return 'The sandbox execution exceeded its time limit.';
+    case 'output_limit':
+      return 'The sandbox exceeded its output limit.';
+    case 'unavailable':
+    case 'launch_failed':
+      return 'The sandbox could not be started.';
+    case 'crashed':
+      return 'The sandboxed mock process exited unexpectedly.';
+    case 'cancelled':
+      return 'The sandbox execution was cancelled.';
+    case 'termination_failed':
+      return 'The sandbox stop could not be confirmed. The run was interrupted for safety.';
   }
 }
 

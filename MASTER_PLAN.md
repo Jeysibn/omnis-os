@@ -1,7 +1,7 @@
 # Omnis OS - Master Implementation Plan
 
 **Version:** 1.1 (project branding update; technical scope unchanged)  
-**Status:** Scope agreed, architecture proposed; no code yet.  
+**Status:** Incremental implementation in progress; R1-G1 persistence and R1-G2 local mock sandbox checkpoints recorded.
 **Date:** 2026-11-02  
 **Product name:** Omnis OS (selected by owner).  
 **Repository slug:** `omnis-os`.  
@@ -63,7 +63,7 @@ Director -> Web UI -> authenticated Fastify control plane -> authorization and b
 ## 6. Release sequence
 
 - **Phase 0: Investigation + guardrails.** Versions, entitlement/policy checks, capability probes, host security, acceptance targets.
-- **Phase 1: Foundation + one real run.** Auth, DB, profile, project/task, Hermes-first adapter if verified, SSE, cancel, persistent history, test harness. The implemented R1-G1 checkpoint is a persistent mock lifecycle only; it does not complete Phase 1 or authorize a real runtime.
+- **Phase 1: Foundation + one real run.** Auth, DB, profile, project/task, Hermes-first adapter if verified, SSE, cancel, persistent history, test harness. R1-G1 provides a persistent mock lifecycle and R1-G2 adds local container isolation for that mock. Neither checkpoint completes Phase 1 or authorizes a real runtime.
 - **Phase 2: Runtime plurality + isolated chat.** Codex and Claude paths behind capability gates, per-chat sessions, model picker, token measurement.
 - **Phase 3: Skills/MCP + knowledge.** Approved skill snapshots, scoped tool grants, global/project knowledge and write-review flow.
 - **Phase 4: PM + workflows + automation.** Dependencies, milestones, scheduling, retries, announcements, budget controls.

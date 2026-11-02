@@ -17,6 +17,7 @@
     "prepare": "node --experimental-strip-types scripts/configure-hooks.ts",
     "db:up": "docker compose --env-file .env -f infra/compose/docker-compose.yml up -d postgres",
     "db:down": "docker compose --env-file .env -f infra/compose/docker-compose.yml down",
+    "sandbox:image:pull": "docker pull node@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85",
     "integration:mock": "node tests/integration/mock-run.mjs",
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",

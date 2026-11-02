@@ -24,6 +24,7 @@ jobs:
           --health-retries 12
     env:
       OMNIS_TEST_DATABASE_URL: postgresql://omnis:omnis_test_password@127.0.0.1:5432/omnis_test
+      OMNIS_SANDBOX_INTEGRATION: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -33,6 +34,7 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+      - run: docker pull node@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
       - run: pnpm build

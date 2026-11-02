@@ -150,6 +150,36 @@ const postgresSuite = describe('PostgreSQL run store', { skip: !databaseUrl }, (
     );
   });
 
+  it('persists sandbox failure state and a safe ordered failure event', async () => {
+    const task = await store.createTask({
+      title: 'Exercise the isolated runtime',
+      detail: 'The trusted worker owns this task and failure state.',
+    });
+    const admitted = await store.admitRun(task.id, key('sandbox-failure'), async () => 'job');
+    await store.beginExecution(admitted.run.id, 'worker-sandbox', 30);
+
+    const failed = await store.failRun(
+      admitted.run.id,
+      'worker-sandbox',
+      'The sandbox execution exceeded its time limit.',
+    );
+
+    assert.equal(failed.run.status, 'failed');
+    assert.deepEqual(
+      (await store.getEvents(admitted.run.id)).map((event) => [event.sequence, event.type]),
+      [
+        [1, 'run.queued'],
+        [2, 'run.started'],
+        [3, 'run.failed'],
+      ],
+    );
+    assert.equal(
+      (await store.getEvents(admitted.run.id))[2]?.message,
+      'The sandbox execution exceeded its time limit.',
+    );
+    assert.equal((await store.getTask(task.id))?.status, 'open');
+  });
+
   it('delivers a durable stop request to the process holding the execution lease', async () => {
     const task = await store.createTask({
       title: 'Observe stop state',
@@ -161,6 +191,26 @@ const postgresSuite = describe('PostgreSQL run store', { skip: !databaseUrl }, (
 
     assert.equal(await store.renewLease(admitted.run.id, 'worker-owner', 30), 'stop_requested');
     assert.equal(await store.renewLease(admitted.run.id, 'other-worker', 30), false);
+  });
+
+  it('does not let an expired worker lease be revived by a late heartbeat', async () => {
+    const task = await store.createTask({
+      title: 'Reject stale lease heartbeat',
+      detail: 'Expired lease ownership cannot be reclaimed without a new run.',
+    });
+    const admitted = await store.admitRun(
+      task.id,
+      key('expired-lease-heartbeat'),
+      async () => 'job',
+    );
+    await store.beginExecution(admitted.run.id, 'stale-worker', 30);
+    await pool!.query(
+      "UPDATE omnis.runs SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
+      [admitted.run.id],
+    );
+
+    assert.equal(await store.renewLease(admitted.run.id, 'stale-worker', 30), false);
+    assert.deepEqual(await store.listActiveRunIds([admitted.run.id]), []);
   });
 
   it('acknowledges cancellation when an unstarted queued job is gone', async () => {
@@ -203,6 +253,7 @@ const postgresSuite = describe('PostgreSQL run store', { skip: !databaseUrl }, (
       return `job-${runId}`;
     });
     await store.beginExecution(admitted.run.id, 'worker-old', 1);
+    assert.ok((await store.listActiveRunIds()).includes(admitted.run.id));
     await pool!.query(
       "UPDATE omnis.runs SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
       [admitted.run.id],
@@ -212,6 +263,7 @@ const postgresSuite = describe('PostgreSQL run store', { skip: !databaseUrl }, (
     assert.equal((await store.getRun(admitted.run.id))?.status, 'interrupted');
     assert.equal(recovered[0]?.event.type, 'run.interrupted');
     assert.equal((await store.getTask(task.id))?.status, 'open');
+    assert.equal((await store.listActiveRunIds()).includes(admitted.run.id), false);
 
     const anotherTask = await store.createTask({
       title: 'Later task',

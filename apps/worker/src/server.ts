@@ -1,9 +1,11 @@
-import { timingSafeEqual } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import Fastify from 'fastify';
 import { PgBoss } from 'pg-boss';
 import { createPool, migrate, PostgresRunStore, StoreError } from '@omnis/db';
 import { CreateRunSchema, CreateTaskSchema } from '@omnis/contracts';
+import { DockerSandboxExecutor } from './docker-sandbox.ts';
 import { CoordinatorError, queueName, RunCoordinator } from './run-coordinator.ts';
+import { SandboxedMockRuntimeAdapter } from './sandboxed-mock-runtime.ts';
 
 const host = process.env.OMNIS_WORKER_HOST ?? '127.0.0.1';
 const port = Number(process.env.OMNIS_WORKER_PORT ?? 4101);
@@ -36,7 +38,16 @@ await boss.start({ attempts: 5 });
 await boss.createQueue(queueName, { retryLimit: 0, retryDelay: 0 });
 
 const store = new PostgresRunStore(pool);
-const coordinator = new RunCoordinator(store, boss);
+const databaseIdentity = new URL(connectionString);
+const sandboxScope = createHash('sha256')
+  .update(
+    `${databaseIdentity.protocol}//${databaseIdentity.hostname}:${databaseIdentity.port}${databaseIdentity.pathname}`,
+  )
+  .digest('hex')
+  .slice(0, 24);
+const sandbox = new DockerSandboxExecutor({ scopeId: sandboxScope });
+const runtime = new SandboxedMockRuntimeAdapter(sandbox);
+const coordinator = new RunCoordinator(store, boss, runtime);
 await coordinator.reconcileExpiredRuns();
 await boss.work(queueName, { batchSize: 1, localConcurrency: 1 }, async ([job]) => {
   if (job) await coordinator.handleQueueJob(job.data, job.signal);

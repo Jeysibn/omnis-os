@@ -2,7 +2,7 @@
 
 **Review date:** 2026-11-02  
 **Scope:** Phase 0 host/runtime gate and safe Phase 1 foundation  
-**Status:** Real runtime gate blocked; safe mock scaffold may proceed. Technology versions are proposals derived from the available environment, not owner approval.
+**Status:** Real runtime gate blocked; R1-G2 local mock sandbox passed its implemented acceptance checks. Production isolation, remote CI, and runtime authorization remain open. Technology versions are proposals derived from the available environment, not owner approval.
 
 ## Decisions
 
@@ -16,6 +16,7 @@
 | D-006 | Do not enable Claude background runs pending plan/Agent SDK policy review. Do not create a third-party credential tunnel. | Security/policy gate |
 | D-007 | Do not start Hermes API or send provider inference until its tool capabilities can be restricted to the authorized read-only scope and the owner approves usage. | Security/policy gate |
 | D-008 | A future Codex plan-backed integration must use the supported Sign in with ChatGPT authorization path, local user-controlled token storage/runtime, express consent for background automation, and one connected app boundary. The installed CLI login alone is not authorization for Omnis OS. | Security/policy gate |
+| D-009 | Execute the deterministic mock program in a digest-pinned, ephemeral Docker container with no network, read-only root, a per-run workspace, non-root UID, dropped capabilities, seccomp, and resource/time limits. Treat the trusted worker and rootful daemon as privileged boundaries. | Implemented and locally verified for mock-only execution; production hardening remains open |
 
 ## Phase 0 checklist
 
@@ -55,6 +56,10 @@
 
 The PostgreSQL-backed mock lifecycle is implemented and its local code, database, process-restart, and browser checks passed. Real Hermes/Codex/Claude inference remains disabled. R1-G1 does not authorize provider use or claim OS-level worker sandboxing or egress enforcement. The exact version pin `pnpm@12.16.1` is in the repository; explicit owner approval of version pins for production remains open.
 
+## R1-G2 status — 2026-11-02
+
+The mock execution path now uses an ephemeral Docker container, with actual-container negative tests run on the WSL2 development host. Tests demonstrated no-network behavior, filesystem and credential denial, no Docker socket, non-root identity, dropped capabilities, resource/time limits, cancellation, and scoped orphan cleanup. PostgreSQL, API/worker integration, SSE replay, and browser regressions passed locally. This is a local mock-only gate: the tested host uses a rootful Docker daemon, AppArmor and rootless/userns modes were unavailable, and remote CI has not run. No real model inference or runtime credential access was enabled. See [ADR-0008](adr/0008-container-isolated-mock-execution.md) and [R1-G2 evidence](evidence/R1_G2_SANDBOX_SECURITY.md).
+
 ## Owner decisions still needed
 
 - Approve the technology/version proposals before production use.
@@ -63,3 +68,4 @@ The PostgreSQL-backed mock lifecycle is implemented and its local code, database
 - Review Claude Team/Agent SDK terms and any background use before enabling it.
 - Review the committed package/image pins before any production deployment; pnpm 12.16.1 and the dependency lockfile now have a local reproducibility proof.
 - Review [ADR-0007](adr/0007-loopback-mock-functional-gate.md) before any real runtime or non-loopback access is enabled.
+- Review [ADR-0008](adr/0008-container-isolated-mock-execution.md) before extending the sandbox to arbitrary tools, enabling network access, or deploying outside the verified local environment. Obtain an independent Claude Code security/architecture review only after its background use and review procedure are approved; no Claude process or credentials were used for R1-G2.

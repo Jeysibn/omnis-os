@@ -318,6 +318,7 @@ export class PostgresRunStore {
         UPDATE omnis.runs
         SET lease_expires_at = now() + ($3::int * interval '1 second'), updated_at = now()
         WHERE id = $1 AND lease_owner = $2 AND status = 'running'
+          AND lease_expires_at > now()
       `,
       [runId, workerId, leaseSeconds],
     );
@@ -529,6 +530,20 @@ export class PostgresRunStore {
       }
       return events;
     });
+  }
+
+  async listActiveRunIds(runIds?: readonly string[]): Promise<string[]> {
+    if (runIds?.length === 0) return [];
+    const result = await this.pool.query<QueryResultRow & { id: string }>(
+      `
+        SELECT id FROM omnis.runs
+        WHERE status IN ('running', 'stopping') AND lease_expires_at > now()
+          AND ($1::text[] IS NULL OR id = ANY($1::text[]))
+        ORDER BY lease_expires_at ASC
+      `,
+      [runIds ?? null],
+    );
+    return result.rows.map((row) => row.id);
   }
 
   async listQueuedJobs(): Promise<

@@ -3,7 +3,7 @@
 ## Environment strategy
 
 1. **Development:** WSL2 Ubuntu/Linux with Node, pnpm, Docker Compose. PostgreSQL in Compose; native AI runtimes on trusted host or isolated dedicated execution user per capability/secret-store requirements.
-2. **CI:** ephemeral PostgreSQL + fake runtime, no OAuth credentials, no paid inference, migrations and Playwright smoke tests.
+2. **CI:** ephemeral PostgreSQL + pinned mock sandbox image, no OAuth credentials, no paid inference, migrations, sandbox negative tests and Playwright smoke tests.
 3. **Production (after gated testing):** private k3s homelab with protected database PVC, SOPS+age for deployment secrets if selected, private DNS and device-trusted TLS/CA, no publicly exposed runtime or database endpoints.
 
 No permanent staging required initially. Isolated local/CI test data must never point at production runtime homes or production database.
@@ -21,7 +21,9 @@ Pin dependencies and image digests in actual code; this document intentionally a
 
 ### Current local mock gate
 
-The repository pins pnpm `12.16.1` and Node `>=24`; workspace dependencies and the `postgres:17.6-alpine` development image are declared exactly in the repository. Run `pnpm install --frozen-lockfile`, `pnpm configure:owner`, `pnpm db:up`, and `pnpm dev`. The worker applies SQL migrations at startup. Run DB-backed integration checks only with an `OMNIS_TEST_DATABASE_URL` that targets a disposable database ending in `test` or `tests`. These pins establish reproducibility for the mock gate; they are not a production approval or provider-runtime authorization.
+The repository pins pnpm `12.16.1` and Node `>=24`. Run `pnpm install --frozen-lockfile`, `pnpm configure:owner`, `pnpm sandbox:image:pull`, `pnpm db:up`, and `pnpm dev` from a fresh WSL login shell with the existing Docker group membership. The sandbox image is pinned to `node@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85` and is used with pulls disabled at execution time. Run DB-backed checks only against a disposable database ending in `test` or `tests`; `pnpm --filter @omnis/worker test:sandbox` requires the local Docker daemon. These controls establish a local mock boundary, not production isolation or provider authorization.
+
+Docker group membership is root-equivalent. The worker uses the trusted rootful daemon to create containers; the sandbox container itself receives no socket, mount, or environment credentials. On the tested WSL host, rootless Docker/userns remapping and AppArmor were unavailable. Keep provider runtimes disabled until their authenticated connector and untrusted-tool sandbox are separately reviewed.
 
 ## Network
 

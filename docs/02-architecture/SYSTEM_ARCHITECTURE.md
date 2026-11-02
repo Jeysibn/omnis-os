@@ -28,7 +28,7 @@ flowchart TD
 
 **Important:** Model providers are accessed by the authenticated runtimes, not by proxying provider OAuth tokens through the control-plane backend.
 
-**Implemented R1-G1 slice:** The current web/API/worker path is local and mock-only. The API proxies owner-authorized task/run commands to the loopback worker; the worker persists state in PostgreSQL and admits synthetic jobs through pg-boss. PostgreSQL-backed event history supports SSE snapshot/replay after API restart. This initial worker has no provider, native shell, or MCP adapter enabled. Process separation is not an OS sandbox; host-level isolation and egress controls remain unverified.
+**Implemented R1-G2 slice:** The web/API/worker path remains local and mock-only. The API proxies owner-authorized task/run commands to the loopback worker; the worker persists state in PostgreSQL and admits synthetic jobs through pg-boss. The worker launches a short-lived Docker container for the fixed mock program; PostgreSQL event history supports SSE replay, and expired worker leases trigger scoped orphan-container cleanup. No provider, native shell, or MCP adapter is enabled. The sandbox does not receive the Docker socket or database connection.
 
 ## Bounded modules inside the control plane
 
@@ -77,11 +77,14 @@ No runtime-specific endpoint assumptions leak into business modules. The runtime
 - **web:** browser assets only; no secrets.
 - **api:** authentication, REST/SSE, database, read/write command validation; cannot directly execute arbitrary shell commands.
 - **worker:** durable job processor, policy gate, isolated sandbox/host runtime client; only constrained permissions.
+- **mock sandbox:** ephemeral Docker container, non-root UID, read-only root, run-scoped writable workspace, no network, dropped capabilities, seccomp, and cgroup limits. The trusted worker/launcher remains outside the container and holds Docker daemon access.
 - **runtime native processes:** configured separately with scoped home, environment, resource limits and per-run workspaces where possible.
 - **database:** private network only; independent backups.
 - **knowledge indexer (later):** reads approved vault revisions and produces search indexes; do not index hidden/private files.
 
 Native CLI auth stores must never be bind-mounted into user file-upload containers or web frontends. Provider approval and runtime capability checks happen before enabling unattended runs.
+
+The R1-G2 container controls and their tested limits are recorded in `../07-governance/evidence/R1_G2_SANDBOX_SECURITY.md`. Docker containers share the host kernel and are not a complete isolation boundary; rootful daemon or launcher compromise remains a host-level risk.
 
 ## Execution sequence
 

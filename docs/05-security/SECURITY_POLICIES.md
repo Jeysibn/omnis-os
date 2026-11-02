@@ -40,6 +40,15 @@ Grants have subject (director, agent, team, run or chat), resource (project ID, 
 - External MCP auth distinct from AI model auth.
 - Restrict outbound network from tool containers to approved endpoints; protect localhost/metadata addresses from SSRF.
 
+### R1-G2 mock sandbox
+
+- The current worker sends only a fixed Node mock program and task-title JSON to an ephemeral container. API inputs cannot select an image or executable; the current executor accepts Node workloads only.
+- Use a pinned image digest with `--pull=never`; run as the worker's non-root UID/GID. Drop all Linux capabilities, set `no-new-privileges`, retain Docker's built-in seccomp profile, and apply cgroup CPU, memory, PID, shared-memory, file-descriptor, and time limits.
+- Mount only a mode-0700 run workspace read/write. Keep the container root read-only; `/tmp` is a bounded `noexec,nosuid,nodev` tmpfs. Do not mount the host home, credential stores, database sockets, or Docker socket. Do not pass worker environment variables into the container.
+- Set `--network=none`. Do not permit alternate DNS, host networking, private routes, container bridges, PostgreSQL, or metadata access. Any later network exception requires a network-layer allowlist and a new policy review.
+- Persist run transitions and output through the trusted worker to PostgreSQL. On lease reconciliation, remove scoped sandbox containers whose run IDs no longer have unexpired DB leases.
+- Residual: the launcher uses the host's rootful Docker daemon; Docker group membership is root-equivalent. The tested WSL kernel has no AppArmor or rootless/user-namespace mode. These containers share the host kernel and do not authorize future model runtimes.
+
 ## Data and privacy
 
 - Redact secret values, full shell environments, credentials, private keys, prompts containing restricted info from general metrics/SSE.

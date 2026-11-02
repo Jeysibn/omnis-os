@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { Run, Task } from '@omnis/contracts';
 import type { PostgresRunStore } from '@omnis/db';
+import { MockRuntimeAdapter, type RuntimeAdapter } from '@omnis/runtime-adapters';
 import { CoordinatorError, RunCoordinator } from './run-coordinator.ts';
+import { SandboxError } from './docker-sandbox.ts';
 
 describe('durable mock run coordinator', () => {
   it('admits queue work with automatic retries disabled', async () => {
@@ -42,7 +44,7 @@ describe('durable mock run coordinator', () => {
       },
       findJobs: async () => [],
     };
-    const coordinator = new RunCoordinator(store, queue);
+    const coordinator = new RunCoordinator(store, queue, new MockRuntimeAdapter());
 
     const first = await coordinator.startRun('task-0001', 'idempotency-key-0001');
     assert.equal(first.created, true);
@@ -67,10 +69,14 @@ describe('durable mock run coordinator', () => {
   });
 
   it('rejects malformed durable job payloads before touching the store', async () => {
-    const coordinator = new RunCoordinator({} as PostgresRunStore, {
-      send: async () => null,
-      findJobs: async () => [],
-    });
+    const coordinator = new RunCoordinator(
+      {} as PostgresRunStore,
+      {
+        send: async () => null,
+        findJobs: async () => [],
+      },
+      new MockRuntimeAdapter(),
+    );
     await assert.rejects(
       coordinator.handleQueueJob({ runId: '../../anything' }),
       /durable mock job payload is invalid/,
@@ -78,10 +84,14 @@ describe('durable mock run coordinator', () => {
   });
 
   it('rejects a task whose schema is invalid before reaching persistence', async () => {
-    const coordinator = new RunCoordinator({} as PostgresRunStore, {
-      send: async () => null,
-      findJobs: async () => [],
-    });
+    const coordinator = new RunCoordinator(
+      {} as PostgresRunStore,
+      {
+        send: async () => null,
+        findJobs: async () => [],
+      },
+      new MockRuntimeAdapter(),
+    );
     await assert.rejects(
       coordinator.createTask({ title: 'x', detail: '' }),
       (error: unknown) => error instanceof CoordinatorError && error.code === 'invalid_input',
@@ -112,7 +122,7 @@ describe('durable mock run coordinator', () => {
       send: async () => null,
       findJobs: async () => [{ id: 'job-0001', state: 'failed' as const }],
     };
-    const coordinator = new RunCoordinator(store, queue);
+    const coordinator = new RunCoordinator(store, queue, new MockRuntimeAdapter());
 
     await coordinator.reconcileExpiredRuns();
     assert.equal(interruptedRunId, 'run-0001');
@@ -132,7 +142,7 @@ describe('durable mock run coordinator', () => {
       send: async () => null,
       findJobs: async () => [{ id: 'job-0001', state: 'failed' as const }],
     };
-    const coordinator = new RunCoordinator(store, queue);
+    const coordinator = new RunCoordinator(store, queue, new MockRuntimeAdapter());
 
     await coordinator.reconcileExpiredRuns();
     assert.equal(acknowledgedRunId, 'run-0001');
@@ -172,10 +182,228 @@ describe('durable mock run coordinator', () => {
     const coordinator = new RunCoordinator(
       store,
       { send: async () => null, findJobs: async () => [] },
+      new MockRuntimeAdapter(),
       10,
     );
 
     await coordinator.handleQueueJob({ runId: run.id });
     assert.equal(cancellationAcknowledged, true);
   });
+
+  it('uses the injected sandbox runtime and persists its successful output', async () => {
+    let taskSeen: Task | undefined;
+    const { coordinator, state } = lifecycleHarness({
+      kind: 'mock',
+      discoverCapabilities: () => new MockRuntimeAdapter().discoverCapabilities(),
+      execute: async (input) => {
+        taskSeen = input.task;
+        assert.equal(input.signal.aborted, false);
+        return { output: 'Synthetic sandbox result.' };
+      },
+    });
+
+    await coordinator.handleQueueJob({ runId: lifecycleRun.id });
+
+    assert.deepEqual(taskSeen, lifecycleTask);
+    assert.equal(state.completedOutput, 'Synthetic sandbox result.');
+    assert.equal(state.failureMessage, undefined);
+  });
+
+  it('passes PostgreSQL active leases to sandbox orphan recovery after reconciliation', async () => {
+    let resolvedCandidates: readonly string[] = [];
+    const store = {
+      reconcileExpiredRuns: async () => [],
+      listQueuedJobs: async () => [],
+      listActiveRunIds: async (candidateIds?: readonly string[]) => {
+        resolvedCandidates = candidateIds ?? [];
+        return candidateIds?.filter((runId) => runId === 'run-0002') ?? [];
+      },
+    } as unknown as PostgresRunStore;
+    const runtime: RuntimeAdapter = {
+      kind: 'mock',
+      discoverCapabilities: () => new MockRuntimeAdapter().discoverCapabilities(),
+      cleanupOrphanedExecutions: async (resolveActiveRunIds) => {
+        const activeRunIds = await resolveActiveRunIds(['run-0001', 'run-0002']);
+        assert.deepEqual(activeRunIds, ['run-0002']);
+      },
+      execute: async () => ({ output: 'Synthetic test result.' }),
+    };
+    const coordinator = new RunCoordinator(
+      store,
+      { send: async () => null, findJobs: async () => [] },
+      runtime,
+    );
+
+    await coordinator.reconcileExpiredRuns();
+
+    assert.deepEqual(resolvedCandidates, ['run-0001', 'run-0002']);
+  });
+
+  it('maps a sandbox timeout to a safe failed-run message', async () => {
+    const { coordinator, state } = lifecycleHarness(failingRuntime(new SandboxError('timed_out')));
+
+    await coordinator.handleQueueJob({ runId: lifecycleRun.id });
+
+    assert.equal(state.failureMessage, 'The sandbox execution exceeded its time limit.');
+  });
+
+  it('does not persist raw sandbox crash details', async () => {
+    const crash = new SandboxError('crashed');
+    Object.defineProperty(crash, 'message', { value: 'secret path /tmp/private-token' });
+    const { coordinator, state } = lifecycleHarness(failingRuntime(crash));
+
+    await coordinator.handleQueueJob({ runId: lifecycleRun.id });
+
+    assert.equal(state.failureMessage, 'The sandboxed mock process exited unexpectedly.');
+    assert.equal(state.failureMessage?.includes('private-token'), false);
+  });
+
+  it('aborts the sandbox runtime and acknowledges operator cancellation', async () => {
+    let runtimeStarted: (() => void) | undefined;
+    let sawAbort = false;
+    const runtime: RuntimeAdapter = {
+      kind: 'mock',
+      discoverCapabilities: () => new MockRuntimeAdapter().discoverCapabilities(),
+      execute: ({ signal }) =>
+        new Promise((_resolve, reject) => {
+          runtimeStarted?.();
+          signal.addEventListener(
+            'abort',
+            () => {
+              sawAbort = true;
+              reject(new SandboxError('cancelled'));
+            },
+            { once: true },
+          );
+        }),
+    };
+    const { coordinator, state } = lifecycleHarness(runtime);
+    const started = new Promise<void>((resolve) => {
+      runtimeStarted = resolve;
+    });
+    const execution = coordinator.handleQueueJob({ runId: lifecycleRun.id });
+    await started;
+    await coordinator.stopRun(lifecycleRun.id);
+    await execution;
+
+    assert.equal(sawAbort, true);
+    assert.equal(state.cancelled, true);
+    assert.equal(state.failureMessage, undefined);
+  });
+
+  it('records interruption when sandbox termination cannot be confirmed', async () => {
+    let runtimeStarted: (() => void) | undefined;
+    const runtime: RuntimeAdapter = {
+      kind: 'mock',
+      discoverCapabilities: () => new MockRuntimeAdapter().discoverCapabilities(),
+      execute: ({ signal }) =>
+        new Promise((_resolve, reject) => {
+          runtimeStarted?.();
+          signal.addEventListener('abort', () => reject(new SandboxError('termination_failed')), {
+            once: true,
+          });
+        }),
+    };
+    const { coordinator, state } = lifecycleHarness(runtime);
+    const started = new Promise<void>((resolve) => {
+      runtimeStarted = resolve;
+    });
+    const execution = coordinator.handleQueueJob({ runId: lifecycleRun.id });
+    await started;
+    await coordinator.stopRun(lifecycleRun.id);
+    await execution;
+
+    assert.equal(state.cancelled, false);
+    assert.equal(state.interrupted, true);
+    assert.equal(
+      state.interruptionMessage,
+      'The sandbox stop could not be confirmed. The run was interrupted for safety.',
+    );
+  });
 });
+
+const lifecycleRun: Run = {
+  id: 'run-0001',
+  taskId: 'task-0001',
+  taskTitle: 'Inspect files',
+  status: 'running',
+  runtimeKind: 'mock',
+  synthetic: true,
+  usage: { quality: 'unknown', inputTokens: null, outputTokens: null, cost: null },
+  createdAt: '2026-11-02T00:00:00.000Z',
+  updatedAt: '2026-11-02T00:00:00.000Z',
+};
+
+const lifecycleTask: Task = {
+  id: lifecycleRun.taskId,
+  title: lifecycleRun.taskTitle,
+  detail: 'Read-only mock task input.',
+  status: 'open',
+  createdAt: lifecycleRun.createdAt,
+};
+
+function failingRuntime(error: Error): RuntimeAdapter {
+  return {
+    kind: 'mock',
+    discoverCapabilities: () => new MockRuntimeAdapter().discoverCapabilities(),
+    execute: async () => {
+      throw error;
+    },
+  };
+}
+
+function lifecycleHarness(runtime: RuntimeAdapter): {
+  coordinator: RunCoordinator;
+  state: {
+    completedOutput?: string;
+    failureMessage?: string;
+    cancelled: boolean;
+    interrupted: boolean;
+    interruptionMessage?: string;
+  };
+} {
+  const state: {
+    completedOutput?: string;
+    failureMessage?: string;
+    cancelled: boolean;
+    interrupted: boolean;
+    interruptionMessage?: string;
+  } = {
+    cancelled: false,
+    interrupted: false,
+  };
+  const store = {
+    beginExecution: async () => ({ run: lifecycleRun, started: true, events: [] }),
+    getTask: async () => lifecycleTask,
+    renewLease: async () => 'renewed' as const,
+    appendOutput: async () => undefined,
+    completeRun: async (_runId: string, _workerId: string, output: string) => {
+      state.completedOutput = output;
+      return { run: { ...lifecycleRun, status: 'completed' as const }, events: [] };
+    },
+    failRun: async (_runId: string, _workerId: string, message: string) => {
+      state.failureMessage = message;
+      return { run: { ...lifecycleRun, status: 'failed' as const }, events: [] };
+    },
+    requestStop: async () => ({
+      run: { ...lifecycleRun, status: 'stopping' as const },
+      events: [],
+    }),
+    cancelRun: async () => {
+      state.cancelled = true;
+      return { run: { ...lifecycleRun, status: 'cancelled' as const }, events: [] };
+    },
+    interruptRun: async (_runId: string, _workerId: string, message?: string) => {
+      state.interrupted = true;
+      if (message !== undefined) state.interruptionMessage = message;
+      return { run: { ...lifecycleRun, status: 'interrupted' as const }, events: [] };
+    },
+  } as unknown as PostgresRunStore;
+  const coordinator = new RunCoordinator(
+    store,
+    { send: async () => null, findJobs: async () => [] },
+    runtime,
+    60_000,
+  );
+  return { coordinator, state };
+}

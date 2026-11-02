@@ -30,6 +30,7 @@
 | T-14 | Agent recursively delegates many subtasks | Cost spike / resource exhaustion | max depth, per-agent concurrency, task and cost caps, human approval | attempted recursive delegation blocked |
 | T-15 | Provider quota unknown is treated as unlimited | Surprise expense / runaway jobs | disable paid fallbacks, hard local concurrency/usage guardrails | absent quota remains unknown and bounded |
 | T-16 | Knowledge proposal automatically becomes policy | Prompt-induced instruction escalation | human review for policy/architectural knowledge, provenance, classification | adversarial proposal not published |
+| T-17 | Sandbox workload escapes filesystem/network policy or outlives a failed worker | Host compromise, data access, resource exhaustion | Docker namespaces, read-only root, scoped workspace, no network, seccomp, dropped caps, cgroups, timeout, DB-lease orphan cleanup | Actual container probes deny host files, credentials, sockets, network and excess resources |
 
 ## Elevated risk operations
 
@@ -50,4 +51,4 @@ Treat the following as requiring separate approval or tightly pre-approved polic
 
 ## Scope and residual risk
 
-This is a design threat model, not a passed security audit. Native coding assistants intentionally execute complex tools: containerization helps but is not a complete defense against escape bugs, external data leakage, or unintended writes. Start read-only and gate all privileged actions until tests establish credible controls.
+The R1-G2 mock sandbox controls were exercised locally; this is not a complete security audit. The rootful Docker daemon and launcher remain trusted host-level components, containers share the kernel, and AppArmor/rootless user namespaces were unavailable on the tested WSL host. Native coding assistants remain disabled. Keep arbitrary tool access and provider runtimes gated until separate policy and isolation reviews pass.

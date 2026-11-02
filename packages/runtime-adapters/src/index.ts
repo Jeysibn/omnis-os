@@ -3,6 +3,9 @@ import type { RunEvent, RuntimeCapabilities, Task } from '@omnis/contracts';
 export interface RuntimeAdapter {
   readonly kind: 'mock';
   discoverCapabilities(): RuntimeCapabilities;
+  cleanupOrphanedExecutions?(
+    resolveActiveRunIds: (candidateRunIds: readonly string[]) => Promise<readonly string[]>,
+  ): Promise<void>;
   execute(input: {
     runId: string;
     task: Task;
