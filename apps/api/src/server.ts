@@ -1,5 +1,11 @@
 import Fastify from 'fastify';
-import { CreateRunSchema, CreateTaskSchema, RunEventSchema } from '@omnis/contracts';
+import {
+  AuthorizationDecisionSchema,
+  CreateAuthorizationSchema,
+  CreateRunSchema,
+  CreateTaskSchema,
+  RunEventSchema,
+} from '@omnis/contracts';
 import {
   isOwnerPasswordValid,
   requireMutationProtection,
@@ -13,6 +19,7 @@ import { AuthThrottle } from './auth-throttle.ts';
 import {
   parseRun,
   parseRunList,
+  parseAuthorization,
   parseTask,
   parseTaskList,
   workerEventStream,
@@ -98,6 +105,64 @@ app.post(
     return reply.code(204).send();
   },
 );
+app.post(
+  '/api/v1/authorizations',
+  { preHandler: [requireOwner, requireMutationProtection] },
+  async (request, reply) => {
+    const parsed = CreateAuthorizationSchema.safeParse(request.body);
+    if (!parsed.success)
+      return reply
+        .code(400)
+        .send({ error: { code: 'invalid_input', message: 'Authorization request is invalid.' } });
+    const authorization = await workerRequest(
+      '/internal/v1/authorizations',
+      {
+        method: 'POST',
+        headers: { 'x-omnis-trusted-actor': 'owner' },
+        body: JSON.stringify(parsed.data),
+      },
+      parseAuthorization,
+    );
+    return reply.code(201).send(authorization);
+  },
+);
+app.post<{ Params: { authorizationId: string } }>(
+  '/api/v1/authorizations/:authorizationId/decision',
+  { preHandler: [requireOwner, requireMutationProtection] },
+  async (request, reply) => {
+    const parsed = AuthorizationDecisionSchema.safeParse(request.body);
+    if (!parsed.success || !/^[0-9a-f-]{36}$/i.test(request.params.authorizationId))
+      return reply
+        .code(400)
+        .send({ error: { code: 'invalid_input', message: 'Authorization decision is invalid.' } });
+    const authorization = await workerRequest(
+      `/internal/v1/authorizations/${encodeURIComponent(request.params.authorizationId)}/decision`,
+      {
+        method: 'POST',
+        headers: { 'x-omnis-trusted-actor': 'owner' },
+        body: JSON.stringify(parsed.data),
+      },
+      parseAuthorization,
+    );
+    return reply.send(authorization);
+  },
+);
+app.post<{ Params: { authorizationId: string } }>(
+  '/api/v1/authorizations/:authorizationId/revoke',
+  { preHandler: [requireOwner, requireMutationProtection] },
+  async (request, reply) => {
+    if (!/^[0-9a-f-]{36}$/i.test(request.params.authorizationId))
+      return reply
+        .code(400)
+        .send({ error: { code: 'invalid_input', message: 'Authorization ID is invalid.' } });
+    const authorization = await workerRequest(
+      `/internal/v1/authorizations/${encodeURIComponent(request.params.authorizationId)}/revoke`,
+      { method: 'POST', headers: { 'x-omnis-trusted-actor': 'owner' } },
+      parseAuthorization,
+    );
+    return reply.send(authorization);
+  },
+);
 
 app.get('/api/v1/me', { preHandler: requireOwner }, async () => ({
   id: 'owner',
@@ -152,7 +217,7 @@ app.post(
       '/internal/v1/runs',
       {
         method: 'POST',
-        headers: { 'idempotency-key': idempotencyKey },
+        headers: { 'idempotency-key': idempotencyKey, 'x-omnis-trusted-actor': 'owner' },
         body: JSON.stringify(parsed.data),
       },
       parseRun,

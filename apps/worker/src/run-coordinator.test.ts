@@ -3,14 +3,54 @@ import { describe, it } from 'node:test';
 import type { Run, Task } from '@omnis/contracts';
 import type { PostgresRunStore } from '@omnis/db';
 import { MockRuntimeAdapter, type RuntimeAdapter } from '@omnis/runtime-adapters';
-import { StaticRuntimeAuthorizer } from '@omnis/policy';
 import { CoordinatorError, RunCoordinator } from './run-coordinator.ts';
 import { SandboxError } from './docker-sandbox.ts';
+
+const authId = '11111111-1111-4111-8111-111111111111';
+const authorizationRecord = {
+  id: authId,
+  requestingActor: 'owner' as const,
+  runtimeId: 'mock' as const,
+  operation: 'execute_task' as const,
+  taskId: 'task-0001',
+  capabilities: ['mock.execute'] as ['mock.execute'],
+  scope: { kind: 'task' as const, taskId: 'task-0001' },
+  status: 'authorized' as const,
+  policyVersion: 'r1g4-mock-v1',
+  correlationId: authId,
+  expiresAt: '2999-01-01T00:00:00.000Z',
+  createdAt: '2026-11-03T00:00:00.000Z',
+  decidedAt: '2026-11-03T00:00:00.000Z',
+  decidedBy: 'owner' as const,
+  revokedAt: null,
+  revokedBy: null,
+  consumedAt: null,
+  consumedRunId: null,
+};
+const defaultAuthorizationStore = {
+  get: async (id: string) => (id === authId ? authorizationRecord : undefined),
+  getForRun: async () => authorizationRecord,
+};
+const emptyAuthorizationStore = {
+  get: async () => undefined,
+  getForRun: async () => undefined,
+  recordEnforcementDenied: async () => undefined,
+};
+
+function testCoordinator(
+  store: PostgresRunStore,
+  queue: ConstructorParameters<typeof RunCoordinator>[1],
+  runtime: RuntimeAdapter,
+  heartbeatIntervalMs?: number,
+  authorizations: unknown = defaultAuthorizationStore,
+) {
+  return new RunCoordinator(store, queue, runtime, authorizations as never, heartbeatIntervalMs);
+}
 
 describe('durable mock run coordinator', () => {
   it('rejects admission without independent Omnis authorization', async () => {
     let admissions = 0;
-    const coordinator = new RunCoordinator(
+    const coordinator = testCoordinator(
       {
         admitRun: async () => {
           admissions += 1;
@@ -19,32 +59,41 @@ describe('durable mock run coordinator', () => {
       { send: async () => 'job', findJobs: async () => [] },
       new MockRuntimeAdapter(),
       undefined,
-      new StaticRuntimeAuthorizer([]),
+      emptyAuthorizationStore,
     );
     await assert.rejects(
-      coordinator.startRun('task-0001', 'idempotency-key-0001'),
+      coordinator.startRun('task-0001', 'idempotency-key-0001', authId, 'owner'),
       (error: unknown) => error instanceof CoordinatorError && error.code === 'invalid_transition',
     );
     assert.equal(admissions, 0);
   });
 
+  it('fails closed when durable authorization lookup is unavailable', async () => {
+    let admissions = 0;
+    const coordinator = testCoordinator(
+      {
+        admitRun: async () => {
+          admissions += 1;
+        },
+      } as unknown as PostgresRunStore,
+      { send: async () => 'job', findJobs: async () => [] },
+      new MockRuntimeAdapter(),
+      undefined,
+      {
+        get: async () => {
+          throw new Error('database unavailable');
+        },
+      },
+    );
+    await assert.rejects(
+      coordinator.startRun('task-0001', 'idempotency-key-0001', authId, 'owner'),
+      /database unavailable/,
+    );
+    assert.equal(admissions, 0);
+  });
+
   it('rechecks authorization before claiming queued work and interrupts a revoked grant', async () => {
-    const authorizer = new StaticRuntimeAuthorizer([
-      ...(['start_task', 'execute_task'] as const).map((operation) => ({
-        id: 'grant-1',
-        actorId: 'owner',
-        runtimeId: 'mock',
-        operation,
-        capabilities: ['mock.execute' as const],
-        scope: { kind: 'all_tasks' as const },
-        approvalRequired: false,
-        status: 'authorized' as const,
-        policyVersion: 'v1',
-        expiresAt: Number.MAX_SAFE_INTEGER,
-        revokedAt: null,
-        provenance: 'test fixture',
-      })),
-    ]);
+    let revoked = false;
     let interrupted = false;
     const run = {
       id: 'run-0001',
@@ -66,15 +115,21 @@ describe('durable mock run coordinator', () => {
       },
       listActiveRunIds: async () => [],
     } as unknown as PostgresRunStore;
-    const coordinator = new RunCoordinator(
+    const coordinator = testCoordinator(
       store,
       { send: async () => 'job', findJobs: async () => [] },
       new MockRuntimeAdapter(),
       undefined,
-      authorizer,
+      {
+        get: async () => authorizationRecord,
+        getForRun: async () => ({
+          ...authorizationRecord,
+          status: revoked ? 'revoked' : 'authorized',
+        }),
+      } as never,
     );
-    await coordinator.startRun(run.taskId, 'idempotency-key-0001');
-    authorizer.revoke('grant-1');
+    await coordinator.startRun(run.taskId, 'idempotency-key-0001', authId, 'owner');
+    revoked = true;
     await coordinator.handleQueueJob({ runId: run.id });
     assert.equal(interrupted, true);
   });
@@ -97,6 +152,8 @@ describe('durable mock run coordinator', () => {
       admitRun: async (
         _taskId: string,
         idempotencyKey: string,
+        _authorizationId: string,
+        _actorId: string,
         enqueue: (tx: never, data: { runId: string }) => Promise<string | null>,
       ) => {
         capturedIdempotencyKey = idempotencyKey;
@@ -115,9 +172,9 @@ describe('durable mock run coordinator', () => {
       },
       findJobs: async () => [],
     };
-    const coordinator = new RunCoordinator(store, queue, new MockRuntimeAdapter());
+    const coordinator = testCoordinator(store, queue, new MockRuntimeAdapter());
 
-    const first = await coordinator.startRun('task-0001', 'idempotency-key-0001');
+    const first = await coordinator.startRun('task-0001', 'idempotency-key-0001', authId, 'owner');
     assert.equal(first.created, true);
     assert.equal(capturedIdempotencyKey, 'idempotency-key-0001');
     const options = capturedOptions as {
@@ -134,13 +191,13 @@ describe('durable mock run coordinator', () => {
     assert.equal(typeof options.db.executeSql, 'function');
 
     created = false;
-    const retry = await coordinator.startRun('task-0001', 'idempotency-key-0001');
+    const retry = await coordinator.startRun('task-0001', 'idempotency-key-0001', authId, 'owner');
     assert.equal(retry.created, false);
     assert.equal(retry.run.id, first.run.id);
   });
 
   it('rejects malformed durable job payloads before touching the store', async () => {
-    const coordinator = new RunCoordinator(
+    const coordinator = testCoordinator(
       {} as PostgresRunStore,
       {
         send: async () => null,
@@ -155,7 +212,7 @@ describe('durable mock run coordinator', () => {
   });
 
   it('rejects a task whose schema is invalid before reaching persistence', async () => {
-    const coordinator = new RunCoordinator(
+    const coordinator = testCoordinator(
       {} as PostgresRunStore,
       {
         send: async () => null,
@@ -193,7 +250,7 @@ describe('durable mock run coordinator', () => {
       send: async () => null,
       findJobs: async () => [{ id: 'job-0001', state: 'failed' as const }],
     };
-    const coordinator = new RunCoordinator(store, queue, new MockRuntimeAdapter());
+    const coordinator = testCoordinator(store, queue, new MockRuntimeAdapter());
 
     await coordinator.reconcileExpiredRuns();
     assert.equal(interruptedRunId, 'run-0001');
@@ -213,7 +270,7 @@ describe('durable mock run coordinator', () => {
       send: async () => null,
       findJobs: async () => [{ id: 'job-0001', state: 'failed' as const }],
     };
-    const coordinator = new RunCoordinator(store, queue, new MockRuntimeAdapter());
+    const coordinator = testCoordinator(store, queue, new MockRuntimeAdapter());
 
     await coordinator.reconcileExpiredRuns();
     assert.equal(acknowledgedRunId, 'run-0001');
@@ -251,7 +308,7 @@ describe('durable mock run coordinator', () => {
       },
       appendOutput: async () => undefined,
     } as unknown as PostgresRunStore;
-    const coordinator = new RunCoordinator(
+    const coordinator = testCoordinator(
       store,
       { send: async () => null, findJobs: async () => [] },
       new MockRuntimeAdapter(),
@@ -300,7 +357,7 @@ describe('durable mock run coordinator', () => {
       },
       execute: async () => ({ output: 'Synthetic test result.' }),
     };
-    const coordinator = new RunCoordinator(
+    const coordinator = testCoordinator(
       store,
       { send: async () => null, findJobs: async () => [] },
       runtime,
@@ -477,7 +534,7 @@ function lifecycleHarness(runtime: RuntimeAdapter): {
       return { run: { ...lifecycleRun, status: 'interrupted' as const }, events: [] };
     },
   } as unknown as PostgresRunStore;
-  const coordinator = new RunCoordinator(
+  const coordinator = testCoordinator(
     store,
     { send: async () => null, findJobs: async () => [] },
     runtime,

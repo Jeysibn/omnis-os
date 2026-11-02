@@ -11,6 +11,8 @@ import {
 } from '@omnis/contracts';
 import type { Pool, PoolClient, QueryResultRow } from 'pg';
 import { asPgBossTransaction, inTransaction, type PgBossTransaction } from './database.ts';
+import { randomUUID } from 'node:crypto';
+import { appendAuthorizationAudit } from './authorization-store.ts';
 
 export type StoreErrorCode =
   'invalid_input' | 'not_found' | 'invalid_transition' | 'concurrency_limit' | 'conflict';
@@ -122,6 +124,8 @@ export class PostgresRunStore {
   async admitRun(
     taskId: string,
     idempotencyKey: string,
+    authorizationId: string,
+    actorId: string,
     enqueue: EnqueueRun,
   ): Promise<{
     run: Run;
@@ -131,7 +135,7 @@ export class PostgresRunStore {
     if (idempotencyKey.length < 16 || idempotencyKey.length > 128) {
       throw new StoreError('invalid_input', 'Idempotency-Key is invalid.', 400);
     }
-    const fingerprint = JSON.stringify({ taskId });
+    const fingerprint = JSON.stringify({ taskId, authorizationId });
     return inTransaction(this.pool, async (client) => {
       // Serialize admission so the idempotency check and global concurrency cap are race-safe.
       await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [admissionLock]);
@@ -189,6 +193,17 @@ export class PostgresRunStore {
         [task.id, task.title],
       );
       const run = mapRun(created.rows[0]!);
+      const authorization = await client.query<{ allowed: boolean }>(
+        'SELECT omnis.consume_run_authorization($1, $2, $3, $4, $5) AS allowed',
+        [authorizationId, task.id, actorId, run.id, randomUUID()],
+      );
+      if (!authorization.rows[0]?.allowed) {
+        throw new StoreError(
+          'invalid_transition',
+          'An active task-scoped authorization is required.',
+          409,
+        );
+      }
       const queuedEvent = await appendEvent(
         client,
         run.id,
@@ -284,6 +299,38 @@ export class PostgresRunStore {
           events: [],
         };
 
+      const authorizationLock = await client.query<{ allowed: boolean }>(
+        'SELECT omnis.lock_active_run_authorization($1) AS allowed',
+        [runId],
+      );
+      if (!authorizationLock.rows[0]?.allowed) {
+        const interrupted = await client.query<RunRow>(
+          `UPDATE omnis.runs SET status='interrupted', updated_at=now()
+            WHERE id=$1 AND status='queued' RETURNING ${runColumns}`,
+          [runId],
+        );
+        await client.query("UPDATE omnis.tasks SET status='open' WHERE id=$1", [current.task_id]);
+        await appendRunAuthorizationAudit(
+          client,
+          runId,
+          'authorization.enforcement_denied',
+          'denied',
+          'missing_expired_or_revoked',
+        );
+        const event = await appendEvent(
+          client,
+          runId,
+          'run.interrupted',
+          'Authorization is unavailable, expired, or revoked. The run was not executed.',
+        );
+        return {
+          run: mapRun(interrupted.rows[0]!),
+          started: false,
+          generation: current.execution_generation,
+          events: [{ runId, event }],
+        };
+      }
+
       const result = await client.query<RunRow>(
         `
           UPDATE omnis.runs
@@ -294,6 +341,29 @@ export class PostgresRunStore {
         `,
         [runId, workerId, leaseSeconds],
       );
+      const auth = await client.query<{
+        id: string;
+        correlation_id: string;
+        requesting_actor: string;
+      }>(
+        `SELECT id, correlation_id, requesting_actor
+           FROM omnis.runtime_authorizations
+          WHERE consumed_run_id=$1 AND task_id=$2 AND status='authorized'
+            AND expires_at > now() AND revoked_at IS NULL`,
+        [runId, current.task_id],
+      );
+      if (!auth.rows[0])
+        throw new StoreError('invalid_transition', 'Authorization changed during claim.', 409);
+      await appendAuthorizationAudit(client, {
+        authorizationId: auth.rows[0].id,
+        taskId: current.task_id,
+        runId,
+        eventType: 'operation.started',
+        actorId: auth.rows[0].requesting_actor,
+        effectiveIdentity: `worker:${workerId}`,
+        correlationId: auth.rows[0].correlation_id,
+        outcome: 'allowed',
+      });
       const event = await appendEvent(
         client,
         runId,
@@ -339,6 +409,11 @@ export class PostgresRunStore {
         SET lease_expires_at = now() + ($4::int * interval '1 second'), updated_at = now()
         WHERE id = $1 AND lease_owner = $2 AND execution_generation = $3 AND status = 'running'
           AND lease_expires_at > now()
+          AND EXISTS (
+            SELECT 1 FROM omnis.runtime_authorizations a
+             WHERE a.consumed_run_id=omnis.runs.id AND a.status='authorized'
+               AND a.expires_at > now() AND a.revoked_at IS NULL
+          )
       `,
       [runId, workerId, generation, leaseSeconds],
     );
@@ -415,7 +490,34 @@ export class PostgresRunStore {
           'run.cancelled',
           'Mock worker acknowledged cancellation.',
         );
+        await appendRunAuthorizationAudit(client, runId, 'operation.cancelled', 'recorded');
         return { run: mapRun(cancelled.rows[0]!), events: [{ runId, event }] };
+      }
+      const authorizationLock = await client.query<{ allowed: boolean }>(
+        'SELECT omnis.lock_active_run_authorization($1) AS allowed',
+        [runId],
+      );
+      if (!authorizationLock.rows[0]?.allowed) {
+        const interrupted = await client.query<RunRow>(
+          `UPDATE omnis.runs SET status='interrupted', lease_owner=NULL,
+             lease_expires_at=NULL, updated_at=now() WHERE id=$1 RETURNING ${runColumns}`,
+          [runId],
+        );
+        await client.query("UPDATE omnis.tasks SET status='open' WHERE id=$1", [current.task_id]);
+        await appendRunAuthorizationAudit(
+          client,
+          runId,
+          'authorization.enforcement_denied',
+          'denied',
+          'revoked_before_completion',
+        );
+        const event = await appendEvent(
+          client,
+          runId,
+          'run.interrupted',
+          'Authorization was revoked or expired before completion was committed.',
+        );
+        return { run: mapRun(interrupted.rows[0]!), events: [{ runId, event }] };
       }
       if (
         current.status !== 'running' ||
@@ -441,6 +543,7 @@ export class PostgresRunStore {
         current.task_id,
       ]);
       const event = await appendEvent(client, runId, 'run.completed', output);
+      await appendRunAuthorizationAudit(client, runId, 'operation.completed', 'allowed');
       return { run: mapRun(updated.rows[0]!), events: [{ runId, event }] };
     });
   }
@@ -480,6 +583,7 @@ export class PostgresRunStore {
         'run.cancelled',
         'Mock worker acknowledged cancellation.',
       );
+      await appendRunAuthorizationAudit(client, runId, 'operation.cancelled', 'recorded');
       return { run: mapRun(updated.rows[0]!), events: [{ runId, event }] };
     });
   }
@@ -523,6 +627,13 @@ export class PostgresRunStore {
       );
       await client.query("UPDATE omnis.tasks SET status = 'open' WHERE id = $1", [current.task_id]);
       const event = await appendEvent(client, runId, 'run.failed', message);
+      await appendRunAuthorizationAudit(
+        client,
+        runId,
+        'operation.failed',
+        'recorded',
+        'runtime_failed',
+      );
       return { run: mapRun(updated.rows[0]!), events: [{ runId, event }] };
     });
   }
@@ -548,6 +659,7 @@ export class PostgresRunStore {
       );
       await client.query("UPDATE omnis.tasks SET status = 'open' WHERE id = $1", [current.task_id]);
       const event = await appendEvent(client, runId, 'run.interrupted', message);
+      await appendRunAuthorizationAudit(client, runId, 'operation.interrupted', 'recorded');
       return { run: mapRun(updated.rows[0]!), events: [{ runId, event }] };
     });
   }
@@ -677,8 +789,41 @@ export class PostgresRunStore {
       'run.cancelled',
       'Mock worker acknowledged cancellation.',
     );
+    await appendRunAuthorizationAudit(client, current.id, 'operation.cancelled', 'recorded');
     return { run: mapRun(updated.rows[0]!), events: [{ runId: current.id, event }] };
   }
+}
+
+async function appendRunAuthorizationAudit(
+  client: PoolClient,
+  runId: string,
+  eventType: string,
+  outcome: 'allowed' | 'denied' | 'recorded',
+  reasonCode: string | null = null,
+): Promise<void> {
+  const result = await client.query<{
+    id: string;
+    task_id: string;
+    requesting_actor: string;
+    correlation_id: string;
+  }>(
+    `SELECT id, task_id, requesting_actor, correlation_id
+       FROM omnis.runtime_authorizations WHERE consumed_run_id=$1`,
+    [runId],
+  );
+  const authorization = result.rows[0];
+  if (!authorization) return;
+  await appendAuthorizationAudit(client, {
+    authorizationId: authorization.id,
+    taskId: authorization.task_id,
+    runId,
+    eventType,
+    actorId: authorization.requesting_actor,
+    effectiveIdentity: 'service:omnis-worker',
+    correlationId: authorization.correlation_id,
+    outcome,
+    reasonCode,
+  });
 }
 
 const runColumns = `id, task_id, task_title, status, lease_owner, lease_expires_at, execution_generation,

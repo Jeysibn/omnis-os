@@ -27,6 +27,7 @@ const port = await freePort();
 const adminPassword = randomBytes(32).toString('hex');
 const migrationPassword = randomBytes(32).toString('hex');
 const runtimePassword = randomBytes(32).toString('hex');
+const authorizerPassword = randomBytes(32).toString('hex');
 const composeArgs = [
   'compose',
   '--project-name',
@@ -48,12 +49,14 @@ const baseEnv = {
   OMNIS_DB_PASSWORD: adminPassword,
   OMNIS_MIGRATION_DB_PASSWORD: migrationPassword,
   OMNIS_RUNTIME_DB_PASSWORD: runtimePassword,
+  OMNIS_AUTHORIZER_DB_PASSWORD: authorizerPassword,
   OMNIS_R1G3_DISPOSABLE: 'true',
   OMNIS_TRUSTED_ARCHIVE_ACKNOWLEDGED: 'true',
 };
 const adminUrl = connectionUrl('omnis', adminPassword, port, databaseName);
 const migrationUrl = connectionUrl('omnis_migrator', migrationPassword, port, databaseName);
 const runtimeUrl = connectionUrl('omnis_runtime', runtimePassword, port, databaseName);
+const authorizerUrl = connectionUrl('omnis_authorizer', authorizerPassword, port, databaseName);
 
 await writeFile(
   envPath,
@@ -102,6 +105,7 @@ try {
       OMNIS_TEST_ADMIN_DATABASE_URL: adminUrl,
       OMNIS_TEST_MIGRATION_DATABASE_URL: migrationUrl,
       OMNIS_TEST_DATABASE_URL: runtimeUrl,
+      OMNIS_TEST_AUTHORIZER_DATABASE_URL: authorizerUrl,
     },
   });
 
@@ -225,12 +229,15 @@ try {
 }
 
 async function createSyntheticRecords(runtimeUrl, adminUrl, suffix) {
-  const { createPool, PostgresRunStore } = await import('../../packages/db/src/index.ts');
+  const { createPool, PostgresAuthorizationStore, PostgresRunStore } =
+    await import('../../packages/db/src/index.ts');
   const { PgBoss } = await import(
     new URL('../../apps/worker/node_modules/pg-boss/dist/index.js', import.meta.url).href
   );
   const runtime = createPool(runtimeUrl);
   const admin = createPool(adminUrl);
+  const authUrl = connectionUrl('omnis_authorizer', authorizerPassword, port, databaseName);
+  const authorizer = createPool(authUrl);
   const boss = new PgBoss({
     connectionString: runtimeUrl,
     schema: 'pgboss',
@@ -247,13 +254,18 @@ async function createSyntheticRecords(runtimeUrl, adminUrl, suffix) {
     await boss.send(queueName, { synthetic: true, fixture: suffix });
 
     const store = new PostgresRunStore(runtime);
+    const authorizations = new PostgresAuthorizationStore(runtime, authorizer);
     const task = await store.createTask({
       title: `Synthetic backup task ${suffix}`,
       detail: 'Disposable backup/restore verification record.',
     });
+    const authorizationRequest = await authorizations.request(task.id, 'owner');
+    const authorization = await authorizations.decide(authorizationRequest.id, 'owner', 'approve');
     const admitted = await store.admitRun(
       task.id,
       `backup-ci-${suffix}`,
+      authorization.id,
+      'owner',
       async () => 'fixture-job',
     );
     const claim = await store.beginExecution(admitted.run.id, `backup-ci-${suffix}`, 30);
@@ -273,6 +285,7 @@ async function createSyntheticRecords(runtimeUrl, adminUrl, suffix) {
     await boss.stop().catch(() => undefined);
     await runtime.end();
     await admin.end();
+    await authorizer.end();
   }
 }
 

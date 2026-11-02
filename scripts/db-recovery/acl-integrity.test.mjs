@@ -18,6 +18,34 @@ const allowed = [
   acl('table', 'omnis', 'runs', 'SELECT'),
   acl('table', 'omnis', 'run_events', 'SELECT'),
   acl('table', 'omnis', 'run_idempotency', 'SELECT'),
+  acl('table', 'omnis', 'runtime_authorizations', 'SELECT'),
+  acl(
+    'routine',
+    'omnis',
+    'consume_run_authorization(p_authorization_id text, p_task_id text, p_actor_id text, p_run_id text, p_correlation_id text)',
+    'EXECUTE',
+    null,
+    'omnis_runtime',
+    true,
+  ),
+  acl(
+    'routine',
+    'omnis',
+    'revoke_run_authorization(p_authorization_id text, p_actor_id text)',
+    'EXECUTE',
+    null,
+    'omnis_authorizer',
+    true,
+  ),
+  acl(
+    'routine',
+    'omnis',
+    'lock_active_run_authorization(p_run_id text)',
+    'EXECUTE',
+    null,
+    'omnis_runtime',
+    true,
+  ),
   acl('column', 'omnis', 'tasks', 'INSERT', 'id'),
   acl('column', 'omnis', 'tasks', 'UPDATE', 'status'),
   acl('sequence', 'omnis', 'task_id_seq', 'USAGE'),
@@ -49,6 +77,42 @@ describe('post-restore PostgreSQL ACL integrity', () => {
         `${object} must not be readable by the runtime role`,
       );
     }
+  });
+
+  it('allows only the dedicated authorization operations for runtime and authorizer roles', () => {
+    const safe = [
+      acl('table', 'omnis', 'tasks', 'SELECT', null, 'omnis_authorizer'),
+      acl('table', 'omnis', 'runtime_authorizations', 'SELECT', null, 'omnis_authorizer'),
+      acl('table', 'omnis', 'authorization_audit', 'SELECT', null, 'omnis_authorizer'),
+      acl('table', 'omnis', 'authorization_audit', 'INSERT', null, 'omnis_authorizer'),
+      acl('column', 'omnis', 'runtime_authorizations', 'INSERT', 'id', 'omnis_authorizer'),
+      acl('column', 'omnis', 'runtime_authorizations', 'UPDATE', 'status', 'omnis_authorizer'),
+    ];
+    assert.doesNotThrow(() => assertRuntimeAclPolicy([...allowed, ...safe]));
+    assert.throws(
+      () =>
+        assertRuntimeAclPolicy([
+          ...allowed,
+          acl('table', 'omnis', 'authorization_audit', 'UPDATE'),
+        ]),
+      /Runtime table privilege UPDATE is prohibited/,
+    );
+    assert.throws(
+      () =>
+        assertRuntimeAclPolicy([
+          ...allowed,
+          acl('column', 'omnis', 'runtime_authorizations', 'UPDATE', 'status', 'omnis_runtime'),
+        ]),
+      /Runtime column privilege UPDATE on omnis\.runtime_authorizations\.status is prohibited/,
+    );
+    assert.throws(
+      () =>
+        assertRuntimeAclPolicy([
+          ...allowed,
+          acl('table', 'omnis', 'runs', 'DELETE', null, 'omnis_authorizer'),
+        ]),
+      /Authorizer ACL DELETE is prohibited/,
+    );
   });
 
   it('rejects unexpected schemas, unsafe PUBLIC grants, and runtime role memberships', () => {

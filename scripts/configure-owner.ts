@@ -41,6 +41,7 @@ try {
     [
       `OMNIS_INTERNAL_TOKEN=${internalToken}`,
       `OMNIS_RUNTIME_DB_PASSWORD=${randomBytes(32).toString('hex')}`,
+      `OMNIS_AUTHORIZER_DB_PASSWORD=${randomBytes(32).toString('hex')}`,
       'OMNIS_WORKER_HOST=127.0.0.1',
       'OMNIS_WORKER_PORT=4101',
       'OMNIS_QUEUE_NAME=omnis-mock-run',

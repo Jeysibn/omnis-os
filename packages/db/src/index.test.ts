@@ -3,6 +3,7 @@ import { after, beforeEach, describe, it } from 'node:test';
 import {
   createPool,
   migrate,
+  PostgresAuthorizationStore,
   PostgresRunStore,
   StoreError,
   type PgBossTransaction,
@@ -13,20 +14,41 @@ import { assertValidMetrics, metricsQuery } from '../../../scripts/db-recovery/m
 const databaseUrl = process.env.OMNIS_TEST_DATABASE_URL;
 const pool = databaseUrl ? createPool(databaseUrl) : undefined;
 const migrationUrl = process.env.OMNIS_TEST_MIGRATION_DATABASE_URL;
+const authorizerUrl = process.env.OMNIS_TEST_AUTHORIZER_DATABASE_URL;
 const migrationPool = migrationUrl ? createPool(migrationUrl) : undefined;
+const authorizerPool = authorizerUrl ? createPool(authorizerUrl) : undefined;
 const adminUrl = process.env.OMNIS_TEST_ADMIN_DATABASE_URL;
 const adminPool = adminUrl ? createPool(adminUrl) : undefined;
 let nextKey = 0;
 const postgresSuite = describe(
   'PostgreSQL run store',
   {
-    skip: !databaseUrl || !migrationUrl || !adminUrl,
+    skip: !databaseUrl || !migrationUrl || !adminUrl || !authorizerUrl,
   },
   () => {
     const store = new PostgresRunStore(pool!);
+    const authorizations = new PostgresAuthorizationStore(pool!, authorizerPool!);
+    const authorizationByIdempotency = new Map<string, Promise<string>>();
+    async function admit(
+      taskId: string,
+      idempotencyKey: string,
+      enqueue: (transaction: PgBossTransaction, data: { runId: string }) => Promise<string | null>,
+    ) {
+      const cacheKey = `${taskId}:${idempotencyKey}`;
+      let authorizationId = authorizationByIdempotency.get(cacheKey);
+      if (!authorizationId) {
+        authorizationId = (async () => {
+          const request = await authorizations.request(taskId, 'owner');
+          return (await authorizations.decide(request.id, 'owner', 'approve')).id;
+        })();
+        authorizationByIdempotency.set(cacheKey, authorizationId);
+      }
+      return store.admitRun(taskId, idempotencyKey, await authorizationId, 'owner', enqueue);
+    }
 
     beforeEach(async () => {
       assertTestDatabase(databaseUrl!);
+      authorizationByIdempotency.clear();
       await migrate(migrationPool!);
       await adminPool!.query(`
       CREATE TABLE IF NOT EXISTS omnis.test_queue_outbox (
@@ -37,7 +59,7 @@ const postgresSuite = describe(
         'GRANT SELECT, INSERT, UPDATE, DELETE ON omnis.test_queue_outbox TO omnis_runtime',
       );
       await adminPool!.query(
-        'TRUNCATE omnis.test_queue_outbox, omnis.run_idempotency, omnis.run_events, omnis.runs, omnis.tasks',
+        'TRUNCATE omnis.test_queue_outbox, omnis.authorization_audit, omnis.runtime_authorizations, omnis.run_idempotency, omnis.run_events, omnis.runs, omnis.tasks',
       );
       await adminPool!.query('ALTER SEQUENCE omnis.task_id_seq RESTART WITH 1');
       await adminPool!.query('ALTER SEQUENCE omnis.run_id_seq RESTART WITH 1');
@@ -49,7 +71,7 @@ const postgresSuite = describe(
         title: 'Inspect files',
         detail: 'List files read-only.',
       });
-      const admitted = await store.admitRun(task.id, key('atomic'), async (tx, { runId }) => {
+      const admitted = await admit(task.id, key('atomic'), async (tx, { runId }) => {
         await tx.executeSql('INSERT INTO omnis.test_queue_outbox (run_id) VALUES ($1)', [runId]);
         return `job-${runId}`;
       });
@@ -90,6 +112,197 @@ const postgresSuite = describe(
       );
     });
 
+    it('keeps authorization durable, scoped, auditable, and non-mutable by the runtime role', async () => {
+      const task = await store.createTask({
+        title: 'Authorization boundary',
+        detail: 'Synthetic persistence test for run-scoped authorization.',
+      });
+      const pending = await authorizations.request(task.id, 'owner');
+      assert.equal(pending.status, 'pending');
+      const decisions = await Promise.allSettled([
+        authorizations.decide(pending.id, 'owner', 'approve'),
+        authorizations.decide(pending.id, 'owner', 'approve'),
+      ]);
+      assert.equal(decisions.filter((entry) => entry.status === 'fulfilled').length, 1);
+      assert.equal(decisions.filter((entry) => entry.status === 'rejected').length, 1);
+      const approved = decisions.find((entry) => entry.status === 'fulfilled')!;
+      assert.equal(approved.status === 'fulfilled' ? approved.value.status : '', 'authorized');
+
+      await assert.rejects(
+        authorizerPool!.query(
+          `UPDATE omnis.runtime_authorizations SET scope='{"kind":"task","taskId":"task-9999"}' WHERE id=$1`,
+          [pending.id],
+        ),
+        /permission denied/,
+      );
+      await assert.rejects(
+        pool!.query("UPDATE omnis.runtime_authorizations SET status='revoked' WHERE id=$1", [
+          pending.id,
+        ]),
+        /permission denied/,
+      );
+      await assert.rejects(
+        pool!.query('DELETE FROM omnis.runtime_authorizations WHERE id=$1', [pending.id]),
+        /permission denied/,
+      );
+      await assert.rejects(
+        pool!.query(
+          `INSERT INTO omnis.runtime_authorizations
+             (id,requesting_actor,runtime_id,operation,task_id,capabilities,scope,policy_version,correlation_id,expires_at)
+           VALUES ('forged','owner','mock','execute_task',$1,'["mock.execute"]',
+             jsonb_build_object('kind','task','taskId',$1::text),'v1','forged',now()+interval '1 hour')`,
+          [task.id],
+        ),
+        /permission denied/,
+      );
+      await assert.rejects(
+        authorizerPool!.query(
+          `INSERT INTO omnis.runtime_authorizations(id,requesting_actor,runtime_id,operation,task_id,capabilities,scope,policy_version,correlation_id,expires_at)
+           VALUES ('agent-forged','agent:mock','mock','execute_task',$1,'["mock.execute"]',jsonb_build_object('kind','task','taskId',$1::text),'v1','agent',now()+interval '1 hour')`,
+          [task.id],
+        ),
+        /check constraint/,
+      );
+
+      const otherTask = await store.createTask({
+        title: 'Cross scope denial',
+        detail: 'An authorization cannot cross task boundaries.',
+      });
+      await assert.rejects(
+        store.admitRun(
+          otherTask.id,
+          key('cross-scope-auth'),
+          pending.id,
+          'owner',
+          async () => 'job',
+        ),
+        /active task-scoped authorization is required/,
+      );
+
+      const admitted = await admit(task.id, key('durable-auth'), async () => 'job');
+      const runAuthorization = await authorizations.getForRun(admitted.run.id);
+      assert.equal(runAuthorization?.status, 'authorized');
+      assert.equal(runAuthorization?.consumedRunId, admitted.run.id);
+      const restartedAuthorizer = new PostgresAuthorizationStore(pool!, authorizerPool!);
+      assert.equal((await restartedAuthorizer.get(pending.id))?.status, 'authorized');
+      const audit = await restartedAuthorizer.getAudit(pending.id);
+      assert.deepEqual(audit.map((event) => event.eventType).slice(0, 2), [
+        'authorization.requested',
+        'authorization.approved',
+      ]);
+      await restartedAuthorizer.revoke(runAuthorization!.id, 'owner');
+      assert.equal((await restartedAuthorizer.getForRun(admitted.run.id))?.status, 'revoked');
+      assert.equal(
+        await restartedAuthorizer.isActive(runAuthorization!.id, task.id, admitted.run.id),
+        false,
+      );
+      assert.ok(
+        (await restartedAuthorizer.getAudit(runAuthorization!.id)).some(
+          (event) => event.eventType === 'authorization.revoked',
+        ),
+      );
+    });
+
+    it('expires authorizations using database time and records the expiry decision', async () => {
+      const task = await store.createTask({
+        title: 'Expired grant',
+        detail: 'Synthetic expiry probe.',
+      });
+      const pending = await authorizations.request(task.id, 'owner');
+      await adminPool!.query(
+        `UPDATE omnis.runtime_authorizations SET expires_at=now()-interval '1 second' WHERE id=$1`,
+        [pending.id],
+      );
+      await assert.rejects(authorizations.decide(pending.id, 'owner', 'approve'), /expired/);
+      const expired = await authorizations.get(pending.id);
+      assert.equal(expired?.status, 'expired');
+      assert.ok(
+        (await authorizations.getAudit(pending.id)).some(
+          (event) => event.eventType === 'authorization.expired',
+        ),
+      );
+    });
+
+    it('serializes revocation against completion and prevents a post-revocation success', async () => {
+      const task = await store.createTask({
+        title: 'Revocation fence',
+        detail: 'Synthetic race probe.',
+      });
+      const admitted = await admit(task.id, key('revoke-fence'), async () => 'job');
+      const authorization = await authorizations.getForRun(admitted.run.id);
+      assert.ok(authorization);
+      const claim = await store.beginExecution(admitted.run.id, 'worker-before-revoke', 30);
+      await authorizations.revoke(authorization.id, 'owner');
+      const completed = await store.completeRun(
+        admitted.run.id,
+        'worker-before-revoke',
+        claim.generation,
+        'must not complete after revocation',
+      );
+      assert.equal(completed.run.status, 'interrupted');
+      assert.ok(
+        (await authorizations.getAudit(authorization.id)).some(
+          (event) =>
+            event.eventType === 'authorization.enforcement_denied' &&
+            event.reasonCode === 'revoked_before_completion',
+        ),
+      );
+    });
+
+    it('serializes a concurrent claim and revocation at the durable authorization row', async () => {
+      const task = await store.createTask({
+        title: 'Concurrent revoke and claim',
+        detail: 'Synthetic race probe for claim/revoke ordering.',
+      });
+      const admitted = await admit(task.id, key('claim-revoke-race'), async () => 'job');
+      const authorization = await authorizations.getForRun(admitted.run.id);
+      assert.ok(authorization);
+
+      const [claimResult] = await Promise.all([
+        store.beginExecution(admitted.run.id, 'worker-race', 30),
+        authorizations.revoke(authorization.id, 'owner'),
+      ]);
+
+      if (claimResult.started) {
+        const settled = await store.completeRun(
+          admitted.run.id,
+          'worker-race',
+          claimResult.generation,
+          'must not complete after concurrent revocation',
+        );
+        assert.equal(settled.run.status, 'interrupted');
+      } else {
+        assert.equal(claimResult.run.status, 'interrupted');
+      }
+      assert.notEqual((await store.getRun(admitted.run.id))?.status, 'completed');
+      assert.ok(
+        (await authorizations.getAudit(authorization.id)).some(
+          (event) => event.eventType === 'authorization.revoked',
+        ),
+      );
+    });
+
+    it('restricts the authorizer database role to authorization records and audit writes', async () => {
+      const identity = await authorizerPool!.query<{ current_user: string; rolsuper: boolean }>(
+        'SELECT current_user, r.rolsuper FROM pg_roles r WHERE r.rolname=current_user',
+      );
+      assert.equal(identity.rows[0]?.current_user, 'omnis_authorizer');
+      assert.equal(identity.rows[0]?.rolsuper, false);
+      await assert.rejects(
+        authorizerPool!.query('CREATE TABLE omnis.authorizer_ddl_probe (id integer)'),
+        /permission denied/,
+      );
+      await assert.rejects(
+        authorizerPool!.query("UPDATE omnis.tasks SET title='tampered'"),
+        /permission denied/,
+      );
+      await assert.rejects(
+        authorizerPool!.query('DELETE FROM omnis.authorization_audit'),
+        /permission denied/,
+      );
+      await assert.rejects(authorizerPool!.query('SELECT pg_reload_conf()'), /permission denied/);
+    });
+
     it('preserves later migration privileges when runtime roles are re-provisioned', async () => {
       const laterMigrationTable = 'future_privilege_probe';
       const ungrantedTable = 'future_ungranted_probe';
@@ -110,6 +323,7 @@ const postgresSuite = describe(
         await provisionDatabaseRoles(adminPool!, {
           migration: decodeURIComponent(migrationConnection.password),
           runtime: decodeURIComponent(new URL(databaseUrl!).password),
+          authorizer: decodeURIComponent(new URL(authorizerUrl!).password),
         });
 
         assert.equal(
@@ -138,7 +352,7 @@ const postgresSuite = describe(
           title: 'Reprovisioning regression',
           detail: 'Normal task admission remains available.',
         });
-        const admitted = await store.admitRun(task.id, key('reprovisioning'), async () => 'job');
+        const admitted = await admit(task.id, key('reprovisioning'), async () => 'job');
         assert.equal(admitted.created, true);
         assert.equal(admitted.run.runtimeKind, 'mock');
       } finally {
@@ -153,7 +367,7 @@ const postgresSuite = describe(
         title: 'Privilege boundary fixture',
         detail: 'Exercise allowed and prohibited SQL under omnis_runtime.',
       });
-      const admitted = await store.admitRun(task.id, key('least-privilege'), async () => 'job');
+      const admitted = await admit(task.id, key('least-privilege'), async () => 'job');
       const eventId = admitted.events[0]!.event.id;
 
       await assert.rejects(
@@ -239,7 +453,7 @@ const postgresSuite = describe(
 
     it('detects deliberately stale task and run sequences against existing identifiers', async () => {
       const task = await store.createTask({ title: 'Sequence fixture', detail: 'Task ID check.' });
-      const admitted = await store.admitRun(task.id, key('sequence-integrity'), async () => 'job');
+      const admitted = await admit(task.id, key('sequence-integrity'), async () => 'job');
 
       await adminPool!.query("SELECT setval('omnis.task_id_seq', 1, false)");
       await adminPool!.query("SELECT setval('omnis.run_id_seq', 1, false)");
@@ -351,7 +565,7 @@ const postgresSuite = describe(
         detail: 'List files read-only.',
       });
       await assert.rejects(
-        store.admitRun(task.id, key('rollback'), async () => {
+        admit(task.id, key('rollback'), async () => {
           throw new Error('queue rejected');
         }),
         /queue rejected/,
@@ -373,8 +587,8 @@ const postgresSuite = describe(
         return `job-${runId}`;
       };
       const [first, retry] = await Promise.all([
-        store.admitRun(task.id, idem, enqueue),
-        store.admitRun(task.id, idem, enqueue),
+        admit(task.id, idem, enqueue),
+        admit(task.id, idem, enqueue),
       ]);
       assert.equal(first.run.id, retry.run.id);
       assert.equal([first.created, retry.created].filter(Boolean).length, 1);
@@ -385,7 +599,7 @@ const postgresSuite = describe(
         detail: 'Read another file list.',
       });
       await assert.rejects(
-        store.admitRun(otherTask.id, key('concurrency'), enqueue),
+        admit(otherTask.id, key('concurrency'), enqueue),
         (error: unknown) => error instanceof StoreError && error.code === 'concurrency_limit',
       );
     });
@@ -395,7 +609,7 @@ const postgresSuite = describe(
         title: 'Inspect files',
         detail: 'List files read-only.',
       });
-      const admitted = await store.admitRun(task.id, key('cancel'), async (tx, { runId }) => {
+      const admitted = await admit(task.id, key('cancel'), async (tx, { runId }) => {
         await tx.executeSql('INSERT INTO omnis.test_queue_outbox (run_id) VALUES ($1)', [runId]);
         return `job-${runId}`;
       });
@@ -421,7 +635,7 @@ const postgresSuite = describe(
         title: 'Complete an owned run',
         detail: 'Persist deterministic synthetic output.',
       });
-      const admitted = await store.admitRun(task.id, key('complete-owned'), async () => 'job');
+      const admitted = await admit(task.id, key('complete-owned'), async () => 'job');
       const claim = await store.beginExecution(admitted.run.id, 'worker-owner', 30);
 
       const completed = await store.completeRun(
@@ -454,7 +668,7 @@ const postgresSuite = describe(
         detail: 'An old generation cannot finalize a run claimed by another worker.',
       });
 
-      const admitted = await store.admitRun(task.id, key('stale-finalizer'), async () => 'job');
+      const admitted = await admit(task.id, key('stale-finalizer'), async () => 'job');
       const staleClaim = await store.beginExecution(admitted.run.id, 'worker-old', 30);
       await pool!.query(
         "UPDATE omnis.runs SET execution_generation = execution_generation + 1, lease_owner = 'worker-new' WHERE id = $1",
@@ -489,7 +703,7 @@ const postgresSuite = describe(
         title: 'Fence competing worker claims',
         detail: 'Only one worker may own the execution generation.',
       });
-      const admitted = await store.admitRun(task.id, key('two-worker-claim'), async () => 'job');
+      const admitted = await admit(task.id, key('two-worker-claim'), async () => 'job');
       const secondPool = createPool(databaseUrl!);
       const secondStore = new PostgresRunStore(secondPool);
       try {
@@ -561,7 +775,7 @@ const postgresSuite = describe(
         title: 'Exercise the isolated runtime',
         detail: 'The trusted worker owns this task and failure state.',
       });
-      const admitted = await store.admitRun(task.id, key('sandbox-failure'), async () => 'job');
+      const admitted = await admit(task.id, key('sandbox-failure'), async () => 'job');
       const claim = await store.beginExecution(admitted.run.id, 'worker-sandbox', 30);
 
       const failed = await store.failRun(
@@ -592,7 +806,7 @@ const postgresSuite = describe(
         title: 'Observe stop state',
         detail: 'A second worker process requested cancellation.',
       });
-      const admitted = await store.admitRun(task.id, key('cross-worker-stop'), async () => 'job');
+      const admitted = await admit(task.id, key('cross-worker-stop'), async () => 'job');
       const claim = await store.beginExecution(admitted.run.id, 'worker-owner', 30);
       await store.requestStop(admitted.run.id);
 
@@ -611,11 +825,7 @@ const postgresSuite = describe(
         title: 'Reject stale lease heartbeat',
         detail: 'Expired lease ownership cannot be reclaimed without a new run.',
       });
-      const admitted = await store.admitRun(
-        task.id,
-        key('expired-lease-heartbeat'),
-        async () => 'job',
-      );
+      const admitted = await admit(task.id, key('expired-lease-heartbeat'), async () => 'job');
       const claim = await store.beginExecution(admitted.run.id, 'stale-worker', 30);
       await pool!.query(
         "UPDATE omnis.runs SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
@@ -634,14 +844,10 @@ const postgresSuite = describe(
         title: 'Inspect files',
         detail: 'List files read-only.',
       });
-      const admitted = await store.admitRun(
-        task.id,
-        key('queued-cancel'),
-        async (tx, { runId }) => {
-          await tx.executeSql('INSERT INTO omnis.test_queue_outbox (run_id) VALUES ($1)', [runId]);
-          return `job-${runId}`;
-        },
-      );
+      const admitted = await admit(task.id, key('queued-cancel'), async (tx, { runId }) => {
+        await tx.executeSql('INSERT INTO omnis.test_queue_outbox (run_id) VALUES ($1)', [runId]);
+        return `job-${runId}`;
+      });
       await store.requestStop(admitted.run.id);
 
       const recovered = await store.interruptQueuedRun(
@@ -657,7 +863,7 @@ const postgresSuite = describe(
         title: 'Settle a terminal queue job',
         detail: 'The queue reports no active executor for this run.',
       });
-      const admitted = await store.admitRun(task.id, key('terminal-queue-stop'), async () => 'job');
+      const admitted = await admit(task.id, key('terminal-queue-stop'), async () => 'job');
       await store.beginExecution(admitted.run.id, 'worker-old', 30);
       await store.requestStop(admitted.run.id);
 
@@ -671,7 +877,7 @@ const postgresSuite = describe(
         title: 'Inspect files',
         detail: 'List files read-only.',
       });
-      const admitted = await store.admitRun(task.id, key('interrupted'), async (tx, { runId }) => {
+      const admitted = await admit(task.id, key('interrupted'), async (tx, { runId }) => {
         await tx.executeSql('INSERT INTO omnis.test_queue_outbox (run_id) VALUES ($1)', [runId]);
         return `job-${runId}`;
       });
@@ -692,14 +898,10 @@ const postgresSuite = describe(
         title: 'Later task',
         detail: 'Read another file list.',
       });
-      const later = await store.admitRun(
-        anotherTask.id,
-        key('fresh-run'),
-        async (tx, { runId }) => {
-          await tx.executeSql('INSERT INTO omnis.test_queue_outbox (run_id) VALUES ($1)', [runId]);
-          return `job-${runId}`;
-        },
-      );
+      const later = await admit(anotherTask.id, key('fresh-run'), async (tx, { runId }) => {
+        await tx.executeSql('INSERT INTO omnis.test_queue_outbox (run_id) VALUES ($1)', [runId]);
+        return `job-${runId}`;
+      });
       assert.equal(later.created, true);
       assert.equal(later.run.status, 'queued');
       assert.equal((await store.getRun(admitted.run.id))?.status, 'interrupted');
@@ -709,7 +911,8 @@ const postgresSuite = describe(
       if (pool && databaseUrl) {
         assertTestDatabase(databaseUrl);
         await adminPool!.query(`
-        TRUNCATE omnis.test_queue_outbox, omnis.run_idempotency,
+        TRUNCATE omnis.test_queue_outbox, omnis.authorization_audit,
+          omnis.runtime_authorizations, omnis.run_idempotency,
           omnis.run_events, omnis.runs, omnis.tasks
       `);
         await adminPool!.query('ALTER SEQUENCE omnis.task_id_seq RESTART WITH 1');
@@ -718,6 +921,7 @@ const postgresSuite = describe(
       }
       await pool?.end();
       await migrationPool?.end();
+      await authorizerPool?.end();
       await adminPool?.end();
     });
   },
