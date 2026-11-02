@@ -115,7 +115,7 @@ No provider adapter or inference was enabled. R1-G4 still requires durable runti
 ## PR #1 reliability follow-up — 2026-11-02
 
 - **Merged baseline:** PR #1 was reviewed at `5a34c42940d378fc06b0a81e799449458a5e5fec`, marked ready, and squash-merged to `main` as `d9c715de80215d74a48ca0eb1d02515fd70fdc0b` with explicit owner authorization. Main CI passed at that SHA in [run 41464559948](https://github.com/Jeysibn/omnis-os/actions/runs/41464559948).
-- **Follow-up branch:** `reliability/n7-backup-restore-ci`, based on the merge commit. This follow-up does not enable provider execution.
+- **Follow-up branch:** `reliability/n7-backup-restore-ci`, based on the merge commit. Verified implementation revision: `7f701933bf33a7151af04c725a319cd768c7768c`, including the legacy-upgrade expectation for migration `0004`. This follow-up does not enable provider execution.
 
 ### N-7 — role reprovisioning safety
 
@@ -139,7 +139,7 @@ Restores previously replayed `0003` after restoring ACL-free archives, so that p
 | Backup/restore integration | Passed locally against the disposable Docker Compose project. Stale task sequence rejection and artifact cleanup passed; the ACL-preserving archive restored with matching fingerprints and sequence invariants. Approved future migration grants survived restore, ungranted fixtures stayed inaccessible, and the restricted runtime created a synthetic task and completed mock run. |
 | Docker sandbox negative security test | Passed locally with `OMNIS_SANDBOX_INTEGRATION=1`: 9 tests passed, 0 failed, 0 skipped. This included actual-container mount, canary, identity, resource, process, timeout, and network checks. |
 | API/browser regression | No API or UI behavior changed in this follow-up; no new browser run was performed. |
-| Follow-up GitHub Actions | Pending push and draft pull request. |
+| Follow-up GitHub Actions | Passed for implementation revision `7f701933bf33a7151af04c725a319cd768c7768c`: [run 41466299224](https://github.com/Jeysibn/omnis-os/actions/runs/41466299224). Frozen install, role provisioning, `pnpm check` including real-container sandbox tests, production build, legacy upgrade, recovery integration, and disposable backup/restore all passed. |
 
 ### Remaining risks and gate
 
