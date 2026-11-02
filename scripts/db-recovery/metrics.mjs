@@ -63,6 +63,15 @@ export function assertValidMetrics(report) {
   }
 }
 
+export function assertBackupSafe(report) {
+  assertValidMetrics(report);
+  if (report.unsafeRunStates !== 0 || report.leasedRuns !== 0) {
+    throw new Error(
+      'Backup requires all queued, running, stopping, unknown, and leased work to settle.',
+    );
+  }
+}
+
 export function metricsMatch(source, restored) {
   assertValidMetrics(restored);
   for (const key of ['tasks', 'runs', 'events', 'idempotencyRecords', 'leasedRuns']) {
