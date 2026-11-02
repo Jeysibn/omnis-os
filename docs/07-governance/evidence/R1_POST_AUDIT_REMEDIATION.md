@@ -112,6 +112,36 @@ No provider adapter or inference was enabled. R1-G4 still requires durable runti
 
 **Follow-up result: Passed locally and in GitHub Actions for N-2/N-3/M-7 at implementation revision `900da0c0cb38978d712312a27b5accd09074753d`; draft PR #1 is open and unmerged. This is not authorization for real AI execution.**
 
+## Post-restore ACL verification follow-up — 2026-11-02
+
+- **Base revision:** PR #2 merge commit `3b0f87feed80ca05b2ebfa3cabf929928237318a`; main CI passed in [run 41473213935](https://github.com/Jeysibn/omnis-os/actions/runs/41473213935).
+- **Feature branch:** `security/restore-acl-validation`.
+- **Draft PR:** [PR #3](https://github.com/Jeysibn/omnis-os/pull/3), open against `main`; no merge performed.
+- **Implementation revision:** `b095290c994b9ddf151810d3bcbc0845e67cbca8`.
+- **Scope:** F-1 post-restore ACL policy validation, F-2 real ACL-free archive compatibility coverage, and F-3 semantic source/restored ACL comparison.
+
+New ACL-preserving backup manifests carry a normalized ACL snapshot for the `omnis` and `pgboss` schemas, including schema/table/sequence/column/routine/type and migration-owned default ACL entries. Restore verifies the runtime grant policy and compares the restored ACL entries with the snapshot before accepting the database. Grantor identity is normalized because `pg_restore --role=omnis_migrator` may change the recorded grantor while preserving the grantee and privilege. PUBLIC routine execution is accepted only for invoker-rights routines; PUBLIC type USAGE is retained where PostgreSQL/pg-boss defines it. Grant options and unreviewed grantees are rejected.
+
+Older `postgres-custom` archives have no source ACL snapshot, so equality cannot be established. The compatibility path reconstructs only the current restricted application grants, revokes runtime access to future application relations/sequences, reapplies required pg-boss grants, and then runs the same runtime ACL policy validation. A real `pg_dump --no-acl` fixture is restored in CI and verifies that later ungranted relations/sequences remain inaccessible.
+
+### Verification for F-1 through F-3
+
+| Check | Result |
+|---|---|
+| ACL policy unit tests | Passed: safe current/pg-boss grants, prohibited DML, PUBLIC and unknown-role grants, grant options, invoker-rights routine handling, and snapshot drift. |
+| New ACL-preserving archive | Passed against disposable PostgreSQL 17.6. Restored normalized ACLs matched the source snapshot, runtime ACL policy passed, and the synthetic task/run and sequence checks passed. |
+| Unauthorized grant negative test | Passed against the restored database. A synthetic `DELETE` grant on `omnis.tasks` caused the ACL policy validator to reject the snapshot; the grant was revoked afterward. |
+| ACL-free compatibility archive | Passed using a real custom-format `pg_dump --no-acl` archive and legacy manifest. Restore rebuilt the restricted baseline, and runtime reads of later ungranted fixtures and sequence access were denied. |
+| Backup/restore disposable infrastructure | Project, source/restore databases, volume, archive, manifest, and temporary credentials were removed; no unrelated containers were touched. |
+| Frozen install | Passed with `npm exec --yes --package=pnpm@12.16.1 -- pnpm install --frozen-lockfile`; lockfile unchanged. |
+| Formatting, ESLint, TypeScript, unit tests | `pnpm check` passed. The DB and live-container suites are gated and skip without their integration DSNs/flag; the database and sandbox suites were run separately below. `pnpm test` includes 5 ACL-integrity unit tests and 5 backup metric tests, all passed. |
+| Production build | `pnpm build` passed. |
+| Actual Docker sandbox | Passed locally: 9 tests, 0 failures, 0 skipped. |
+| Full local regression | Passed on the feature-branch working tree: frozen install, `pnpm check` (format, ESLint, TypeScript, all workspace tests and 10 recovery/ACL tests), `pnpm build`, real disposable PostgreSQL backup/restore, and actual Docker sandbox security suite (9 passed, 0 failed, 0 skipped). |
+| GitHub Actions | Passed for implementation revision `b095290c994b9ddf151810d3bcbc0845e67cbca8` in [run 41475423033](https://github.com/Jeysibn/omnis-os/actions/runs/41475423033): frozen install, role provisioning, `pnpm check`, production build, legacy-upgrade, recovery, disposable backup/restore, and cleanup all succeeded. The subsequent documentation-only revision also passed in [run 41475925282](https://github.com/Jeysibn/omnis-os/actions/runs/41475925282). |
+
+Backup encryption and manifest/archive authentication remain explicit upcoming requirements. The snapshot detects source/restored ACL drift and policy violations but is not authenticated against a malicious actor who can alter both archive and manifest. A separately reviewed key-management design is required before implementing either control. This work does not enable real model inference.
+
 ## PR #1 reliability follow-up — 2026-11-02
 
 - **Merged baseline:** PR #1 was reviewed at `5a34c42940d378fc06b0a81e799449458a5e5fec`, marked ready, and squash-merged to `main` as `d9c715de80215d74a48ca0eb1d02515fd70fdc0b` with explicit owner authorization. Main CI passed at that SHA in [run 41464559948](https://github.com/Jeysibn/omnis-os/actions/runs/41464559948).

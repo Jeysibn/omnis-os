@@ -31,7 +31,7 @@
     "lint": "eslint apps packages scripts",
     "format:check": "prettier --check \"apps/**/*.{ts,tsx,css,html,json}\" \"packages/**/*.ts\" \"scripts/**/*.{ts,mjs}\" \"tests/**/*.mjs\" \"infra/**/*.yml\" \"*.json\" \"*.yaml\" \"*.mjs\"",
     "format": "prettier --write \"apps/**/*.{ts,tsx,css,html,json}\" \"packages/**/*.ts\" \"scripts/**/*.{ts,mjs}\" \"tests/**/*.mjs\" \"infra/**/*.yml\" \"*.json\" \"*.yaml\" \"*.mjs\"",
-    "test": "pnpm -r test && node --test scripts/db-recovery/metrics.test.mjs",
+    "test": "pnpm -r test && node --test scripts/db-recovery/*.test.mjs",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test"
   },
   "devDependencies": {
