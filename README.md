@@ -4,7 +4,7 @@ Omnis OS is a single-owner command center for managing agents, projects, tasks, 
 
 ## Current status
 
-R1-G1 provides PostgreSQL-backed tasks, runs, results, cancellation, ordered events, and durable mock admission. R1-G2 runs the mock workload in an ephemeral Docker container with a read-only root, a per-run workspace, dropped capabilities, resource limits, and no network. Local security, persistence, process-restart, and browser checks passed. The product remains mock-only: no provider is connected, and synthetic output is not verified AI evidence. The original Phase 0 and R1-G1 records remain preserved; current risks and [R1-G2 evidence](docs/07-governance/evidence/R1_G2_SANDBOX_SECURITY.md) are in the governance decision log.
+R1-G1 provides PostgreSQL-backed tasks, runs, results, cancellation, ordered events, and durable mock admission. R1-G2 runs the mock workload in an ephemeral Docker container with a read-only root, a per-run workspace, dropped capabilities, resource limits, and no network. R1-G3 adds locally verified backup/restore, clean-clone build checks, and worker/sandbox/database recovery tests. The product remains mock-only: no provider is connected, and synthetic output is not verified AI evidence. Remote GitHub Actions and Docker-daemon failure recovery remain unverified. Read the [R1-G2 security evidence](docs/07-governance/evidence/R1_G2_SANDBOX_SECURITY.md), [R1-G3 recovery evidence](docs/07-governance/evidence/R1_G3_CI_RECOVERY.md), and governance decision log.
 
 ## Development
 

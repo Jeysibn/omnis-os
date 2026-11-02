@@ -12,7 +12,7 @@ Exit: owner accepts policy limitations and a safe first runtime; no credentials 
 
 Deliverables: typed monorepo, auth/private access, PostgreSQL migrations, Agent/Department/Project/Task/Run entities, Fastify API, one verified runtime adapter, durable events/SSE, cancellation, evidence panel, basic usage event ingestion, initial command center, tests/CI.
 
-**Current checkpoint:** R1-G1 delivered the PostgreSQL-backed mock task/run/event slice. R1-G2 locally verified the mock execution container, filesystem/credential isolation, default-deny network, resource limits, cancellation, and lease-based orphan cleanup. The Phase 1/R1 exit gate remains open: no real runtime is authorized, broader domain entities are not implemented, remote CI and production sandbox deployment are unverified. See the R1-G1 and R1-G2 evidence reports.
+**Current checkpoint:** R1-G1 delivered the PostgreSQL-backed mock task/run/event slice. R1-G2 locally verified the mock execution container, filesystem/credential isolation, default-deny network, resource limits, cancellation, and lease-based orphan cleanup. R1-G3 locally verified frozen clean-clone setup, backup/restore, and worker, sandbox, API, SSE and database recovery behavior. The Phase 1/R1 exit gate remains open: no real runtime is authorized, broader domain entities are not implemented, remote CI and Docker-daemon recovery are unverified, and database outage recovery requires a replacement worker. See the R1-G1, R1-G2, and R1-G3 evidence reports.
 
 Exit: task can complete or fail honestly; browser reload/worker restart preserves state; audit and authorization enforced.
 

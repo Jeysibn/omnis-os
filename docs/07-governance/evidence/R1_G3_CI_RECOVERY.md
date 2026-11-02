@@ -3,7 +3,7 @@
 **Review date:** 2026-11-02  
 **Scope:** reproducible CI, PostgreSQL logical backup/restore, and local failure injection  
 **Base revision inspected:** `e127c9bd556e8c00273786b1fb0b6318160e45ff`  
-**Final revision:** to be recorded after the R1-G3 changes are committed  
+**Final implementation revision tested:** `55636c3b999304b94cede48a75b182a1da6bda47`
 **Data:** synthetic Omnis tasks and mock runs only; no provider inference or credentials
 
 ## Threat model and boundaries
@@ -18,7 +18,7 @@ The CI workflow pins Node `24.22.1`, pnpm `12.16.1`, PostgreSQL `17.6-alpine` by
 
 Remote GitHub Actions status: **Not verified**. The checkout has no Git remote configured and the owner has not yet provided the repository URL. No push was made. The review-branch push authorization is pending that URL.
 
-Clean-clone verification: **pending final committed revision**. Record the disposable clone path, tested SHA, install output and checks here after running from a fresh local clone without `node_modules` or build output.
+Clean-clone verification: **Passed locally** on `55636c3` in `/tmp/omnis-os-r1g3-clean-55636c3`, cloned from local Git without build artifacts or `node_modules`. `npx --yes pnpm@12.16.1 install --frozen-lockfile` installed all 209 packages with no download, followed by `pnpm check`, `pnpm build`, and `pnpm integration:mock`. Formatting, ESLint, all TypeScript packages, 42 tests (including 11 real PostgreSQL tests and eight actual Docker sandbox tests), production build, and the API/worker integration smoke passed. The pnpm store used `/tmp/.pnpm-store/v11` because the clone and default store are on different filesystems.
 
 ## Backup and restore procedure
 
@@ -37,7 +37,7 @@ The measured restore is a small local synthetic database result, not an RTO guar
 
 ## Failure injection results
 
-The final local command was `pnpm integration:recovery`, with `OMNIS_TEST_DATABASE_URL` pointed at a new disposable database and `OMNIS_TEST_POSTGRES_CONTAINER` set only to the test container bearing `com.omnis.os.r1g3-disposable=true`.
+The final local command was `pnpm integration:recovery`, with `OMNIS_TEST_DATABASE_URL` pointed at a new disposable database and `OMNIS_TEST_POSTGRES_CONTAINER` set only to the test container bearing `com.omnis.os.r1g3-disposable=true`. The run completed on implementation revision `55636c3b999304b94cede48a75b182a1da6bda47` with: `PostgreSQL-backed recovery passed: durable lifecycle, API/SSE replay, abrupt worker recovery, sandbox crash cleanup, and no duplicate execution.`
 
 | Scenario | Result | Observation |
 |---|---|---|
@@ -55,11 +55,12 @@ The recovery integration completed with: `PostgreSQL-backed recovery passed: dur
 - WSL2 Ubuntu 26.04.1, Node `v24.22.1`, pnpm `12.16.1` via `npx`, Docker Compose with PostgreSQL `17.6-alpine`.
 - Docker socket access came from the existing account `docker` group membership in a fresh `sg docker` shell. No socket mode, group membership, daemon configuration, or host firewall was changed.
 - Disposable Compose project: `omnis-r1g3-0dad5eae`, unique named volume, loopback-only host port. Existing unrelated MoniKey containers remained running and healthy.
-- Frozen install: `npx --yes pnpm@12.16.1 install --frozen-lockfile` — passed before final documentation/commit.
-- `pnpm format`, `pnpm check`, `pnpm build` — passed before the last integration-only assertion updates; repeat against final revision below.
+- Frozen install: `npx --yes pnpm@12.16.1 install --frozen-lockfile` — passed from the source checkout and clean clone.
+- `pnpm check` — passed on the final code revision, including all eight actual Docker security cases and 11 PostgreSQL integration tests.
+- `pnpm build` — passed on the final code revision.
 - `pnpm integration:mock` — passed against both source and restored databases.
 - `pnpm integration:recovery` — passed after the final workspace cleanup, SSE terminal reader, outage worker-restart and task-count corrections.
-- Actual Docker sandbox negative suite — eight container tests passed in the prior verification; repeat in final `pnpm check` with `OMNIS_SANDBOX_INTEGRATION=1`.
+- Actual Docker sandbox negative suite — eight container tests passed in final `pnpm check` with `OMNIS_SANDBOX_INTEGRATION=1`.
 
 ## Remaining limitations and gate decision
 
@@ -70,4 +71,4 @@ The recovery integration completed with: `PostgreSQL-backed recovery passed: dur
 - Backups are not encrypted by these scripts; encryption and off-host retention are operational prerequisites for real data.
 - Hermes, Codex and Claude remain disabled; this evidence grants no model/runtime authorization.
 
-**R1-G3 status:** not yet a complete release pass. Backup/restore and local process recovery passed; clean-clone and final-revision checks remain pending, remote CI is blocked on repository details/authorization, and Docker-daemon failure is not verified.
+**R1-G3 status:** Local implementation, clean-clone verification, backup/restore, and tested process recovery passed. The overall gate is **Not Passed** until GitHub Actions runs remotely on the intended revision. The checkout has no configured Git remote; the owner said they will provide the URL and authorize a review-branch push, but has not supplied the URL yet. Docker-daemon failure remains unverified. Worker process recovery from database loss requires a replacement process.

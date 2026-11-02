@@ -1,7 +1,7 @@
 # Omnis OS - Master Implementation Plan
 
 **Version:** 1.1 (project branding update; technical scope unchanged)  
-**Status:** Incremental implementation in progress; R1-G1 persistence and R1-G2 local mock sandbox checkpoints recorded.
+**Status:** Incremental implementation in progress; R1-G1 persistence, R1-G2 local mock sandbox, and R1-G3 local recovery evidence recorded. Remote CI and the complete R1 gate remain open.
 **Date:** 2026-11-02  
 **Product name:** Omnis OS (selected by owner).  
 **Repository slug:** `omnis-os`.  
@@ -63,7 +63,7 @@ Director -> Web UI -> authenticated Fastify control plane -> authorization and b
 ## 6. Release sequence
 
 - **Phase 0: Investigation + guardrails.** Versions, entitlement/policy checks, capability probes, host security, acceptance targets.
-- **Phase 1: Foundation + one real run.** Auth, DB, profile, project/task, Hermes-first adapter if verified, SSE, cancel, persistent history, test harness. R1-G1 provides a persistent mock lifecycle and R1-G2 adds local container isolation for that mock. Neither checkpoint completes Phase 1 or authorizes a real runtime.
+- **Phase 1: Foundation + one real run.** Auth, DB, profile, project/task, Hermes-first adapter if verified, SSE, cancel, persistent history, test harness. R1-G1 provides a persistent mock lifecycle; R1-G2 adds local container isolation; R1-G3 adds local backup/restore, clean-clone verification, and process failure recovery. Remote CI, daemon-level recovery and runtime authorization remain open, so these checkpoints do not complete Phase 1 or authorize a real runtime. See the [R1-G3 evidence](docs/07-governance/evidence/R1_G3_CI_RECOVERY.md).
 - **Phase 2: Runtime plurality + isolated chat.** Codex and Claude paths behind capability gates, per-chat sessions, model picker, token measurement.
 - **Phase 3: Skills/MCP + knowledge.** Approved skill snapshots, scoped tool grants, global/project knowledge and write-review flow.
 - **Phase 4: PM + workflows + automation.** Dependencies, milestones, scheduling, retries, announcements, budget controls.
