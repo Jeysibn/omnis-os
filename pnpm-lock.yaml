@@ -307,6 +307,9 @@ importers:
 
   packages/db:
     dependencies:
+      '@omnis/contracts':
+        specifier: workspace:*
+        version: link:../contracts
       pg:
         specifier: 8.23.1
         version: 8.23.1
