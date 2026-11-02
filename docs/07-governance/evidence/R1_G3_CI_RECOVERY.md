@@ -20,6 +20,8 @@ Remote GitHub Actions status: **Not verified**. The checkout has no Git remote c
 
 Clean-clone verification: **Passed locally** on `55636c3` in `/tmp/omnis-os-r1g3-clean-55636c3`, cloned from local Git without build artifacts or `node_modules`. `npx --yes pnpm@12.16.1 install --frozen-lockfile` installed all 209 packages with no download, followed by `pnpm check`, `pnpm build`, and `pnpm integration:mock`. Formatting, ESLint, all TypeScript packages, 42 tests (including 11 real PostgreSQL tests and eight actual Docker sandbox tests), production build, and the API/worker integration smoke passed. The pnpm store used `/tmp/.pnpm-store/v11` because the clone and default store are on different filesystems.
 
+Earlier disposable-clone attempts exposed timing assumptions: a 700 ms sandbox deadline raced container startup, and an interrupted-run assertion sampled state before lease reconciliation. The integration test deadline is now 3 seconds and the lifecycle smoke waits for the durable interrupted state (up to 45 seconds). The final clean clone on `55636c3` passed; the database lease policy and production execution timeout were not changed.
+
 ## Backup and restore procedure
 
 The backup script takes a repeatable-read exported PostgreSQL snapshot shared by `pg_dump` and its metrics query. It emits PostgreSQL custom format (`PGDMP`) and a SHA-256/count manifest. The scripts require a private directory and owner-only files, reject overwrite, verify the archive list, and refuse restore to an existing database. Restore targets must use the reserved `omnis_restore_` prefix. A failed restore is left in place for inspection; it is never silently dropped.
