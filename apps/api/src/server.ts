@@ -9,6 +9,7 @@ import {
 } from './auth.ts';
 import { env } from './env.ts';
 import { LocalSessionStore } from './session-store.ts';
+import { AuthThrottle } from './auth-throttle.ts';
 import {
   parseRun,
   parseRunList,
@@ -20,10 +21,12 @@ import {
 } from './worker-client.ts';
 
 const app = Fastify({
+  trustProxy: false,
   logger: { redact: ['req.headers.cookie', 'res.headers.set-cookie', 'req.headers.x-omnis-csrf'] },
 });
 // Memory-backed sessions are limited to this single-owner local mock gate. Durable session storage is a later gate.
 const sessions = new LocalSessionStore(env.sessionSecret, env.secureCookies);
+const authThrottle = new AuthThrottle();
 app.decorateRequest('omnisSession', undefined);
 app.addHook('onRequest', async (request, reply) => {
   reply.header('x-content-type-options', 'nosniff');
@@ -31,9 +34,12 @@ app.addHook('onRequest', async (request, reply) => {
   reply.header('x-frame-options', 'DENY');
   reply.header('cache-control', 'no-store');
   if (request.url === '/api/v1/health') return;
-  const resolved = sessions.resolve(request.headers.cookie);
-  request.omnisSession = resolved.session;
-  if (resolved.setCookie) reply.header('set-cookie', sessions.cookie(resolved.session));
+  const needsAnonymousSession =
+    request.url === '/api/v1/auth/csrf' || request.url === '/api/v1/auth/login';
+  const resolved = sessions.resolve(request.headers.cookie, needsAnonymousSession);
+  if (resolved.session) request.omnisSession = resolved.session;
+  if (resolved.setCookie && resolved.session)
+    reply.header('set-cookie', sessions.cookie(resolved.session));
 });
 
 app.get('/api/v1/health', async () => ({
@@ -50,17 +56,35 @@ app.post('/api/v1/auth/login', async (request, reply) => {
       .code(403)
       .send({ error: { code: 'csrf_rejected', message: 'Refresh the page and retry sign in.' } });
   }
+  const admission = authThrottle.begin(request.ip);
+  if ('retryAfterSeconds' in admission) {
+    reply.header('retry-after', admission.retryAfterSeconds);
+    return reply.code(429).send({
+      error: { code: 'authentication_throttled', message: 'Sign in is temporarily rate limited.' },
+    });
+  }
   const body: unknown = request.body;
   const password =
     typeof body === 'object' && body !== null && 'password' in body
       ? (body as { password?: unknown }).password
       : undefined;
-  if (!(await isOwnerPasswordValid(password))) {
-    return reply.code(401).send({
-      error: { code: 'invalid_credentials', message: 'The owner password is incorrect.' },
-    });
+  try {
+    if (!(await isOwnerPasswordValid(password))) {
+      authThrottle.failed(request.ip);
+      return reply.code(401).send({
+        error: { code: 'invalid_credentials', message: 'The owner password is incorrect.' },
+      });
+    }
+    authThrottle.succeeded(request.ip);
+  } finally {
+    admission.release();
   }
   const rotated = sessions.rotate(request.omnisSession?.id ?? '');
+  if (!rotated) {
+    return reply
+      .code(429)
+      .send({ error: { code: 'session_capacity', message: 'Retry sign in shortly.' } });
+  }
   request.omnisSession = rotated;
   reply.header('set-cookie', sessions.cookie(rotated));
   return { authenticated: true };
