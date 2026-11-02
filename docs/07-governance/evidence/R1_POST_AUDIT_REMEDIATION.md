@@ -77,6 +77,7 @@ Fresh migration, upgrade from the prior checksum-less R1 ledger, repeat/concurre
 ## Database integrity hardening follow-up — 2026-11-02
 
 - **Review base:** `9d50ad1b830a8468a8dd639c069bced8de84cb3a` on `security/post-audit-remediation`.
+- **Implementation revision:** `2cfc53bdc0dc529152f05de7eceea02e5ebb7b0a`.
 - **Scope:** Claude Code follow-up items N-2 (runtime grants), N-3 (legacy upgrade), and M-7 (ID sequence integrity).
 - **Verification data:** synthetic records and disposable PostgreSQL 17.6 only. No provider credentials or inference were used.
 
@@ -99,7 +100,7 @@ Fresh migration, upgrade from the prior checksum-less R1 ledger, repeat/concurre
 | Legacy upgrade | `pnpm integration:legacy-upgrade` — passed from the exact original revision above, including pg-boss and restricted worker execution. |
 | Backup and restore | Real PostgreSQL backup rejected the intentionally stale task sequence. Valid backup and restore then passed into `omnis_restore_final_n2`; runtime task/run insert and sequence checks passed. The unsafe in-flight rejection remains covered by existing recovery integration and metrics tests. |
 | Browser | No frontend or API contract changed in this follow-up. Existing Firefox owner sign-in, throttling, mock execution, cancellation, SSE reload/reconnect, and responsive checks remain recorded above; database integration reran the affected task/run HTTP path. |
-| GitHub Actions | Pending for the final follow-up commit. The prior run URL above verifies only the earlier revision and does not cover this follow-up. |
+| GitHub Actions | **Passed** for implementation revision `2cfc53bdc0dc529152f05de7eceea02e5ebb7b0a`: [run 41459910602](https://github.com/Jeysibn/omnis-os/actions/runs/41459910602). Frozen install, role provisioning, `pnpm check`, production build, legacy upgrade, and recovery integration all passed. |
 
 The disposable PostgreSQL container was `omnis-db-integrity-20261102-postgres-1`, bound to loopback port `37441`, with a dedicated test volume/network. No unrelated containers or services were changed. The current WSL shell lacked the Docker supplementary group; `sg docker` used existing group membership. No socket, group, daemon, or WSL configuration was modified. Temporary credentials were synthetic, process-scoped or held in mode-0600 files under `/tmp`, and are not committed.
 
@@ -109,4 +110,4 @@ This closes N-2, N-3, and M-7 for the locally tested mock-only foundation. SQL g
 
 No provider adapter or inference was enabled. R1-G4 still requires durable runtime authorization, owner approval, persistent actor-attributed audit, trusted credential broker, effective in-run revocation, approved provider policies/authentication, connector egress restrictions, and trusted-connector canary verification. Rootful Docker/same-host UID, disk quota, and production-grade arbitrary-code isolation remain unverified and general-purpose tools remain prohibited.
 
-**Local follow-up result: Passed for N-2/N-3/M-7 on the tested working tree; final milestone/release gate remains conditional on a clean final revision, passing remote GitHub Actions, and the review PR. This is not authorization for real AI execution.**
+**Follow-up result: Passed locally and in GitHub Actions for N-2/N-3/M-7 at implementation revision `2cfc53bdc0dc529152f05de7eceea02e5ebb7b0a`; draft PR #1 is open and unmerged. This is not authorization for real AI execution.**
