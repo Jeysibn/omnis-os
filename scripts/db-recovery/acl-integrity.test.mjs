@@ -4,17 +4,26 @@ import {
   aclSnapshotsMatch,
   assertRuntimeAclPolicy,
   normalizeAclSnapshot,
+  runtimeAclSnapshotsMatch,
 } from './acl-integrity.mjs';
 
 const allowed = [
   acl('schema', 'omnis', 'omnis', 'USAGE'),
+  acl('schema', 'pgboss', 'pgboss', 'USAGE'),
+  acl('schema', 'public', 'public', 'USAGE', null, 'PUBLIC'),
+  acl('database', '', 'database', 'CONNECT'),
   acl('table', 'omnis', 'tasks', 'SELECT'),
+  acl('table', 'omnis', 'runs', 'SELECT'),
+  acl('table', 'omnis', 'run_events', 'SELECT'),
+  acl('table', 'omnis', 'run_idempotency', 'SELECT'),
   acl('column', 'omnis', 'tasks', 'INSERT', 'id'),
   acl('column', 'omnis', 'tasks', 'UPDATE', 'status'),
-  acl('sequence', 'omnis', 'future_approved_id_seq', 'USAGE'),
-  acl('table', 'omnis', 'future_read_model', 'SELECT'),
+  acl('sequence', 'omnis', 'task_id_seq', 'USAGE'),
+  acl('sequence', 'omnis', 'run_id_seq', 'SELECT'),
   acl('table', 'pgboss', 'job', 'DELETE'),
   acl('default:table', 'pgboss', '', 'INSERT'),
+  acl('routine', 'public', 'extension_helper()', 'EXECUTE', null, 'PUBLIC', false),
+  acl('type', 'public', 'extension_state', 'USAGE', null, 'PUBLIC'),
 ];
 
 describe('post-restore PostgreSQL ACL integrity', () => {
@@ -26,6 +35,46 @@ describe('post-restore PostgreSQL ACL integrity', () => {
     assert.throws(
       () => assertRuntimeAclPolicy([...allowed, acl('table', 'omnis', 'tasks', 'DELETE')]),
       /DELETE is prohibited on omnis\.tasks/,
+    );
+  });
+
+  it('allows SELECT only on the explicitly approved application tables', () => {
+    for (const object of ['schema_migrations', 'unreviewed_view', 'future_read_model']) {
+      const objectType = object === 'unreviewed_view' ? 'view' : 'table';
+      assert.throws(
+        () => assertRuntimeAclPolicy([...allowed, acl(objectType, 'omnis', object, 'SELECT')]),
+        /Runtime (table|view) privilege SELECT is prohibited/,
+        `${object} must not be readable by the runtime role`,
+      );
+    }
+  });
+
+  it('rejects unexpected schemas, unsafe PUBLIC grants, and runtime role memberships', () => {
+    for (const unexpectedSchema of ['rogue', 'pg_unexpected']) {
+      assert.throws(
+        () =>
+          assertRuntimeAclPolicy([
+            ...allowed,
+            acl('schema', unexpectedSchema, unexpectedSchema, 'USAGE'),
+          ]),
+        new RegExp(`Runtime schema privilege USAGE is prohibited on ${unexpectedSchema}`),
+      );
+    }
+    assert.throws(
+      () =>
+        assertRuntimeAclPolicy([
+          ...allowed,
+          acl('schema', 'public', 'public', 'CREATE', null, 'PUBLIC'),
+        ]),
+      /grants CREATE to PUBLIC on public\.public/,
+    );
+    assert.throws(
+      () => assertRuntimeAclPolicy([...allowed, acl('membership', '', 'reader', 'MEMBER_OF')]),
+      /membership involving the runtime role is prohibited/,
+    );
+    assert.throws(
+      () => assertRuntimeAclPolicy([...allowed, acl('database', '', 'database', 'CREATE')]),
+      /Runtime database privilege CREATE is prohibited/,
     );
   });
 
@@ -82,8 +131,33 @@ describe('post-restore PostgreSQL ACL integrity', () => {
       false,
     );
   });
+
+  it('compares the effective runtime grant set for legacy baseline parity', () => {
+    assert.equal(runtimeAclSnapshotsMatch(allowed, [...allowed].reverse()), true);
+    assert.equal(
+      runtimeAclSnapshotsMatch(allowed, [...allowed, acl('table', 'omnis', 'tasks', 'DELETE')]),
+      false,
+    );
+  });
 });
 
-function acl(objectType, schema, object, privilege, column = null, grantee = 'omnis_runtime') {
-  return { objectType, schema, object, column, grantee, privilege, grantable: false };
+function acl(
+  objectType,
+  schema,
+  object,
+  privilege,
+  column = null,
+  grantee = 'omnis_runtime',
+  securityDefiner = null,
+) {
+  return {
+    objectType,
+    schema,
+    object,
+    column,
+    grantee,
+    privilege,
+    grantable: false,
+    securityDefiner,
+  };
 }

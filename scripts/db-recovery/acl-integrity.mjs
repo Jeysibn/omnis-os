@@ -1,65 +1,77 @@
-export const aclSnapshotQuery = `WITH acl_entries AS (
+export const aclSnapshotQuery = `WITH user_schemas AS (
+  SELECT oid, nspname, nspowner, nspacl
+    FROM pg_namespace
+   WHERE nspname NOT IN ('information_schema', 'pg_catalog', 'pg_toast')
+     AND nspname !~ '^pg_(toast_)?temp_[0-9]+$'
+), acl_entries AS (
   SELECT 'schema'::text AS object_type, n.nspname AS schema_name, n.nspname AS object_name,
          NULL::text AS column_name, acl.grantee, acl.privilege_type AS privilege,
          acl.is_grantable AS grantable, NULL::boolean AS security_definer
-    FROM pg_namespace n
+    FROM user_schemas n
     CROSS JOIN LATERAL aclexplode(COALESCE(n.nspacl, acldefault('n', n.nspowner))) acl
-   WHERE n.nspname IN ('omnis', 'pgboss')
   UNION ALL
-  SELECT CASE WHEN c.relkind = 'S' THEN 'sequence' ELSE 'table' END,
+  SELECT 'database', '', 'database', NULL::text, acl.grantee, acl.privilege_type,
+         acl.is_grantable, NULL::boolean
+    FROM pg_database d
+    CROSS JOIN LATERAL aclexplode(COALESCE(d.datacl, acldefault('d', d.datdba))) acl
+   WHERE d.datname = current_database()
+  UNION ALL
+  SELECT CASE c.relkind
+           WHEN 'S' THEN 'sequence' WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized_view'
+           WHEN 'f' THEN 'foreign_table' ELSE 'table'
+         END,
          n.nspname, c.relname, NULL::text, acl.grantee, acl.privilege_type,
          acl.is_grantable, NULL::boolean
     FROM pg_class c
-    JOIN pg_namespace n ON n.oid = c.relnamespace
+    JOIN user_schemas n ON n.oid = c.relnamespace
     CROSS JOIN LATERAL aclexplode(COALESCE(
       c.relacl,
-      CASE WHEN c.relkind = 'S'
-        THEN acldefault('S', c.relowner)
-        ELSE acldefault('r', c.relowner)
-      END
+      CASE WHEN c.relkind = 'S' THEN acldefault('S', c.relowner)
+           ELSE acldefault('r', c.relowner) END
     )) acl
-   WHERE n.nspname IN ('omnis', 'pgboss')
-     AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+   WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
   UNION ALL
   SELECT 'column', n.nspname, c.relname, a.attname,
          acl.grantee, acl.privilege_type, acl.is_grantable, NULL::boolean
     FROM pg_attribute a
     JOIN pg_class c ON c.oid = a.attrelid
-    JOIN pg_namespace n ON n.oid = c.relnamespace
+    JOIN user_schemas n ON n.oid = c.relnamespace
     CROSS JOIN LATERAL aclexplode(a.attacl) acl
-   WHERE n.nspname IN ('omnis', 'pgboss')
-     AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+   WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
      AND a.attnum > 0 AND NOT a.attisdropped AND a.attacl IS NOT NULL
   UNION ALL
   SELECT 'routine', n.nspname,
          p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')',
          NULL::text, acl.grantee, acl.privilege_type, acl.is_grantable, p.prosecdef
     FROM pg_proc p
-    JOIN pg_namespace n ON n.oid = p.pronamespace
+    JOIN user_schemas n ON n.oid = p.pronamespace
     CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) acl
-   WHERE n.nspname IN ('omnis', 'pgboss')
   UNION ALL
   SELECT 'type', n.nspname, t.typname, NULL::text,
          acl.grantee, acl.privilege_type, acl.is_grantable, NULL::boolean
     FROM pg_type t
-    JOIN pg_namespace n ON n.oid = t.typnamespace
+    JOIN user_schemas n ON n.oid = t.typnamespace
     CROSS JOIN LATERAL aclexplode(COALESCE(t.typacl, acldefault('T', t.typowner))) acl
-   WHERE n.nspname IN ('omnis', 'pgboss')
-     AND t.typtype IN ('d', 'e', 'r', 'm')
+   WHERE t.typtype IN ('d', 'e', 'r', 'm')
   UNION ALL
   SELECT 'default:' || CASE d.defaclobjtype
            WHEN 'r' THEN 'table' WHEN 'S' THEN 'sequence' WHEN 'f' THEN 'routine'
            WHEN 'T' THEN 'type' WHEN 'n' THEN 'schema' ELSE d.defaclobjtype::text
          END,
          COALESCE(n.nspname, ''), '', NULL::text,
-         acl.grantee, acl.privilege_type, acl.is_grantable
-         ,NULL::boolean
+         acl.grantee, acl.privilege_type, acl.is_grantable, NULL::boolean
     FROM pg_default_acl d
-    JOIN pg_roles owner_role ON owner_role.oid = d.defaclrole
-    LEFT JOIN pg_namespace n ON n.oid = d.defaclnamespace
+    LEFT JOIN user_schemas n ON n.oid = d.defaclnamespace
     CROSS JOIN LATERAL aclexplode(d.defaclacl) acl
-   WHERE owner_role.rolname = 'omnis_migrator'
-     AND (d.defaclnamespace = 0 OR n.nspname IN ('omnis', 'pgboss'))
+   WHERE d.defaclnamespace = 0 OR n.oid IS NOT NULL
+  UNION ALL
+  SELECT 'membership', '', member.rolname, NULL::text, runtime.oid,
+         'ROLE_MEMBERSHIP', false, NULL::boolean
+    FROM pg_auth_members membership
+    JOIN pg_roles granted ON granted.oid = membership.roleid
+    JOIN pg_roles member ON member.oid = membership.member
+    JOIN pg_roles runtime ON runtime.rolname = 'omnis_runtime'
+   WHERE granted.rolname = 'omnis_runtime' OR member.rolname = 'omnis_runtime'
 )
 SELECT COALESCE(jsonb_agg(jsonb_build_object(
   'objectType', object_type,
@@ -74,13 +86,15 @@ SELECT COALESCE(jsonb_agg(jsonb_build_object(
   AS acl_snapshot
 FROM acl_entries`;
 
-const knownRoles = new Set(['omnis', 'omnis_migrator', 'omnis_runtime', 'PUBLIC']);
-const applicationTablePrivileges = new Map([
-  ['tasks', new Set(['SELECT'])],
-  ['runs', new Set(['SELECT'])],
-  ['run_events', new Set(['SELECT'])],
-  ['run_idempotency', new Set(['SELECT'])],
+const knownRoles = new Set([
+  'omnis',
+  'omnis_migrator',
+  'omnis_runtime',
+  'postgres',
+  'pg_database_owner',
+  'PUBLIC',
 ]);
+const applicationReadTables = new Set(['tasks', 'runs', 'run_events', 'run_idempotency']);
 const applicationColumnPrivileges = new Map([
   ['tasks', new Set(['INSERT:id', 'INSERT:title', 'INSERT:detail', 'UPDATE:status'])],
   [
@@ -121,16 +135,32 @@ const applicationColumnPrivileges = new Map([
 export function normalizeAclSnapshot(snapshot) {
   if (!Array.isArray(snapshot)) throw new Error('PostgreSQL ACL snapshot must be an array.');
   return snapshot
-    .map((entry) => ({
-      objectType: entry.objectType,
-      schema: entry.schema,
-      object: entry.object,
-      column: entry.column ?? null,
-      grantee: entry.grantee,
-      privilege: entry.privilege,
-      grantable: entry.grantable === true,
-      securityDefiner: entry.securityDefiner ?? null,
-    }))
+    .map((entry) => {
+      if (
+        !entry ||
+        typeof entry !== 'object' ||
+        typeof entry.objectType !== 'string' ||
+        typeof entry.schema !== 'string' ||
+        typeof entry.object !== 'string' ||
+        typeof entry.grantee !== 'string' ||
+        typeof entry.privilege !== 'string' ||
+        (entry.column != null && typeof entry.column !== 'string') ||
+        typeof entry.grantable !== 'boolean' ||
+        (entry.securityDefiner != null && typeof entry.securityDefiner !== 'boolean')
+      ) {
+        throw new Error('PostgreSQL ACL snapshot contains a malformed entry.');
+      }
+      return {
+        objectType: entry.objectType,
+        schema: entry.schema,
+        object: entry.object,
+        column: entry.column ?? null,
+        grantee: entry.grantee,
+        privilege: entry.privilege,
+        grantable: entry.grantable,
+        securityDefiner: entry.securityDefiner ?? null,
+      };
+    })
     .sort(compareAclEntries);
 }
 
@@ -140,10 +170,21 @@ export function aclSnapshotsMatch(source, restored) {
   );
 }
 
+export function runtimeAclSnapshotsMatch(source, restored) {
+  const runtimeEntries = (snapshot) =>
+    normalizeAclSnapshot(snapshot).filter((entry) => entry.grantee === 'omnis_runtime');
+  return JSON.stringify(runtimeEntries(source)) === JSON.stringify(runtimeEntries(restored));
+}
+
 export function assertRuntimeAclPolicy(snapshot) {
   for (const entry of normalizeAclSnapshot(snapshot)) {
     if (!knownRoles.has(entry.grantee)) {
       throw new Error(`Unexpected PostgreSQL ACL grantee ${entry.grantee}.`);
+    }
+    if (entry.objectType === 'membership') {
+      throw new Error(
+        `Direct membership involving the runtime role is prohibited: ${entry.object}.`,
+      );
     }
     if (entry.grantee === 'PUBLIC') {
       if (
@@ -154,8 +195,18 @@ export function assertRuntimeAclPolicy(snapshot) {
         continue;
       }
       if (entry.objectType === 'type' && entry.privilege === 'USAGE') continue;
+      if (
+        entry.objectType === 'schema' &&
+        entry.schema === 'public' &&
+        entry.privilege === 'USAGE'
+      ) {
+        continue;
+      }
+      if (entry.objectType === 'database' && ['CONNECT', 'TEMPORARY'].includes(entry.privilege)) {
+        continue;
+      }
       throw new Error(
-        `PostgreSQL ACL grants ${entry.privilege} to PUBLIC on ${entry.schema}.${entry.object}.`,
+        `PostgreSQL ACL grants ${entry.privilege} to PUBLIC on ${entry.schema || 'database'}.${entry.object}.`,
       );
     }
     if (entry.grantee !== 'omnis_runtime') continue;
@@ -163,8 +214,15 @@ export function assertRuntimeAclPolicy(snapshot) {
       throw new Error(`Runtime ACL grant option is prohibited on ${entry.schema}.${entry.object}.`);
     }
 
+    if (entry.objectType === 'database') {
+      if (entry.privilege !== 'CONNECT') {
+        throw new Error(`Runtime database privilege ${entry.privilege} is prohibited.`);
+      }
+      continue;
+    }
+
     if (entry.objectType === 'schema') {
-      if (entry.privilege !== 'USAGE') {
+      if (!['omnis', 'pgboss'].includes(entry.schema) || entry.privilege !== 'USAGE') {
         throw new Error(
           `Runtime schema privilege ${entry.privilege} is prohibited on ${entry.object}.`,
         );
@@ -173,8 +231,7 @@ export function assertRuntimeAclPolicy(snapshot) {
     }
 
     if (entry.objectType === 'table' && entry.schema === 'omnis') {
-      const allowed = applicationTablePrivileges.get(entry.object);
-      if (!allowed?.has(entry.privilege) && entry.privilege !== 'SELECT') {
+      if (!applicationReadTables.has(entry.object) || entry.privilege !== 'SELECT') {
         throw new Error(
           `Runtime table privilege ${entry.privilege} is prohibited on omnis.${entry.object}.`,
         );
@@ -201,12 +258,21 @@ export function assertRuntimeAclPolicy(snapshot) {
       continue;
     }
 
-    if (entry.objectType === 'sequence' && ['omnis', 'pgboss'].includes(entry.schema)) {
+    if (entry.objectType === 'sequence' && entry.schema === 'pgboss') {
       if (!['USAGE', 'SELECT'].includes(entry.privilege)) {
         throw new Error(
-          `Runtime sequence privilege ${entry.privilege} is prohibited on ${entry.schema}.${entry.object}.`,
+          `Runtime sequence privilege ${entry.privilege} is prohibited on pgboss.${entry.object}.`,
         );
       }
+      continue;
+    }
+
+    if (
+      entry.objectType === 'sequence' &&
+      entry.schema === 'omnis' &&
+      ['task_id_seq', 'run_id_seq'].includes(entry.object) &&
+      ['USAGE', 'SELECT'].includes(entry.privilege)
+    ) {
       continue;
     }
 

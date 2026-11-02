@@ -174,3 +174,21 @@ Restores previously replayed `0003` after restoring ACL-free archives, so that p
 ### Remaining risks and gate
 
 This follow-up changes ACL preservation and reprovisioning behavior, but PostgreSQL ACLs are not a tamper-proof audit trail. Backup encryption and authenticated manifests remain open pending an approved key-management design. Legacy archives without ACL entries use compatibility grant restoration; newly created archives retain ACLs. In-flight executions remain disallowed in backups. N-8 lifecycle constraints, N-9 pg-boss upgrade compatibility, worker supervision, separate sandbox UID and disk quotas, and production host/network isolation remain deferred. R1-G4 still requires durable runtime authorization, owner approval, actor-attributed persistent audit, a trusted credential broker, effective in-run revocation, approved provider policies/authentication, connector egress restrictions, and trusted-connector canary verification. Hermes, Codex, and Claude inference remain disabled.
+
+## Restore ACL hardening follow-up — 2026-11-03
+
+- **Merged base:** PR #3 was marked ready and squash-merged to `main` as `f8301c8d04803cc465037b88b7ad1ad7baebbcc6`; main CI passed in [run 41478720147](https://github.com/Jeysibn/omnis-os/actions/runs/41478720147).
+- **Branch:** `security/restore-acl-hardening`.
+- **Scope:** F-5 explicit application SELECT allowlist, F-6 end-to-end restore rejection for unauthorized ACLs and mismatched snapshots, F-7 unexpected-schema/public-grant/role-membership checks with extension compatibility, F-8 fresh-versus-legacy runtime ACL parity, and ADR-0010 for authenticated encrypted backups.
+- **Local PostgreSQL verification:** passed against disposable PostgreSQL 17.6 using unique temporary projects and synthetic credentials. The integration exercised real malicious ACL-preserving archives, source/restored mismatch rejection, `pgcrypto` extension ACL behavior, ACL-free legacy restore, fresh-versus-legacy runtime grant parity, and post-restore synthetic task/run creation.
+- **Legacy upgrade:** passed from audited revision `708d0f5e9b6083da852e26c0643c60c0f5879f85`; synthetic task/run/pg-boss data remained intact, ownership normalized, migration checksum upgraded, and restricted worker completed a run.
+- **Recovery integration:** passed with PostgreSQL-backed API/SSE replay, abrupt worker recovery, sandbox crash cleanup, and no duplicate execution. The optional PostgreSQL-container outage injection was not run in this local invocation.
+- **Docker sandbox:** actual-container suite passed, 9 tests, 0 failures, 0 skipped.
+- **Frozen install:** passed with pnpm 12.16.1; lockfile unchanged.
+- **Static checks and build:** `pnpm check` passed formatting, ESLint, TypeScript, workspace tests, and 13 recovery/ACL unit tests; the database package's separately gated test skipped without a test DSN, and real database coverage ran in the disposable integrations. `pnpm build` passed.
+- **Browser regression:** not run because no UI or sign-in interfaces changed.
+- **GitHub Actions:** pending push of this follow-up branch.
+
+The restore policy permits runtime table SELECT only on `omnis.tasks`, `omnis.runs`, `omnis.run_events`, and `omnis.run_idempotency`; views and `schema_migrations` are denied. ACL collection now covers non-system schemas, database ACLs, default ACLs, and direct runtime memberships. It rejects unapproved runtime and PUBLIC grants while preserving PostgreSQL defaults required for `public` schema resolution, invoker-rights extension routines, type usage, and database connection/temporary behavior.
+
+`restore-verify.mjs` now requires `OMNIS_TRUSTED_ARCHIVE_ACKNOWLEDGED=true`; this is an operator attestation, not cryptographic authentication or isolation. ADR-0010 (`docs/07-governance/adr/0010-encrypted-authenticated-backups.md`) proposes per-archive envelope encryption, authenticated manifests, safe key custody/rotation/revocation, and verification before PostgreSQL sees plaintext. It is proposed only; no algorithms, KMS/HSM vendor, or key lifecycle were approved or implemented. Until archive authentication and isolated restoration are independently reviewed, do not restore untrusted archives or use this verifier for production restoration. No real AI inference or provider credentials are enabled.

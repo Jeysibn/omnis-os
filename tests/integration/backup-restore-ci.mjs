@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { createServer } from 'node:net';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,6 +13,9 @@ const projectName = `omnis-backup-ci-${randomSuffix}`;
 const databaseName = 'omnis_backup_test';
 const restoreDatabase = `omnis_restore_ci_${randomSuffix}`;
 const legacyRestoreDatabase = `omnis_restore_acl_free_${randomSuffix}`;
+const deniedGrantDatabase = `omnis_restore_bad_grant_${randomSuffix}`;
+const mismatchedAclDatabase = `omnis_restore_bad_acl_${randomSuffix}`;
+const unacknowledgedDatabase = `omnis_restore_unacknowledged_${randomSuffix}`;
 const directory = await mkdtemp(path.join(tmpdir(), 'omnis-backup-restore-'));
 const envPath = path.join(directory, 'postgres.env');
 const dumpPath = path.join(directory, 'synthetic.dump');
@@ -42,6 +45,7 @@ const baseEnv = {
   OMNIS_MIGRATION_DB_PASSWORD: migrationPassword,
   OMNIS_RUNTIME_DB_PASSWORD: runtimePassword,
   OMNIS_R1G3_DISPOSABLE: 'true',
+  OMNIS_TRUSTED_ARCHIVE_ACKNOWLEDGED: 'true',
 };
 const adminUrl = connectionUrl('omnis', adminPassword, port, databaseName);
 const migrationUrl = connectionUrl('omnis_migrator', migrationPassword, port, databaseName);
@@ -70,6 +74,24 @@ try {
   run(process.execPath, ['--experimental-strip-types', 'apps/worker/src/migrate.ts'], {
     env: { ...baseEnv, OMNIS_MIGRATION_DATABASE_URL: migrationUrl },
   });
+  run(
+    'docker',
+    [
+      ...composeArgs,
+      'exec',
+      '-T',
+      'postgres',
+      'psql',
+      '-X',
+      '--no-psqlrc',
+      '--set=ON_ERROR_STOP=1',
+      '--username=omnis',
+      `--dbname=${databaseName}`,
+      '--command',
+      'CREATE EXTENSION pgcrypto WITH SCHEMA public',
+    ],
+    { env: baseEnv },
+  );
   run('pnpm', ['--filter', '@omnis/db', 'test'], {
     env: {
       ...baseEnv,
@@ -95,6 +117,8 @@ try {
 
   await setSequenceState(adminUrl, false);
   run(process.execPath, ['scripts/db-recovery/backup.mjs', dumpPath], { env: baseEnv });
+  await verifyLiveAclBoundaries(adminUrl);
+  await verifyRestoreRequiresTrustedArchiveAcknowledgement(unacknowledgedDatabase);
   run(process.execPath, ['scripts/db-recovery/restore-verify.mjs', dumpPath, restoreDatabase], {
     env: baseEnv,
   });
@@ -102,9 +126,8 @@ try {
     connectionUrl('omnis_runtime', runtimePassword, port, restoreDatabase),
     randomSuffix,
   );
-  await assertUnauthorizedGrantRejected(
-    connectionUrl('omnis', adminPassword, port, restoreDatabase),
-  );
+  await verifyRestoreRejectsUnauthorizedGrant(adminUrl, deniedGrantDatabase);
+  await verifyRestoreRejectsMismatchedSnapshot(mismatchedAclDatabase);
 
   const legacyDumpPath = path.join(directory, 'acl-free-legacy.dump');
   await createAclFreeLegacyArchive(legacyDumpPath);
@@ -116,6 +139,10 @@ try {
   await verifyLegacyAclBaseline(
     connectionUrl('omnis_runtime', runtimePassword, port, legacyRestoreDatabase),
     randomSuffix,
+  );
+  await verifyLegacyRuntimeAclParity(
+    adminUrl,
+    connectionUrl('omnis', adminPassword, port, legacyRestoreDatabase),
   );
 
   process.stdout.write(
@@ -139,6 +166,28 @@ try {
       ],
       { env: baseEnv, allowFailure: true },
     );
+    for (const failedTarget of [
+      deniedGrantDatabase,
+      mismatchedAclDatabase,
+      unacknowledgedDatabase,
+    ]) {
+      run(
+        'docker',
+        [
+          ...composeArgs,
+          'exec',
+          '-T',
+          'postgres',
+          'dropdb',
+          '--if-exists',
+          '--force',
+          '--username=omnis',
+          '--maintenance-db=postgres',
+          failedTarget,
+        ],
+        { env: baseEnv, allowFailure: true },
+      );
+    }
     run(
       'docker',
       [
@@ -226,10 +275,8 @@ async function addFutureMigrationAclFixtures(migrationUrl, suffix) {
     await migration.query(`
       CREATE TABLE omnis.${table} (id integer PRIMARY KEY);
       INSERT INTO omnis.${table} VALUES (41);
-      GRANT SELECT ON omnis.${table} TO omnis_runtime;
       CREATE TABLE omnis.${deniedTable} (id integer PRIMARY KEY);
       CREATE SEQUENCE omnis.${sequence};
-      GRANT USAGE, SELECT ON SEQUENCE omnis.${sequence} TO omnis_runtime;
       CREATE SEQUENCE omnis.${deniedSequence};
     `);
   } finally {
@@ -241,12 +288,14 @@ async function verifyRestoredMigrationAcl(runtimeUrl, suffix) {
   const { createPool } = await import('../../packages/db/src/index.ts');
   const runtime = createPool(runtimeUrl);
   try {
-    const approved = await runtime.query(`SELECT id FROM omnis.future_acl_${suffix}`);
-    assert.deepEqual(approved.rows, [{ id: 41 }]);
-    assert.equal(
-      (await runtime.query(`SELECT nextval('omnis.future_acl_seq_${suffix}') AS value`)).rows[0]
-        ?.value,
-      '1',
+    await assert.rejects(
+      runtime.query(`SELECT id FROM omnis.future_acl_${suffix}`),
+      /permission denied/,
+      'future application tables require explicit ACL-policy approval before runtime reads',
+    );
+    await assert.rejects(
+      runtime.query(`SELECT nextval('omnis.future_acl_seq_${suffix}')`),
+      /permission denied/,
     );
     await assert.rejects(
       runtime.query(`SELECT id FROM omnis.future_denied_${suffix}`),
@@ -261,24 +310,172 @@ async function verifyRestoredMigrationAcl(runtimeUrl, suffix) {
   }
 }
 
-async function assertUnauthorizedGrantRejected(adminUrl) {
+async function verifyLiveAclBoundaries(adminUrl) {
   const { createPool } = await import('../../packages/db/src/index.ts');
   const { aclSnapshotQuery, assertRuntimeAclPolicy } =
     await import('../../scripts/db-recovery/acl-integrity.mjs');
   const admin = createPool(adminUrl);
   try {
-    await admin.query('GRANT DELETE ON TABLE omnis.tasks TO omnis_runtime');
-    const aclResult = await admin.query(aclSnapshotQuery);
-    assert.throws(
-      () => assertRuntimeAclPolicy(aclResult.rows[0]?.acl_snapshot),
-      /DELETE is prohibited on omnis\.tasks/,
-      'post-restore ACL validation must fail closed on unauthorized DML grants',
+    const assertPolicyRejects = async (pattern, reason) => {
+      const { rows } = await admin.query(aclSnapshotQuery);
+      assert.throws(() => assertRuntimeAclPolicy(rows[0]?.acl_snapshot), pattern, reason);
+    };
+    await admin.query(
+      'CREATE SCHEMA acl_boundary_fixture; GRANT USAGE ON SCHEMA acl_boundary_fixture TO omnis_runtime',
+    );
+    await assertPolicyRejects(
+      /Runtime schema privilege USAGE is prohibited on acl_boundary_fixture/,
+      'unexpected schema access is denied',
+    );
+    await admin.query('REVOKE USAGE ON SCHEMA acl_boundary_fixture FROM omnis_runtime');
+
+    await admin.query('GRANT SELECT ON omnis.tasks TO PUBLIC');
+    await assertPolicyRejects(/grants SELECT to PUBLIC/, 'PUBLIC table reads are denied');
+    await admin.query('REVOKE SELECT ON omnis.tasks FROM PUBLIC');
+
+    await admin.query(
+      'CREATE VIEW omnis.acl_boundary_view AS SELECT 1 AS value; GRANT SELECT ON omnis.acl_boundary_view TO omnis_runtime',
+    );
+    await assertPolicyRejects(
+      /Runtime view privilege SELECT is prohibited/,
+      'runtime reads of views are denied',
+    );
+    await admin.query('DROP VIEW omnis.acl_boundary_view');
+
+    await admin.query(
+      'CREATE ROLE omnis_acl_boundary_member NOLOGIN; GRANT omnis_acl_boundary_member TO omnis_runtime',
+    );
+    await assertPolicyRejects(
+      /membership involving the runtime role is prohibited/,
+      'role memberships are denied',
     );
   } finally {
     await admin
-      .query('REVOKE DELETE ON TABLE omnis.tasks FROM omnis_runtime')
+      .query(
+        `
+      REVOKE omnis_acl_boundary_member FROM omnis_runtime;
+      DROP ROLE IF EXISTS omnis_acl_boundary_member;
+      REVOKE SELECT ON omnis.tasks FROM PUBLIC;
+      DROP VIEW IF EXISTS omnis.acl_boundary_view;
+      DROP SCHEMA IF EXISTS acl_boundary_fixture;
+    `,
+      )
       .catch(() => undefined);
     await admin.end();
+  }
+}
+
+async function verifyRestoreRejectsUnauthorizedGrant(adminUrl, targetDatabase) {
+  const { createPool } = await import('../../packages/db/src/index.ts');
+  const { aclSnapshotQuery } = await import('../../scripts/db-recovery/acl-integrity.mjs');
+  const admin = createPool(adminUrl);
+  const archivePath = path.join(directory, 'unauthorized-select.dump');
+  try {
+    await admin.query('GRANT SELECT ON omnis.schema_migrations TO omnis_runtime');
+    const [{ acl_snapshot: aclSnapshot }] = (await admin.query(aclSnapshotQuery)).rows;
+    const binary = runBinary('docker', [
+      ...composeArgs,
+      'exec',
+      '-T',
+      'postgres',
+      'pg_dump',
+      '--format=custom',
+      '--no-owner',
+      '--username=omnis',
+      `--dbname=${databaseName}`,
+    ]);
+    await writeFile(archivePath, binary, { mode: 0o600, flag: 'wx' });
+    const baseManifest = JSON.parse(await readFile(`${dumpPath}.manifest.json`, 'utf8'));
+    await writeFile(
+      `${archivePath}.manifest.json`,
+      `${JSON.stringify({ ...baseManifest, dumpBytes: binary.length, dumpSha256: createHash('sha256').update(binary).digest('hex'), aclSnapshot }, null, 2)}\n`,
+      { mode: 0o600, flag: 'wx' },
+    );
+  } finally {
+    await admin
+      .query('REVOKE SELECT ON omnis.schema_migrations FROM omnis_runtime')
+      .catch(() => undefined);
+    await admin.end();
+  }
+  const result = run(
+    process.execPath,
+    ['scripts/db-recovery/restore-verify.mjs', archivePath, targetDatabase],
+    { env: baseEnv, allowFailure: true },
+  );
+  assert.notEqual(result.status, 0, 'restore must reject an archive that grants schema_migrations');
+  assert.match(result.output, /schema_migrations/);
+}
+
+async function verifyRestoreRejectsMismatchedSnapshot(targetDatabase) {
+  const archivePath = path.join(directory, 'mismatched-acl.dump');
+  await copyFile(dumpPath, archivePath);
+  const manifest = JSON.parse(await readFile(`${dumpPath}.manifest.json`, 'utf8'));
+  const changedSnapshot = manifest.aclSnapshot.filter(
+    (entry) =>
+      !(
+        entry.grantee === 'omnis_runtime' &&
+        entry.objectType === 'table' &&
+        entry.schema === 'omnis' &&
+        entry.object === 'tasks' &&
+        entry.privilege === 'SELECT'
+      ),
+  );
+  assert.notEqual(changedSnapshot.length, manifest.aclSnapshot.length);
+  await writeFile(
+    `${archivePath}.manifest.json`,
+    `${JSON.stringify({ ...manifest, aclSnapshot: changedSnapshot }, null, 2)}\n`,
+    { mode: 0o600, flag: 'wx' },
+  );
+  const result = run(
+    process.execPath,
+    ['scripts/db-recovery/restore-verify.mjs', archivePath, targetDatabase],
+    { env: baseEnv, allowFailure: true },
+  );
+  assert.notEqual(
+    result.status,
+    0,
+    'restore must reject a manifest with a mismatched ACL snapshot',
+  );
+  assert.match(result.output, /do not match the source ACL snapshot/i);
+}
+
+async function verifyRestoreRequiresTrustedArchiveAcknowledgement(targetDatabase) {
+  const environment = { ...baseEnv };
+  delete environment.OMNIS_TRUSTED_ARCHIVE_ACKNOWLEDGED;
+  const result = run(
+    process.execPath,
+    ['scripts/db-recovery/restore-verify.mjs', dumpPath, targetDatabase],
+    { env: environment, allowFailure: true },
+  );
+  assert.notEqual(
+    result.status,
+    0,
+    'restore must require an explicit trusted-input acknowledgement',
+  );
+  assert.match(result.output, /operator-vetted trusted archives/i);
+}
+
+async function verifyLegacyRuntimeAclParity(sourceUrl, restoredUrl) {
+  const { createPool } = await import('../../packages/db/src/index.ts');
+  const { aclSnapshotQuery, runtimeAclSnapshotsMatch } =
+    await import('../../scripts/db-recovery/acl-integrity.mjs');
+  const source = createPool(sourceUrl);
+  const restored = createPool(restoredUrl);
+  try {
+    const [sourceResult, restoredResult] = await Promise.all([
+      source.query(aclSnapshotQuery),
+      restored.query(aclSnapshotQuery),
+    ]);
+    assert.equal(
+      runtimeAclSnapshotsMatch(
+        sourceResult.rows[0]?.acl_snapshot,
+        restoredResult.rows[0]?.acl_snapshot,
+      ),
+      true,
+      'ACL-free restore runtime grants must match the approved fresh-database grant set',
+    );
+  } finally {
+    await Promise.all([source.end(), restored.end()]);
   }
 }
 
