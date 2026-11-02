@@ -119,6 +119,7 @@ try {
     '0001_initial',
     '0002_runtime_grants',
     '0003_runtime_privileges',
+    '0004_narrow_runtime_sequence_defaults',
   ]);
   assert.equal(afterUpgrade.unsafeRunStates, 1);
   assert.equal(
