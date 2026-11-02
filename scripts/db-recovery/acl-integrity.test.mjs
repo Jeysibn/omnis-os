@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
   aclSnapshotsMatch,
+  assertRestoreDatabaseClosed,
   assertRuntimeAclPolicy,
   normalizeAclSnapshot,
+  restoreAclSnapshotsMatch,
   runtimeAclSnapshotsMatch,
 } from './acl-integrity.mjs';
 
@@ -128,6 +130,38 @@ describe('post-restore PostgreSQL ACL integrity', () => {
     assert.equal(aclSnapshotsMatch(allowed, [...allowed].reverse()), true);
     assert.equal(
       aclSnapshotsMatch(allowed, [...allowed, acl('table', 'omnis', 'tasks', 'DELETE')]),
+      false,
+    );
+  });
+
+  it('allows only the intentional deferred database CONNECT difference during restore', () => {
+    const source = [
+      {
+        ...allowed[0],
+        objectType: 'database',
+        schema: '',
+        object: 'database',
+        grantee: 'PUBLIC',
+        privilege: 'CONNECT',
+      },
+      {
+        ...allowed[0],
+        objectType: 'database',
+        schema: '',
+        object: 'database',
+        grantee: 'omnis_runtime',
+        privilege: 'CONNECT',
+      },
+      ...allowed,
+    ];
+    const restored = source.filter(
+      (entry) => !(entry.objectType === 'database' && entry.privilege === 'CONNECT'),
+    );
+    assert.equal(restoreAclSnapshotsMatch(source, restored), true);
+    assert.doesNotThrow(() => assertRestoreDatabaseClosed(restored));
+    assert.throws(() => assertRestoreDatabaseClosed(source), /must remain closed/);
+    assert.equal(
+      restoreAclSnapshotsMatch(source, [...restored, { ...source[0], privilege: 'CREATE' }]),
       false,
     );
   });

@@ -24,7 +24,7 @@ Earlier disposable-clone attempts exposed timing assumptions: a 700 ms sandbox d
 
 ## Backup and restore procedure
 
-The backup script takes a repeatable-read exported PostgreSQL snapshot shared by `pg_dump` and its metrics query. It emits PostgreSQL custom format (`PGDMP`) and a SHA-256/count manifest. The scripts require a private directory and owner-only files, reject overwrite, verify the archive list, and refuse restore to an existing database. Restore targets must use the reserved `omnis_restore_` prefix. A failed restore is left in place for inspection; it is never silently dropped.
+The backup script takes a repeatable-read exported PostgreSQL snapshot shared by `pg_dump` and its metrics query. It emits PostgreSQL custom format (`PGDMP`) and a SHA-256/count manifest. The scripts require a private directory and owner-only files, reject overwrite, verify the archive list, and refuse restore to an existing database. Restore targets must use the reserved `omnis_restore_` prefix. A target is created with connections disabled, and runtime access is granted only in the same transaction that marks the target verified. A rejected restore quarantines and removes its own target; if removal fails, it remains connection-disabled with an unverified marker. See [the operator procedure](../../06-delivery/OPERATIONS.md) for failure investigation and safe cleanup.
 
 Commands run against the isolated local Compose PostgreSQL 17.6 instance (password supplied only through a mode-0600 environment file):
 
