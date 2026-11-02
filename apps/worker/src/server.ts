@@ -6,6 +6,7 @@ import { CreateRunSchema, CreateTaskSchema } from '@omnis/contracts';
 import { DockerSandboxExecutor } from './docker-sandbox.ts';
 import { CoordinatorError, queueName, RunCoordinator } from './run-coordinator.ts';
 import { SandboxedMockRuntimeAdapter } from './sandboxed-mock-runtime.ts';
+import { streamPersistedRunEvents } from './reliable-event-stream.ts';
 
 const host = process.env.OMNIS_WORKER_HOST ?? '127.0.0.1';
 const port = Number(process.env.OMNIS_WORKER_PORT ?? 4101);
@@ -152,34 +153,35 @@ app.get<{ Params: { runId: string }; Querystring: { after?: string } }>(
         connection: 'keep-alive',
         'x-accel-buffering': 'no',
       });
-      let lastSequence = after;
       const heartbeat = setInterval(() => reply.raw.write(': keep-alive\n\n'), 15_000);
-      let unsubscribe = () => {};
-      const send = (event: {
-        id: string;
-        sequence: number;
-        type: string;
-        [key: string]: unknown;
-      }) => {
-        if (event.sequence <= lastSequence) return;
-        lastSequence = event.sequence;
-        reply.raw.write(
-          `id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
-        );
-        if (
-          ['run.completed', 'run.cancelled', 'run.failed', 'run.interrupted'].includes(event.type)
-        ) {
-          clearInterval(heartbeat);
-          unsubscribe();
-          reply.raw.end();
-        }
-      };
-      unsubscribe = coordinator.subscribe(request.params.runId, send);
-      reply.raw.on('close', () => {
+      let stopStream = () => {};
+      const close = () => {
         clearInterval(heartbeat);
-        unsubscribe();
+        stopStream();
+        if (!reply.raw.writableEnded) reply.raw.end();
+      };
+      reply.raw.on('close', close);
+      stopStream = streamPersistedRunEvents({
+        source: {
+          subscribe: (runId, listener) => coordinator.subscribe(runId, () => listener()),
+          getEvents: (runId, cursor) => coordinator.getEvents(runId, cursor),
+        },
+        runId: request.params.runId,
+        afterSequence: after,
+        send: (event) => {
+          reply.raw.write(
+            `id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
+          );
+        },
+        end: close,
+        fail: (error) => {
+          app.log.error(
+            { errorType: error instanceof Error ? error.name : 'unknown' },
+            'Persisted event stream failed.',
+          );
+          close();
+        },
       });
-      (await coordinator.getEvents(request.params.runId, after)).forEach(send);
     } catch (error) {
       if (error instanceof CoordinatorError || error instanceof StoreError) {
         if (!reply.sent) {
