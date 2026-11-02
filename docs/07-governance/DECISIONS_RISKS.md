@@ -62,7 +62,7 @@ The mock execution path now uses an ephemeral Docker container, with actual-cont
 
 ## R1-G3 status — 2026-11-02
 
-R1-G3 work adds pinned least-privilege CI, PostgreSQL custom-format backup and isolated restore verification, and hard worker/sandbox/database failure injection. Backup and restore were exercised locally with synthetic data, and the restored database served the existing API/worker integration smoke. The final recovery integration result and clean-clone verification are recorded in [R1-G3 evidence](evidence/R1_G3_CI_RECOVERY.md). GitHub Actions remains unverified remotely until the repository URL is supplied and a review-branch push is authorized. Shared Docker-daemon interruption is intentionally untested because unrelated services share that daemon. A worker process may exit during a database outage; the recovery drill requires a replacement worker after PostgreSQL returns. Real AI runtimes remain disabled.
+R1-G3 work adds pinned least-privilege CI, PostgreSQL custom-format backup and isolated restore verification, and hard worker/sandbox/database failure injection. Backup and restore were exercised locally with synthetic data, and the restored database served the existing API/worker integration smoke. Clean-clone verification and GitHub Actions passed on the public repository’s final revision; details are in [R1-G3 evidence](evidence/R1_G3_CI_RECOVERY.md). Shared Docker-daemon interruption remains unverified because unrelated services share it. A worker process may exit during a database outage; the recovery drill requires a replacement worker after PostgreSQL returns. Real AI runtimes remain disabled.
 
 ## Owner decisions still needed
 
