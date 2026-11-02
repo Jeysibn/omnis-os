@@ -37,7 +37,7 @@ Exact local results on the rebased branch tree:
 | Docker sandbox integration | Passed as part of final `pnpm check`: 9 actual-container tests, 0 failures, 0 skipped. Verified filesystem, credential, identity, resource, PID, CPU, memory, network, timeout, cancellation, and cleanup boundaries. |
 | Production build | `npm exec --yes --package=pnpm@12.16.1 -- pnpm build` — passed. |
 | Browser UI smoke | Not run. The owner-session and API authorization/run interface were exercised in `integration:recovery`; the updated confirmation dialog was compiled and covered by the production build only. |
-| GitHub Actions | Pending publication of the rebased branch. |
+| GitHub Actions | Passed on implementation revision `0bcbc394d182213efa59c42787bd44802bab1b5b`: [run 41501283412](https://github.com/Jeysibn/omnis-os/actions/runs/41501283412). Frozen install, restricted role provisioning, full CI check, production build, legacy upgrade, PostgreSQL recovery, backup/restore, and post-job cleanup all succeeded. |
 
 All database and container tests use disposable resources and synthetic records. PostgreSQL ran in a unique, loopback-only container `omnis-r1g4-authz-postgres` on port `55437`, pinned to the CI PostgreSQL 17.6 image digest and labeled for recovery-test control. Only that container was stopped/restarted. Existing MoniKey containers were inspected and left untouched; the disposable container and its volume were removed after final checks. No persistent user database or provider credential was used.
 
