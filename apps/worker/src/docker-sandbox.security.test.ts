@@ -177,7 +177,7 @@ describe(
         executor.execute({
           runId: nextRunId(),
           argv: ['node', '-e', 'while (true) {}'],
-          timeoutMs: 700,
+          timeoutMs: 3_000,
           signal: new AbortController().signal,
         }),
         (error: unknown) => error instanceof SandboxError && error.code === 'timed_out',
