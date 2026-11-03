@@ -40,16 +40,16 @@ for group in "$worker_group" "$authorizer_group" "$api_group" "$launcher_group" 
   groupadd --system "$group"
   groups+=("$group")
 done
-useradd --system --no-create-home --shell /usr/sbin/nologin --gid "$worker_group" "$worker"
+useradd --system --no-user-group --no-create-home --shell /usr/sbin/nologin --gid "$worker_group" "$worker"
 users+=("$worker")
-useradd --system --no-create-home --shell /usr/sbin/nologin --gid "$authorizer_group" "$authorizer"
+useradd --system --no-user-group --no-create-home --shell /usr/sbin/nologin --gid "$authorizer_group" "$authorizer"
 users+=("$authorizer")
 usermod --append --groups "$authorizer_group" "$authorizer"
 usermod --append --groups "$authorizer_socket_group" "$authorizer"
-useradd --system --no-create-home --shell /usr/sbin/nologin --gid "$api_group" "$api"
+useradd --system --no-user-group --no-create-home --shell /usr/sbin/nologin --gid "$api_group" "$api"
 users+=("$api")
 usermod --append --groups "$authorizer_socket_group" "$api"
-useradd --system --no-create-home --shell /usr/sbin/nologin --gid "$launcher_group" "$launcher"
+useradd --system --no-user-group --no-create-home --shell /usr/sbin/nologin --gid "$launcher_group" "$launcher"
 users+=("$launcher")
 usermod --append --groups "$launcher_socket_group" "$worker"
 usermod --append --groups "$launcher_socket_group" "$launcher"

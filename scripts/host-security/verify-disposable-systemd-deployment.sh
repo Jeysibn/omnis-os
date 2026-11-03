@@ -48,11 +48,15 @@ cleanup() {
   rm -rf -- /opt/omnis-os /etc/omnis /var/lib/omnis-sandbox /run/omnis-authorizer /run/omnis-sandbox
   rm -f -- "${created_envs[@]/#/$repo_root/}"
   for user in omnis-api omnis-authorizer omnis-worker omnis-launcher; do
-    pkill -KILL -u "$user" >/dev/null 2>&1 || true
-    userdel "$user" >/dev/null 2>&1 || cleanup_failed=1
+    if id "$user" >/dev/null 2>&1; then
+      pkill -KILL -u "$user" >/dev/null 2>&1 || true
+      userdel "$user" >/dev/null 2>&1 || cleanup_failed=1
+    fi
   done
   for group in omnis-api omnis-authorizer omnis-worker omnis-launcher omnis-authorizer-socket omnis-launcher-socket; do
-    groupdel "$group" >/dev/null 2>&1 || cleanup_failed=1
+    if getent group "$group" >/dev/null 2>&1; then
+      groupdel "$group" >/dev/null 2>&1 || cleanup_failed=1
+    fi
   done
   if (( cleanup_failed != 0 )); then
     echo "Disposable systemd cleanup could not remove every created service resource." >&2

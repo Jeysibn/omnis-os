@@ -14,7 +14,7 @@ for group in omnis-api omnis-authorizer omnis-worker omnis-launcher omnis-author
   getent group "$group" >/dev/null || groupadd --system "$group"
 done
 for user in omnis-api omnis-authorizer omnis-worker omnis-launcher; do
-  id "$user" >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin "$user"
+  id "$user" >/dev/null 2>&1 || useradd --system --no-user-group --no-create-home --shell /usr/sbin/nologin "$user"
 done
 usermod --gid omnis-api omnis-api
 usermod --gid omnis-authorizer omnis-authorizer
