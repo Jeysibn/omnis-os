@@ -189,12 +189,18 @@ bash "$repo_root/scripts/host-security/verify-worker-boundary.sh"
 
 OMNIS_TEST_API_URL=http://127.0.0.1:4100 \
 OMNIS_TEST_OWNER_PASSWORD="$owner_password" \
-node --input-type=module <<'NODE'
+/usr/bin/node --input-type=module <<'NODE'
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 
 const base = process.env.OMNIS_TEST_API_URL;
 const origin = 'http://127.0.0.1:5173';
+async function expectStatus(response, expected) {
+  if (response.status === expected) return;
+  const body = await response.text().catch(() => '<response body unavailable>');
+  throw new Error(`Expected HTTP ${expected}, got ${response.status}: ${body}`);
+}
+
 const csrfResponse = await fetch(`${base}/api/v1/auth/csrf`);
 const csrfCookie = csrfResponse.headers.get('set-cookie')?.split(';', 1)[0];
 assert.ok(csrfCookie, 'API did not issue the anonymous CSRF session cookie');
@@ -203,7 +209,7 @@ const login = await fetch(`${base}/api/v1/auth/login`, {
   method: 'POST', headers: { cookie: csrfCookie, origin, 'x-omnis-csrf': csrf, 'content-type': 'application/json' },
   body: JSON.stringify({ password: process.env.OMNIS_TEST_OWNER_PASSWORD }),
 });
-assert.equal(login.status, 200, await login.text());
+await expectStatus(login, 200);
 const cookie = login.headers.get('set-cookie')?.split(';', 1)[0];
 assert.ok(cookie, 'API did not issue the owner session cookie');
 const ownerCsrfResponse = await fetch(`${base}/api/v1/auth/csrf`, { headers: { cookie } });
@@ -213,25 +219,25 @@ const taskResponse = await fetch(`${base}/api/v1/tasks`, {
   method: 'POST', headers: mutationHeaders,
   body: JSON.stringify({ title: `Host isolation synthetic ${randomUUID()}`, detail: 'CI disposable systemd verification.' }),
 });
-assert.equal(taskResponse.status, 201, await taskResponse.text());
+await expectStatus(taskResponse, 201);
 const task = await taskResponse.json();
 const idempotencyKey = randomUUID();
 const request = await fetch(`${base}/api/v1/authorizations`, {
   method: 'POST', headers: { ...mutationHeaders, 'idempotency-key': idempotencyKey },
   body: JSON.stringify({ taskId: task.id }),
 });
-assert.equal(request.status, 201, await request.text());
+await expectStatus(request, 201);
 const authorization = await request.json();
 const approval = await fetch(`${base}/api/v1/authorizations/${authorization.id}/decision`, {
   method: 'POST', headers: mutationHeaders, body: JSON.stringify({ decision: 'approve' }),
 });
-assert.equal(approval.status, 200, await approval.text());
+await expectStatus(approval, 200);
 const approved = await approval.json();
 const runResponse = await fetch(`${base}/api/v1/runs`, {
   method: 'POST', headers: { ...mutationHeaders, 'idempotency-key': randomUUID() },
   body: JSON.stringify({ taskId: task.id, authorizationId: approved.id }),
 });
-assert.equal(runResponse.status, 201, await runResponse.text());
+await expectStatus(runResponse, 201);
 const run = await runResponse.json();
 const deadline = Date.now() + 20_000;
 while (Date.now() < deadline) {
