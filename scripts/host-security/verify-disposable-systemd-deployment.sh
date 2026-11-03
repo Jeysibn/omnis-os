@@ -92,8 +92,8 @@ cleanup() {
       systemctl stop "$unit" >/dev/null 2>&1 || cleanup_failed=1
     fi
   done
-  if ((${#created_units[@]})); then rm -f -- "${created_units[@]/#/$unit_dir/}"; fi
-  if ((${#created_units[@]})); then systemctl daemon-reload >/dev/null 2>&1 || cleanup_failed=1; fi
+  if ((${#created_units[@]})); then rm -f -- "${created_units[@]/#/$unit_dir/}" || cleanup_failed=1; fi
+  if ((${#created_units[@]})); then systemctl daemon-reload >/dev/null 2>&1 || { echo "Failed to reload systemd after removing created units." >&2; cleanup_failed=1; }; fi
   for path in "${created_envs[@]}"; do rm -f -- "$path" || cleanup_failed=1; done
   if ((created_application_tree)); then rm -rf -- /opt/omnis-os || cleanup_failed=1; fi
   local kind value
@@ -102,18 +102,26 @@ cleanup() {
       user)
         if id "$value" >/dev/null 2>&1; then
           pkill -KILL -u "$value" >/dev/null 2>&1 || true
-          userdel "$value" >/dev/null 2>&1 || cleanup_failed=1
+          userdel "$value" >/dev/null 2>&1 || { echo "Failed to remove created user $value." >&2; cleanup_failed=1; }
         fi
         ;;
       group)
-        if getent group "$value" >/dev/null; then groupdel "$value" >/dev/null 2>&1 || cleanup_failed=1; fi
+        if getent group "$value" >/dev/null; then groupdel "$value" >/dev/null 2>&1 || { echo "Failed to remove created group $value." >&2; cleanup_failed=1; }; fi
         ;;
       file) rm -f -- "$value" || cleanup_failed=1 ;;
       directory)
         case "$value" in
-          /etc/omnis|/run/omnis-authorizer|/run/omnis-sandbox) rmdir -- "$value" 2>/dev/null || cleanup_failed=1 ;;
-          /var/lib/omnis-sandbox/workspaces) rm -rf -- "$value" || cleanup_failed=1 ;;
-          /var/lib/omnis-sandbox) rmdir -- "$value" 2>/dev/null || cleanup_failed=1 ;;
+          /etc/omnis) rmdir -- "$value" 2>/dev/null || { echo "Failed to remove created directory $value." >&2; cleanup_failed=1; } ;;
+          /run/omnis-authorizer)
+            rm -f -- "$value/authorizer.sock"
+            rmdir -- "$value" 2>/dev/null || { echo "Failed to remove created directory $value." >&2; cleanup_failed=1; }
+            ;;
+          /run/omnis-sandbox)
+            rm -f -- "$value/launcher.sock"
+            rmdir -- "$value" 2>/dev/null || { echo "Failed to remove created directory $value." >&2; cleanup_failed=1; }
+            ;;
+          /var/lib/omnis-sandbox/workspaces) rm -rf -- "$value" || { echo "Failed to remove created directory $value." >&2; cleanup_failed=1; } ;;
+          /var/lib/omnis-sandbox) rmdir -- "$value" 2>/dev/null || { echo "Failed to remove created directory $value." >&2; cleanup_failed=1; } ;;
           *) echo "Refusing cleanup of unrecognized manifest directory $value." >&2; cleanup_failed=1 ;;
         esac
         ;;

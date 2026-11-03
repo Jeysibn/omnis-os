@@ -30,6 +30,10 @@ test('deployment packaging includes tracked app files and excludes nested secret
       'config/credentials.json',
       'keys/service.pem',
       'keys/id_ed25519',
+      'config/private.key',
+      'node_modules/.pnpm/demo/node_modules/demo/index.js',
+      'node_modules/.pnpm/demo/node_modules/demo/.env.local',
+      'apps/api/node_modules/demo-credential/credential.json',
       'docs/allowed.md',
     ];
     for (const file of fixtures) {
@@ -56,11 +60,15 @@ test('deployment packaging includes tracked app files and excludes nested secret
       'fixture: apps/api/src/index.ts',
     );
     assert.equal(
+      readFileSync(path.join(stage, 'node_modules/.pnpm/demo/node_modules/demo/index.js'), 'utf8'),
+      'fixture: node_modules/.pnpm/demo/node_modules/demo/index.js',
+    );
+    assert.equal(
       readFileSync(path.join(stage, 'docs/allowed.md'), 'utf8'),
       'fixture: docs/allowed.md',
     );
     for (const file of fixtures.filter((entry) =>
-      /\.env|credentials|\.pem$|id_ed25519/.test(entry),
+      /\.env|credential|\.pem$|\.key$|id_ed25519/.test(entry),
     )) {
       assert.equal(pathExists(path.join(stage, file)), false, `${file} entered deployment tree`);
     }

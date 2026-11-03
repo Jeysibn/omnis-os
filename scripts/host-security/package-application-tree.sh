@@ -25,21 +25,34 @@ git -C "$source_root" ls-files -z --cached > "$manifest"
 allowlist="$(mktemp)"
 cleanup_allowlist() { rm -f -- "$allowlist"; }
 trap 'cleanup_allowlist; cleanup' EXIT
-while IFS= read -r -d '' path; do
+add_allowlisted_path() {
+  local path="$1"
   name="${path##*/}"
   lower_name="${name,,}"
   case "$lower_name" in
-    .env*|.npmrc|*.pem|*.key|*.p12|*.pfx|*.jks|*.keystore|*.token|*.credential|*.credentials|*.secret|credentials.json|secrets.json|id_rsa*|id_ed25519*)
-      continue
+    .env*|.npmrc|*.pem|*.key|*.p12|*.pfx|*.jks|*.keystore|*.token|*.credential|*.credentials|*.secret|*credential*.json|*credentials*.json|secrets.json|id_rsa*|id_ed25519*)
+      return 0
       ;;
   esac
   case "/$path/" in
     */.ssh/*|*/.aws/*|*/.gnupg/*|*/credentials/*|*/secrets/*)
-      continue
+      return 0
       ;;
   esac
   printf '%s\0' "$path" >> "$allowlist"
-done < "$manifest"
+}
+while IFS= read -r -d '' path; do add_allowlisted_path "$path"; done < "$manifest"
+
+# Frozen pnpm installs create the workspace links and dependency files used by
+# the systemd services. Include only those explicit dependency roots, and apply
+# the same sensitive-file policy to every nested dependency path.
+dependency_roots=("$source_root/node_modules" "$source_root/apps"/*/node_modules "$source_root/packages"/*/node_modules)
+for dependency_root in "${dependency_roots[@]}"; do
+  [[ -d "$dependency_root" ]] || continue
+  while IFS= read -r -d '' absolute_path; do
+    add_allowlisted_path "${absolute_path#"$source_root"/}"
+  done < <(find "$dependency_root" \( -type f -o -type l \) -print0)
+done
 
 if [[ ! -s "$allowlist" ]]; then
   echo "No tracked application files remain after sensitive-file exclusions." >&2
