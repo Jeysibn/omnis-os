@@ -60,7 +60,7 @@ All results below were observed locally on the PR #9 working tree using syntheti
 
 The first combined integration shell invocation scoped environment variables to only its first command; recovery then correctly refused to run without its disposable database URL. Recovery and backup/restore were rerun with the required variables passed to each command and passed. This was a command-environment issue, not a code/test failure.
 
-GitHub Actions for the final PR #9 SHA is recorded after branch publication. No CI result is claimed here until that workflow completes.
+GitHub Actions run [41632671390](https://github.com/Jeysibn/omnis-os/actions/runs/41632671390) passed on implementation SHA `3d18498c4808a37ba5e1f93dc90c3093d0ee2ea7`. It executed frozen installation, restricted-role provisioning, `pnpm check`, production build, legacy upgrade, recovery, and disposable backup/restore. A documentation-only follow-up records this run; CI was rerun on that final PR head before closeout.
 
 ## Remaining security limits
 
