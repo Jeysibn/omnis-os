@@ -9,6 +9,7 @@ const destinations = [
   '.env',
   '.env.worker',
   '.env.authorizer',
+  '.env.sandbox-launcher',
   '.env.migration',
   '.env.db-admin',
 ].map((name) => new URL(`../${name}`, import.meta.url));
@@ -40,8 +41,7 @@ try {
     'OMNIS_ALLOWED_ORIGIN=http://127.0.0.1:5173',
     'OMNIS_API_HOST=127.0.0.1',
     'OMNIS_API_PORT=4100',
-    'OMNIS_AUTHORIZER_HOST=127.0.0.1',
-    'OMNIS_AUTHORIZER_PORT=4102',
+    'OMNIS_AUTHORIZER_SOCKET=/run/omnis-authorizer/authorizer.sock',
     'OMNIS_SECURE_COOKIES=false',
   ];
   const files = [
@@ -51,16 +51,22 @@ try {
       `OMNIS_RUNTIME_DB_PASSWORD=${randomBytes(32).toString('hex')}`,
       'OMNIS_WORKER_HOST=127.0.0.1',
       'OMNIS_WORKER_PORT=4101',
+      'OMNIS_SANDBOX_LAUNCHER_SOCKET=/run/omnis-sandbox/launcher.sock',
       'OMNIS_QUEUE_NAME=omnis-mock-run',
     ],
     [
       `OMNIS_API_AUTHORIZER_TOKEN=${apiAuthorizerToken}`,
       `OMNIS_AUTHORIZER_DB_PASSWORD=${randomBytes(32).toString('hex')}`,
-      'OMNIS_AUTHORIZER_HOST=127.0.0.1',
-      'OMNIS_AUTHORIZER_PORT=4102',
+      'OMNIS_AUTHORIZER_SOCKET=/run/omnis-authorizer/authorizer.sock',
+      'OMNIS_AUTHORIZER_SOCKET_MODE=660',
       'OMNIS_DB_HOST=127.0.0.1',
       'OMNIS_DB_PORT=5432',
       'OMNIS_DB_NAME=omnis',
+    ],
+    [
+      `OMNIS_LAUNCHER_DB_PASSWORD=${randomBytes(32).toString('hex')}`,
+      'OMNIS_SANDBOX_LAUNCHER_SOCKET=/run/omnis-sandbox/launcher.sock',
+      'OMNIS_SANDBOX_LAUNCHER_SOCKET_MODE=660',
     ],
     [`OMNIS_MIGRATION_DB_PASSWORD=${randomBytes(32).toString('hex')}`],
     [`OMNIS_DB_PASSWORD=${randomBytes(32).toString('hex')}`],
@@ -74,7 +80,7 @@ try {
     await chmod(destination, 0o600);
   }
   stdout.write(
-    'Created private Omnis API, worker, authorizer, migration, and database-admin environment files.\n',
+    'Created private Omnis API, worker, authorizer, sandbox-launcher, migration, and database-admin environment files.\n',
   );
 } finally {
   input.close();

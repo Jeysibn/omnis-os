@@ -1,17 +1,11 @@
-const port = Number(process.env.OMNIS_AUTHORIZER_PORT ?? 4102);
-const host = process.env.OMNIS_AUTHORIZER_HOST ?? '127.0.0.1';
+import path from 'node:path';
+
+const socketPath = process.env.OMNIS_AUTHORIZER_SOCKET ?? '/run/omnis-authorizer/authorizer.sock';
 const serviceToken = process.env.OMNIS_API_AUTHORIZER_TOKEN;
 const password = process.env.OMNIS_AUTHORIZER_DB_PASSWORD;
 const configuredDatabaseUrl = process.env.OMNIS_AUTHORIZER_DATABASE_URL;
 
-if (!['127.0.0.1', '::1', 'localhost'].includes(host)) {
-  throw new Error(
-    'The authorizer must bind to loopback until a private authenticated transport is configured.',
-  );
-}
-if (!Number.isInteger(port) || port < 1 || port > 65535) {
-  throw new Error('OMNIS_AUTHORIZER_PORT must be a valid TCP port.');
-}
+if (!path.isAbsolute(socketPath)) throw new Error('Authorizer socket path must be absolute.');
 if (!serviceToken || serviceToken.length < 64) {
   throw new Error('OMNIS_API_AUTHORIZER_TOKEN must be generated with `pnpm configure:owner`.');
 }
@@ -31,8 +25,7 @@ if (databaseUrl) {
 }
 
 export const env = {
-  host,
-  port,
+  socketPath,
   serviceToken,
   databaseUrl:
     databaseUrl ??

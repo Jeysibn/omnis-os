@@ -7,8 +7,8 @@
     "db:migrate": "node --experimental-strip-types --env-file=../../.env.migration src/migrate.ts",
     "build": "pnpm typecheck",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --experimental-strip-types --test src/run-coordinator.test.ts src/docker-sandbox.test.ts src/reliable-event-stream.test.ts src/docker-sandbox.security.test.ts",
-    "test:sandbox": "OMNIS_SANDBOX_INTEGRATION=1 node --experimental-strip-types --test src/docker-sandbox.security.test.ts"
+    "test": "node --experimental-strip-types --test src/run-coordinator.test.ts src/reliable-event-stream.test.ts src/sandbox-launcher-client.test.ts",
+    "test:sandbox": "pnpm --filter @omnis/sandbox-launcher test:sandbox"
   },
   "dependencies": {
     "@omnis/db": "workspace:*",

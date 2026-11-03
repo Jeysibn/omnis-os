@@ -31,6 +31,7 @@ jobs:
       OMNIS_TEST_MIGRATION_DATABASE_URL: postgresql://omnis_migrator:omnis_migration_test_password_2026@127.0.0.1:5432/omnis_test
       OMNIS_TEST_DATABASE_URL: postgresql://omnis_runtime:omnis_runtime_test_password_2026@127.0.0.1:5432/omnis_test
       OMNIS_TEST_AUTHORIZER_DATABASE_URL: postgresql://omnis_authorizer:omnis_authorizer_test_password_2026@127.0.0.1:5432/omnis_test
+      OMNIS_TEST_LAUNCHER_DATABASE_URL: postgresql://omnis_launcher:omnis_launcher_test_password_2026@127.0.0.1:5432/omnis_test
       OMNIS_SANDBOX_INTEGRATION: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -46,6 +47,8 @@ jobs:
           cache: pnpm
       - run: docker pull node@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85
       - run: pnpm install --frozen-lockfile
+      - name: Verify disposable Linux service identity boundaries
+        run: sudo --preserve-env=CI bash scripts/host-security/test-disposable-identities.sh
       - name: Provision restricted PostgreSQL roles
         run: node --experimental-strip-types packages/db/src/provision.ts
         env:
@@ -53,6 +56,7 @@ jobs:
           OMNIS_MIGRATION_DB_PASSWORD: omnis_migration_test_password_2026
           OMNIS_RUNTIME_DB_PASSWORD: omnis_runtime_test_password_2026
           OMNIS_AUTHORIZER_DB_PASSWORD: omnis_authorizer_test_password_2026
+          OMNIS_LAUNCHER_DB_PASSWORD: omnis_launcher_test_password_2026
       - run: pnpm check
       - run: pnpm build
       - run: pnpm integration:legacy-upgrade

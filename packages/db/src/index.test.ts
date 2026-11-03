@@ -3,6 +3,7 @@ import { after, beforeEach, describe, it } from 'node:test';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
+import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { Pool } from 'pg';
 import {
@@ -24,15 +25,17 @@ const databaseUrl = process.env.OMNIS_TEST_DATABASE_URL;
 const pool = databaseUrl ? createPool(databaseUrl) : undefined;
 const migrationUrl = process.env.OMNIS_TEST_MIGRATION_DATABASE_URL;
 const authorizerUrl = process.env.OMNIS_TEST_AUTHORIZER_DATABASE_URL;
+const launcherUrl = process.env.OMNIS_TEST_LAUNCHER_DATABASE_URL;
 const migrationPool = migrationUrl ? createPool(migrationUrl) : undefined;
 const authorizerPool = authorizerUrl ? createPool(authorizerUrl) : undefined;
+const launcherPool = launcherUrl ? createPool(launcherUrl) : undefined;
 const adminUrl = process.env.OMNIS_TEST_ADMIN_DATABASE_URL;
 const adminPool = adminUrl ? createPool(adminUrl) : undefined;
 let nextKey = 0;
 const postgresSuite = describe(
   'PostgreSQL run store',
   {
-    skip: !databaseUrl || !migrationUrl || !adminUrl || !authorizerUrl,
+    skip: !databaseUrl || !migrationUrl || !adminUrl || !authorizerUrl || !launcherUrl,
   },
   () => {
     const store = new PostgresRunStore(pool!);
@@ -130,6 +133,7 @@ const postgresSuite = describe(
         migration: decodeURIComponent(new URL(migrationUrl!).password),
         runtime: decodeURIComponent(new URL(databaseUrl!).password),
         authorizer: decodeURIComponent(new URL(authorizerUrl!).password),
+        launcher: decodeURIComponent(new URL(launcherUrl!).password),
       };
       await provisionDatabaseRoles(adminPool!, passwords);
       await provisionDatabaseRoles(adminPool!, passwords);
@@ -144,6 +148,10 @@ const postgresSuite = describe(
       const authorizerFreshPool = createPool({
         connectionString: authorizerUrl!,
         application_name: 'omnis-timeout-authorizer-fresh',
+      });
+      const launcherFreshPool = createPool({
+        connectionString: launcherUrl!,
+        application_name: 'omnis-timeout-launcher-fresh',
       });
       try {
         const runtime = await runtimeFreshPool.query<{
@@ -166,6 +174,16 @@ const postgresSuite = describe(
                   current_setting('idle_in_transaction_session_timeout') AS idle`,
         );
         assert.deepEqual(authorizer.rows[0], { lock: '3s', statement: '15s', idle: '20s' });
+        const launcher = await launcherFreshPool.query<{
+          lock: string;
+          statement: string;
+          idle: string;
+        }>(
+          `SELECT current_setting('lock_timeout') AS lock,
+                  current_setting('statement_timeout') AS statement,
+                  current_setting('idle_in_transaction_session_timeout') AS idle`,
+        );
+        assert.deepEqual(launcher.rows[0], { lock: '3s', statement: '10s', idle: '10s' });
 
         await runtimeFreshPool.query("SET lock_timeout = '0'");
         assert.equal(
@@ -174,7 +192,11 @@ const postgresSuite = describe(
           '0',
         );
       } finally {
-        await Promise.all([runtimeFreshPool.end(), authorizerFreshPool.end()]);
+        await Promise.all([
+          runtimeFreshPool.end(),
+          authorizerFreshPool.end(),
+          launcherFreshPool.end(),
+        ]);
       }
 
       const currentDatabase = (
@@ -223,6 +245,7 @@ const postgresSuite = describe(
         migration: decodeURIComponent(new URL(migrationUrl!).password),
         runtime: decodeURIComponent(new URL(databaseUrl!).password),
         authorizer: decodeURIComponent(new URL(authorizerUrl!).password),
+        launcher: decodeURIComponent(new URL(launcherUrl!).password),
       });
       const storedSetting = await adminPool!.query(
         `SELECT 1 FROM pg_db_role_setting settings
@@ -256,6 +279,7 @@ const postgresSuite = describe(
             migration: decodeURIComponent(new URL(migrationUrl!).password),
             runtime: decodeURIComponent(new URL(databaseUrl!).password),
             authorizer: decodeURIComponent(new URL(authorizerUrl!).password),
+            launcher: decodeURIComponent(new URL(launcherUrl!).password),
           }),
           /Database-specific PostgreSQL timeout settings are not permitted/,
         );
@@ -341,6 +365,68 @@ const postgresSuite = describe(
         outcome.errorCode || /connection|terminat|not queryable/i.test(outcome.errorMessage),
         `the failed transaction error must remain observable: ${outcome.errorMessage}`,
       );
+    });
+
+    it('handles idle pooled-client termination without crashing and uses a replacement connection', async () => {
+      const moduleUrl = new URL('./database.ts', import.meta.url).href;
+      const childScript = `
+        import { createPool } from ${JSON.stringify(moduleUrl)};
+        let resolveIdleError;
+        const idleError = new Promise((resolve) => { resolveIdleError = resolve; });
+        const pool = createPool({
+          connectionString: process.env.OMNIS_TEST_DATABASE_URL,
+          max: 1,
+          application_name: 'omnis-idle-pool-error-child'
+        }, (error) => resolveIdleError(error));
+        const client = await pool.connect();
+        const pid = (await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+        client.release();
+        process.stdout.write(JSON.stringify({ ready: true, pid }) + '\\n');
+        const error = await idleError;
+        const replacement = await pool.query('SELECT 1 AS recovered');
+        process.stdout.write(JSON.stringify({
+          handled: error.name === 'Error',
+          safeCode: error.code ?? null,
+          recovered: replacement.rows[0].recovered === 1
+        }) + '\\n');
+        await pool.end();
+      `;
+      const child = spawn(
+        process.execPath,
+        ['--experimental-strip-types', '--input-type=module', '-e', childScript],
+        {
+          env: { ...process.env, OMNIS_TEST_DATABASE_URL: databaseUrl! },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        },
+      );
+      const lineReader = createInterface({ input: child.stdout! });
+      const lines = lineReader[Symbol.asyncIterator]();
+      const firstLine = await Promise.race([
+        lines.next(),
+        delay(5_000).then(() => {
+          throw new Error('Timed out waiting for the idle-pool child to connect.');
+        }),
+      ]);
+      const ready = JSON.parse(firstLine.value as string) as { ready: boolean; pid: number };
+      assert.equal(ready.ready, true);
+      await adminPool!.query('SELECT pg_terminate_backend($1)', [ready.pid]);
+      const secondLine = await Promise.race([
+        lines.next(),
+        delay(5_000).then(() => {
+          throw new Error('Timed out waiting for the idle-pool error handler.');
+        }),
+      ]);
+      const outcome = JSON.parse(secondLine.value as string) as {
+        handled: boolean;
+        safeCode: string | null;
+        recovered: boolean;
+      };
+      lineReader.close();
+      const [code, signal] = await once(child, 'exit');
+      assert.equal(code, 0);
+      assert.equal(signal, null);
+      assert.equal(outcome.handled, true);
+      assert.equal(outcome.recovered, true);
     });
 
     it('recycles a backend killed by idle transaction timeout and leaves idle pooled sessions alone', async () => {
@@ -1878,6 +1964,56 @@ const postgresSuite = describe(
       await assert.rejects(authorizerPool!.query('SELECT pg_reload_conf()'), /permission denied/);
     });
 
+    it('allows only the launcher role to validate and reserve one authorized mock execution', async () => {
+      const task = await store.createTask({
+        title: 'Launcher authorization fixture',
+        detail: 'Synthetic fixed-workload launch authorization test.',
+      });
+      const grantRequest = await authorizations.request(task.id, 'owner');
+      const grant = await authorizations.decide(grantRequest.id, 'owner', 'approve');
+      const admitted = await store.admitRun(task.id, key('launcher'), grant.id, async () => 'job');
+      const workerId = randomUUID();
+      const claim = await store.beginExecution(admitted.run.id, workerId, 30);
+      assert.equal(claim.started, true);
+
+      await assert.rejects(
+        pool!.query('SELECT task_title FROM omnis.authorize_mock_sandbox_launch($1, $2, $3)', [
+          admitted.run.id,
+          workerId,
+          claim.generation,
+        ]),
+        /permission denied for function authorize_mock_sandbox_launch/,
+      );
+      await assert.rejects(
+        pool!.query('SELECT * FROM omnis.mock_sandbox_launches'),
+        /permission denied/,
+      );
+      await assert.rejects(
+        launcherPool!.query('SELECT * FROM omnis.runs'),
+        /permission denied for table runs/,
+      );
+
+      const allowed = await launcherPool!.query<{ task_title: string }>(
+        'SELECT task_title FROM omnis.authorize_mock_sandbox_launch($1, $2, $3)',
+        [admitted.run.id, workerId, claim.generation],
+      );
+      assert.deepEqual(allowed.rows, [{ task_title: task.title }]);
+      const replay = await launcherPool!.query(
+        'SELECT task_title FROM omnis.authorize_mock_sandbox_launch($1, $2, $3)',
+        [admitted.run.id, workerId, claim.generation],
+      );
+      assert.equal(
+        replay.rowCount,
+        0,
+        'a repeated or replayed launch cannot start a second sandbox',
+      );
+      const stale = await launcherPool!.query(
+        'SELECT task_title FROM omnis.authorize_mock_sandbox_launch($1, $2, $3)',
+        [admitted.run.id, workerId, claim.generation + 1],
+      );
+      assert.equal(stale.rowCount, 0, 'a stale execution generation cannot launch');
+    });
+
     it('preserves later migration privileges when runtime roles are re-provisioned', async () => {
       const laterMigrationTable = 'future_privilege_probe';
       const ungrantedTable = 'future_ungranted_probe';
@@ -1899,6 +2035,7 @@ const postgresSuite = describe(
           migration: decodeURIComponent(migrationConnection.password),
           runtime: decodeURIComponent(new URL(databaseUrl!).password),
           authorizer: decodeURIComponent(new URL(authorizerUrl!).password),
+          launcher: decodeURIComponent(new URL(launcherUrl!).password),
         });
 
         assert.equal(
@@ -2497,6 +2634,7 @@ const postgresSuite = describe(
       await pool?.end();
       await migrationPool?.end();
       await authorizerPool?.end();
+      await launcherPool?.end();
       await adminPool?.end();
     });
   },

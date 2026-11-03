@@ -64,6 +64,18 @@ REVOKE ALL ON FUNCTION omnis.revoke_run_authorization(text, text)
   FROM PUBLIC, omnis_runtime;
 GRANT EXECUTE ON FUNCTION omnis.revoke_run_authorization(text, text)
   TO omnis_authorizer;
+DO $launcher_acl$
+BEGIN
+  IF pg_catalog.to_regprocedure('omnis.authorize_mock_sandbox_launch(text,text,integer)') IS NOT NULL
+     AND pg_catalog.to_regprocedure('omnis.list_authorized_active_mock_runs(text[])') IS NOT NULL THEN
+    EXECUTE 'GRANT USAGE ON SCHEMA omnis TO omnis_launcher';
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.authorize_mock_sandbox_launch(text, text, integer) FROM PUBLIC';
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.list_authorized_active_mock_runs(text[]) FROM PUBLIC';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.authorize_mock_sandbox_launch(text, text, integer) TO omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.list_authorized_active_mock_runs(text[]) TO omnis_launcher';
+  END IF;
+END
+$launcher_acl$;
 GRANT SELECT ON omnis.runtime_authorizations TO omnis_authorizer;
 GRANT SELECT, INSERT ON omnis.authorization_audit TO omnis_authorizer;
 GRANT INSERT (

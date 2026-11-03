@@ -91,6 +91,7 @@ const knownRoles = new Set([
   'omnis_migrator',
   'omnis_runtime',
   'omnis_authorizer',
+  'omnis_launcher',
   'postgres',
   'pg_database_owner',
   'PUBLIC',
@@ -203,7 +204,12 @@ export function runtimeAclSnapshotsMatch(source, restored) {
   return JSON.stringify(runtimeEntries(source)) === JSON.stringify(runtimeEntries(restored));
 }
 
-const deferredDatabaseConnectGrantees = new Set(['PUBLIC', 'omnis_runtime', 'omnis_authorizer']);
+const deferredDatabaseConnectGrantees = new Set([
+  'PUBLIC',
+  'omnis_runtime',
+  'omnis_authorizer',
+  'omnis_launcher',
+]);
 
 export function assertRestoreDatabaseClosed(snapshot) {
   for (const entry of normalizeAclSnapshot(snapshot)) {
@@ -329,6 +335,29 @@ export function assertRuntimeAclPolicy(snapshot) {
         continue;
       throw new Error(
         `Authorizer ACL ${entry.privilege} is prohibited on ${entry.schema}.${entry.object}.`,
+      );
+    }
+    if (entry.grantee === 'omnis_launcher') {
+      if (entry.grantable)
+        throw new Error(
+          `Launcher ACL grant option is prohibited on ${entry.schema}.${entry.object}.`,
+        );
+      if (entry.objectType === 'database' && entry.privilege === 'CONNECT') continue;
+      if (entry.objectType === 'schema' && entry.schema === 'omnis' && entry.privilege === 'USAGE')
+        continue;
+      if (
+        entry.objectType === 'routine' &&
+        entry.schema === 'omnis' &&
+        [
+          'authorize_mock_sandbox_launch(p_run_id text, p_worker_id text, p_generation integer)',
+          'list_authorized_active_mock_runs(p_candidate_ids text[])',
+        ].includes(entry.object) &&
+        entry.privilege === 'EXECUTE' &&
+        entry.securityDefiner === true
+      )
+        continue;
+      throw new Error(
+        `Launcher ACL ${entry.privilege} is prohibited on ${entry.schema}.${entry.object}.`,
       );
     }
     if (entry.grantee !== 'omnis_runtime') continue;

@@ -40,6 +40,9 @@ function makeStore() {
       calls.push({ method: 'revoke', actor });
       return { ...authorization, status: 'revoked' };
     },
+    async get() {
+      return authorization;
+    },
   };
   return { store, calls };
 }
@@ -111,6 +114,37 @@ describe('independent authorizer service boundary', () => {
       const response = await app.inject({ method: 'GET', url: '/internal/v1/health' });
       assert.equal(response.statusCode, 503);
       assert.equal(response.json().error.code, 'authorizer_unavailable');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('reports an unknown decision outcome when a mutation fails outside a confirmed rollback path', async () => {
+    const { store } = makeStore();
+    const failingStore: AuthorizerStore = {
+      ...store,
+      async request() {
+        throw new Error('synthetic connection loss during commit');
+      },
+    };
+    const app = createAuthorizerApp({
+      store: failingStore,
+      serviceToken,
+      checkDatabase: async () => undefined,
+    });
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/internal/v1/authorizations',
+        headers: {
+          'x-omnis-authorizer-token': serviceToken,
+          'idempotency-key': authorization.correlationId,
+        },
+        payload: { taskId: 'task-0001' },
+      });
+      assert.equal(response.statusCode, 503);
+      assert.equal(response.json().error.code, 'authorization_outcome_unknown');
+      assert.match(response.json().error.message, /same idempotency key/i);
     } finally {
       await app.close();
     }

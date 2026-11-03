@@ -21,21 +21,15 @@ if (!authorizerToken || authorizerToken.length < 64 || authorizerToken === inter
 const apiPort = Number(process.env.OMNIS_API_PORT ?? 4100);
 const workerPort = Number(process.env.OMNIS_WORKER_PORT ?? 4101);
 const workerHost = process.env.OMNIS_WORKER_HOST ?? '127.0.0.1';
-const authorizerPort = Number(process.env.OMNIS_AUTHORIZER_PORT ?? 4102);
-const authorizerHost = process.env.OMNIS_AUTHORIZER_HOST ?? '127.0.0.1';
+const authorizerSocket = process.env.OMNIS_AUTHORIZER_SOCKET ?? '/tmp/omnis-authorizer.sock';
 if (!Number.isInteger(apiPort) || apiPort < 1 || apiPort > 65535)
   throw new Error('OMNIS_API_PORT is invalid.');
 if (!Number.isInteger(workerPort) || workerPort < 1 || workerPort > 65535)
   throw new Error('OMNIS_WORKER_PORT is invalid.');
-if (!Number.isInteger(authorizerPort) || authorizerPort < 1 || authorizerPort > 65535)
-  throw new Error('OMNIS_AUTHORIZER_PORT is invalid.');
+if (!authorizerSocket.startsWith('/')) throw new Error('OMNIS_AUTHORIZER_SOCKET is invalid.');
 if (!['127.0.0.1', '::1', 'localhost'].includes(workerHost)) {
   throw new Error('The initial Omnis OS worker must bind to loopback.');
 }
-if (!['127.0.0.1', '::1', 'localhost'].includes(authorizerHost)) {
-  throw new Error('The initial Omnis OS authorizer must bind to loopback.');
-}
-
 export const env = {
   host: process.env.OMNIS_API_HOST ?? '127.0.0.1',
   port: apiPort,
@@ -45,7 +39,7 @@ export const env = {
   internalToken,
   authorizerToken,
   workerUrl: `http://${workerHost}:${workerPort}`,
-  authorizerUrl: `http://${authorizerHost}:${authorizerPort}`,
+  authorizerSocket,
   secureCookies: process.env.OMNIS_SECURE_COOKIES === 'true',
 };
 

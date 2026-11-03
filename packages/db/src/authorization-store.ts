@@ -141,6 +141,8 @@ export class PostgresAuthorizationStore {
         [id],
       );
       const current = locked.rows[0];
+      const requestedStatus = decision === 'approve' ? 'authorized' : 'denied';
+      if (current?.status === requestedStatus) return mapAuthorization(current);
       if (
         !current ||
         current.status !== 'pending' ||
@@ -148,7 +150,7 @@ export class PostgresAuthorizationStore {
       ) {
         throw new Error('Authorization is missing, expired, or already decided.');
       }
-      const status = decision === 'approve' ? 'authorized' : 'denied';
+      const status = requestedStatus;
       const result = await client.query<AuthorizationRow>(
         `UPDATE omnis.runtime_authorizations
             SET status = $2, decided_at = now(), decided_by = $3
@@ -185,8 +187,10 @@ export class PostgresAuthorizationStore {
       }
       if (outcome !== 'retry_consumed' && outcome !== 'retry_unconsumed') break;
     }
-    if (!revoked) throw new Error('Only an active authorization can be revoked.');
     const updated = await this.get(id);
+    if (!revoked && updated?.status !== 'revoked') {
+      throw new Error('Only an active authorization can be revoked.');
+    }
     if (!updated) throw new Error('Revoked authorization could not be reloaded.');
     return updated;
   }

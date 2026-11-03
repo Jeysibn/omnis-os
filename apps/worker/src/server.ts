@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { timingSafeEqual } from 'node:crypto';
 import Fastify from 'fastify';
 import { PgBoss } from 'pg-boss';
 import {
@@ -8,9 +8,9 @@ import {
   StoreError,
 } from '@omnis/db';
 import { CreateRunSchema, CreateTaskSchema } from '@omnis/contracts';
-import { DockerSandboxExecutor } from './docker-sandbox.ts';
 import { CoordinatorError, queueName, RunCoordinator } from './run-coordinator.ts';
 import { SandboxedMockRuntimeAdapter } from './sandboxed-mock-runtime.ts';
+import { UnixMockSandboxLauncherClient } from './sandbox-launcher-client.ts';
 import { streamPersistedRunEvents } from './reliable-event-stream.ts';
 
 const host = process.env.OMNIS_WORKER_HOST ?? '127.0.0.1';
@@ -29,6 +29,8 @@ for (const forbiddenSecret of [
   'OMNIS_AUTHORIZER_DB_PASSWORD',
   'OMNIS_AUTHORIZER_DATABASE_URL',
   'OMNIS_API_AUTHORIZER_TOKEN',
+  'OMNIS_LAUNCHER_DATABASE_URL',
+  'OMNIS_LAUNCHER_DB_PASSWORD',
 ]) {
   if (process.env[forbiddenSecret]) {
     throw new Error(
@@ -56,17 +58,11 @@ await boss.start({ attempts: 5 });
 await boss.createQueue(queueName, { retryLimit: 0, retryDelay: 0 });
 
 const store = new PostgresRunStore(pool);
-const databaseIdentity = new URL(connectionString);
-const sandboxScope = createHash('sha256')
-  .update(
-    `${databaseIdentity.protocol}//${databaseIdentity.hostname}:${databaseIdentity.port}${databaseIdentity.pathname}`,
-  )
-  .digest('hex')
-  .slice(0, 24);
-const sandbox = new DockerSandboxExecutor({ scopeId: sandboxScope });
-const mockDelayMs =
-  process.env.NODE_ENV === 'test' ? Number(process.env.OMNIS_MOCK_TEST_DELAY_MS ?? 500) : 500;
-const runtime = new SandboxedMockRuntimeAdapter(sandbox, mockDelayMs);
+const launcherSocket = process.env.OMNIS_SANDBOX_LAUNCHER_SOCKET;
+if (!launcherSocket || !launcherSocket.startsWith('/')) {
+  throw new Error('OMNIS_SANDBOX_LAUNCHER_SOCKET must point to the provisioned private socket.');
+}
+const runtime = new SandboxedMockRuntimeAdapter(new UnixMockSandboxLauncherClient(launcherSocket));
 const authorizationStore = new PostgresRuntimeAuthorizationReader(pool);
 const coordinator = new RunCoordinator(store, boss, runtime, authorizationStore);
 await coordinator.reconcileExpiredRuns();

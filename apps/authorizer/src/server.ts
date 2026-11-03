@@ -1,4 +1,6 @@
 import { createPool, PostgresAuthorizationStore } from '@omnis/db';
+import { chmod, lstat, mkdir, rm } from 'node:fs/promises';
+import path from 'node:path';
 import { createAuthorizerApp } from './app.ts';
 import { env } from './env.ts';
 
@@ -30,10 +32,26 @@ expiryTimer.unref();
 app.addHook('onClose', async () => {
   clearInterval(expiryTimer);
   await pool.end();
+  await rm(env.socketPath, { force: true });
 });
 
-await app.listen({ host: env.host, port: env.port });
-app.log.info({ host: env.host, port: env.port }, 'Omnis OS authorizer ready on loopback');
+await mkdir(path.dirname(env.socketPath), { recursive: true, mode: 0o750 });
+const existingSocket = await lstat(env.socketPath).catch((error: NodeJS.ErrnoException) => {
+  if (error.code === 'ENOENT') return undefined;
+  throw error;
+});
+if (existingSocket) {
+  if (!existingSocket.isSocket() || existingSocket.uid !== (process.getuid?.() ?? -1)) {
+    throw new Error('Refusing to replace an unowned or non-socket authorizer path.');
+  }
+  await rm(env.socketPath);
+}
+await app.listen({ path: env.socketPath });
+const socketMode = Number.parseInt(process.env.OMNIS_AUTHORIZER_SOCKET_MODE ?? '600', 8);
+if (![0o600, 0o660].includes(socketMode))
+  throw new Error('Authorizer socket mode must be 600 or 660.');
+await chmod(env.socketPath, socketMode);
+app.log.info('Omnis OS authorizer ready on its Unix socket');
 
 let shutdownStarted = false;
 const shutdown = (signal: NodeJS.Signals) => {

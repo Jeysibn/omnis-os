@@ -8,6 +8,7 @@ export interface RuntimeAdapter {
   ): Promise<void>;
   execute(input: {
     runId: string;
+    lease: { workerId: string; generation: number };
     task: Task;
     signal: AbortSignal;
     emit(event: Omit<RunEvent, 'id' | 'runId' | 'sequence' | 'at' | 'source' | 'synthetic'>): void;

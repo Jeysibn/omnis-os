@@ -16,7 +16,7 @@ import {
 import { evaluateAllowedUse } from '@omnis/policy';
 import type { RuntimeAuthorizationReader } from '@omnis/db';
 import type { RuntimeAdapter } from '@omnis/runtime-adapters';
-import { SandboxError } from './docker-sandbox.ts';
+import { SandboxError } from '@omnis/runtime-adapters/sandbox-error';
 
 export class CoordinatorError extends Error {
   readonly code:
@@ -311,6 +311,7 @@ export class RunCoordinator {
         if (!task) throw new Error('The persisted task for this run is missing.');
         const result = await this.runtime.execute({
           runId,
+          lease: { workerId: this.workerId, generation },
           task: TaskSchema.parse(task),
           signal: controller.signal,
           emit: (event) => {

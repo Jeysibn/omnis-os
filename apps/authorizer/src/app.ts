@@ -11,6 +11,7 @@ export type AuthorizerStore = {
   request(taskId: string, actor: 'owner', correlationId: string): Promise<Authorization>;
   decide(id: string, actor: 'owner', decision: 'approve' | 'deny'): Promise<Authorization>;
   revoke(id: string, actor: 'owner'): Promise<Authorization>;
+  get(id: string): Promise<Authorization | undefined>;
 };
 
 export function createAuthorizerApp(input: {
@@ -65,6 +66,23 @@ export function createAuthorizerApp(input: {
     }
   });
 
+  app.get<{ Params: { authorizationId: string } }>(
+    '/internal/v1/authorizations/:authorizationId',
+    async (request, reply) => {
+      if (!isUuid(request.params.authorizationId)) {
+        return reply
+          .code(400)
+          .send({ error: { code: 'invalid_input', message: 'Authorization ID is invalid.' } });
+      }
+      const authorization = await input.store.get(request.params.authorizationId);
+      return authorization
+        ? AuthorizationSchema.parse(authorization)
+        : reply
+            .code(404)
+            .send({ error: { code: 'not_found', message: 'Authorization was not found.' } });
+    },
+  );
+
   app.post<{ Params: { authorizationId: string } }>(
     '/internal/v1/authorizations/:authorizationId/decision',
     async (request, reply) => {
@@ -104,16 +122,19 @@ export function createAuthorizerApp(input: {
     },
   );
 
-  app.setErrorHandler((error, _request, reply) => {
+  app.setErrorHandler((error, request, reply) => {
     app.log.error(
       { errorType: error instanceof Error ? error.name : 'unknown' },
       'Authorizer request failed.',
     );
+    const decisionOutcomeUnknown =
+      request.method !== 'GET' && request.url.startsWith('/internal/v1/authorizations');
     return reply.code(503).send({
       error: {
-        code: 'authorizer_unavailable',
-        message:
-          'The authorization decision was not committed. Retry after checking service health.',
+        code: decisionOutcomeUnknown ? 'authorization_outcome_unknown' : 'authorizer_unavailable',
+        message: decisionOutcomeUnknown
+          ? 'The authorizer could not confirm whether the decision committed. Read the authorization state or retry with the same idempotency key.'
+          : 'The authorization store is unavailable.',
       },
     });
   });

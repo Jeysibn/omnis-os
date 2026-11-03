@@ -5,39 +5,14 @@ import { access, chmod, lstat, mkdir, mkdtemp, readdir, realpath, rm } from 'nod
 import os from 'node:os';
 import path from 'node:path';
 import type { ChildProcess } from 'node:child_process';
+import { SandboxError, type SandboxErrorCode } from '@omnis/runtime-adapters/sandbox-error';
 
 /** Exact multi-architecture Node 24 Alpine image digest used by the local WSL2 proof. */
 export const SANDBOX_IMAGE_REF =
   'node@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85';
 
-export type SandboxErrorCode =
-  | 'timed_out'
-  | 'cancelled'
-  | 'unavailable'
-  | 'crashed'
-  | 'output_limit'
-  | 'launch_failed'
-  | 'termination_failed';
-
-const safeMessages: Record<SandboxErrorCode, string> = {
-  timed_out: 'The isolated execution exceeded its time limit.',
-  cancelled: 'The isolated execution was cancelled.',
-  unavailable: 'The isolated execution service is unavailable.',
-  crashed: 'The isolated execution process failed.',
-  output_limit: 'The isolated execution exceeded its output limit.',
-  launch_failed: 'The isolated execution could not be started.',
-  termination_failed: 'The isolated execution could not be confirmed stopped.',
-};
-
-export class SandboxError extends Error {
-  readonly code: SandboxErrorCode;
-
-  constructor(code: SandboxErrorCode) {
-    super(safeMessages[code]);
-    this.name = 'SandboxError';
-    this.code = code;
-  }
-}
+export { SandboxError };
+export type { SandboxErrorCode };
 
 export interface SandboxExecutor {
   cleanupOrphanedContainers(
@@ -109,7 +84,10 @@ export class DockerSandboxExecutor implements SandboxExecutor {
 
   constructor(dependencies: DockerSandboxTestDependencies = {}) {
     this.dockerPath = dependencies.dockerPath ?? '/usr/bin/docker';
-    this.workspaceRoot = dependencies.workspaceRoot ?? path.join(os.tmpdir(), 'omnis-os-sandbox');
+    this.workspaceRoot =
+      dependencies.workspaceRoot ??
+      process.env.OMNIS_SANDBOX_WORKSPACE_ROOT ??
+      path.join(os.tmpdir(), 'omnis-os-sandbox');
     this.uid = dependencies.uid ?? process.getuid?.() ?? 0;
     this.gid = dependencies.gid ?? process.getgid?.() ?? 0;
     this.maxOutputBytes = dependencies.maxOutputBytes ?? defaultMaxOutputBytes;

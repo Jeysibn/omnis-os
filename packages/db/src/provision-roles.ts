@@ -4,6 +4,7 @@ const databaseRoles = {
   migration: 'omnis_migrator',
   runtime: 'omnis_runtime',
   authorizer: 'omnis_authorizer',
+  launcher: 'omnis_launcher',
 } as const;
 
 const roleTimeoutSettings = {
@@ -17,6 +18,11 @@ const roleTimeoutSettings = {
     statement_timeout: '15s',
     idle_in_transaction_session_timeout: '20s',
   },
+  launcher: {
+    lock_timeout: '3s',
+    statement_timeout: '10s',
+    idle_in_transaction_session_timeout: '10s',
+  },
 } as const;
 
 const auditedTimeoutSettings = [
@@ -27,7 +33,7 @@ const auditedTimeoutSettings = [
 ] as const;
 export async function provisionDatabaseRoles(
   admin: Pool,
-  passwords: { migration: string; runtime: string; authorizer: string },
+  passwords: { migration: string; runtime: string; authorizer: string; launcher: string },
 ): Promise<void> {
   for (const [name, password] of Object.entries(passwords)) {
     if (password.length < 32)
@@ -70,7 +76,9 @@ export async function provisionDatabaseRoles(
         ? roleTimeoutSettings.runtime
         : key === 'authorizer'
           ? roleTimeoutSettings.authorizer
-          : undefined;
+          : key === 'launcher'
+            ? roleTimeoutSettings.launcher
+            : undefined;
     for (const setting of auditedTimeoutSettings) {
       const value = timeoutSettings?.[setting as keyof typeof roleTimeoutSettings.runtime];
       if (value) {
@@ -95,7 +103,7 @@ export async function provisionDatabaseRoles(
       JOIN pg_database databases ON defaults.setdatabase = databases.oid
       CROSS JOIN LATERAL unnest(defaults.setconfig) AS entry(config)
      WHERE defaults.setdatabase <> 0
-       AND roles.rolname IN ('omnis_runtime', 'omnis_authorizer', 'omnis_migrator')
+       AND roles.rolname IN ('omnis_runtime', 'omnis_authorizer', 'omnis_migrator', 'omnis_launcher')
        AND split_part(config, '=', 1) = ANY($1::text[])
   `,
     [[...auditedTimeoutSettings]],
@@ -111,8 +119,8 @@ export async function provisionDatabaseRoles(
       FROM pg_auth_members memberships
       JOIN pg_roles granted ON granted.oid = memberships.roleid
       JOIN pg_roles member ON member.oid = memberships.member
-     WHERE granted.rolname IN ('omnis_migrator', 'omnis_runtime')
-        OR member.rolname IN ('omnis_migrator', 'omnis_runtime')
+     WHERE granted.rolname IN ('omnis_migrator', 'omnis_runtime', 'omnis_authorizer', 'omnis_launcher')
+        OR member.rolname IN ('omnis_migrator', 'omnis_runtime', 'omnis_authorizer', 'omnis_launcher')
   `);
   for (const membership of memberships.rows) {
     await admin.query(
@@ -121,7 +129,7 @@ export async function provisionDatabaseRoles(
   }
 
   await admin.query(
-    `GRANT CONNECT ON DATABASE ${quoteIdentifier(databaseName)} TO omnis_migrator, omnis_runtime, omnis_authorizer`,
+    `GRANT CONNECT ON DATABASE ${quoteIdentifier(databaseName)} TO omnis_migrator, omnis_runtime, omnis_authorizer, omnis_launcher`,
   );
   await admin.query(`GRANT CREATE ON DATABASE ${quoteIdentifier(databaseName)} TO omnis_migrator`);
   await admin.query('CREATE SCHEMA IF NOT EXISTS omnis AUTHORIZATION omnis_migrator');
@@ -170,6 +178,7 @@ export async function provisionDatabaseRoles(
 
   await admin.query('GRANT USAGE ON SCHEMA omnis, pgboss TO omnis_runtime');
   await admin.query('GRANT USAGE ON SCHEMA omnis TO omnis_authorizer');
+  await admin.query('GRANT USAGE ON SCHEMA omnis TO omnis_launcher');
   await admin.query(
     'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA pgboss TO omnis_runtime',
   );

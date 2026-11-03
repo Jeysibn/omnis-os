@@ -134,7 +134,7 @@ try {
     '--username=omnis',
     '--dbname=postgres',
     '--command',
-    `COMMENT ON DATABASE "${targetDatabase}" IS '${unverifiedComment}'; REVOKE CONNECT ON DATABASE "${targetDatabase}" FROM PUBLIC, omnis_runtime, omnis_authorizer; GRANT CONNECT, CREATE ON DATABASE "${targetDatabase}" TO omnis_migrator; ALTER DATABASE "${targetDatabase}" ALLOW_CONNECTIONS=true;`,
+    `COMMENT ON DATABASE "${targetDatabase}" IS '${unverifiedComment}'; REVOKE CONNECT ON DATABASE "${targetDatabase}" FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher; GRANT CONNECT, CREATE ON DATABASE "${targetDatabase}" TO omnis_migrator; ALTER DATABASE "${targetDatabase}" ALLOW_CONNECTIONS=true;`,
   ]);
 
   await dockerFromFile(
@@ -348,7 +348,7 @@ try {
     '--username=omnis',
     '--dbname=postgres',
     '--command',
-    `BEGIN; GRANT CONNECT ON DATABASE "${targetDatabase}" TO omnis_runtime, omnis_authorizer; COMMENT ON DATABASE "${targetDatabase}" IS 'omnis-restore:${restoreMarker}:verified'; COMMIT;`,
+    `BEGIN; GRANT CONNECT ON DATABASE "${targetDatabase}" TO omnis_runtime, omnis_authorizer, omnis_launcher; COMMENT ON DATABASE "${targetDatabase}" IS 'omnis-restore:${restoreMarker}:verified'; COMMIT;`,
   ]);
 
   process.stdout.write(
@@ -416,7 +416,7 @@ async function containFailedRestoreTarget(database, marker) {
     '--username=omnis',
     '--dbname=postgres',
     '--command',
-    `ALTER DATABASE "${database}" ALLOW_CONNECTIONS=false; REVOKE CONNECT ON DATABASE "${database}" FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_migrator; SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${database}' AND pid <> pg_backend_pid();`,
+    `ALTER DATABASE "${database}" ALLOW_CONNECTIONS=false; REVOKE CONNECT ON DATABASE "${database}" FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher, omnis_migrator; SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${database}' AND pid <> pg_backend_pid();`,
   ]);
 
   if (process.env.OMNIS_RESTORE_TEST_FAIL_CLEANUP === 'true') {

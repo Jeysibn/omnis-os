@@ -96,6 +96,25 @@ describe('post-restore PostgreSQL ACL integrity', () => {
       acl('table', 'omnis', 'authorization_audit', 'INSERT', null, 'omnis_authorizer'),
       acl('column', 'omnis', 'runtime_authorizations', 'INSERT', 'id', 'omnis_authorizer'),
       acl('column', 'omnis', 'runtime_authorizations', 'UPDATE', 'status', 'omnis_authorizer'),
+      acl('schema', 'omnis', 'omnis', 'USAGE', null, 'omnis_launcher'),
+      acl(
+        'routine',
+        'omnis',
+        'authorize_mock_sandbox_launch(p_run_id text, p_worker_id text, p_generation integer)',
+        'EXECUTE',
+        null,
+        'omnis_launcher',
+        true,
+      ),
+      acl(
+        'routine',
+        'omnis',
+        'list_authorized_active_mock_runs(p_candidate_ids text[])',
+        'EXECUTE',
+        null,
+        'omnis_launcher',
+        true,
+      ),
     ];
     assert.doesNotThrow(() => assertRuntimeAclPolicy([...allowed, ...safe]));
     assert.throws(
