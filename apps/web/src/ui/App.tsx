@@ -144,6 +144,8 @@ function App() {
   const [owner, setOwner] = useState<Owner | null>(null);
   const [checking, setChecking] = useState(true);
   const [csrfToken, setCsrfToken] = useState('');
+  const [csrfLoading, setCsrfLoading] = useState(false);
+  const [csrfBootstrapError, setCsrfBootstrapError] = useState('');
   const [tasks, setTasks] = useState<Task[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
   const [tasksLoading, setTasksLoading] = useState(true);
@@ -168,8 +170,9 @@ function App() {
   const [announcement, setAnnouncement] = useState('');
   const approvalTrigger = useRef<HTMLButtonElement | null>(null);
   const focusRunInspector = useRef(false);
+  const sessionRecoveryInFlight = useRef(false);
+  const stopInFlight = useRef(new Set<string>());
   const seenSequences = useRef(new Map<string, Set<number>>());
-  const terminalReconciled = useRef(new Set<string>());
 
   const selectedRun = useMemo(
     () => runs.find((run) => run.id === selectedRunId) ?? null,
@@ -182,34 +185,61 @@ function App() {
   );
 
   const refreshCsrf = useCallback(async () => {
-    const value = await request('/api/v1/auth/csrf', {}, (payload) => {
-      if (
-        typeof payload !== 'object' ||
-        payload === null ||
-        !('csrfToken' in payload) ||
-        typeof payload.csrfToken !== 'string'
-      )
-        throw new Error('Could not start a secure session.');
-      return payload.csrfToken;
-    });
-    setCsrfToken(value);
-    return value;
+    setCsrfLoading(true);
+    setCsrfBootstrapError('');
+    try {
+      const value = await request('/api/v1/auth/csrf', {}, (payload) => {
+        if (
+          typeof payload !== 'object' ||
+          payload === null ||
+          !('csrfToken' in payload) ||
+          typeof payload.csrfToken !== 'string' ||
+          payload.csrfToken.length === 0
+        )
+          throw new Error('Secure sign-in setup returned an invalid token.');
+        return payload.csrfToken;
+      });
+      setCsrfToken(value);
+      return value;
+    } catch (cause) {
+      setCsrfToken('');
+      setCsrfBootstrapError(
+        'Secure sign-in could not be prepared. Check your connection and retry secure sign-in setup.',
+      );
+      throw cause;
+    } finally {
+      setCsrfLoading(false);
+    }
   }, []);
 
-  const expireSessionIfNeeded = useCallback((cause: unknown) => {
-    if (!(cause instanceof ApiRequestError) || cause.status !== 401) return false;
-    setOwner(null);
-    setCsrfToken('');
-    setTasks([]);
-    setRuns([]);
-    setSelectedRunId(null);
-    setSelectedTaskId(null);
-    setEvents([]);
-    setApprovalTask(null);
-    setApprovalOperation(null);
-    setError('Your owner session expired. Sign in again to continue.');
-    return true;
-  }, []);
+  const expireSessionIfNeeded = useCallback(
+    (cause: unknown) => {
+      if (!(cause instanceof ApiRequestError) || cause.status !== 401) return false;
+      setOwner(null);
+      setCsrfToken('');
+      setTasks([]);
+      setRuns([]);
+      setSelectedRunId(null);
+      setSelectedTaskId(null);
+      setEvents([]);
+      setApprovalTask(null);
+      setApprovalOperation(null);
+      setApprovalExpiry('');
+      setPassword('');
+      setError('Your owner session expired. Sign in again to continue.');
+      setCsrfBootstrapError('');
+      if (!sessionRecoveryInFlight.current) {
+        sessionRecoveryInFlight.current = true;
+        void refreshCsrf()
+          .catch(() => undefined)
+          .finally(() => {
+            sessionRecoveryInFlight.current = false;
+          });
+      }
+      return true;
+    },
+    [refreshCsrf],
+  );
 
   const loadTasks = useCallback(async () => {
     setTasksLoading(true);
@@ -319,6 +349,7 @@ function App() {
     setAnnouncement('');
     seenSequences.current.set(selectedRunId, new Set());
     setStreamState('connecting');
+    let terminalHandled = false;
     const source = new EventSource(`/api/v1/runs/${encodeURIComponent(selectedRunId)}/events`);
     const eventNames = [
       'run.queued',
@@ -372,12 +403,8 @@ function App() {
               `${parsed.type.replace('run.', '').replaceAll('_', ' ')}: ${parsed.message}`,
             );
           }
-          if (
-            parsed.sequence > newestSequence &&
-            terminalStatus(parsed.type) &&
-            !terminalReconciled.current.has(selectedRunId)
-          ) {
-            terminalReconciled.current.add(selectedRunId);
+          if (parsed.sequence > newestSequence && terminalStatus(parsed.type) && !terminalHandled) {
+            terminalHandled = true;
             setStreamState('ended');
             source.close();
             void reconcileRun(selectedRunId);
@@ -391,8 +418,10 @@ function App() {
       source.addEventListener(name, handler);
       return [name, handler] as const;
     });
-    source.onerror = () =>
-      setStreamState(source.readyState === EventSource.CLOSED ? 'closed' : 'reconnecting');
+    source.onerror = () => {
+      if (!terminalHandled)
+        setStreamState(source.readyState === EventSource.CLOSED ? 'closed' : 'reconnecting');
+    };
     return () => {
       handlers.forEach(([name, handler]) => source.removeEventListener(name, handler));
       source.close();
@@ -667,6 +696,8 @@ function App() {
   }
 
   async function stopRun(run: Run) {
+    if (stopInFlight.current.has(run.id)) return;
+    stopInFlight.current.add(run.id);
     setBusy(true);
     setError('');
     try {
@@ -680,6 +711,7 @@ function App() {
       if (!expireSessionIfNeeded(cause))
         setError(failureMessage(cause, 'Omnis OS could not stop this run.'));
     } finally {
+      stopInFlight.current.delete(run.id);
       setBusy(false);
     }
   }
@@ -732,10 +764,23 @@ function App() {
               required
             />
             {error && <ErrorNote message={error} />}
+            {csrfBootstrapError && (
+              <div className="error-note" role="alert">
+                <X size={16} />
+                <span>{csrfBootstrapError}</span>
+                <button
+                  type="button"
+                  onClick={() => void refreshCsrf().catch(() => undefined)}
+                  disabled={csrfLoading}
+                >
+                  {csrfLoading ? 'Preparing secure sign-in…' : 'Retry secure sign-in setup'}
+                </button>
+              </div>
+            )}
             <button
               className="primary-button auth-submit"
               type="submit"
-              disabled={busy || !csrfToken}
+              disabled={busy || csrfLoading || !csrfToken}
             >
               <LockKeyhole size={16} /> {busy ? 'Signing in…' : 'Sign in'}
             </button>
@@ -810,6 +855,7 @@ function App() {
             runsLoading={runsLoading}
             tasksError={tasksError}
             runsError={runsError}
+            busy={busy}
             onRetryTasks={() => void loadTasks()}
             onRetryRuns={() => void loadRuns()}
             onNavigate={(destination) => navigate(destination, setPage)}
@@ -1002,6 +1048,7 @@ function CommandCenter({
   runsLoading,
   tasksError,
   runsError,
+  busy,
   onRetryTasks,
   onRetryRuns,
   onNavigate,
@@ -1015,6 +1062,7 @@ function CommandCenter({
   runsLoading: boolean;
   tasksError: string;
   runsError: string;
+  busy: boolean;
   onRetryTasks: () => void;
   onRetryRuns: () => void;
   onNavigate: (page: Page) => void;
@@ -1041,7 +1089,7 @@ function CommandCenter({
               <button
                 className="stop-button"
                 onClick={() => onStop(activeRun)}
-                disabled={activeRun.status === 'stopping'}
+                disabled={busy || activeRun.status === 'stopping'}
               >
                 <CircleStop size={15} />
                 {activeRun.status === 'stopping' ? 'Stop requested' : 'Request stop'}

@@ -57,6 +57,7 @@ type FixtureOptions = {
   tasks?: Task[];
   runs?: Run[];
   signedOut?: boolean;
+  csrfBootstrapFailures?: number;
   taskGetFailures?: number;
   runGetFailures?: number;
   taskDelayMs?: number;
@@ -72,6 +73,8 @@ type FixtureOptions = {
   decisionExpiresAt?: string;
   runMutationStatus?: number;
   detailFailures?: number;
+  stopMutationStatus?: number;
+  stopMutationFailures?: number;
   eventCount?: number;
   eventDisconnects?: boolean;
   eventOrder?: 'reverse';
@@ -94,6 +97,7 @@ function createMockApi(page: Page) {
   let currentRuns = [...defaultRuns];
   let currentAuthorization: Authorization | null = null;
   let authenticated = true;
+  let currentCsrfToken = csrfToken;
   let taskGetFailures = 0;
   let runGetFailures = 0;
   let detailFailures = 0;
@@ -101,6 +105,8 @@ function createMockApi(page: Page) {
   let decisionDisconnects = 0;
   let runDisconnects = 0;
   let eventDisconnects = 0;
+  let csrfBootstrapFailures = 0;
+  let stopMutationFailures = 0;
   const unexpected: string[] = [];
   const requests: Array<{
     method: string;
@@ -124,6 +130,7 @@ function createMockApi(page: Page) {
     currentRuns = [...(options.runs ?? defaultRuns)];
     currentAuthorization = null;
     authenticated = !options.signedOut;
+    currentCsrfToken = csrfToken;
     taskGetFailures = options.taskGetFailures ?? 0;
     runGetFailures = options.runGetFailures ?? 0;
     detailFailures = options.detailFailures ?? 0;
@@ -131,6 +138,8 @@ function createMockApi(page: Page) {
     decisionDisconnects = options.decisionDisconnects ?? 0;
     runDisconnects = options.runDisconnects ?? 0;
     eventDisconnects = options.eventDisconnects ? 1 : 0;
+    csrfBootstrapFailures = 0;
+    stopMutationFailures = options.stopMutationFailures ?? 0;
     createdTaskCount = 0;
   };
 
@@ -170,7 +179,12 @@ function createMockApi(page: Page) {
   });
 
   const makeEvents = (run: Run): RunEvent[] => {
-    const count = Math.max(1, options.eventCount ?? (run.status === 'completed' ? 3 : 2));
+    const count =
+      options.eventCount === undefined
+        ? run.status === 'completed'
+          ? 3
+          : 2
+        : Math.max(0, options.eventCount);
     return Array.from({ length: count }, (_, index) => {
       const sequence = index + 1;
       const type: RunEvent['type'] =
@@ -204,12 +218,16 @@ function createMockApi(page: Page) {
     const body = request.postDataJSON?.() ?? null;
     requests.push({ method, path, headers, body });
 
-    if (method === 'POST' && headers['x-omnis-csrf'] !== csrfToken) {
+    if (method === 'POST' && headers['x-omnis-csrf'] !== currentCsrfToken) {
       return fulfillError(route, 403, 'csrf_rejected', 'A valid CSRF header is required.');
     }
 
     if (path === '/api/v1/auth/csrf' && method === 'GET') {
-      return route.fulfill({ json: { csrfToken } });
+      if (csrfBootstrapFailures > 0) {
+        csrfBootstrapFailures -= 1;
+        return fulfillError(route, 503, 'csrf_unavailable', 'Secure sign-in setup is unavailable.');
+      }
+      return route.fulfill({ json: { csrfToken: currentCsrfToken } });
     }
     if (path === '/api/v1/me' && method === 'GET') {
       return authenticated
@@ -234,13 +252,19 @@ function createMockApi(page: Page) {
       return route.fulfill({ json: currentTasks.map((task) => TaskSchema.parse(task)) });
     }
     if (path === '/api/v1/tasks' && method === 'POST') {
-      if (options.taskMutationStatus)
+      if (options.taskMutationStatus) {
+        if (options.taskMutationStatus === 401) {
+          authenticated = false;
+          currentCsrfToken = 'csrf-recovered-fixture-token';
+          csrfBootstrapFailures = options.csrfBootstrapFailures ?? 0;
+        }
         return fulfillError(
           route,
           options.taskMutationStatus,
           'task_write_failed',
           'Task could not be created.',
         );
+      }
       const parsed = CreateTaskSchema.safeParse(body);
       if (!parsed.success)
         return fulfillError(route, 400, 'invalid_input', 'Task payload is invalid.');
@@ -365,6 +389,15 @@ function createMockApi(page: Page) {
     const stopMatch = path.match(/^\/api\/v1\/runs\/([^/]+)\/stop$/);
     if (stopMatch && method === 'POST') {
       stopRunIds.push(stopMatch[1]!);
+      if (stopMutationFailures > 0) {
+        stopMutationFailures -= 1;
+        return fulfillError(
+          route,
+          options.stopMutationStatus ?? 503,
+          'stop_failed',
+          'Stop request could not be completed.',
+        );
+      }
       const target = currentRuns.find((run) => run.id === stopMatch[1]);
       if (!target) return fulfillError(route, 404, 'not_found', 'Run not found.');
       const updated = RunSchema.parse({ ...target, status: 'stopping', updatedAt: now });
@@ -750,7 +783,10 @@ test('approval expiry displays the API-provided expiresAt value', async ({ page,
   expect(api.runPosts).toHaveLength(0);
 });
 
-test('a mutation 401 clears authenticated UI and returns to sign-in', async ({ page, api }) => {
+test('a mutation 401 refreshes CSRF and allows sign-in again without reloading', async ({
+  page,
+  api,
+}) => {
   api.configure({ taskMutationStatus: 401 });
   await openWorkspace(page);
   await page.getByRole('link', { name: 'Tasks' }).click();
@@ -760,11 +796,35 @@ test('a mutation 401 clears authenticated UI and returns to sign-in', async ({ p
   await expect(page.getByRole('heading', { name: 'Welcome back.' })).toBeVisible();
   await expect(page.getByRole('alert')).toContainText('session expired');
   await expect(page.getByRole('navigation', { name: 'Primary navigation' })).toHaveCount(0);
+  const signIn = page.getByRole('button', { name: 'Sign in' });
+  await expect(signIn).toBeEnabled();
+  await page.getByLabel('Owner password').fill('fixture-owner-password');
+  await signIn.click();
+  await expect(page.getByRole('navigation', { name: 'Primary navigation' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Task list' })).toBeVisible();
   expect(
-    api.requests
-      .filter((entry) => entry.method === 'POST')
-      .every((entry) => entry.headers['x-omnis-csrf'] === csrfToken),
-  ).toBe(true);
+    api.requests.filter((entry) => entry.path === '/api/v1/tasks' && entry.method === 'POST'),
+  ).toHaveLength(1);
+  expect(
+    api.requests.find((entry) => entry.path === '/api/v1/auth/login')?.headers['x-omnis-csrf'],
+  ).toBe('csrf-recovered-fixture-token');
+});
+
+test('expired-session CSRF bootstrap failure has a usable recovery action', async ({
+  page,
+  api,
+}) => {
+  api.configure({ taskMutationStatus: 401, csrfBootstrapFailures: 1 });
+  await openWorkspace(page);
+  await page.getByRole('link', { name: 'Tasks' }).click();
+  await page.getByLabel('Task title').fill('Create a secure follow-up');
+  await page.getByLabel('Task detail').fill('Review the allowed task flow and its owner.');
+  await page.getByRole('button', { name: 'Create task' }).click();
+  await expect(page.getByRole('heading', { name: 'Welcome back.' })).toBeVisible();
+  await expect(page.getByText(/Secure sign-in could not be prepared/)).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Retry secure sign-in setup' })).toBeEnabled();
+  await page.getByRole('button', { name: 'Retry secure sign-in setup' }).click();
+  await expect(page.getByRole('button', { name: 'Sign in' })).toBeEnabled();
 });
 
 test('a mutation 403 does not expire the owner session', async ({ page, api }) => {
@@ -860,17 +920,60 @@ test('event replay sorts out-of-order frames and ignores duplicate sequences', a
   await expect(page.locator('.inspector-summary .status-pill')).toContainText('Running');
 });
 
-test('Stop targets the selected historical run, not the first run in the fixture', async ({
+test('Stop targets the selected run when the active run is not first in the fixture', async ({
   page,
   api,
 }) => {
-  api.configure();
-  await openWorkspace(page, '#runs/run-old');
-  await expect(page.getByRole('button', { name: 'Request stop' })).toHaveCount(0);
+  api.configure({
+    runs: [
+      makeRun('run-first-completed', 'task-done', 'Audit access notes'),
+      makeRun('run-selected-active', 'task-open', 'Review launch checklist', 'running'),
+    ],
+  });
+  await openWorkspace(page, '#runs');
   await page.getByRole('button', { name: /Review launch checklist/ }).click();
   await page.getByRole('button', { name: 'Request stop' }).click();
   await expect(page.getByRole('button', { name: 'Stop requested' })).toBeVisible();
+  expect(api.stopRunIds).toEqual(['run-selected-active']);
+});
+
+test('revisiting a terminal run replays history, ends the stream, and stays closed', async ({
+  page,
+  api,
+}) => {
+  test.setTimeout(20_000);
+  api.configure();
+  await openWorkspace(page, '#runs/run-old');
+  await expect(page.locator('.stream-badge')).toContainText('Stream ended');
+  expect(api.eventRequestCursors).toHaveLength(1);
+  await page.getByRole('link', { name: 'Tasks' }).click();
+  await page.getByRole('link', { name: 'Runs' }).click();
+  await page.getByRole('button', { name: /Audit access notes/ }).click();
+  await expect(page.locator('.stream-badge')).toContainText('Stream ended');
+  await expect(page.getByText('3 events')).toBeVisible();
+  expect(api.eventRequestCursors).toHaveLength(2);
+  await page.waitForTimeout(1_500);
+  expect(api.eventRequestCursors).toHaveLength(2);
+});
+
+test('Command Center Stop ignores rapid duplicate clicks and can retry after failure', async ({
+  page,
+  api,
+}) => {
+  api.configure({ stopMutationStatus: 503, stopMutationFailures: 1 });
+  await openWorkspace(page);
+  const stop = page.getByRole('button', { name: 'Request stop' });
+  await expect(stop).toBeVisible();
+  await stop.evaluate((element) => {
+    element.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    element.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  });
+  await expect(page.getByRole('alert')).toContainText('Stop request could not be completed.');
   expect(api.stopRunIds).toEqual(['run-active']);
+  await expect(stop).toBeEnabled();
+  await stop.click();
+  await expect(page.getByRole('button', { name: 'Stop requested' })).toBeVisible();
+  expect(api.stopRunIds).toEqual(['run-active', 'run-active']);
 });
 
 test('replays 600 events in order without per-event detail reads and reconciles once', async ({
@@ -974,6 +1077,8 @@ test('axe reports no serious or critical violations on key routes at all target 
     await page.getByRole('link', { name: 'Runs' }).click();
     await assertNoSeriousAxeViolations(page);
     await page.getByRole('button', { name: /Review launch checklist/ }).click();
+    await expect(page.getByText('2 events')).toBeVisible();
+    await assertNoSeriousAxeViolations(page);
     await page.getByRole('link', { name: 'Tasks' }).click();
     await openApproval(page);
     await assertNoSeriousAxeViolations(page);
@@ -993,6 +1098,39 @@ test('axe reports no serious or critical violations on key routes at all target 
   }
 });
 
+test('axe scans populated and empty run inspectors at all target widths', async ({ page, api }) => {
+  test.setTimeout(120_000);
+  api.configure();
+  await openWorkspace(page, '#runs/run-old');
+  await expect(page.getByText('3 events')).toBeVisible();
+  const viewports = [
+    { width: 1440, height: 900 },
+    { width: 820, height: 1180 },
+    { width: 390, height: 844 },
+    { width: 320, height: 700 },
+  ];
+  for (const viewport of viewports) {
+    await page.setViewportSize(viewport);
+    await assertNoSeriousAxeViolations(page);
+    await page.screenshot({
+      path: `/tmp/omnis-runs-inspector-populated-${viewport.width}.png`,
+      fullPage: true,
+    });
+  }
+
+  api.configure({ eventCount: 0 });
+  await page.goto('/#runs/run-active');
+  await expect(page.locator('.event-empty')).toBeVisible();
+  for (const viewport of viewports) {
+    await page.setViewportSize(viewport);
+    await assertNoSeriousAxeViolations(page);
+    await page.screenshot({
+      path: `/tmp/omnis-runs-inspector-empty-${viewport.width}.png`,
+      fullPage: true,
+    });
+  }
+});
+
 test('captures all requested route screenshots for review', async ({ page, api }) => {
   api.configure({});
   await openWorkspace(page);
@@ -1006,6 +1144,8 @@ test('captures all requested route screenshots for review', async ({ page, api }
   ]) {
     await page.setViewportSize(viewport);
     const tag = String(viewport.width);
+    await page.getByRole('link', { name: 'Command Center' }).click();
+    await expect(page.getByRole('heading', { name: 'Command Center' })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
       viewport.width,
     );
