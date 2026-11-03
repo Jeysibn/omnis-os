@@ -1,0 +1,16 @@
+{
+  "name": "@omnis/authorizer",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch --experimental-strip-types --env-file=../../.env.authorizer src/server.ts",
+    "build": "pnpm typecheck",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --experimental-strip-types --test src/app.test.ts"
+  },
+  "dependencies": {
+    "@omnis/contracts": "workspace:*",
+    "@omnis/db": "workspace:*",
+    "fastify": "5.12.7"
+  }
+}

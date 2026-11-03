@@ -36,25 +36,29 @@ REVOKE INSERT (
   id, authorization_id, task_id, run_id, event_type, actor_id,
   effective_identity, capability, correlation_id, outcome, reason_code, occurred_at
 ) ON omnis.authorization_audit FROM omnis_runtime;
-REVOKE ALL ON FUNCTION omnis.consume_run_authorization(text, text, text, text, text)
-  FROM PUBLIC, omnis_runtime;
+REVOKE ALL ON FUNCTION omnis.consume_run_authorization(text, text, text, text)
+  FROM PUBLIC, omnis_runtime, omnis_authorizer;
 REVOKE ALL ON FUNCTION omnis.lock_active_run_authorization(text) FROM PUBLIC, omnis_runtime;
-GRANT EXECUTE ON FUNCTION omnis.consume_run_authorization(text, text, text, text, text)
+GRANT EXECUTE ON FUNCTION omnis.consume_run_authorization(text, text, text, text)
   TO omnis_runtime;
 GRANT EXECUTE ON FUNCTION omnis.lock_active_run_authorization(text) TO omnis_runtime;
 DO $grant_admission_lock$
 BEGIN
   IF pg_catalog.to_regprocedure(
-       'omnis.lock_run_authorization_for_admission(text,text,text)'
+       'omnis.lock_run_authorization_for_admission(text,text)'
      ) IS NOT NULL THEN
-    EXECUTE 'REVOKE ALL ON FUNCTION omnis.lock_run_authorization_for_admission(text, text, text) FROM PUBLIC, omnis_authorizer';
-    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.lock_run_authorization_for_admission(text, text, text) TO omnis_runtime';
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.lock_run_authorization_for_admission(text, text) FROM PUBLIC, omnis_authorizer';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.lock_run_authorization_for_admission(text, text) TO omnis_runtime';
   END IF;
 END
 $grant_admission_lock$;
 REVOKE ALL ON FUNCTION omnis.append_runtime_authorization_audit(text, text, text)
   FROM PUBLIC, omnis_authorizer;
 GRANT EXECUTE ON FUNCTION omnis.append_runtime_authorization_audit(text, text, text)
+  TO omnis_runtime;
+REVOKE ALL ON FUNCTION omnis.append_runtime_admission_denial(text, text, text)
+  FROM PUBLIC, omnis_authorizer;
+GRANT EXECUTE ON FUNCTION omnis.append_runtime_admission_denial(text, text, text)
   TO omnis_runtime;
 REVOKE ALL ON FUNCTION omnis.revoke_run_authorization(text, text)
   FROM PUBLIC, omnis_runtime;

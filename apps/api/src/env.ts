@@ -1,6 +1,7 @@
 const sessionSecret = process.env.OMNIS_SESSION_SECRET;
 const ownerPasswordHash = process.env.OMNIS_OWNER_PASSWORD_HASH;
 const internalToken = process.env.OMNIS_INTERNAL_TOKEN;
+const authorizerToken = process.env.OMNIS_API_AUTHORIZER_TOKEN;
 
 if (!sessionSecret || sessionSecret.length < 64) {
   throw new Error('OMNIS_SESSION_SECRET must be generated with `pnpm configure:owner`.');
@@ -11,16 +12,28 @@ if (!ownerPasswordHash || !/^[a-f0-9]{32}:[a-f0-9]{128}$/i.test(ownerPasswordHas
 if (!internalToken || internalToken.length < 64) {
   throw new Error('OMNIS_INTERNAL_TOKEN must be generated with `pnpm configure:owner`.');
 }
+if (!authorizerToken || authorizerToken.length < 64 || authorizerToken === internalToken) {
+  throw new Error(
+    'A separate OMNIS_API_AUTHORIZER_TOKEN must be generated with `pnpm configure:owner`.',
+  );
+}
 
 const apiPort = Number(process.env.OMNIS_API_PORT ?? 4100);
 const workerPort = Number(process.env.OMNIS_WORKER_PORT ?? 4101);
 const workerHost = process.env.OMNIS_WORKER_HOST ?? '127.0.0.1';
+const authorizerPort = Number(process.env.OMNIS_AUTHORIZER_PORT ?? 4102);
+const authorizerHost = process.env.OMNIS_AUTHORIZER_HOST ?? '127.0.0.1';
 if (!Number.isInteger(apiPort) || apiPort < 1 || apiPort > 65535)
   throw new Error('OMNIS_API_PORT is invalid.');
 if (!Number.isInteger(workerPort) || workerPort < 1 || workerPort > 65535)
   throw new Error('OMNIS_WORKER_PORT is invalid.');
+if (!Number.isInteger(authorizerPort) || authorizerPort < 1 || authorizerPort > 65535)
+  throw new Error('OMNIS_AUTHORIZER_PORT is invalid.');
 if (!['127.0.0.1', '::1', 'localhost'].includes(workerHost)) {
   throw new Error('The initial Omnis OS worker must bind to loopback.');
+}
+if (!['127.0.0.1', '::1', 'localhost'].includes(authorizerHost)) {
+  throw new Error('The initial Omnis OS authorizer must bind to loopback.');
 }
 
 export const env = {
@@ -30,7 +43,9 @@ export const env = {
   sessionSecret,
   ownerPasswordHash,
   internalToken,
+  authorizerToken,
   workerUrl: `http://${workerHost}:${workerPort}`,
+  authorizerUrl: `http://${authorizerHost}:${authorizerPort}`,
   secureCookies: process.env.OMNIS_SECURE_COOKIES === 'true',
 };
 

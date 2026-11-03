@@ -22,7 +22,7 @@ const allowed = [
   acl(
     'routine',
     'omnis',
-    'consume_run_authorization(p_authorization_id text, p_task_id text, p_actor_id text, p_run_id text, p_correlation_id text)',
+    'consume_run_authorization(p_authorization_id text, p_task_id text, p_run_id text, p_correlation_id text)',
     'EXECUTE',
     null,
     'omnis_runtime',

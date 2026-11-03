@@ -63,6 +63,7 @@ const legacyWorktree = await mkdtemp(join(tmpdir(), 'omnis-r1-legacy-worktree-')
 let legacyBoss;
 let runtimeBoss;
 let worker;
+let authorizerService;
 let workerLogs = '';
 let createdDatabase = false;
 
@@ -156,6 +157,8 @@ try {
     '0006_authorization_revocation_lock_order',
     '0007_authorization_audit_and_revoke_order',
     '0008_revocation_availability_and_legacy_run_recovery',
+    '0009_authorizer_process_boundary',
+    '0010_runtime_admission_identity',
   ]);
   assert.equal(afterUpgrade.unsafeRunStates, 3);
   assert.equal(
@@ -281,30 +284,30 @@ try {
     'owner',
     'approve',
   );
+  authorizerService = await startRestrictedAuthorizer();
   const grantHolder = await runtimePool.connect();
   try {
     await grantHolder.query('BEGIN');
     const lockedGrant = await grantHolder.query(
-      'SELECT omnis.lock_run_authorization_for_admission($1,$2,$3) AS allowed',
-      [busyGrant.id, busyTask.id, 'owner'],
+      'SELECT omnis.lock_run_authorization_for_admission($1,$2) AS allowed',
+      [busyGrant.id, busyTask.id],
     );
     assert.equal(lockedGrant.rows[0]?.allowed, true);
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const startedAt = Date.now();
       const busyResponse = await fetch(
-        `${worker.baseUrl}/internal/v1/authorizations/${busyGrant.id}/revoke`,
+        `${authorizerService.baseUrl}/internal/v1/authorizations/${busyGrant.id}/revoke`,
         {
           method: 'POST',
           headers: {
-            'x-omnis-internal-token': worker.internalToken,
-            'x-omnis-trusted-actor': 'owner',
+            'x-omnis-authorizer-token': authorizerService.token,
           },
         },
       );
       assert.equal(busyResponse.status, 503);
       const body = await busyResponse.json();
       assert.equal(body.error.code, 'authorization_busy');
-      assert.match(body.error.message, /not revoked/i);
+      assert.match(body.error.message, /not committed/i);
       assert.ok(Date.now() - startedAt < 5_000, 'revocation contention response must be bounded');
       assert.equal(
         (
@@ -330,12 +333,11 @@ try {
     grantHolder.release();
   }
   const retryResponse = await fetch(
-    `${worker.baseUrl}/internal/v1/authorizations/${busyGrant.id}/revoke`,
+    `${authorizerService.baseUrl}/internal/v1/authorizations/${busyGrant.id}/revoke`,
     {
       method: 'POST',
       headers: {
-        'x-omnis-internal-token': worker.internalToken,
-        'x-omnis-trusted-actor': 'owner',
+        'x-omnis-authorizer-token': authorizerService.token,
       },
     },
   );
@@ -364,7 +366,6 @@ try {
       method: 'POST',
       headers: {
         'x-omnis-internal-token': worker.internalToken,
-        'x-omnis-trusted-actor': 'owner',
         'idempotency-key': admissionIdempotencyKey,
         'content-type': 'application/json',
       },
@@ -409,7 +410,6 @@ try {
     method: 'POST',
     headers: {
       'x-omnis-internal-token': worker.internalToken,
-      'x-omnis-trusted-actor': 'owner',
       'idempotency-key': admissionIdempotencyKey,
       'content-type': 'application/json',
     },
@@ -430,7 +430,6 @@ try {
     newTask.id,
     `current-upgrade-${suffix}`,
     authorization.id,
-    'owner',
     (db, data) =>
       runtimeBoss.send('omnis-mock-run', data, {
         retryLimit: 0,
@@ -446,6 +445,7 @@ try {
     `Legacy upgrade passed from ${legacyRevision}: pre-migration records preserved; staged 0001–0007 provenance classified only the pre-0005 run; runtime timestamp backdating was denied; grantless legacy cancellation/interruption/failure succeeded without synthetic grants; repeated revoke attempts returned 503 without committing and succeeded on retry; admission lock contention returned a truthful 503 then succeeded on retry; role ownership, migration checksums, restricted pg-boss, worker execution, and post-upgrade task/run creation passed in ${databaseName}.\n`,
   );
 } finally {
+  await stopWorker(authorizerService?.child);
   await stopWorker(worker?.child);
   await runtimeBoss?.stop().catch(() => undefined);
   await legacyBoss?.stop().catch(() => undefined);
@@ -637,10 +637,10 @@ async function verifyPost0005ProvenanceUpgrade() {
     );
     assert.equal((await runtimeStore.getRun(modernRun.rows[0].id))?.status, 'queued');
     const migrationRows = await stagedAdmin.query(
-      "SELECT id, length(checksum) AS checksum_length FROM omnis.schema_migrations WHERE id LIKE '000%' ORDER BY id",
+      "SELECT id, length(checksum) AS checksum_length FROM omnis.schema_migrations WHERE id LIKE '00%' ORDER BY id",
     );
     assert.deepEqual(migrationRows.rows.at(-1), {
-      id: '0008_revocation_availability_and_legacy_run_recovery',
+      id: '0010_runtime_admission_identity',
       checksum_length: 64,
     });
   } finally {
@@ -731,7 +731,6 @@ async function startRestrictedWorker() {
       ...workerEnvironment(),
       NODE_ENV: 'test',
       OMNIS_DATABASE_URL: databaseUrl,
-      OMNIS_AUTHORIZER_DB_PASSWORD: authorizerPassword,
       OMNIS_INTERNAL_TOKEN: internalToken,
       OMNIS_WORKER_HOST: '127.0.0.1',
       OMNIS_WORKER_PORT: String(port),
@@ -771,6 +770,54 @@ async function startRestrictedWorker() {
   throw new Error(
     `Restricted worker did not become healthy. Captured output: ${sanitize(workerLogs)}`,
   );
+}
+
+async function startRestrictedAuthorizer() {
+  const port = await freePort();
+  const token = randomBytes(64).toString('hex');
+  const childEnvironment = { ...process.env };
+  for (const key of [
+    'OMNIS_ADMIN_DATABASE_URL',
+    'OMNIS_MIGRATION_DATABASE_URL',
+    'OMNIS_MIGRATION_DB_PASSWORD',
+    'OMNIS_RUNTIME_DB_PASSWORD',
+    'OMNIS_TEST_ADMIN_DATABASE_URL',
+    'OMNIS_TEST_MIGRATION_DATABASE_URL',
+    'OMNIS_TEST_DATABASE_URL',
+    'OMNIS_TEST_AUTHORIZER_DATABASE_URL',
+    'OMNIS_TEST_AUTHORIZER_DATABASE_URL',
+    'OMNIS_AUTHORIZER_DB_PASSWORD',
+    'OMNIS_AUTHORIZER_DATABASE_URL',
+    'OMNIS_API_AUTHORIZER_TOKEN',
+  ])
+    delete childEnvironment[key];
+  childEnvironment.OMNIS_AUTHORIZER_DATABASE_URL = authorizerUrl;
+  childEnvironment.OMNIS_AUTHORIZER_HOST = '127.0.0.1';
+  childEnvironment.OMNIS_AUTHORIZER_PORT = String(port);
+  childEnvironment.OMNIS_API_AUTHORIZER_TOKEN = token;
+  const child = spawn(process.execPath, ['--experimental-strip-types', 'src/server.ts'], {
+    cwd: join(repositoryRoot, 'apps/authorizer'),
+    env: childEnvironment,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  for (const stream of [child.stdout, child.stderr]) {
+    stream?.on('data', (chunk) => {
+      workerLogs = `${workerLogs}${chunk.toString('utf8')}`.slice(-64_000);
+    });
+  }
+  const baseUrl = `http://127.0.0.1:${port}`;
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    if (child.exitCode !== null) throw new Error('Authorizer exited during legacy-upgrade test.');
+    try {
+      const response = await fetch(`${baseUrl}/internal/v1/health`);
+      if (response.ok) return { child, baseUrl, token };
+    } catch {
+      // Retry until the bounded startup deadline.
+    }
+    await delay(100);
+  }
+  await stopWorker(child);
+  throw new Error('Authorizer did not become healthy during legacy-upgrade test.');
 }
 
 async function waitForRun(store, runId, expectedStatus) {
@@ -828,9 +875,13 @@ function workerEnvironment() {
     'OMNIS_MIGRATION_DB_PASSWORD',
     'OMNIS_DB_PASSWORD',
     'OMNIS_RUNTIME_DB_PASSWORD',
+    'OMNIS_AUTHORIZER_DB_PASSWORD',
+    'OMNIS_AUTHORIZER_DATABASE_URL',
+    'OMNIS_API_AUTHORIZER_TOKEN',
     'OMNIS_TEST_ADMIN_DATABASE_URL',
     'OMNIS_TEST_MIGRATION_DATABASE_URL',
     'OMNIS_TEST_DATABASE_URL',
+    'OMNIS_TEST_AUTHORIZER_DATABASE_URL',
   ]) {
     delete environment[key];
   }

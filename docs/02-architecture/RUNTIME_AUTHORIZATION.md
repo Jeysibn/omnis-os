@@ -8,15 +8,16 @@ The shipped R1-G4 foundation is restricted to a local, authenticated owner appro
 sequenceDiagram
     participant H as Owner session
     participant A as API
-    participant W as Trusted worker
+    participant Z as Authorizer process
+    participant W as Runtime worker
     participant DB as PostgreSQL
     participant S as Mock sandbox
-    H->>A: Request and approve task-scoped grant (CSRF)
-    A->>W: Internal-token request; actor fixed to owner
-    W->>DB: Persist request/decision and audit (omnis_authorizer)
+    H->>A: Request and approve task-scoped grant (session + CSRF)
+    A->>Z: Control request with separate API-authorizer token
+    Z->>DB: Persist request/decision and audit (omnis_authorizer)
     H->>A: Start run with authorization ID
-    A->>W: Start request (owner identity from session)
-    W->>DB: Consume exact grant + admit run atomically (omnis_runtime)
+    A->>W: Start request (no owner assertion header)
+    W->>DB: Consume exact owner-approved grant + admit run atomically (omnis_runtime)
     W->>DB: Lock/recheck grant before claim and completion
     W->>S: Execute fixed synthetic mock only
     W->>DB: Persist lifecycle and audit events
@@ -30,7 +31,9 @@ Effective states are `pending`, `authorized`, `denied`, `revoked`, and derived `
 
 ## Trusted identity and approval
 
-The browser never supplies an actor identity. Owner-only API routes require the existing authenticated owner session and CSRF validation, then the API attaches the fixed `owner` identity over the private worker channel protected by the internal token. The worker rejects missing or unrecognized identity. The agent/runtime adapter has no approval interface. This does not create a general identity provider: the effective human principal remains the single local owner account, and the trust boundary depends on the existing session and internal-token protections.
+The browser never supplies an actor identity. Owner-only API routes require the existing authenticated owner session and CSRF validation. The API sends authorization lifecycle requests to the separate loopback authorizer with a service token distinct from the API-to-worker token. The authorizer derives the fixed `owner` identity and does not accept caller-provided identity fields. The worker has no approval or revocation routes, does not load the authorizer credential, and does not receive an owner actor header for admission. It verifies the persisted grant is an owner-requested approval for the exact task and operation. Migration `0010` removes the runtime-supplied actor parameter from grant-lock and consumption functions; consumption audit attribution is fixed to `service:omnis-runtime`. The approval and decision audit entries retain the owner identity. The effective human principal remains the single local owner account, not a general identity provider.
+
+The process split is not yet a host-enforced trust boundary. Local processes run as the same Unix identity, which can read their environment and private files. The worker also has Docker-daemon access, which is root-equivalent and can inspect/control other local services. A compromised worker with these host capabilities may still obtain the API-to-authorizer token or control the authorizer. G4-3 is partially addressed; do not use this arrangement for real provider credentials or workloads.
 
 ## Enforcement and revocation
 
@@ -62,7 +65,7 @@ Admission sets a transaction-local three-second `lock_timeout` before taking the
 
 ## PostgreSQL connection timeout defaults
 
-Role provisioning sets session defaults for new connections: `omnis_runtime` receives `lock_timeout=3s`, `statement_timeout=20s`, and `idle_in_transaction_session_timeout=20s`; `omnis_authorizer` receives `3s`, `15s`, and `20s`, respectively. The three-second lock bound matches admission/revocation transaction policy and heartbeat renewal. Worker heartbeats run every five seconds under a thirty-second lease; routine SQL transactions are short, and the twenty-second statement/idle-transaction ceilings leave room for normal work while staying below the lease window. `omnis_migrator` has these role defaults reset so schema upgrades retain necessary headroom. The `omnis` administrator/recovery login remains operator-managed.
+Role provisioning sets session defaults for new connections: `omnis_runtime` receives `lock_timeout=3s`, `statement_timeout=20s`, and `idle_in_transaction_session_timeout=20s`; `omnis_authorizer` receives `3s`, `15s`, and `20s`, respectively. The three-second lock bound matches admission/revocation transaction policy and heartbeat renewal. Worker heartbeats run every five seconds under a thirty-second lease; routine SQL transactions are short, and the twenty-second statement/idle-transaction ceilings leave room for normal work while staying below the lease window. `omnis_migrator` has these role defaults reset so schema upgrades retain necessary headroom. The `omnis` administrator/recovery login remains operator-managed. A disposable PostgreSQL test also sets a cluster `statement_timeout` default and verifies that the runtime role's explicit 20-second role default is effective for a new connection.
 
 `idle_session_timeout` is intentionally not set for application roles. PostgreSQL warns that terminating normally idle pooled connections can cause middleware/pool churn. The Node pool already retires idle clients; an idle session-level advisory lock may remain held while a connection is idle. An idle-in-transaction timeout does terminate abandoned transactions and release their locks, but it does not terminate a session-level advisory lock held outside a transaction.
 

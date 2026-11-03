@@ -267,7 +267,6 @@ async function createSyntheticRecords(runtimeUrl, adminUrl, suffix) {
       task.id,
       `backup-ci-${suffix}`,
       authorization.id,
-      'owner',
       async () => 'fixture-job',
     );
     const claim = await store.beginExecution(admitted.run.id, `backup-ci-${suffix}`, 30);

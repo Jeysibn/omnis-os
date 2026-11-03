@@ -124,7 +124,6 @@ export class PostgresRunStore {
     taskId: string,
     idempotencyKey: string,
     authorizationId: string,
-    actorId: string,
     enqueue: EnqueueRun,
   ): Promise<{
     run: Run;
@@ -166,8 +165,8 @@ export class PostgresRunStore {
       // lock first when it is unconsumed, so the FK KEY SHARE acquired by its
       // audit insert cannot form the former task→grant / grant→task deadlock.
       const authorizationLock = await client.query<{ allowed: boolean }>(
-        'SELECT omnis.lock_run_authorization_for_admission($1, $2, $3) AS allowed',
-        [authorizationId, taskId, actorId],
+        'SELECT omnis.lock_run_authorization_for_admission($1, $2) AS allowed',
+        [authorizationId, taskId],
       );
       if (!authorizationLock.rows[0]?.allowed) {
         throw new StoreError(
@@ -210,8 +209,8 @@ export class PostgresRunStore {
       );
       const run = mapRun(created.rows[0]!);
       const authorization = await client.query<{ allowed: boolean }>(
-        'SELECT omnis.consume_run_authorization($1, $2, $3, $4, $5) AS allowed',
-        [authorizationId, task.id, actorId, run.id, randomUUID()],
+        'SELECT omnis.consume_run_authorization($1, $2, $3, $4) AS allowed',
+        [authorizationId, task.id, run.id, randomUUID()],
       );
       if (!authorization.rows[0]?.allowed) {
         throw new StoreError(

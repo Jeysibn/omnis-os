@@ -62,7 +62,7 @@ describe('durable mock run coordinator', () => {
       emptyAuthorizationStore,
     );
     await assert.rejects(
-      coordinator.startRun('task-0001', 'idempotency-key-0001', authId, 'owner'),
+      coordinator.startRun('task-0001', 'idempotency-key-0001', authId),
       (error: unknown) => error instanceof CoordinatorError && error.code === 'invalid_transition',
     );
     assert.equal(admissions, 0);
@@ -86,7 +86,7 @@ describe('durable mock run coordinator', () => {
       },
     );
     await assert.rejects(
-      coordinator.startRun('task-0001', 'idempotency-key-0001', authId, 'owner'),
+      coordinator.startRun('task-0001', 'idempotency-key-0001', authId),
       /database unavailable/,
     );
     assert.equal(admissions, 0);
@@ -103,7 +103,7 @@ describe('durable mock run coordinator', () => {
       new MockRuntimeAdapter(),
     );
     await assert.rejects(
-      coordinator.startRun('task-0001', 'idempotency-key-0001', authId, 'owner'),
+      coordinator.startRun('task-0001', 'idempotency-key-0001', authId),
       (error: unknown) =>
         error instanceof CoordinatorError &&
         error.code === 'admission_busy' &&
@@ -148,7 +148,7 @@ describe('durable mock run coordinator', () => {
         }),
       } as never,
     );
-    await coordinator.startRun(run.taskId, 'idempotency-key-0001', authId, 'owner');
+    await coordinator.startRun(run.taskId, 'idempotency-key-0001', authId);
     revoked = true;
     await coordinator.handleQueueJob({ runId: run.id });
     assert.equal(interrupted, true);
@@ -173,7 +173,6 @@ describe('durable mock run coordinator', () => {
         _taskId: string,
         idempotencyKey: string,
         _authorizationId: string,
-        _actorId: string,
         enqueue: (tx: never, data: { runId: string }) => Promise<string | null>,
       ) => {
         capturedIdempotencyKey = idempotencyKey;
@@ -194,7 +193,7 @@ describe('durable mock run coordinator', () => {
     };
     const coordinator = testCoordinator(store, queue, new MockRuntimeAdapter());
 
-    const first = await coordinator.startRun('task-0001', 'idempotency-key-0001', authId, 'owner');
+    const first = await coordinator.startRun('task-0001', 'idempotency-key-0001', authId);
     assert.equal(first.created, true);
     assert.equal(capturedIdempotencyKey, 'idempotency-key-0001');
     const options = capturedOptions as {
@@ -211,7 +210,7 @@ describe('durable mock run coordinator', () => {
     assert.equal(typeof options.db.executeSql, 'function');
 
     created = false;
-    const retry = await coordinator.startRun('task-0001', 'idempotency-key-0001', authId, 'owner');
+    const retry = await coordinator.startRun('task-0001', 'idempotency-key-0001', authId);
     assert.equal(retry.created, false);
     assert.equal(retry.run.id, first.run.id);
   });

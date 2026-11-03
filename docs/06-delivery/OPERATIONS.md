@@ -1,5 +1,13 @@
 # Operations, Environments and Deployment
 
+## API, authorizer, and worker credentials
+
+`pnpm configure:owner` writes separate owner/API (`.env`), worker (`.env.worker`), authorizer (`.env.authorizer`), migrator (`.env.migration`), and database-admin (`.env.db-admin`) files with owner-only permissions. `pnpm db:roles` reads runtime, authorizer, migration, and administrator credentials only for provisioning. The worker process loads `.env.worker` and must not receive `OMNIS_AUTHORIZER_DB_PASSWORD`, `OMNIS_AUTHORIZER_DATABASE_URL`, or `OMNIS_API_AUTHORIZER_TOKEN`. The authorizer loads `.env.authorizer`; the API loads `.env` and contacts only its configured loopback authorizer endpoint. The database migration runner remains a separate command using the migrator role.
+
+Owner approval and revocation flow through the API's existing owner-session and CSRF checks. The API supplies a separate service token to the authorizer over loopback HTTP; the authorizer checks the token in constant time, ignores caller-supplied identity fields, fixes the actor to `owner`, and commits authorization state and its audit record in PostgreSQL before responding. Authorization request IDs are client idempotency keys persisted uniquely in PostgreSQL. If the authorizer or its database is unavailable, the API returns an explicit failure; there is no worker-side fallback. The worker retains the runtime role for admission and lifecycle checks only.
+
+This layout separates application configuration and database credentials but does not establish host-enforced process isolation on the current local setup. API, authorizer, and worker processes inherit one Unix identity; that identity can read the private environment files and same-user process environment. The worker also uses Docker-daemon access, which is root-equivalent. Do not treat loopback binding or a distinct token as protection against a compromised worker with those host capabilities. Before any provider data is allowed, deploy these services under separate operating-system identities with narrowly delivered secrets and remove Docker-daemon access from the control-plane trust boundary. Current model execution remains mock-only.
+
 ## Environment strategy
 
 1. **Development:** WSL2 Ubuntu/Linux with Node, pnpm, Docker Compose. PostgreSQL in Compose; native AI runtimes on trusted host or isolated dedicated execution user per capability/secret-store requirements.

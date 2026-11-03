@@ -24,6 +24,16 @@ export type RuntimeAuthorizationRecord = {
   consumedRunId: string | null;
 };
 
+export interface RuntimeAuthorizationReader {
+  get(id: string): Promise<RuntimeAuthorizationRecord | undefined>;
+  getForRun(runId: string): Promise<RuntimeAuthorizationRecord | undefined>;
+  recordEnforcementDenied(
+    authorizationId: string,
+    taskId: string,
+    reasonCode: string,
+  ): Promise<void>;
+}
+
 type AuthorizationRow = QueryResultRow & {
   id: string;
   requesting_actor: 'owner';
@@ -70,10 +80,20 @@ export class PostgresAuthorizationStore {
   async request(
     taskId: string,
     actor: 'owner',
-    correlationId = randomUUID(),
+    correlationId: string = randomUUID(),
   ): Promise<RuntimeAuthorizationRecord> {
-    const id = randomUUID();
     return inTransaction(this.authorizer, async (client) => {
+      const prior = await client.query<AuthorizationRow>(
+        `${selectAuthorization} WHERE correlation_id=$1 FOR UPDATE`,
+        [correlationId],
+      );
+      if (prior.rows[0]) {
+        if (prior.rows[0].task_id !== taskId) {
+          throw new Error('Authorization idempotency key belongs to a different task.');
+        }
+        return mapAuthorization(prior.rows[0]);
+      }
+
       const task = await client.query('SELECT 1 FROM omnis.tasks WHERE id = $1', [taskId]);
       if (!task.rowCount) throw new Error('Authorization task was not found.');
       const result = await client.query<AuthorizationRow>(
@@ -83,11 +103,22 @@ export class PostgresAuthorizationStore {
          ) VALUES ($1, $2, 'mock', 'execute_task', $3, '["mock.execute"]',
            jsonb_build_object('kind','task','taskId',$3::text), 'r1g4-mock-v1', $4,
            now() + interval '20 minutes')
+         ON CONFLICT (correlation_id) DO NOTHING
          RETURNING *`,
-        [id, actor, taskId, correlationId],
+        [randomUUID(), actor, taskId, correlationId],
       );
+      if (!result.rows[0]) {
+        const raced = await client.query<AuthorizationRow>(
+          `${selectAuthorization} WHERE correlation_id=$1`,
+          [correlationId],
+        );
+        if (!raced.rows[0] || raced.rows[0].task_id !== taskId) {
+          throw new Error('Authorization idempotency key belongs to a different task.');
+        }
+        return mapAuthorization(raced.rows[0]);
+      }
       await appendAudit(client, {
-        authorizationId: id,
+        authorizationId: result.rows[0].id,
         taskId,
         eventType: 'authorization.requested',
         actorId: actor,
@@ -95,7 +126,7 @@ export class PostgresAuthorizationStore {
         correlationId,
         outcome: 'recorded',
       });
-      return mapAuthorization(result.rows[0]!);
+      return mapAuthorization(result.rows[0]);
     });
   }
 
@@ -172,7 +203,7 @@ export class PostgresAuthorizationStore {
            authorization_id, task_id, event_type, actor_id, effective_identity,
            capability, correlation_id, outcome, reason_code
          ) SELECT a.id, a.task_id, 'authorization.expired', 'service:omnis-authorizer',
-           'service:omnis-worker', 'mock.execute', a.correlation_id, 'recorded', 'time_elapsed'
+           'service:omnis-authorizer', 'mock.execute', a.correlation_id, 'recorded', 'time_elapsed'
            FROM omnis.runtime_authorizations a
           WHERE a.id=$1 AND a.status IN ('pending','authorized') AND a.expires_at<=now()
          ON CONFLICT (authorization_id) WHERE event_type = 'authorization.expired' DO NOTHING`,
@@ -182,25 +213,30 @@ export class PostgresAuthorizationStore {
     return row ? mapAuthorization(row) : undefined;
   }
 
-  async recordEnforcementDenied(
-    authorizationId: string,
-    taskId: string,
-    actor: 'owner',
-    reasonCode: string,
-  ): Promise<void> {
-    await this.authorizer.query(
+  async recordExpiredAuthorizations(): Promise<number> {
+    const result = await this.authorizer.query(
       `INSERT INTO omnis.authorization_audit (
          authorization_id, task_id, event_type, actor_id, effective_identity,
          capability, correlation_id, outcome, reason_code
-       ) SELECT
-           CASE WHEN EXISTS (SELECT 1 FROM omnis.runtime_authorizations a WHERE a.id=$1 AND a.task_id=$2)
-             THEN $1 ELSE NULL END,
-           CASE WHEN EXISTS (SELECT 1 FROM omnis.tasks t WHERE t.id=$2) THEN $2 ELSE NULL END,
-           'authorization.enforcement_denied',$3,'service:omnis-worker','mock.execute',
-           COALESCE((SELECT a.correlation_id FROM omnis.runtime_authorizations a WHERE a.id=$1 AND a.task_id=$2),$4),
-           'denied',$5`,
-      [authorizationId, taskId, actor, randomUUID(), reasonCode],
+       ) SELECT a.id, a.task_id, 'authorization.expired', 'service:omnis-authorizer',
+         'service:omnis-authorizer', 'mock.execute', a.correlation_id, 'recorded', 'time_elapsed'
+         FROM omnis.runtime_authorizations AS a
+        WHERE a.status IN ('pending', 'authorized') AND a.expires_at <= now()
+       ON CONFLICT (authorization_id) WHERE event_type = 'authorization.expired' DO NOTHING`,
     );
+    return result.rowCount ?? 0;
+  }
+
+  async recordEnforcementDenied(
+    authorizationId: string,
+    taskId: string,
+    reasonCode: string,
+  ): Promise<void> {
+    const result = await this.authorizer.query<{ recorded: boolean }>(
+      'SELECT omnis.append_runtime_admission_denial($1, $2, $3) AS recorded',
+      [authorizationId, taskId, reasonCode],
+    );
+    if (!result.rows[0]?.recorded) throw new Error('Runtime denial audit was not recorded.');
   }
 
   async getForRun(runId: string): Promise<RuntimeAuthorizationRecord | undefined> {
@@ -231,6 +267,43 @@ export class PostgresAuthorizationStore {
       [id, taskId, runId],
     );
     return Boolean(result.rowCount);
+  }
+}
+
+/** Runtime-only authorization reads and denial provenance; no approval/revoke methods. */
+export class PostgresRuntimeAuthorizationReader implements RuntimeAuthorizationReader {
+  private readonly runtime: Pool;
+
+  constructor(runtime: Pool) {
+    this.runtime = runtime;
+  }
+
+  async get(id: string): Promise<RuntimeAuthorizationRecord | undefined> {
+    const result = await this.runtime.query<AuthorizationRow>(
+      `${selectAuthorization} WHERE id=$1`,
+      [id],
+    );
+    return result.rows[0] ? mapAuthorization(result.rows[0]) : undefined;
+  }
+
+  async getForRun(runId: string): Promise<RuntimeAuthorizationRecord | undefined> {
+    const result = await this.runtime.query<AuthorizationRow>(
+      `${selectAuthorization} WHERE consumed_run_id=$1`,
+      [runId],
+    );
+    return result.rows[0] ? mapAuthorization(result.rows[0]) : undefined;
+  }
+
+  async recordEnforcementDenied(
+    authorizationId: string,
+    taskId: string,
+    reasonCode: string,
+  ): Promise<void> {
+    const result = await this.runtime.query<{ recorded: boolean }>(
+      'SELECT omnis.append_runtime_admission_denial($1, $2, $3) AS recorded',
+      [authorizationId, taskId, reasonCode],
+    );
+    if (!result.rows[0]?.recorded) throw new Error('Runtime denial audit was not recorded.');
   }
 }
 
