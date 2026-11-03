@@ -1,6 +1,6 @@
 # AO-104 Agent Profile Read API Foundation
 
-**Status:** Draft implementation evidence. This change implements the owner-authenticated read slice only; it does not complete AO-104 or authorize agent execution.
+**Status:** Draft implementation evidence; CI passed for candidate `55cdbfa5483f8c117fe8d182d9c4fa729939ff48`. Independent backend/security review remains pending. This change implements the owner-authenticated read slice only; it does not complete AO-104 or authorize agent execution.
 
 ## Contract
 
@@ -32,8 +32,12 @@ The implementation worktree is based on `origin/main` at `198137c9281beed7b0d620
 - `pnpm check`: passed formatting, lint, workspace type checks, unit tests, API route tests, security regressions, and recovery/ACL policy tests.
 - `pnpm build`: passed workspace builds.
 - `git diff --check`: passed.
-- The PostgreSQL integration suite did not run locally because no isolated test database was configured. The Docker sandbox test was skipped because the local Docker socket denied access. These checks must pass in the branch's GitHub Actions run before review readiness is claimed.
-- Cursor validation unit test passed locally. Database integration coverage is present for empty and oversized directories, stable name tie ordering, department lookup, drafts and archived visibility, immutable historical snapshots, exact lookup/no fallback, contiguous version order, stable cursor totals/current markers during a concurrent append, malformed data rejection, and read-only runtime grants.
+- GitHub Actions [run 41699565424](https://github.com/Jeysibn/omnis-os/actions/runs/41699565424) passed both required jobs for the exact candidate SHA above: `checks` and `frontend-browser`.
+- `pnpm check` reported 154 passed, 0 failed, 0 skipped across workspace and recovery-policy test suites. This included 56 PostgreSQL integration tests. `pnpm build` passed.
+- Integration gates passed: legacy migration upgrade through 0012, recovery integration, disposable PostgreSQL backup/restore with ACL parity, host cleanup/packaging/required-check regressions, and disposable Ubuntu systemd host-isolation verification. The frontend browser job passed all 34 existing Command Center tests.
+- Two earlier candidate CI runs exposed and fixed specific issues: the legacy-upgrade test still expected migration 0011 as latest; the ACL-free restore baseline omitted the three new runtime SELECT grants. Both fixes are included in the final candidate and the full run above passed.
+- Locally, the PostgreSQL integration suite did not run because no isolated test database was configured, and Docker sandbox coverage was skipped because the local Docker socket denied access. CI supplied those required verifications.
+- Database coverage includes empty and oversized directories, stable name tie ordering, department lookup, drafts and archived visibility, immutable historical snapshots, exact lookup/no fallback, contiguous version order, stable cursor totals/current markers during a concurrent append, malformed data rejection, and read-only runtime grants.
 
 ## Deferred work and limitations
 
@@ -41,4 +45,4 @@ The implementation worktree is based on `origin/main` at `198137c9281beed7b0d620
 - There are no default or demonstration agents; until an approved write path exists, the directory may be empty.
 - The single-owner `owner` identity is retained. Multi-user authorization is not implemented or authorized.
 - No agent runtime, provider, background execution, tool permissions, or Docker authority is attached to profiles.
-- PostgreSQL role/migration and Docker regression evidence remains pending the CI run for the implementation commit.
+- No post-merge or production assurance is claimed; this is a draft backend PR awaiting Claude #1's independent review.
