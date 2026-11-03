@@ -85,6 +85,19 @@ resource_manifest="$(mktemp /tmp/omnis-systemd-resources.XXXXXX)"
 chmod 0600 "$resource_manifest"
 cleanup() {
   local cleanup_failed=0
+  remove_created_directory() {
+    local path="$1"
+    if [[ -d "$path" && ! -L "$path" ]]; then
+      rmdir -- "$path" 2>/dev/null || {
+        find "$path" -mindepth 1 -maxdepth 1 -printf '  remaining child: %f\n' >&2 || true
+        echo "Failed to remove created directory $path." >&2
+        cleanup_failed=1
+      }
+    elif [[ -e "$path" || -L "$path" ]]; then
+      echo "Refusing cleanup because created directory path changed type: $path." >&2
+      cleanup_failed=1
+    fi
+  }
   if ((${#created_units[@]})); then systemctl stop "${created_units[@]}" >/dev/null 2>&1 || true; fi
   for unit in "${created_units[@]}"; do
     if systemctl is-active --quiet "$unit"; then
@@ -111,17 +124,24 @@ cleanup() {
       file) rm -f -- "$value" || cleanup_failed=1 ;;
       directory)
         case "$value" in
-          /etc/omnis) rmdir -- "$value" 2>/dev/null || { find "$value" -mindepth 1 -maxdepth 1 -printf '  remaining child: %f\n' >&2 || true; echo "Failed to remove created directory $value." >&2; cleanup_failed=1; } ;;
+          /etc/omnis) remove_created_directory "$value" ;;
           /run/omnis-authorizer)
             rm -f -- "$value/authorizer.sock"
-            rmdir -- "$value" 2>/dev/null || { find "$value" -mindepth 1 -maxdepth 1 -printf '  remaining child: %f\n' >&2 || true; echo "Failed to remove created directory $value." >&2; cleanup_failed=1; }
+            remove_created_directory "$value"
             ;;
           /run/omnis-sandbox)
             rm -f -- "$value/launcher.sock"
-            rmdir -- "$value" 2>/dev/null || { find "$value" -mindepth 1 -maxdepth 1 -printf '  remaining child: %f\n' >&2 || true; echo "Failed to remove created directory $value." >&2; cleanup_failed=1; }
+            remove_created_directory "$value"
             ;;
-          /var/lib/omnis-sandbox/workspaces) rm -rf -- "$value" || { echo "Failed to remove created directory $value." >&2; cleanup_failed=1; } ;;
-          /var/lib/omnis-sandbox) rmdir -- "$value" 2>/dev/null || { find "$value" -mindepth 1 -maxdepth 1 -printf '  remaining child: %f\n' >&2 || true; echo "Failed to remove created directory $value." >&2; cleanup_failed=1; } ;;
+          /var/lib/omnis-sandbox/workspaces)
+            if [[ -d "$value" && ! -L "$value" ]]; then
+              rm -rf -- "$value" || { echo "Failed to remove created workspace directory." >&2; cleanup_failed=1; }
+            elif [[ -e "$value" || -L "$value" ]]; then
+              echo "Refusing cleanup because created workspace path changed type." >&2
+              cleanup_failed=1
+            fi
+            ;;
+          /var/lib/omnis-sandbox) remove_created_directory "$value" ;;
           *) echo "Refusing cleanup of unrecognized manifest directory $value." >&2; cleanup_failed=1 ;;
         esac
         ;;
