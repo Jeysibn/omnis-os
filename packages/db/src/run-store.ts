@@ -160,6 +160,21 @@ export class PostgresRunStore {
         return { run: mapRun(runResult.rows[0]), created: false, events: [] };
       }
 
+      // Lock the exact grant before locking the task. Revocation takes the grant
+      // lock first when it is unconsumed, so the FK KEY SHARE acquired by its
+      // audit insert cannot form the former task→grant / grant→task deadlock.
+      const authorizationLock = await client.query<{ allowed: boolean }>(
+        'SELECT omnis.lock_run_authorization_for_admission($1, $2, $3) AS allowed',
+        [authorizationId, taskId, actorId],
+      );
+      if (!authorizationLock.rows[0]?.allowed) {
+        throw new StoreError(
+          'invalid_transition',
+          'An active task-scoped authorization is required.',
+          409,
+        );
+      }
+
       const taskResult = await client.query<TaskRow>(
         'SELECT id, title, detail, status, created_at FROM omnis.tasks WHERE id = $1 FOR UPDATE',
         [taskId],

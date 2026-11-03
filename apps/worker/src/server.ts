@@ -165,6 +165,15 @@ app.post<{ Params: { authorizationId: string } }>(
       );
       return AuthorizationSchema.parse(authorization);
     } catch (error) {
+      if (error && typeof error === 'object' && 'code' in error && error.code === '55P03') {
+        return reply.code(503).send({
+          error: {
+            code: 'authorization_busy',
+            message:
+              'Authorization was not revoked because its database row is busy. Retry the request.',
+          },
+        });
+      }
       if (error instanceof Error && error.message.includes('Only an active'))
         return reply
           .code(409)

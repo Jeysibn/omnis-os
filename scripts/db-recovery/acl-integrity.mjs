@@ -141,6 +141,7 @@ const applicationColumnPrivileges = new Map([
 const approvedSecurityDefinerRoutineArities = new Map([
   ['consume_run_authorization', 5],
   ['lock_active_run_authorization', 1],
+  ['lock_run_authorization_for_admission', 3],
   ['append_runtime_authorization_audit', 3],
 ]);
 
