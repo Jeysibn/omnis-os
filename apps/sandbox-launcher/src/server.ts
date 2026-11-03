@@ -17,10 +17,6 @@ const scopeId = createHash('sha256')
   .digest('hex')
   .slice(0, 24);
 const pool = createPool({ connectionString, max: 2, application_name: 'omnis-sandbox-launcher' });
-const testDelayMs =
-  process.env.NODE_ENV === 'test'
-    ? Number(process.env.OMNIS_MOCK_TEST_DELAY_MS ?? '500')
-    : undefined;
 const executor = new DockerSandboxExecutor({
   scopeId,
   ...(process.env.OMNIS_SANDBOX_WORKSPACE_ROOT
@@ -49,7 +45,6 @@ const app = createSandboxLauncherApp({
   checkDatabase: async () => {
     await pool.query('SELECT 1');
   },
-  ...(testDelayMs === undefined ? {} : { testDelayMs }),
 });
 app.addHook('onClose', async () => {
   await pool.end();

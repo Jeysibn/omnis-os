@@ -20,8 +20,7 @@ const RequestSchema = z
   })
   .strict();
 
-function createMockProgram(delayMs: number): string {
-  return `
+const mockProgram = `
 const chunks = [];
 process.stdin.on('data', (chunk) => chunks.push(chunk));
 process.stdin.on('end', async () => {
@@ -29,26 +28,19 @@ process.stdin.on('end', async () => {
     const input = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     if (typeof input.title !== 'string' || input.title.length > 120) process.exit(2);
     const emit = (message) => process.stdout.write(JSON.stringify({ type: 'run.output', message }) + '\\n');
-    await new Promise((resolve) => setTimeout(resolve, ${delayMs}));
+    await new Promise((resolve) => setTimeout(resolve, 500));
     emit('Mock runtime accepted the task. No provider was contacted.');
-    await new Promise((resolve) => setTimeout(resolve, ${delayMs}));
+    await new Promise((resolve) => setTimeout(resolve, 500));
     emit('Synthetic result for “' + input.title + '”: the mock lifecycle completed. This is not provider evidence.');
   } catch { process.exitCode = 2; }
 });
 `;
-}
 
 export function createSandboxLauncherApp(input: {
   executor: FixedMockExecutor;
   authorize: (runId: string, workerId: string, generation: number) => Promise<string | undefined>;
   checkDatabase: () => Promise<void>;
-  testDelayMs?: number;
 }) {
-  const testDelayMs = input.testDelayMs ?? 500;
-  if (!Number.isInteger(testDelayMs) || testDelayMs < 0 || testDelayMs > 5_000) {
-    throw new Error('Sandbox launcher test delay must be an integer from 0 to 5000 ms.');
-  }
-  const mockProgram = createMockProgram(testDelayMs);
   const app = Fastify({ logger: true, bodyLimit: 4096 });
   app.get('/health', async (_request, reply) => {
     try {

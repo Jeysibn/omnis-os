@@ -73,7 +73,6 @@ describe('restricted sandbox-launcher protocol', () => {
         return 'Synthetic title';
       },
       checkDatabase: async () => undefined,
-      testDelayMs: 1_000,
       executor: {
         execute: async (input) => {
           observed = input;
@@ -101,7 +100,6 @@ describe('restricted sandbox-launcher protocol', () => {
       assert.equal(observed?.runId, request.runId);
       assert.deepEqual(observed?.argv.slice(0, 2), ['node', '-e']);
       assert.match(observed?.argv[2] ?? '', /No provider was contacted/);
-      assert.equal((observed?.argv[2]?.match(/setTimeout\(resolve, 1000\)/g) ?? []).length, 2);
       assert.equal(observed?.stdin, JSON.stringify({ title: 'Synthetic title' }));
       assert.equal(observed?.timeoutMs, 8_000);
     } finally {

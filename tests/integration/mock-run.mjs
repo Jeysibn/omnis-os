@@ -114,9 +114,6 @@ await writeFile(
     `OMNIS_SANDBOX_LAUNCHER_SOCKET=${launcherSocket}`,
     'OMNIS_SANDBOX_LAUNCHER_SOCKET_MODE=600',
     `OMNIS_SANDBOX_WORKSPACE_ROOT=${join(tempDirectory, 'workspaces')}`,
-    ...(process.env.OMNIS_RECOVERY_INTEGRATION === '1'
-      ? ['NODE_ENV=test', 'OMNIS_MOCK_TEST_DELAY_MS=1000']
-      : []),
   ].join('\n') + '\n',
   { mode: 0o600 },
 );
@@ -1067,11 +1064,8 @@ async function waitForRunWorkspaceRemoval(runId) {
 }
 
 function findSandboxContainer(runId, allowMissing = false) {
-  const url = new URL(databaseUrl);
-  const scope = createHash('sha256')
-    .update(`${url.protocol}//${url.hostname}:${url.port}${url.pathname}`)
-    .digest('hex')
-    .slice(0, 24);
+  const url = new URL(launcherUrl);
+  const scope = createHash('sha256').update(url.pathname).digest('hex').slice(0, 24);
   const result = docker(
     [
       'ps',
