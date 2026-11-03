@@ -96,7 +96,7 @@ Applies to the two collection endpoints: `GET /agents` (3.1) and `GET /agents/:a
 | `complete` | `true` if and only if **no items remain after this response** in the traversal. It does **not** mean this response's items are the whole set; on the final page of a multi-page traversal it is `true` while the page holds only part of the set. |
 | `nextCursor` | Opaque non-empty string if more items remain; `null` otherwise. |
 
-**Invariants.** The backend must satisfy them; the frontend verifies them on every response (a violation is an "unexpected response", never a partial or optimistic render). "Accumulated" means the number of unique items received so far in this traversal, including the current page.
+**Invariants.** The backend must satisfy every one of them. The frontend can check only some of them, and only against what it received (a failed check is an "unexpected response", never a partial or optimistic render); the others are backend guarantees that no response can prove. The split is stated in "Who establishes each invariant" below. "Accumulated" means the number of unique items received so far in this traversal, including the current page.
 
 | ID | Invariant |
 |---|---|
@@ -111,9 +111,35 @@ Applies to the two collection endpoints: `GET /agents` (3.1) and `GET /agents/:a
 | PG-9 | Stable total: `total` is identical on every response of one traversal. If the backend cannot hold the set stable (for example a version is published mid-traversal), a changed `total` is how that is reported, and the frontend treats it as "changed while loading". |
 | PG-10 | Cursors are opaque: the frontend never constructs, parses, or alters one, and sends it back unchanged (URL-encoded). A cursor is valid only for the same collection and order. A malformed, expired, or foreign cursor is rejected with `422` and the standard error envelope (the existing documented validation status; no new error code). |
 
-**What the frontend may claim.** It treats a collection as *logically complete* only when every response satisfied PG-1 to PG-10, the traversal ended with `complete: true`, and accumulated equals `total`. Until then it never presents the items as the whole set and always shows how many of `total` it holds. A failed, loading, or invalid response is never rendered as an empty collection: the empty state requires a validated response with `total: 0` (PG-6).
+**Who establishes each invariant.** "Frontend-checkable" means the property can be tested against the responses the frontend actually received. It never means the frontend can establish what the backend did not send.
 
-**Frontend reaction to a violation.** Stop the traversal and discard the offending page. For a single-response collection (the V1 directory) render no items. For a multi-page collection (version history) keep earlier verified pages visible, clearly labeled "Showing N of M" with an error and a Reload action. Never display a violation as complete or as empty.
+| ID | Frontend-checkable (against received responses) | Backend guarantee the frontend cannot prove |
+|---|---|---|
+| PG-1 | Field types and ranges: fully. | n/a |
+| PG-2 | `complete` agrees with `nextCursor`: fully. | n/a |
+| PG-3 | A first response with `complete: true` has an item count equal to its own `total`: internal consistency only. | That `total` is correct (BG-3). |
+| PG-4 | Observable progress: cursor present, at least one item, accumulated below `total`, cursor differs from the one just sent. | That the cursor really continues the set. This shows up only by using it (BG-1, BG-2). |
+| PG-5 | At the end, accumulated equals `total`: a count reconciliation. | That `total` is correct and that no omission is hidden behind a matching `total` (BG-1, BG-3). |
+| PG-6 | An empty response has `total: 0`, `complete: true`, and no cursor: internal consistency only. | That the set is truly empty (BG-3). |
+| PG-7 | Duplicate identities, and ordering violations **among the items received** (for example `versionNo` not strictly descending). | One stable total order that also covers items never received (BG-4). |
+| PG-8 | **Not verifiable.** A skipped record can be noticed only incidentally, when the omission happens to change a count or an order the frontend can see. | **Backend guarantee BG-1.** Needs backend contract or integration coverage. |
+| PG-9 | A **change** in `total` between pages of one traversal. | A consistent logical result set across pages (BG-2). A swapped set of the same size is undetectable. |
+| PG-10 | The frontend's own behavior (it treats the cursor as opaque and unchanged) and its reaction to a `422`. | Which cursors are valid, and rejecting malformed, expired, or foreign ones. |
+
+**Backend guarantees (not frontend-verifiable).**
+
+| ID | Guarantee |
+|---|---|
+| BG-1 | **No silently skipped records** across continuation requests (PG-8): every item that exists for the whole traversal is returned exactly once, in keyset order. |
+| BG-2 | A **consistent logical result set** across pages, under the backend's documented ordering or snapshot model (the cause behind PG-9). |
+| BG-3 | **Correct `total`, `complete`, and `nextCursor`:** they truthfully describe the logical result set, and a continuation cursor continues that same set. |
+| BG-4 | A **stable total order** over the whole logical result set, including items not yet received (PG-7), and cursor validity semantics (PG-10). |
+
+**Required backend coverage.** BG-1 to BG-4 must be covered by backend contract or integration tests, reviewed independently of the frontend. At minimum those tests exercise pages of every boundary size, ties on the ordering key, and items created or removed between page requests. Frontend fixture tests cannot stand in for this coverage (frontend spec 14.1.1).
+
+**What the frontend may claim.** It treats a collection as *logically complete* only when every response passed the frontend-checkable properties above (PG-1 to PG-7 and PG-9, and the observable parts of PG-4 and PG-10), the traversal ended with `complete: true`, and accumulated equals `total`. This is a statement that the responses are **mutually consistent**. It does **not** independently prove that the backend dataset is complete: a backend that omitted a record and reported a `total` that matches what it returned would pass every frontend check. Dataset completeness rests on BG-1 to BG-4. Until the frontend-checkable conditions hold it never presents the items as the whole set and always shows how many of `total` it holds. A failed, loading, or invalid response is never rendered as an empty collection: the empty state requires a validated response with `total: 0` (PG-6).
+
+**Frontend reaction to a violation.** Stop the traversal and discard the offending page. For a single-response collection (the V1 directory) render no items. For a multi-page collection (version history) keep earlier pages that passed the checks visible, clearly labeled "Showing N of M" with an error and a Reload action. Never display a violation as complete or as empty.
 
 #### Worked example: version history with 5 versions, three pages
 
@@ -129,7 +155,7 @@ Applies to the two collection endpoints: `GET /agents` (3.1) and `GET /agents/:a
       accumulated 5 == total, cursor null                     (PG-2, PG-5)  UI: "5 versions", Load more removed
 ```
 
-The final page reports `complete: true` while holding one of five items: `complete` and `total` describe the logical set, and the frontend verifies completeness by reconciling the accumulated count (1 + 2 + 2 = 5).
+The final page reports `complete: true` while holding one of five items: `complete` and `total` describe the logical set, and the frontend checks the accumulated count against `total` (1 + 2 + 2 = 5). That reconciliation is a consistency check; it does not prove the backend returned every record (BG-1).
 
 Single-response example (the V1 directory, 3 agents): `{ "agents": [A, B, C], "page": { "total": 3, "complete": true, "nextCursor": null } }`. Empty directory: `{ "agents": [], "page": { "total": 0, "complete": true, "nextCursor": null } }`.
 
@@ -141,12 +167,13 @@ Single-response example (the V1 directory, 3 agents): `{ "agents": [A, B, C], "p
 | `complete: false` with `nextCursor: null`, or `complete: true` with a cursor | PG-2 | Unexpected-response error |
 | `complete: false`, empty items, cursor present | PG-4 | Stop; unexpected-response error |
 | Continuation returns the cursor it was just given | PG-4 | Stop; unexpected-response error |
-| Page 2 repeats `versionNo` 4 | PG-7 | Stop; keep verified pages labeled "Showing N of M"; Reload |
+| Page 2 repeats `versionNo` 4 | PG-7 | Stop; keep checked pages labeled "Showing N of M"; Reload |
 | Page 2 is `[2, 3]` (ascending) | PG-7 | Same as above |
-| Pages `[5, 4]` then `[2, 1]`, final `complete: true`, `total: 5` (3 skipped; 4 accumulated) | PG-5 | Same as above; never labeled complete |
+| Pages `[5, 4]` then `[2, 1]`, final `complete: true`, `total: 5` (3 skipped; 4 accumulated). Detectable **only because** the omission leaves a count mismatch | PG-5 | Same as above; never labeled complete |
+| The backend omits version 3 and reports `total: 4` consistently on every page (pages `[5, 4]`, `[2, 1]`) | BG-1 (PG-8) | **Not detectable by the frontend.** Every frontend check passes. Prevented only by backend guarantee and backend coverage |
 | `total` is 5 on page 1 and 6 on page 2 | PG-9 | "History changed while loading" with Reload; never labeled complete |
 | `total: 0` with non-empty items, or `total: 3` with `complete: true` and no items | PG-6, PG-5 | Unexpected-response error; not the empty state |
-| Continuation answered with `422` (invalid or expired cursor) | PG-10 | Stop; keep verified pages labeled partial; Reload |
+| Continuation answered with `422` (invalid or expired cursor) | PG-10 | Stop; keep checked pages labeled partial; Reload |
 | Network error, `429`, or `5xx` on any request | n/a | Error with Retry (same request) or Reload; never complete, never empty |
 
 ## 3. Endpoints
@@ -157,7 +184,7 @@ Single-response example (the V1 directory, 3 agents): `{ "agents": [A, B, C], "p
 - **Response:** `{ "agents": AgentSummary[], "page": AgentPage }`.
 - **Includes archived agents.** The frontend hides them by default and offers a "Show archived" toggle. (Alternatively the backend may offer `?includeArchived`; D-4.)
 - **Completeness rule (normative):**
-  1. The frontend filters and searches client-side **only** when the directory is logically complete in the sense of section 2.5: the first response satisfies PG-1 to PG-7 with `complete: true` and its item count equals `total`.
+  1. The frontend filters and searches client-side **only** when the first response passes the frontend-checkable properties of section 2.5 (PG-1 to PG-7 as they apply to a single response) with `complete: true` and an item count equal to `total`. That the response contains every agent that exists is a backend guarantee (BG-3), not something the frontend can prove.
   2. If the backend cannot guarantee a complete bounded result, it must provide cursor pagination (`cursor`, `limit`, `nextCursor`) **and** backend filtering (`q`, `departmentId`, archived inclusion), and this document and the frontend spec must be amended before implementation.
   3. V1 of the frontend implements only case 1 and fetches a single response. A response with `complete: false` (a continuation exists) is an explicit **incomplete-directory** error state; contradictory metadata is an **unexpected-response** error state. In neither case is a filtered or paged subset presented as the complete directory, and the warning is never suppressed.
   4. The size bound, if any, is a **backend decision** to be justified with evidence (for example the expected size of a single-owner workforce). The frontend does not specify a scale requirement.
@@ -207,7 +234,7 @@ The frontend maps each case as follows. Codes below are requested behavior, not 
 | 401 | No owner session | Standard envelope | Existing session-expiry flow (clear owner UI, show sign-in). No agent data remains on screen. |
 | 403 | Authenticated but not permitted | Standard envelope; **must not** end the session | "You don't have access to this" state; the session stays valid and other routes keep working |
 | 404 | Resource not found. On `/agents/:id` the agent; on `/agents/:id/versions/:version` the agent **or** the version, deliberately indistinguishable | Standard envelope; hidden-resource rule applies; one generic response for every not-found cause | Profile route: "Agent not found". Version route: a **generic** resource-not-found state that does not name or infer the missing resource (frontend spec 5.3) |
-| 422 | Syntactically invalid path parameter, or an invalid/expired/foreign `cursor` (PG-10) | Standard envelope | Path parameter: treated as an invalid link (the frontend validates grammar first and should not normally send such a request). Cursor: stop the traversal, keep verified pages labeled partial, offer Reload |
+| 422 | Syntactically invalid path parameter, or an invalid/expired/foreign `cursor` (PG-10) | Standard envelope | Path parameter: treated as an invalid link (the frontend validates grammar first and should not normally send such a request). Cursor: stop the traversal, keep checked pages labeled partial, offer Reload |
 | 429 | Rate/limit | Standard envelope | Non-looping error with manual Retry |
 | 5xx / network | Service unavailable | Standard envelope where possible | Error state with Retry; no stale data presented as current |
 
@@ -217,6 +244,7 @@ The frontend sends no `POST`, `PATCH`, or `DELETE` for this feature and uses no 
 
 1. `GET /agents` is logically complete in a single response (section 2.5: `complete: true`, item count equals `total`) or the contract is amended (section 3.1).
    Collection metadata obeys PG-1 to PG-10 in every response of both collection endpoints.
+   The backend guarantees BG-1 to BG-4 (section 2.5), including that no records are silently skipped (PG-8), and covers them with backend contract or integration tests. The frontend can check consistency but cannot prove them.
 2. A snapshot for `(agentId, versionNo)` never changes after publication.
 3. `isCurrent` and `currentVersion` are computed by the server and mutually consistent in every response.
 4. Embedded `agent` objects are consistent within a single response (one read, one consistent view).

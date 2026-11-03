@@ -71,7 +71,7 @@ UI wording for lifecycle (labels are display text; the contract value is in the 
 
 **Route:** `#agents`. **Page title in shell:** "Agents & Profiles". **Nav label:** "Agents". **Subtitle:** "Review agent identities and immutable profile versions. Read-only in this release."
 
-**Data:** one `GET /api/v1/agents` per entry to the directory. All filtering is local and only when the response is logically complete and its metadata is consistent (single response with `complete: true`, item count equal to `total`; API proposal sections 2.5 and 3.1). Never cached across visits as if fresh: the list is refetched on every mount.
+**Data:** one `GET /api/v1/agents` per entry to the directory. All filtering is local and only when the response passes the frontend-checkable properties (single response with `complete: true`, item count equal to `total`, consistent metadata; API proposal sections 2.5 and 3.1). That the response contains every agent that exists is a backend guarantee the frontend cannot prove. Never cached across visits as if fresh: the list is refetched on every mount.
 
 **Layout:**
 
@@ -144,7 +144,7 @@ What assistive technology will announce (the text of the description is exposed 
 3. **Personality and behavior** - traits, tone, principles, autonomy, escalation, all as plain text; "Not specified" per missing field. Not editable.
 4. **Instructions** - the verbatim `instructions` text in a labeled, keyboard-scrollable read-only region (`tabindex="0"`, `role="region"`, accessible name "Instructions (plain text)"). Omitted entirely if the backend does not return the field (D-3).
 5. **Current version** - "Version N, published <time> by <actor>" with a link to `#agents/<id>/v/<N>`.
-6. **Version history** - list of versions (newest first) each a link to `#agents/<id>/v/<n>` showing version number, "Current" marker (from `isCurrent`), profession/seniority, publish time, publisher. Versions load one page at a time following the pagination contract and its invariants in API proposal section 2.5 (PG-1 to PG-10). "Load more" appears only while `complete` is `false`; the count reads "Showing N of M versions" while accumulated < `total`, and "M versions" only after the traversal ended with `complete: true` and the accumulated unique count equals `total`. Sequential loading: one request in flight at a time, aborted on route change.
+6. **Version history** - list of versions (newest first) each a link to `#agents/<id>/v/<n>` showing version number, "Current" marker (from `isCurrent`), profession/seniority, publish time, publisher. Versions load one page at a time following the pagination contract in API proposal section 2.5. The frontend checks the properties it can observe; the remaining invariants (notably PG-8, no skipped records) are backend guarantees it cannot prove. "Load more" appears only while `complete` is `false`; the count reads "Showing N of M versions" while accumulated < `total`, and "M versions" only after the traversal ended with `complete: true` and the accumulated unique count equals `total` (a consistency check that does not by itself prove the backend returned every record). Sequential loading: one request in flight at a time, aborted on route change.
 7. **Permissions note** - a fixed, backend-independent explanation, always shown: "A job title or personality does not grant authority. Actions require explicit authorization recorded by Omnis OS." It lists **no grants**, because no V1 endpoint returns any. It states: "Tool and skill permissions aren't shown in this release." This is a static statement of policy, not data.
 
 **Not shown anywhere on the profile:** runtime availability, runtime bindings, tool/skill/MCP grants, memory, active tasks or runs, usage, avatars from remote URLs, or "last active".
@@ -156,7 +156,7 @@ What assistive technology will announce (the text of the description is exposed 
 | Loading | Existing `ResourceLoading` status in place of the content; the shell `h1` is unchanged |
 | Profile loaded, history loading | Profile renders; History section shows its own loading state |
 | History failed (first page) | History section shows an inline failure with Retry; the rest of the profile remains. This is never shown as "No versions". |
-| History partially loaded then failed, invalid cursor (`422`), contradictory metadata, or `total` changed | Verified pages stay visible, labeled "Showing N of M versions", with an inline error and a Reload action (restarts the traversal). Never labeled complete; "History changed while loading" for a changed `total`. |
+| History partially loaded then failed, invalid cursor (`422`), contradictory metadata, or `total` changed | Checked pages stay visible, labeled "Showing N of M versions", with an inline error and a Reload action (restarts the traversal). Never labeled complete; "History changed while loading" for a changed `total`. |
 | History empty | Shown only for a validated `total: 0` response (PG-6), with the wording "No versions published yet." |
 | Draft (no `currentVersion`) | Identity renders; Profession/Personality/Instructions/Current version show "No published version yet." |
 | Archived | Persistent banner (not dismissible) "This agent is archived. History is preserved and the agent can't be assigned new work."; all content read-only as always |
@@ -281,7 +281,7 @@ Styles are added to `styles.css` under an `.agents-*` class prefix using the exi
 
 - All requests go through the existing `request(path, init, parse)` in `api.ts`, with `parse` using shared Zod schemas from `packages/contracts` (defined in the backend change, section 12). The web app never defines duplicate agent schemas.
 - `useAgentsData` uses `AbortController` per request, keyed by route; responses for superseded routes are discarded.
-- Collection responses are verified against API proposal PG-1 to PG-10 on every response, including uniqueness of `id` (and of `slug` for agents) and `versionNo` ordering; the history hook keeps the accumulated set, loads one page at a time, and never labels a collection complete until the final response reconciles with `total`.
+- Collection responses are checked on every response against the **frontend-checkable** properties of API proposal 2.5 (PG-1 to PG-7 and PG-9, and the observable parts of PG-4 and PG-10), including uniqueness of `id` (and of `slug` for agents) and `versionNo` ordering among received items. PG-8 (no skipped records) and the other backend guarantees BG-1 to BG-4 cannot be verified by the frontend and are not claimed. The history hook keeps the accumulated set, loads one page at a time, and never labels a collection complete until the final response reconciles with `total`; that is a consistency check, not proof of dataset completeness.
 - Beyond schema validation, the hook enforces the invariants in the API proposal (section 5): `archivedAt`/`lifecycle`, `currentVersion` consistency, id/version equality. Violations are "unexpected response" errors.
 - Error classification reuses `ApiRequestError`: 401 -> `onUnauthorized`; 403 -> access state (no session expiry); 404 -> the route's not-found state, chosen by route only (never by error `code` or `message`); 429/5xx/network -> Retry state; schema/invariant failure -> unexpected response.
 - No client-side persistence (no `localStorage`, no cached agents), and no `POST`/`PATCH`/`DELETE`.
@@ -354,13 +354,13 @@ Agents cannot exist until a backend path to create them exists (AO-104 write pat
 | UI feature | Required API capability | Available today | Verdict |
 |---|---|---|---|
 | Directory list, identity, profession, department | `GET /agents` (`AgentSummary`) | No | Blocked |
-| Search and department filter (client-side) | `GET /agents` returning a logically complete single response (`complete: true`, count equals `total`) | No | Blocked |
+| Search and department filter (client-side) | `GET /agents` returning a single response with `complete: true` and count equal to `total`, with the backend guaranteeing it holds every agent (BG-3) | No | Blocked |
 | Lifecycle and archived presentation | `lifecycle`, `archivedAt` in `AgentSummary` | No | Blocked |
 | Demo-agent labeling | `provenance` | No | Blocked |
 | Profile identity and current snapshot | `GET /agents/:id` | No | Blocked |
 | Version history list | `GET /agents/:id/versions` | No | Blocked |
 | Historical snapshot | `GET /agents/:id/versions/:version` | No | Blocked |
-| Truthful multi-page version history | Collection metadata and invariants PG-1 to PG-10 (API proposal 2.5) on `GET /agents/:id/versions` | No | Blocked |
+| Truthful multi-page version history | Collection metadata and invariants PG-1 to PG-10 on `GET /agents/:id/versions`, with backend guarantees BG-1 to BG-4 (API proposal 2.5), including no silently skipped records, covered by backend tests | No | Blocked |
 | Generic not-found for version deep links | One indistinguishable 404 for unknown agent or version (API proposal 3.4) | No (existing 404 envelope and hidden-resource rule suffice) | Blocked on the route itself; no new error codes needed |
 | Authentication, CSRF, 401/403 handling | Existing session and error envelope | Yes | Reusable |
 | Timestamps in Asia/Manila | Existing `formatDate` | Yes | Reusable |
@@ -414,7 +414,7 @@ These are requirements for the F1 implementation, **not** tests added by this do
 | AP-03 | Department filter, "No department", and "Show archived" each produce the correct set; counts read "Showing N of M". |
 | AP-04 | Filters round-trip through the URL; reload and Back from a profile restore the same filtered directory. `dept` for an unknown department shows the unknown state, not an unfiltered list. |
 | AP-05 | Card link opens `#agents/<id>`; profile shows identity, profession, personality, behavior, instructions, current version, history. |
-| AP-06 | Version history is retrieved correctly across multiple pages and fails honestly: multi-page retrieval, stable ordering, no duplicate versions, no skipped versions, correct final count, cursor handling, invalid cursor, and contradictory metadata, with a server-driven "Current" marker. Cases AP-06a to AP-06k in 14.1.1. |
+| AP-06 | Version history is retrieved correctly across multiple pages and fails honestly: multi-page retrieval, stable ordering, no duplicate versions, detection of skipped versions that cause an observable count mismatch, correct display of a complete valid fixture, cursor handling, invalid cursor, and contradictory metadata, with a server-driven "Current" marker. Cases AP-06a to AP-06k in 14.1.1. |
 | AP-07 | Selecting version N opens `#agents/<id>/v/N`; heading and banner show N; content is that snapshot's, different from the current profile. |
 | AP-08 | A version request never renders current-profile content; a response whose `agentId`/`versionNo` mismatches the route shows the unexpected-response error. |
 | AP-09 | Deep links to the directory, a profile, and a version survive reload and browser Back/Forward; opening in a fresh page works. |
@@ -439,17 +439,19 @@ These are requirements for the F1 implementation, **not** tests added by this do
 
 Fixture: an agent with 5 versions served as three pages `[5, 4]`, `[3, 2]`, `[1]` with `total: 5` (the worked example in API proposal 2.5). The fixture records each request's URL.
 
+**What these tests do and do not show.** They are synthetic frontend fixtures. They show how the frontend behaves for the responses it is given: it checks what it can observe (types, metadata agreement, counts, duplicates, order among received items, total changes), displays honestly, and fails closed. They do **not** show that a real backend never skips, duplicates by omission, or misreports a record, because a frontend cannot observe that (BG-1 to BG-4). Those guarantees need backend contract or integration tests, owned by the backend and independently reviewed; no Playwright fixture substitutes for them.
+
 | Case | Setup | Required result |
 |---|---|---|
 | AP-06a Multi-page retrieval | Pages as above | Exactly three requests, one in flight at a time. Counts read "Showing 2 of 5 versions", then "Showing 4 of 5 versions" with Load more present after pages 1 and 2; after page 3 Load more is gone and the count reads "5 versions". |
 | AP-06b Stable ordering | Same | DOM order is 5, 4, 3, 2, 1. The "Current" marker appears only on the row the server flags. A variant flags version 4 as current and the marker is on 4, not on the highest number. |
-| AP-06c No duplicates | Variant: page 2 is `[4, 3]` | Traversal stops; pages already verified stay visible labeled "Showing 2 of 5 versions" with an error and Reload; version 4 appears once; never labeled complete. |
-| AP-06d No skipped records | Variant: pages `[5, 4]` then `[2, 1]`, final `complete: true`, `total: 5` | The count mismatch (4 unique items against `total: 5`) is detected on the final page, which is discarded as the offending response: verified pages stay, labeled "Showing 2 of 5 versions" with an error and Reload; never "5 versions"; no Load more. |
-| AP-06e Correct final count | Pages as above | Exactly 5 rows with 5 unique `versionNo`; the final label is "5 versions". |
+| AP-06c No duplicates | Variant: page 2 is `[4, 3]` | Traversal stops; pages already checked stay visible labeled "Showing 2 of 5 versions" with an error and Reload; version 4 appears once; never labeled complete. |
+| AP-06d Observable skipped records | Variant: pages `[5, 4]` then `[2, 1]`, final `complete: true`, `total: 5`. **Scope:** shows detection of a skipped-item fixture *when the omission creates an observable count mismatch*. It does not prove arbitrary no-skip correctness; an omission with a consistent `total` is undetectable here (API proposal 2.5, BG-1). | The count mismatch (4 unique items against `total: 5`) is detected on the final page, which is discarded as the offending response: checked pages stay, labeled "Showing 2 of 5 versions" with an error and Reload; never "5 versions"; no Load more. |
+| AP-06e Display of a complete valid fixture | Pages as above. **Scope:** shows that the frontend correctly displays the complete dataset a valid fixture supplies. It does not establish that the real backend never omits a record (BG-1). | Exactly 5 rows with 5 unique `versionNo`; the final label is "5 versions". |
 | AP-06f Cursor handling | Cursors `cur_A` and an opaque value containing reserved characters (e.g. `a+b/c=`) | The first request carries no `cursor`; each continuation carries the previous `nextCursor` exactly and decodes server-side to the original value; no other query parameter is invented. |
-| AP-06g Invalid cursor | Continuation answered `422` with the standard envelope | Verified pages remain, labeled partial, with a Reload action; Reload re-requests the first page without a cursor and rebuilds the list with no duplicates. |
+| AP-06g Invalid cursor | Continuation answered `422` with the standard envelope | Checked pages remain, labeled partial, with a Reload action; Reload re-requests the first page without a cursor and rebuilds the list with no duplicates. |
 | AP-06h Contradictory metadata | One variant per row of the invalid-metadata table in API proposal 2.5 (`complete` vs `nextCursor` disagreement; empty page with a cursor; repeated cursor; `total` 5 then 6; first page count not equal to `total` with `complete: true`) | The result in that table: error state, the stated labels, never complete, never the empty state. The `total`-change variant shows "History changed while loading" with Reload. |
-| AP-06i Honest failures | `5xx`, `429`, and a network error on page 1, and on page 2 | Page 1: error with Retry and no "No versions" text. Page 2: verified pages stay labeled partial with Retry. Retry repeats the same request. |
+| AP-06i Honest failures | `5xx`, `429`, and a network error on page 1, and on page 2 | Page 1: error with Retry and no "No versions" text. Page 2: checked pages stay labeled partial with Retry. Retry repeats the same request. |
 | AP-06j Empty history | A validated `total: 0` response | "No versions published yet." appears here and only here. |
 | AP-06k Route change | Navigate to another agent or leave Agents while page 2 is delayed | The pending request is aborted; late data never appends to another agent's list (overlaps AP-20). |
 
