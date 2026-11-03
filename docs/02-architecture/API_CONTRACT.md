@@ -32,6 +32,8 @@
 | POST | `/api/v1/runs/{id}/accept` | Explicitly accept verified task result |
 | GET | `/api/v1/runs/{id}/usage` | Measured token telemetry or unknown |
 
+The minimum **read-only** slice of the agent and profile-version endpoints needed by the first Agents & Profiles frontend is requested, with conventions and open decisions, in [Agents & Profiles - Proposed Read API Contract](AGENTS_READ_API_PROPOSAL.md). That document is a proposal, not an implemented API. It follows the implemented `camelCase` contract convention rather than the `snake_case` used in the examples below.
+
 ### Example: create run
 
 ```http
