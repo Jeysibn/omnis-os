@@ -6,10 +6,12 @@ Requires=docker.service
 [Service]
 Type=simple
 User=omnis-launcher
-Group=omnis-worker-socket
+Group=omnis-launcher
 RuntimeDirectory=omnis-sandbox
 RuntimeDirectoryMode=0750
-SupplementaryGroups=docker
+SupplementaryGroups=omnis-launcher-socket docker
+ExecStartPre=/usr/bin/chgrp omnis-launcher-socket /run/omnis-sandbox
+ExecStartPost=/usr/bin/chgrp omnis-launcher-socket /run/omnis-sandbox/launcher.sock
 WorkingDirectory=/opt/omnis-os/apps/sandbox-launcher
 EnvironmentFile=/etc/omnis/sandbox-launcher.env
 Environment=OMNIS_SANDBOX_WORKSPACE_ROOT=/var/lib/omnis-sandbox/workspaces

@@ -6,7 +6,7 @@ Requires=omnis-sandbox-launcher.service
 [Service]
 Type=simple
 User=omnis-worker
-Group=omnis-worker-socket
+Group=omnis-worker
 WorkingDirectory=/opt/omnis-os/apps/worker
 EnvironmentFile=/etc/omnis/worker.env
 ExecStart=/usr/bin/node --experimental-strip-types src/server.ts

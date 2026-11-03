@@ -1,3 +1,6 @@
+import path from 'node:path';
+import { lstatSync, realpathSync } from 'node:fs';
+
 const sessionSecret = process.env.OMNIS_SESSION_SECRET;
 const ownerPasswordHash = process.env.OMNIS_OWNER_PASSWORD_HASH;
 const internalToken = process.env.OMNIS_INTERNAL_TOKEN;
@@ -21,12 +24,11 @@ if (!authorizerToken || authorizerToken.length < 64 || authorizerToken === inter
 const apiPort = Number(process.env.OMNIS_API_PORT ?? 4100);
 const workerPort = Number(process.env.OMNIS_WORKER_PORT ?? 4101);
 const workerHost = process.env.OMNIS_WORKER_HOST ?? '127.0.0.1';
-const authorizerSocket = process.env.OMNIS_AUTHORIZER_SOCKET ?? '/tmp/omnis-authorizer.sock';
+const authorizerSocket = validateAuthorizerSocket(process.env.OMNIS_AUTHORIZER_SOCKET);
 if (!Number.isInteger(apiPort) || apiPort < 1 || apiPort > 65535)
   throw new Error('OMNIS_API_PORT is invalid.');
 if (!Number.isInteger(workerPort) || workerPort < 1 || workerPort > 65535)
   throw new Error('OMNIS_WORKER_PORT is invalid.');
-if (!authorizerSocket.startsWith('/')) throw new Error('OMNIS_AUTHORIZER_SOCKET is invalid.');
 if (!['127.0.0.1', '::1', 'localhost'].includes(workerHost)) {
   throw new Error('The initial Omnis OS worker must bind to loopback.');
 }
@@ -42,6 +44,40 @@ export const env = {
   authorizerSocket,
   secureCookies: process.env.OMNIS_SECURE_COOKIES === 'true',
 };
+
+export function validateAuthorizerSocket(value: string | undefined): string {
+  if (
+    !value ||
+    !path.isAbsolute(value) ||
+    path.normalize(value) !== value ||
+    value.includes('\0')
+  ) {
+    throw new Error(
+      'OMNIS_AUTHORIZER_SOCKET must be configured as an absolute private socket path.',
+    );
+  }
+  if (value === '/run/omnis-authorizer/authorizer.sock') return value;
+
+  const parent = path.dirname(value);
+  let parentStat;
+  try {
+    parentStat = lstatSync(parent);
+  } catch {
+    throw new Error('A custom authorizer socket must be inside an existing private directory.');
+  }
+  if (
+    !parentStat.isDirectory() ||
+    parentStat.isSymbolicLink() ||
+    realpathSync(parent) !== parent ||
+    parentStat.uid !== (process.getuid?.() ?? -1) ||
+    (parentStat.mode & 0o077) !== 0
+  ) {
+    throw new Error(
+      'A custom authorizer socket directory must be private to this process identity.',
+    );
+  }
+  return value;
+}
 
 if (env.host !== '127.0.0.1' && env.host !== '::1' && env.host !== 'localhost') {
   throw new Error('The initial Omnis OS API must bind to loopback.');

@@ -13,7 +13,10 @@ api="omnisa_api_${suffix}"
 launcher="omnissl_${suffix}"
 worker_group="omniswg_${suffix}"
 authorizer_group="omnisag_${suffix}"
-socket_group="omnissg_${suffix}"
+api_group="omnisapig_${suffix}"
+launcher_group="omnislg_${suffix}"
+authorizer_socket_group="omnisasg_${suffix}"
+launcher_socket_group="omnissg_${suffix}"
 temp_root="$(mktemp -d /tmp/omnis-host-isolation.XXXXXX)"
 chmod 0755 "$temp_root"
 process_pids=()
@@ -33,7 +36,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for group in "$worker_group" "$authorizer_group" "$socket_group"; do
+for group in "$worker_group" "$authorizer_group" "$api_group" "$launcher_group" "$authorizer_socket_group" "$launcher_socket_group"; do
   groupadd --system "$group"
   groups+=("$group")
 done
@@ -41,11 +44,15 @@ useradd --system --no-create-home --shell /usr/sbin/nologin --gid "$worker_group
 users+=("$worker")
 useradd --system --no-create-home --shell /usr/sbin/nologin --gid "$authorizer_group" "$authorizer"
 users+=("$authorizer")
-useradd --system --no-create-home --shell /usr/sbin/nologin --gid "$authorizer_group" "$api"
+usermod --append --groups "$authorizer_group" "$authorizer"
+usermod --append --groups "$authorizer_socket_group" "$authorizer"
+useradd --system --no-create-home --shell /usr/sbin/nologin --gid "$api_group" "$api"
 users+=("$api")
-useradd --system --no-create-home --shell /usr/sbin/nologin --gid "$socket_group" "$launcher"
+usermod --append --groups "$authorizer_socket_group" "$api"
+useradd --system --no-create-home --shell /usr/sbin/nologin --gid "$launcher_group" "$launcher"
 users+=("$launcher")
-usermod --append --groups "$socket_group" "$worker"
+usermod --append --groups "$launcher_socket_group" "$worker"
+usermod --append --groups "$launcher_socket_group" "$launcher"
 if getent group docker >/dev/null && [[ -S /var/run/docker.sock ]]; then
   usermod --append --groups docker "$launcher"
   if ! id -nG "$launcher" | tr ' ' '\n' | grep -qx docker; then
@@ -56,17 +63,18 @@ fi
 
 secret_root="$temp_root/etc/omnis"
 install -d -o root -g root -m 0755 "$secret_root"
-for item in "authorizer:$authorizer:$authorizer_group" "api:$api:$authorizer_group" "launcher:$launcher:$socket_group"; do
+for item in "authorizer:$authorizer:$authorizer_group" "api:$api:$api_group" "launcher:$launcher:$launcher_group"; do
   IFS=: read -r name owner group <<< "$item"
   install -o "$owner" -g "$group" -m 0600 /dev/null "$secret_root/$name.env"
 done
 
-root_owned_app="$temp_root/opt/omnis/apps/authorizer"
-install -d -o root -g root -m 0755 "$root_owned_app"
+root_owned_app="$temp_root/opt/omnis"
+install -d -o root -g root -m 0755 "$root_owned_app/apps/api" "$root_owned_app/apps/authorizer" "$root_owned_app/apps/sandbox-launcher" "$root_owned_app/apps/worker" "$root_owned_app/packages/contracts" "$root_owned_app/node_modules/.pnpm/test-dependency"
+ln -s ../../packages/contracts "$root_owned_app/apps/api/contracts"
 authorizer_dir="$temp_root/run/omnis-authorizer"
 launcher_dir="$temp_root/run/omnis-launcher"
-install -d -o "$authorizer" -g "$authorizer_group" -m 0750 "$authorizer_dir"
-install -d -o "$launcher" -g "$socket_group" -m 0750 "$launcher_dir"
+install -d -o "$authorizer" -g "$authorizer_socket_group" -m 0750 "$authorizer_dir"
+install -d -o "$launcher" -g "$launcher_socket_group" -m 0750 "$launcher_dir"
 
 start_socket_server() {
   local service_user="$1" service_group="$2" socket_path="$3" pid_path="$4"
@@ -105,8 +113,8 @@ start_socket_server() {
 
 authorizer_socket="$authorizer_dir/authorizer.sock"
 launcher_socket="$launcher_dir/launcher.sock"
-start_socket_server "$authorizer" "$authorizer_group" "$authorizer_socket" "$temp_root/authorizer.pid"
-start_socket_server "$launcher" "$socket_group" "$launcher_socket" "$temp_root/launcher.pid"
+start_socket_server "$authorizer" "$authorizer_socket_group" "$authorizer_socket" "$temp_root/authorizer.pid"
+start_socket_server "$launcher" "$launcher_socket_group" "$launcher_socket" "$temp_root/launcher.pid"
 
 api_pid_file="$temp_root/api.pid"
 install -o "$api" -g "$authorizer_group" -m 0600 /dev/null "$api_pid_file"
@@ -124,14 +132,21 @@ if id -nG "$worker" | tr ' ' '\n' | grep -qx docker; then
   echo "Disposable worker unexpectedly has Docker group membership." >&2
   exit 1
 fi
-if id -nG "$worker" | tr ' ' '\n' | grep -qx "$authorizer_group"; then
-  echo "Disposable worker unexpectedly has authorizer group membership." >&2
+if id -nG "$worker" | tr ' ' '\n' | grep -Eq "^($authorizer_group|$api_group|$launcher_group)$"; then
+  echo "Disposable worker unexpectedly has a trusted service primary group." >&2
+  exit 1
+fi
+if [[ "$(id -gn "$launcher")" != "$launcher_group" ]]; then
+  echo "Disposable launcher does not have its private primary group." >&2
   exit 1
 fi
 
 runuser -u "$worker" -- env \
   TEST_SECRET_ROOT="$secret_root" \
-  TEST_AUTHOR_APP="$root_owned_app" \
+  TEST_AUTHOR_APP="$temp_root/opt/omnis" \
+  TEST_LAUNCHER_SECRET="$secret_root/launcher.env" \
+  TEST_WORKER_GROUP="$worker_group" \
+  TEST_LAUNCHER_GROUP="$launcher_group" \
   TEST_AUTHORIZER_SOCKET="$authorizer_socket" \
   TEST_LAUNCHER_SOCKET="$launcher_socket" \
   TEST_AUTHORIZER_PID="$(cat "$temp_root/authorizer.pid")" \
@@ -144,7 +159,12 @@ fail() { echo "Disposable worker identity probe failed: $1" >&2; exit 1; }
 for secret in "$TEST_SECRET_ROOT/authorizer.env" "$TEST_SECRET_ROOT/api.env" "$TEST_SECRET_ROOT/launcher.env"; do
   [[ ! -r "$secret" ]] || fail "worker can read $secret"
 done
-[[ ! -w "$TEST_AUTHOR_APP" ]] || fail "worker can modify trusted executable files"
+for trusted_path in "$TEST_AUTHOR_APP" "$TEST_AUTHOR_APP/apps" "$TEST_AUTHOR_APP/packages" "$TEST_AUTHOR_APP/node_modules"; do
+  [[ ! -w "$trusted_path" ]] || fail "worker can modify trusted code path $trusted_path"
+done
+[[ ! -w "$TEST_AUTHOR_APP/apps/api/contracts" ]] || fail "worker can modify shared package code through its symlink"
+[[ ! -r "$TEST_LAUNCHER_SECRET" ]] || fail "worker can read launcher secret"
+[[ ! -w "$(dirname "$TEST_LAUNCHER_SECRET")" ]] || fail "worker can modify the service secret directory"
 for pid in "$TEST_API_PID" "$TEST_AUTHORIZER_PID" "$TEST_LAUNCHER_PID"; do
   [[ ! -r "/proc/$pid/environ" ]] || fail "worker can inspect service process environment"
 done
@@ -182,4 +202,4 @@ else
 fi
 WORKER_PROBES
 
-echo "Disposable Linux identities passed: worker denied authorizer/API/launcher secrets, trusted process environments, authorizer socket and Docker socket; restricted launcher socket remained available."
+echo "Disposable Linux identities passed: worker denied control-plane and launcher secrets, trusted process environments, protected code and authorizer socket; launcher used a private primary group, worker could use only the narrow launcher socket group, and Docker socket access remained launcher-only."
