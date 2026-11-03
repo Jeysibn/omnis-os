@@ -25,6 +25,33 @@ The repository pins pnpm `12.16.1` and Node `>=24`. Run `pnpm install --frozen-l
 
 Docker group membership is root-equivalent. The worker uses the trusted rootful daemon to create containers; the sandbox container itself receives no socket, mount, or environment credentials. On the tested WSL host, rootless Docker/userns remapping and AppArmor were unavailable. Keep provider runtimes disabled until their authenticated connector and untrusted-tool sandbox are separately reviewed.
 
+### PostgreSQL contention and timeout handling
+
+`pnpm db:roles` provisions defaults for new application connections. `omnis_runtime` uses `lock_timeout=3s`, `statement_timeout=20s`, and `idle_in_transaction_session_timeout=20s`; `omnis_authorizer` uses `3s`, `15s`, and `20s`. The migration role has these role defaults reset for upgrade headroom. The administrator/recovery role is managed separately. `idle_session_timeout` remains unset to avoid surprising pooled connection termination; it would also be only a bounded cleanup for idle backends, not a control against active or periodically reused sessions.
+
+Role defaults apply only at login. After reprovisioning, recycle the worker and its pools before relying on the new values. Check the role catalog and the effective session values on a newly established connection; do not assume a running pool refreshed its defaults:
+
+```sql
+SELECT COALESCE(r.rolname, '<all roles>') AS role_name,
+       s.setdatabase, d.datname, s.setconfig
+FROM pg_db_role_setting s
+LEFT JOIN pg_roles r ON r.oid = s.setrole
+LEFT JOIN pg_database d ON d.oid = s.setdatabase
+WHERE r.rolname IN ('omnis_runtime', 'omnis_authorizer', 'omnis_migrator')
+ORDER BY r.rolname, d.datname;
+
+SELECT current_user, current_setting('lock_timeout'),
+       current_setting('statement_timeout'),
+       current_setting('idle_in_transaction_session_timeout'),
+       current_setting('idle_session_timeout');
+```
+
+PostgreSQL role defaults are operational safeguards, not immutable enforcement. A connected runtime or authorizer can override ordinary session parameters with `SET`; database-specific role settings can also take precedence and are rejected by the role-integrity check. Do not interpret these defaults as protection from a compromised session with direct database credentials.
+
+For an authorization or admission HTTP 503, treat the operation as **not committed**. `authorization_busy` means the grant remains active and no revocation audit committed. `admission_busy` means no run, grant consumption, idempotency record, or queue job committed. Retry only after checking that the contention has cleared. Heartbeat SQLSTATE `55P03` rolls back renewal; the worker treats it as a lost lease checkpoint, stops the sandbox, and permits recovery to interrupt the run without automatic replay. A transient blocker can therefore cause a safe interruption.
+
+For diagnosis, use a restricted administrative connection and first capture the exact database, PID, role, application name, transaction age, wait event, and relevant `pg_locks` rows. Avoid logging query text or task data. Confirm the backend belongs to the affected Omnis worker/session before taking action. If it is a confirmed abandoned test/worker session, release or terminate only that PID, then verify the pool reconnects and the authorization/run state before retrying. Never terminate unrelated service sessions or use cluster-wide lock-clearing scripts. `idle_in_transaction_session_timeout` releases locks by terminating a backend abandoned inside a transaction; it does not release a session-level advisory lock held outside a transaction. Continuous runtime-controlled contention remains possible until the authorizer credentials are isolated from the worker under G4-3.
+
 ### PostgreSQL backup and isolated restore
 
 Use PostgreSQL custom-format logical dumps for local recovery. Keep the `.dump` and adjacent `.dump.manifest.json` outside the repository in an owner-only directory (`0700` directory, `0600` files). The manifest stores counts, migration IDs, sequence checks and record fingerprints; it contains no database password. Set `OMNIS_BACKUP_DATABASE` to the source database name when it is not `omnis`.

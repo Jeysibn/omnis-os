@@ -396,36 +396,45 @@ export class PostgresRunStore {
     generation: number,
     leaseSeconds: number,
   ): Promise<boolean | 'stop_requested'> {
-    return inTransaction(this.pool, async (client) => {
-      const selected = await client.query<RunRow>(`${runSelect} WHERE r.id = $1 FOR UPDATE`, [
-        runId,
-      ]);
-      const current = selected.rows[0];
-      if (!current) return false;
-      if (current.lease_owner !== workerId || current.execution_generation !== generation) {
-        return false;
-      }
-      if (current.status === 'stopping') return 'stop_requested';
-      if (current.status !== 'running') return false;
+    try {
+      return await inTransaction(this.pool, async (client) => {
+        await client.query("SET LOCAL lock_timeout = '3s'");
+        const selected = await client.query<RunRow>(`${runSelect} WHERE r.id = $1 FOR UPDATE`, [
+          runId,
+        ]);
+        const current = selected.rows[0];
+        if (!current) return false;
+        if (current.lease_owner !== workerId || current.execution_generation !== generation) {
+          return false;
+        }
+        if (current.status === 'stopping') return 'stop_requested';
+        if (current.status !== 'running') return false;
 
-      // Revocation also locks run then grant. Recheck under the grant row lock
-      // after acquiring the run lock so a pre-revocation statement snapshot
-      // cannot renew a lease after revocation commits.
-      const authorization = await client.query<{ allowed: boolean }>(
-        'SELECT omnis.lock_active_run_authorization($1) AS allowed',
-        [runId],
-      );
-      if (!authorization.rows[0]?.allowed) return false;
+        // Revocation also locks run then grant. Recheck under the grant row lock
+        // after acquiring the run lock so a pre-revocation statement snapshot
+        // cannot renew a lease after revocation commits.
+        const authorization = await client.query<{ allowed: boolean }>(
+          'SELECT omnis.lock_active_run_authorization($1) AS allowed',
+          [runId],
+        );
+        if (!authorization.rows[0]?.allowed) return false;
 
-      const renewed = await client.query(
-        `UPDATE omnis.runs
-            SET lease_expires_at = now() + ($4::int * interval '1 second'), updated_at = now()
-          WHERE id = $1 AND lease_owner = $2 AND execution_generation = $3
-            AND status = 'running' AND lease_expires_at > now()`,
-        [runId, workerId, generation, leaseSeconds],
-      );
-      return renewed.rowCount === 1;
-    });
+        const renewed = await client.query(
+          `UPDATE omnis.runs
+              SET lease_expires_at = now() + ($4::int * interval '1 second'), updated_at = now()
+            WHERE id = $1 AND lease_owner = $2 AND execution_generation = $3
+              AND status = 'running' AND lease_expires_at > now()`,
+          [runId, workerId, generation, leaseSeconds],
+        );
+        return renewed.rowCount === 1;
+      });
+    } catch (error) {
+      // inTransaction has rolled back before this handler runs. A timed-out
+      // heartbeat is a lost renewal and causes the worker to stop safely; it
+      // must never be reported as a lease extension.
+      if (isPostgresLockTimeout(error)) return false;
+      throw error;
+    }
   }
 
   async requestStop(runId: string): Promise<{ run: Run; events: DurableEvent[] }> {
@@ -787,6 +796,10 @@ export class PostgresRunStore {
     await appendRunAuthorizationAudit(client, current.id, 'operation.cancelled');
     return { run: mapRun(updated.rows[0]!), events: [{ runId: current.id, event }] };
   }
+}
+
+function isPostgresLockTimeout(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === '55P03';
 }
 
 async function appendRunAuthorizationAudit(
