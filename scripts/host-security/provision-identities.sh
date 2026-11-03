@@ -45,7 +45,7 @@ record_created directory /run/omnis-authorizer
 install -d -o omnis-launcher -g omnis-launcher-socket -m 0750 /run/omnis-sandbox
 record_created directory /run/omnis-sandbox
 install -d -o omnis-launcher -g omnis-launcher -m 0700 /var/lib/omnis-sandbox/workspaces
-record_created directory /var/lib/omnis-sandbox/workspaces
 record_created directory /var/lib/omnis-sandbox
+record_created directory /var/lib/omnis-sandbox/workspaces
 echo "Created Omnis service identities. Worker and launcher share only omnis-launcher-socket; only launcher is in docker."
 echo "Install reviewed service-specific environment files and systemd units separately; this script does not enable or start services."

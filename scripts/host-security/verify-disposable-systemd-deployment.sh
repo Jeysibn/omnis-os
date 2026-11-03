@@ -111,17 +111,17 @@ cleanup() {
       file) rm -f -- "$value" || cleanup_failed=1 ;;
       directory)
         case "$value" in
-          /etc/omnis) rmdir -- "$value" 2>/dev/null || { echo "Failed to remove created directory $value." >&2; cleanup_failed=1; } ;;
+          /etc/omnis) rmdir -- "$value" 2>/dev/null || { find "$value" -mindepth 1 -maxdepth 1 -printf '  remaining child: %f\n' >&2 || true; echo "Failed to remove created directory $value." >&2; cleanup_failed=1; } ;;
           /run/omnis-authorizer)
             rm -f -- "$value/authorizer.sock"
-            rmdir -- "$value" 2>/dev/null || { echo "Failed to remove created directory $value." >&2; cleanup_failed=1; }
+            rmdir -- "$value" 2>/dev/null || { find "$value" -mindepth 1 -maxdepth 1 -printf '  remaining child: %f\n' >&2 || true; echo "Failed to remove created directory $value." >&2; cleanup_failed=1; }
             ;;
           /run/omnis-sandbox)
             rm -f -- "$value/launcher.sock"
-            rmdir -- "$value" 2>/dev/null || { echo "Failed to remove created directory $value." >&2; cleanup_failed=1; }
+            rmdir -- "$value" 2>/dev/null || { find "$value" -mindepth 1 -maxdepth 1 -printf '  remaining child: %f\n' >&2 || true; echo "Failed to remove created directory $value." >&2; cleanup_failed=1; }
             ;;
           /var/lib/omnis-sandbox/workspaces) rm -rf -- "$value" || { echo "Failed to remove created directory $value." >&2; cleanup_failed=1; } ;;
-          /var/lib/omnis-sandbox) rmdir -- "$value" 2>/dev/null || { echo "Failed to remove created directory $value." >&2; cleanup_failed=1; } ;;
+          /var/lib/omnis-sandbox) rmdir -- "$value" 2>/dev/null || { find "$value" -mindepth 1 -maxdepth 1 -printf '  remaining child: %f\n' >&2 || true; echo "Failed to remove created directory $value." >&2; cleanup_failed=1; } ;;
           *) echo "Refusing cleanup of unrecognized manifest directory $value." >&2; cleanup_failed=1 ;;
         esac
         ;;
