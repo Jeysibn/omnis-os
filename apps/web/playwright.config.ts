@@ -3,6 +3,8 @@ import { defineConfig, devices } from '@playwright/test';
 export default defineConfig({
   testDir: './src/ui',
   fullyParallel: true,
+  forbidOnly: Boolean(process.env.CI),
+  workers: process.env.CI ? 2 : 4,
   reporter: 'list',
   use: {
     baseURL: 'http://127.0.0.1:5173',
