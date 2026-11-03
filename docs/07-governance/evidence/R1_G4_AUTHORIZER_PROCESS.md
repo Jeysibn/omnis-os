@@ -1,6 +1,6 @@
 # R1-G4 Independent Authorizer Process Evidence
 
-**Status:** Local verification complete; independent security review and branch CI pending  
+**Status:** Local verification complete; independent security review pending  
 **Base:** PR #9 squash merge `71fe3f07e4d4e9541e366ba304420ec93164552a`  
 **Branch:** `security/r1g4-authorizer-process-isolation`  
 **Verification date:** 2026-11-03
@@ -61,9 +61,11 @@ Infrastructure was synthetic and disposable: PostgreSQL 17.6 container `omnis-pr
 | `pnpm integration:backup-restore` | Passed: disposable custom-format backup/restore, ACL/role verification, sequence and post-restore mock execution checks |
 | `pnpm build` | Passed: all TypeScript workspace builds and Vite production build |
 | Browser GUI smoke | Not run; API-level owner/session/CSRF flow was exercised; UI layout was not changed |
-| GitHub Actions | Pending push and exact-commit branch run |
+| GitHub Actions | Passed on implementation SHA `22fb4aa19f817f44364097fe42840b7cb656ff9e`: [run 41645566824](https://github.com/Jeysibn/omnis-os/actions/runs/41645566824) |
 
 Commands used the repository scripts: `pnpm check`, `pnpm --filter @omnis/worker test` with `OMNIS_SANDBOX_INTEGRATION=1`, `pnpm integration:mock`, `pnpm integration:legacy-upgrade`, `pnpm integration:recovery`, and `pnpm integration:backup-restore`. All PostgreSQL URLs and passwords were generated or passed through process environment and are intentionally omitted from this evidence.
+
+The CI run above passed frozen installation, role provisioning, `pnpm check`, build, legacy-upgrade, recovery, and disposable backup/restore on the implementation tree. The evidence and template follow-up commits are documentation-only and are being checked by the workflow on the final branch SHA separately.
 
 ## Remaining risks and gates
 
