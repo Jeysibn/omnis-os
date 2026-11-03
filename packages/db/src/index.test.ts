@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { after, beforeEach, describe, it } from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 import type { Pool } from 'pg';
 import {
   createPool,
@@ -11,6 +12,10 @@ import {
 } from './index.ts';
 import { provisionDatabaseRoles } from './provision-roles.ts';
 import { assertValidMetrics, metricsQuery } from '../../../scripts/db-recovery/metrics.mjs';
+import {
+  assertRestoreRoleSecurity,
+  restoreRoleSecurityQuery,
+} from '../../../scripts/db-recovery/role-integrity.mjs';
 
 const databaseUrl = process.env.OMNIS_TEST_DATABASE_URL;
 const pool = databaseUrl ? createPool(databaseUrl) : undefined;
@@ -111,6 +116,146 @@ const postgresSuite = describe(
         pool!.query("SELECT setval('omnis.task_id_seq', 1)"),
         /permission denied/,
       );
+    });
+
+    it('provisions distinct role timeout defaults and audits catalog scope', async () => {
+      const passwords = {
+        migration: decodeURIComponent(new URL(migrationUrl!).password),
+        runtime: decodeURIComponent(new URL(databaseUrl!).password),
+        authorizer: decodeURIComponent(new URL(authorizerUrl!).password),
+      };
+      await provisionDatabaseRoles(adminPool!, passwords);
+      await provisionDatabaseRoles(adminPool!, passwords);
+
+      const catalog = await adminPool!.query<{ role_security: unknown }>(restoreRoleSecurityQuery);
+      assertRestoreRoleSecurity(catalog.rows[0]?.role_security);
+
+      const runtimeFreshPool = createPool({
+        connectionString: databaseUrl!,
+        application_name: 'omnis-timeout-runtime-fresh',
+      });
+      const authorizerFreshPool = createPool({
+        connectionString: authorizerUrl!,
+        application_name: 'omnis-timeout-authorizer-fresh',
+      });
+      try {
+        const runtime = await runtimeFreshPool.query<{
+          lock: string;
+          statement: string;
+          idle: string;
+        }>(
+          `SELECT current_setting('lock_timeout') AS lock,
+                  current_setting('statement_timeout') AS statement,
+                  current_setting('idle_in_transaction_session_timeout') AS idle`,
+        );
+        assert.deepEqual(runtime.rows[0], { lock: '3s', statement: '20s', idle: '20s' });
+        const authorizer = await authorizerFreshPool.query<{
+          lock: string;
+          statement: string;
+          idle: string;
+        }>(
+          `SELECT current_setting('lock_timeout') AS lock,
+                  current_setting('statement_timeout') AS statement,
+                  current_setting('idle_in_transaction_session_timeout') AS idle`,
+        );
+        assert.deepEqual(authorizer.rows[0], { lock: '3s', statement: '15s', idle: '20s' });
+
+        await runtimeFreshPool.query("SET lock_timeout = '0'");
+        assert.equal(
+          (await runtimeFreshPool.query("SELECT current_setting('lock_timeout') AS lock")).rows[0]
+            ?.lock,
+          '0',
+        );
+      } finally {
+        await Promise.all([runtimeFreshPool.end(), authorizerFreshPool.end()]);
+      }
+
+      const currentDatabase = (
+        await adminPool!.query<{ name: string }>('SELECT current_database() AS name')
+      ).rows[0]!.name;
+      const quotedDatabase = `"${currentDatabase.replaceAll('"', '""')}"`;
+      try {
+        await adminPool!.query(
+          `ALTER ROLE omnis_runtime IN DATABASE ${quotedDatabase} SET lock_timeout TO '0'`,
+        );
+        await assert.rejects(
+          provisionDatabaseRoles(adminPool!, passwords),
+          /Database-specific PostgreSQL timeout settings are not permitted/,
+        );
+        const overridden = await adminPool!.query<{ role_security: unknown }>(
+          restoreRoleSecurityQuery,
+        );
+        assert.throws(
+          () => assertRestoreRoleSecurity(overridden.rows[0]?.role_security),
+          /omnis_runtime has database timeout overrides/,
+        );
+      } finally {
+        await adminPool!.query(
+          `ALTER ROLE omnis_runtime IN DATABASE ${quotedDatabase} RESET lock_timeout`,
+        );
+      }
+    });
+
+    it('recycles a backend killed by idle transaction timeout and leaves idle pooled sessions alone', async () => {
+      const timeoutPool = createPool({
+        connectionString: databaseUrl!,
+        max: 1,
+        application_name: 'omnis-idle-transaction-timeout',
+      });
+      let clientError: Error | undefined;
+      const timedClient = await timeoutPool.connect();
+      timedClient.on('error', (error: Error) => {
+        clientError = error;
+      });
+      let backendPid: number;
+      try {
+        await timedClient.query("SET idle_in_transaction_session_timeout = '250ms'");
+        await timedClient.query('BEGIN');
+        await timedClient.query('SELECT pg_advisory_xact_lock(7046390999411)');
+        backendPid = (await timedClient.query<{ pid: number }>('SELECT pg_backend_pid() AS pid'))
+          .rows[0]!.pid;
+        await waitForBackendExit(adminPool!, backendPid, 3_000);
+        assert.ok(clientError, 'PostgreSQL should terminate an idle transaction past its timeout');
+        await assert.rejects(timedClient.query('SELECT 1'));
+      } finally {
+        timedClient.release(true);
+      }
+
+      const replacement = await timeoutPool.connect();
+      try {
+        const replacementPid = (
+          await replacement.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')
+        ).rows[0]!.pid;
+        assert.notEqual(replacementPid, backendPid, 'the pool must replace the terminated backend');
+      } finally {
+        replacement.release();
+        await timeoutPool.end();
+      }
+
+      const idleLockPool = createPool({
+        connectionString: databaseUrl!,
+        max: 1,
+        application_name: 'omnis-idle-session-advisory-lock',
+      });
+      const idleLockClient = await idleLockPool.connect();
+      const sessionLockKey = '7046390999412';
+      try {
+        await idleLockClient.query("SET idle_session_timeout = '0'");
+        await idleLockClient.query('SELECT pg_advisory_lock($1::bigint)', [sessionLockKey]);
+        const pid = (await idleLockClient.query<{ pid: number }>('SELECT pg_backend_pid() AS pid'))
+          .rows[0]!.pid;
+        await delay(300);
+        const state = await adminPool!.query<{ present: boolean; lock_held: boolean }>(
+          `SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid=$1) AS present,
+                  EXISTS (SELECT 1 FROM pg_locks WHERE pid=$1 AND locktype='advisory' AND granted) AS lock_held`,
+          [pid],
+        );
+        assert.deepEqual(state.rows[0], { present: true, lock_held: true });
+      } finally {
+        await idleLockClient.query('SELECT pg_advisory_unlock($1::bigint)', [sessionLockKey]);
+        idleLockClient.release();
+        await idleLockPool.end();
+      }
     });
 
     it('keeps authorization durable, scoped, auditable, and non-mutable by the runtime role', async () => {
@@ -1394,6 +1539,154 @@ const postgresSuite = describe(
       }
     });
 
+    it('allows a committed heartbeat before revocation but denies every renewal afterward', async () => {
+      const task = await store.createTask({
+        title: 'Heartbeat wins revocation ordering',
+        detail: 'A renewal before revocation is valid; later renewals must fail.',
+      });
+      const admitted = await admit(task.id, key('heartbeat-before-revoke'), async () => 'job');
+      const authorization = await authorizations.getForRun(admitted.run.id);
+      assert.ok(authorization);
+      const claim = await store.beginExecution(admitted.run.id, 'heartbeat-before-revoke', 30);
+      assert.equal(claim.started, true);
+      const before = (
+        await adminPool!.query<{ lease_expires_at: Date }>(
+          'SELECT lease_expires_at FROM omnis.runs WHERE id=$1',
+          [admitted.run.id],
+        )
+      ).rows[0]!.lease_expires_at;
+
+      assert.equal(
+        await store.renewLease(admitted.run.id, 'heartbeat-before-revoke', claim.generation, 30),
+        true,
+      );
+      const renewed = (
+        await adminPool!.query<{ lease_expires_at: Date }>(
+          'SELECT lease_expires_at FROM omnis.runs WHERE id=$1',
+          [admitted.run.id],
+        )
+      ).rows[0]!.lease_expires_at;
+      assert.ok(renewed > before);
+
+      assert.equal((await authorizations.revoke(authorization.id, 'owner')).status, 'revoked');
+      const afterRevoke = (
+        await adminPool!.query<{ lease_expires_at: Date }>(
+          'SELECT lease_expires_at FROM omnis.runs WHERE id=$1',
+          [admitted.run.id],
+        )
+      ).rows[0]!.lease_expires_at;
+      assert.equal(
+        await store.renewLease(admitted.run.id, 'heartbeat-before-revoke', claim.generation, 30),
+        false,
+      );
+      assert.equal(
+        (
+          await adminPool!.query<{ lease_expires_at: Date }>(
+            'SELECT lease_expires_at FROM omnis.runs WHERE id=$1',
+            [admitted.run.id],
+          )
+        ).rows[0]!.lease_expires_at.toISOString(),
+        afterRevoke.toISOString(),
+      );
+    });
+
+    it('rolls back and bounds heartbeat renewal behind runtime-held run and grant locks', async () => {
+      for (const lockTarget of ['run', 'grant'] as const) {
+        const task = await store.createTask({
+          title: `Heartbeat ${lockTarget} lock timeout`,
+          detail: 'A timed-out renewal must fail closed without extending its lease.',
+        });
+        const grant = await authorizations.request(task.id, 'owner');
+        await authorizations.decide(grant.id, 'owner', 'approve');
+        const admitted = await store.admitRun(
+          task.id,
+          key(`heartbeat-${lockTarget}-timeout`),
+          grant.id,
+          'owner',
+          async () => 'job',
+        );
+        const claim = await store.beginExecution(admitted.run.id, 'timeout-worker', 30);
+        assert.equal(claim.started, true);
+
+        const holder = await pool!.connect();
+        const blockerName = `omnis-heartbeat-${lockTarget}-holder`;
+        const heartbeatName = `omnis-heartbeat-${lockTarget}-waiter`;
+        const heartbeatPool = createPool({
+          connectionString: databaseUrl!,
+          application_name: heartbeatName,
+          query_timeout: 5_000,
+        });
+        const heartbeatStore = new PostgresRunStore(heartbeatPool);
+        const leaseBefore = (
+          await adminPool!.query<{ lease_expires_at: Date }>(
+            'SELECT lease_expires_at FROM omnis.runs WHERE id=$1',
+            [admitted.run.id],
+          )
+        ).rows[0]?.lease_expires_at;
+        assert.ok(leaseBefore);
+        let renewal: Promise<boolean | 'stop_requested'> | undefined;
+        try {
+          await holder.query('BEGIN');
+          await holder.query('SELECT set_config($1, $2, false)', ['application_name', blockerName]);
+          if (lockTarget === 'run') {
+            await holder.query('SELECT id FROM omnis.runs WHERE id=$1 FOR UPDATE', [
+              admitted.run.id,
+            ]);
+          } else {
+            const locked = await holder.query<{ allowed: boolean }>(
+              'SELECT omnis.lock_active_run_authorization($1) AS allowed',
+              [admitted.run.id],
+            );
+            assert.equal(locked.rows[0]?.allowed, true);
+          }
+
+          const startedAt = Date.now();
+          renewal = heartbeatStore.renewLease(
+            admitted.run.id,
+            'timeout-worker',
+            claim.generation,
+            30,
+          );
+          await waitForLockWait(adminPool!, heartbeatName);
+          assert.equal(await renewal, false);
+          assert.ok(
+            Date.now() - startedAt >= 2_500 && Date.now() - startedAt < 5_000,
+            'heartbeat lock waits must fail within the transaction-local three-second bound',
+          );
+          const leaseAfter = (
+            await adminPool!.query<{ lease_expires_at: Date }>(
+              'SELECT lease_expires_at FROM omnis.runs WHERE id=$1',
+              [admitted.run.id],
+            )
+          ).rows[0]?.lease_expires_at;
+          assert.equal(leaseAfter?.toISOString(), leaseBefore.toISOString());
+          assert.equal((await heartbeatPool.query('SELECT 1 AS usable')).rows[0]?.usable, 1);
+        } finally {
+          await holder.query('ROLLBACK').catch(() => undefined);
+          holder.release();
+          await renewal?.catch(() => undefined);
+          await heartbeatPool.end();
+        }
+
+        assert.equal(
+          await store.renewLease(admitted.run.id, 'timeout-worker', claim.generation, 30),
+          true,
+          'the current fenced owner can renew after contention clears',
+        );
+        assert.equal(
+          await store.renewLease(admitted.run.id, 'stale-timeout-worker', claim.generation, 30),
+          false,
+          'a stale owner remains fenced after a timed-out heartbeat',
+        );
+        await store.completeRun(
+          admitted.run.id,
+          'timeout-worker',
+          claim.generation,
+          'Synthetic heartbeat lock-timeout verification completed.',
+        );
+      }
+    });
+
     it('restricts the authorizer database role to authorization records and audit writes', async () => {
       const identity = await authorizerPool!.query<{ current_user: string; rolsuper: boolean }>(
         'SELECT current_user, r.rolsuper FROM pg_roles r WHERE r.rolname=current_user',
@@ -2065,6 +2358,20 @@ async function waitForLockWait(admin: Pool, applicationName: string): Promise<vo
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   throw new Error(`Database session ${applicationName} did not reach the expected lock wait.`);
+}
+
+async function waitForBackendExit(
+  admin: Pool,
+  backendPid: number,
+  timeoutMs: number,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const result = await admin.query('SELECT 1 FROM pg_stat_activity WHERE pid=$1', [backendPid]);
+    if (!result.rowCount) return;
+    await delay(20);
+  }
+  throw new Error(`PostgreSQL backend ${backendPid} did not exit before the test timeout.`);
 }
 
 async function waitForLockWaitOrCompletion(

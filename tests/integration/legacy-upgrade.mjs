@@ -290,6 +290,7 @@ try {
     );
     assert.equal(lockedGrant.rows[0]?.allowed, true);
     for (let attempt = 0; attempt < 2; attempt += 1) {
+      const startedAt = Date.now();
       const busyResponse = await fetch(
         `${worker.baseUrl}/internal/v1/authorizations/${busyGrant.id}/revoke`,
         {
@@ -301,7 +302,10 @@ try {
         },
       );
       assert.equal(busyResponse.status, 503);
-      assert.equal((await busyResponse.json()).error.code, 'authorization_busy');
+      const body = await busyResponse.json();
+      assert.equal(body.error.code, 'authorization_busy');
+      assert.match(body.error.message, /not revoked/i);
+      assert.ok(Date.now() - startedAt < 5_000, 'revocation contention response must be bounded');
       assert.equal(
         (
           await authorizerPool.query(
@@ -355,6 +359,7 @@ try {
   const admissionIdempotencyKey = `api-admission-${suffix}-retry`;
   try {
     await admissionHolder.query('SELECT pg_advisory_lock(70463909136524)');
+    const startedAt = Date.now();
     const response = await fetch(`${worker.baseUrl}/internal/v1/runs`, {
       method: 'POST',
       headers: {
@@ -369,6 +374,7 @@ try {
     const body = await response.json();
     assert.equal(body.error.code, 'admission_busy');
     assert.match(body.error.message, /no run was admitted/i);
+    assert.ok(Date.now() - startedAt < 5_000, 'admission contention response must be bounded');
     assert.equal(
       (
         await authorizerPool.query(
@@ -383,6 +389,15 @@ try {
         await databaseAdminPool.query('SELECT 1 FROM omnis.runs WHERE task_id=$1', [
           admissionTask.id,
         ])
+      ).rowCount,
+      0,
+    );
+    assert.equal(
+      (
+        await databaseAdminPool.query(
+          'SELECT 1 FROM omnis.run_idempotency WHERE idempotency_key=$1',
+          [admissionIdempotencyKey],
+        )
       ).rowCount,
       0,
     );

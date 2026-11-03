@@ -5,6 +5,26 @@ const databaseRoles = {
   runtime: 'omnis_runtime',
   authorizer: 'omnis_authorizer',
 } as const;
+
+const roleTimeoutSettings = {
+  runtime: {
+    lock_timeout: '3s',
+    statement_timeout: '20s',
+    idle_in_transaction_session_timeout: '20s',
+  },
+  authorizer: {
+    lock_timeout: '3s',
+    statement_timeout: '15s',
+    idle_in_transaction_session_timeout: '20s',
+  },
+} as const;
+
+const auditedTimeoutSettings = [
+  'lock_timeout',
+  'statement_timeout',
+  'idle_in_transaction_session_timeout',
+  'idle_session_timeout',
+] as const;
 export async function provisionDatabaseRoles(
   admin: Pool,
   passwords: { migration: string; runtime: string; authorizer: string },
@@ -43,6 +63,46 @@ export async function provisionDatabaseRoles(
     `);
     await admin.query(
       `ALTER ROLE ${role} WITH LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD ${quoted.rows[0]!.literal}`,
+    );
+
+    const timeoutSettings =
+      key === 'runtime'
+        ? roleTimeoutSettings.runtime
+        : key === 'authorizer'
+          ? roleTimeoutSettings.authorizer
+          : undefined;
+    for (const setting of auditedTimeoutSettings) {
+      const value = timeoutSettings?.[setting as keyof typeof roleTimeoutSettings.runtime];
+      if (value) {
+        await admin.query(`ALTER ROLE ${role} SET ${setting} TO '${value}'`);
+      } else {
+        await admin.query(`ALTER ROLE ${role} RESET ${setting}`);
+      }
+    }
+  }
+
+  const databaseOverrides = await admin.query<{
+    role_name: string;
+    database_name: string;
+    setting: string;
+  }>(
+    `
+    SELECT DISTINCT roles.rolname AS role_name,
+           databases.datname AS database_name,
+           split_part(config, '=', 1) AS setting
+      FROM pg_db_role_setting defaults
+      JOIN pg_roles roles ON defaults.setrole = roles.oid OR defaults.setrole = 0
+      JOIN pg_database databases ON defaults.setdatabase = databases.oid
+      CROSS JOIN LATERAL unnest(defaults.setconfig) AS entry(config)
+     WHERE defaults.setdatabase <> 0
+       AND roles.rolname IN ('omnis_runtime', 'omnis_authorizer', 'omnis_migrator')
+       AND split_part(config, '=', 1) = ANY($1::text[])
+  `,
+    [[...auditedTimeoutSettings]],
+  );
+  if (databaseOverrides.rowCount) {
+    throw new Error(
+      'Database-specific PostgreSQL timeout settings are not permitted for Omnis application roles.',
     );
   }
 
