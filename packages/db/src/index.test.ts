@@ -385,7 +385,7 @@ const postgresSuite = describe(
         const error = await idleError;
         const replacement = await pool.query('SELECT 1 AS recovered');
         process.stdout.write(JSON.stringify({
-          handled: error.name === 'Error',
+          handled: typeof error.code === 'string',
           safeCode: error.code ?? null,
           recovered: replacement.rows[0].recovered === 1
         }) + '\\n');
@@ -426,6 +426,7 @@ const postgresSuite = describe(
       assert.equal(code, 0);
       assert.equal(signal, null);
       assert.equal(outcome.handled, true);
+      assert.equal(outcome.safeCode, '57P01');
       assert.equal(outcome.recovered, true);
     });
 
@@ -502,10 +503,13 @@ const postgresSuite = describe(
         authorizations.decide(pending.id, 'owner', 'approve'),
         authorizations.decide(pending.id, 'owner', 'approve'),
       ]);
-      assert.equal(decisions.filter((entry) => entry.status === 'fulfilled').length, 1);
-      assert.equal(decisions.filter((entry) => entry.status === 'rejected').length, 1);
-      const approved = decisions.find((entry) => entry.status === 'fulfilled')!;
-      assert.equal(approved.status === 'fulfilled' ? approved.value.status : '', 'authorized');
+      assert.equal(decisions.filter((entry) => entry.status === 'fulfilled').length, 2);
+      assert.equal(decisions.filter((entry) => entry.status === 'rejected').length, 0);
+      const approvals = decisions.flatMap((entry) =>
+        entry.status === 'fulfilled' ? [entry.value] : [],
+      );
+      assert.equal(approvals[0]?.id, approvals[1]?.id);
+      assert.equal(approvals[0]?.status, 'authorized');
 
       await assert.rejects(
         authorizerPool!.query(
@@ -559,6 +563,7 @@ const postgresSuite = describe(
       const restartedAuthorizer = new PostgresAuthorizationStore(pool!, authorizerPool!);
       assert.equal((await restartedAuthorizer.get(pending.id))?.status, 'authorized');
       const audit = await restartedAuthorizer.getAudit(pending.id);
+      assert.equal(audit.filter((event) => event.eventType === 'authorization.approved').length, 1);
       assert.deepEqual(audit.map((event) => event.eventType).slice(0, 2), [
         'authorization.requested',
         'authorization.approved',
