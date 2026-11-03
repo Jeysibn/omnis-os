@@ -29,6 +29,11 @@ for unit in omnis-api.service omnis-authorizer.service omnis-worker.service omni
     exit 1
   fi
 done
+if [[ ! -d /opt || -L /opt || "$(stat -c '%U' /opt)" != root ]]; then
+  echo "The disposable runner /opt must be a real root-owned directory." >&2
+  exit 1
+fi
+original_opt_mode="$(stat -c '%a' /opt)"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 unit_dir=/etc/systemd/system
@@ -58,12 +63,18 @@ cleanup() {
       groupdel "$group" >/dev/null 2>&1 || cleanup_failed=1
     fi
   done
+  chmod "$original_opt_mode" /opt || cleanup_failed=1
   if (( cleanup_failed != 0 )); then
     echo "Disposable systemd cleanup could not remove every created service resource." >&2
     exit 1
   fi
 }
 trap cleanup EXIT
+
+# Hosted runners may ship /opt as root-owned but group-writable. Narrow only
+# this disposable CI parent for the duration of the probe; restore its mode on
+# every exit. Production installation continues to reject unsafe /opt paths.
+chmod 0755 /opt
 
 for port in 4100 4101; do
   if ss -ltn "sport = :$port" | tail -n +2 | grep -q .; then
