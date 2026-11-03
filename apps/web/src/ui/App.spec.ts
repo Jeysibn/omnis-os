@@ -1,4 +1,6 @@
 import AxeBuilder from '@axe-core/playwright';
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { expect, test as base, type Page, type Route } from '@playwright/test';
 import {
   AuthorizationDecisionSchema,
@@ -79,7 +81,57 @@ type FixtureOptions = {
   eventDisconnects?: boolean;
   eventOrder?: 'reverse';
   eventDuplicates?: boolean;
+  /** Scripted native-EventSource scenario: deliver event 1, drop, then replay 1 and send 2. */
+  eventReconnectScenario?: boolean;
 };
+
+type EventScenarioServer = {
+  url: string;
+  cursors: string[];
+  release: () => void;
+  close: () => Promise<void>;
+};
+
+const sseFrame = (event: RunEvent) =>
+  `id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
+
+/**
+ * Real SSE endpoint for the reconnect regression. Connection 1 delivers one nonterminal event and
+ * ends the response; connection 2 is held until released, then replays event 1 and sends event 2;
+ * later connections stay idle. `cursors` holds each request's true `Last-Event-ID` ('' if absent).
+ */
+async function startEventScenario(events: RunEvent[]): Promise<EventScenarioServer> {
+  const cursors: string[] = [];
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const server: Server = createServer((request, response) => {
+    const header = request.headers['last-event-id'];
+    cursors.push(Array.isArray(header) ? header.join(',') : (header ?? ''));
+    const connection = cursors.length;
+    response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+    if (connection === 1) return void response.end(`retry: 100\n\n${sseFrame(events[0]!)}`);
+    if (connection === 2) {
+      void gate.then(() => response.end(`${sseFrame(events[0]!)}${sseFrame(events[1]!)}`));
+      return;
+    }
+    response.end('retry: 60000\n\n');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  return {
+    url: `http://127.0.0.1:${port}/events`,
+    cursors,
+    release: () => release(),
+    close: () =>
+      new Promise<void>((resolve) => {
+        release();
+        server.closeAllConnections();
+        server.close(() => resolve());
+      }),
+  };
+}
 
 type MockApi = ReturnType<typeof createMockApi>;
 
@@ -87,6 +139,7 @@ const test = base.extend<{ api: MockApi }>({
   api: async ({ page }, use) => {
     const api = createMockApi(page);
     await use(api);
+    await api.dispose();
     expect(api.unexpected, 'all frontend requests must match the fixture contract').toEqual([]);
   },
 });
@@ -121,6 +174,7 @@ function createMockApi(page: Page) {
   const runKeys: string[] = [];
   const stopRunIds: string[] = [];
   const eventRequestCursors: string[] = [];
+  let scenario: EventScenarioServer | undefined;
   const runDetailGets = new Map<string, number>();
   let createdTaskCount = 0;
 
@@ -413,6 +467,12 @@ function createMockApi(page: Page) {
       }
       const run = currentRuns.find((item) => item.id === eventMatch[1]);
       if (!run) return fulfillError(route, 404, 'not_found', 'Run not found.');
+      if (options.eventReconnectScenario) {
+        // Playwright routes never expose Chromium's native Last-Event-ID, so a real HTTP server
+        // receives the browser's actual EventSource requests and records the true cursor.
+        scenario ??= await startEventScenario(makeEvents(run));
+        return route.continue({ url: scenario.url });
+      }
       const after = Number(headers['last-event-id'] ?? '0');
       const events = makeEvents(run).filter((event) => event.sequence > after);
       const orderedEvents = options.eventOrder === 'reverse' ? [...events].reverse() : events;
@@ -465,6 +525,11 @@ function createMockApi(page: Page) {
     runKeys,
     stopRunIds,
     eventRequestCursors,
+    get scenarioCursors() {
+      return scenario?.cursors ?? [];
+    },
+    releaseReconnect: () => scenario?.release(),
+    dispose: async () => scenario?.close(),
     runDetailGets,
     get tasks() {
       return currentTasks;
@@ -903,6 +968,48 @@ test('event stream retries with the last delivered event sequence', async ({ pag
   await expect(page.getByText('2 events')).toBeVisible();
   await page.getByRole('link', { name: 'Tasks' }).click();
   await expect(page.getByRole('heading', { name: 'Task list' })).toBeVisible();
+});
+
+test('native EventSource reconnect after a delivered event sends Last-Event-ID and dedupes the replay', async ({
+  page,
+  api,
+}) => {
+  test.setTimeout(20_000);
+  api.configure({ eventReconnectScenario: true });
+  await openWorkspace(page, '#runs/run-active');
+  const history = page.getByRole('region', { name: 'Event history for Review launch checklist' });
+  const rows = history.locator('.event-row');
+
+  // Connection 1 delivers `id: 1` / `event: run.queued`, then the response ends.
+  await expect(page.getByText('1 event', { exact: true })).toBeVisible();
+  await expect(rows).toHaveCount(1);
+  await expect(rows.nth(0)).toContainText('Synthetic queued event 1.');
+  await expect(rows.nth(0)).toContainText('Event 1 · mock source · synthetic');
+  await expect(page.locator('.stream-badge')).toContainText('Reconnecting');
+
+  // Chromium reconnects on its own; the held request lets us inspect it mid-flight.
+  await expect.poll(() => api.scenarioCursors.length, { timeout: 10_000 }).toBe(2);
+  expect(api.scenarioCursors.slice(0, 2)).toEqual(['', '1']);
+  await expect(rows).toHaveCount(1);
+
+  // Release connection 2: replayed event 1 followed by new event 2.
+  api.releaseReconnect();
+  await expect(page.getByText('2 events', { exact: true })).toBeVisible();
+  await expect(rows).toHaveCount(2);
+  await expect(rows.nth(0)).toContainText('Synthetic queued event 1.');
+  await expect(rows.nth(1)).toContainText('Synthetic started event 2.');
+  await expect(history.getByText('Event 1 · mock source · synthetic')).toHaveCount(1);
+  await expect(history.getByText('Event 2 · mock source · synthetic')).toHaveCount(1);
+  await expect(page.locator('.inspector-summary .status-pill')).toContainText('Running');
+
+  // The cursor advances to the newest delivered event on the next reconnect.
+  await expect.poll(() => api.scenarioCursors.length, { timeout: 10_000 }).toBeGreaterThan(2);
+  expect(api.scenarioCursors.slice(0, 3)).toEqual(['', '1', '2']);
+
+  // No duplicate rows, no invalid terminal transition, no surfaced error.
+  await expect(rows).toHaveCount(2);
+  await expect(page.locator('.stream-badge')).not.toContainText(/Stream ended|Closed/);
+  await expect(page.getByRole('alert')).toHaveCount(0);
 });
 
 test('event replay sorts out-of-order frames and ignores duplicate sequences', async ({
