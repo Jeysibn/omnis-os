@@ -911,7 +911,7 @@ function socketRequest(socketPath, requestPath, init = {}) {
       },
     );
     req.once('error', reject);
-    req.setTimeout(3_000, () => req.destroy(new Error('unix_socket_request_timeout')));
+    req.setTimeout(10_000, () => req.destroy(new Error('unix_socket_request_timeout')));
     req.end(init.body);
   });
 }
