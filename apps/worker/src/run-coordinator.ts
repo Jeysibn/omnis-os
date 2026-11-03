@@ -20,13 +20,24 @@ import { SandboxError } from './docker-sandbox.ts';
 
 export class CoordinatorError extends Error {
   readonly code:
-    'invalid_input' | 'not_found' | 'invalid_transition' | 'concurrency_limit' | 'conflict';
-  readonly statusCode: 400 | 404 | 409;
+    | 'invalid_input'
+    | 'not_found'
+    | 'invalid_transition'
+    | 'concurrency_limit'
+    | 'admission_busy'
+    | 'conflict';
+  readonly statusCode: 400 | 404 | 409 | 503;
 
   constructor(
-    code: 'invalid_input' | 'not_found' | 'invalid_transition' | 'concurrency_limit' | 'conflict',
+    code:
+      | 'invalid_input'
+      | 'not_found'
+      | 'invalid_transition'
+      | 'concurrency_limit'
+      | 'admission_busy'
+      | 'conflict',
     message: string,
-    statusCode: 400 | 404 | 409,
+    statusCode: 400 | 404 | 409 | 503,
   ) {
     super(message);
     this.code = code;
@@ -144,6 +155,13 @@ export class RunCoordinator {
           taskId,
           actorId,
           'admission_authorization_race',
+        );
+      }
+      if (error && typeof error === 'object' && 'code' in error && error.code === '55P03') {
+        throw new CoordinatorError(
+          'admission_busy',
+          'Run admission is temporarily busy. Retry the request; no run was admitted.',
+          503,
         );
       }
       throw error;

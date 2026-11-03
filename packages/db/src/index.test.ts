@@ -643,6 +643,55 @@ const postgresSuite = describe(
       );
     });
 
+    it('bounds consumed-run row contention without committing revocation or audit', async () => {
+      const task = await store.createTask({
+        title: 'Consumed run revocation contention',
+        detail: 'Synthetic run-row lock fixture for the consumed grant path.',
+      });
+      const grant = await authorizations.request(task.id, 'owner');
+      await authorizations.decide(grant.id, 'owner', 'approve');
+      const admitted = await store.admitRun(
+        task.id,
+        key('consumed-revoke-lock'),
+        grant.id,
+        'owner',
+        async () => 'job',
+      );
+      const holder = await pool!.connect();
+      const revokerPool = createPool({
+        connectionString: authorizerUrl!,
+        application_name: 'omnis-g4-12-consumed-run-revoker',
+        query_timeout: 5_000,
+      });
+      const revoker = new PostgresAuthorizationStore(pool!, revokerPool);
+      try {
+        await holder.query('BEGIN');
+        await holder.query('SELECT id FROM omnis.runs WHERE id=$1 FOR UPDATE', [admitted.run.id]);
+        const pending = revoker.revoke(grant.id, 'owner');
+        await waitForLockWait(adminPool!, 'omnis-g4-12-consumed-run-revoker');
+        await assert.rejects(
+          pending,
+          (error: unknown) =>
+            typeof error === 'object' &&
+            error !== null &&
+            'code' in error &&
+            error.code === '55P03',
+        );
+        assert.equal((await authorizations.get(grant.id))?.status, 'authorized');
+        assert.equal(
+          (await authorizations.getAudit(grant.id)).some(
+            (event) => event.eventType === 'authorization.revoked',
+          ),
+          false,
+        );
+      } finally {
+        await holder.query('ROLLBACK').catch(() => undefined);
+        holder.release();
+        await revokerPool.end();
+      }
+      assert.equal((await authorizations.revoke(grant.id, 'owner')).status, 'revoked');
+    });
+
     it('allows only migration-marked grantless legacy runs to reach safe terminal states', async () => {
       const makeLegacyRun = async (suffix: string, status: 'queued' | 'stopping' | 'running') => {
         const task = await store.createTask({
@@ -975,6 +1024,109 @@ const postgresSuite = describe(
       }
     });
 
+    it('reproduces the legacy blocking admission lock and bounds the wait under that lock', async () => {
+      const task = await store.createTask({
+        title: 'Admission lock contention',
+        detail: 'Disposable proof that a runtime-held capacity key cannot hang requests.',
+      });
+      const grant = await authorizations.request(task.id, 'owner');
+      await authorizations.decide(grant.id, 'owner', 'approve');
+      const lockKey = 70463909136524;
+      const holder = await pool!.connect();
+      const oldPathPool = createPool({
+        connectionString: databaseUrl!,
+        application_name: 'omnis-g4-13-old-admission-path',
+      });
+      const contender = await oldPathPool.connect();
+      try {
+        await holder.query("SET application_name = 'omnis-g4-13-lock-holder'");
+        await holder.query('SELECT pg_advisory_lock($1::bigint)', [lockKey]);
+
+        await contender.query('BEGIN');
+        const historicalWait = contender.query('SELECT pg_advisory_xact_lock($1::bigint)', [
+          lockKey,
+        ]);
+        await waitForLockWait(adminPool!, 'omnis-g4-13-old-admission-path');
+        await holder.query('SELECT pg_advisory_unlock($1::bigint)', [lockKey]);
+        await historicalWait;
+        await contender.query('ROLLBACK');
+
+        await holder.query('SELECT pg_advisory_lock($1::bigint)', [lockKey]);
+        const startedAt = Date.now();
+        await assert.rejects(
+          store.admitRun(task.id, key('admission-key-held'), grant.id, 'owner', async () => 'job'),
+          (error: unknown) =>
+            typeof error === 'object' &&
+            error !== null &&
+            'code' in error &&
+            error.code === '55P03',
+        );
+        assert.ok(
+          Date.now() - startedAt >= 2_500 && Date.now() - startedAt < 5_000,
+          'the configured three-second lock timeout must bound the wait',
+        );
+        assert.equal(
+          (await adminPool!.query('SELECT 1 FROM omnis.runs WHERE task_id=$1', [task.id])).rowCount,
+          0,
+        );
+        assert.equal(
+          (
+            await adminPool!.query('SELECT 1 FROM omnis.run_idempotency WHERE idempotency_key=$1', [
+              key('admission-key-held'),
+            ])
+          ).rowCount,
+          0,
+        );
+        assert.equal((await authorizations.get(grant.id))?.consumedRunId, null);
+
+        await holder.query('SELECT pg_advisory_unlock($1::bigint)', [lockKey]);
+        const admitted = await store.admitRun(
+          task.id,
+          key('admission-key-held'),
+          grant.id,
+          'owner',
+          async () => 'job',
+        );
+        assert.equal(admitted.created, true);
+      } finally {
+        await holder
+          .query('SELECT pg_advisory_unlock($1::bigint)', [lockKey])
+          .catch(() => undefined);
+        await contender.query('ROLLBACK').catch(() => undefined);
+        contender.release();
+        holder.release();
+        await oldPathPool.end();
+      }
+    });
+
+    it('bounds waits for a runtime-held transaction-level admission key too', async () => {
+      const task = await store.createTask({
+        title: 'Transaction admission lock',
+        detail: 'The protected path must not wait behind either advisory lock lifetime.',
+      });
+      const grant = await authorizations.request(task.id, 'owner');
+      await authorizations.decide(grant.id, 'owner', 'approve');
+      const holder = await pool!.connect();
+      try {
+        await holder.query('BEGIN');
+        await holder.query('SELECT pg_advisory_xact_lock($1::bigint)', ['70463909136524']);
+        const startedAt = Date.now();
+        await assert.rejects(
+          store.admitRun(task.id, key('admission-xact-held'), grant.id, 'owner', async () => 'job'),
+          (error: unknown) =>
+            typeof error === 'object' &&
+            error !== null &&
+            'code' in error &&
+            error.code === '55P03',
+        );
+        assert.ok(Date.now() - startedAt >= 2_500 && Date.now() - startedAt < 5_000);
+        assert.equal((await authorizations.get(grant.id))?.consumedRunId, null);
+      } finally {
+        await holder.query('ROLLBACK').catch(() => undefined);
+        holder.release();
+      }
+    });
+
     it('serializes direct runtime consumption with revocation at the SQL function boundary', async () => {
       const iterations = 3;
       for (let iteration = 0; iteration < iterations; iteration += 1) {
@@ -1158,6 +1310,88 @@ const postgresSuite = describe(
           (event) => event.eventType === 'authorization.revoked',
         ),
       );
+    });
+
+    it('rechecks authorization after a heartbeat waits behind a committing revocation', async () => {
+      const task = await store.createTask({
+        title: 'Heartbeat revocation race',
+        detail: 'A heartbeat queued behind revocation must not renew under its stale snapshot.',
+      });
+      const admitted = await admit(task.id, key('heartbeat-revocation-race'), async () => 'job');
+      const authorization = await authorizations.getForRun(admitted.run.id);
+      assert.ok(authorization);
+      const claim = await store.beginExecution(admitted.run.id, 'heartbeat-race-worker', 30);
+      assert.equal(claim.started, true);
+
+      const gateKey = 7046390888877;
+      const blocker = await adminPool!.connect();
+      const revokerPool = createPool({
+        connectionString: authorizerUrl!,
+        application_name: 'omnis-g4-heartbeat-race-revoker',
+        query_timeout: 5_000,
+      });
+      const heartbeatPool = createPool({
+        connectionString: databaseUrl!,
+        application_name: 'omnis-g4-heartbeat-race-heartbeat',
+        query_timeout: 5_000,
+      });
+      const revoker = new PostgresAuthorizationStore(pool!, revokerPool);
+      const heartbeatStore = new PostgresRunStore(heartbeatPool);
+      try {
+        await blocker.query('SELECT pg_advisory_lock($1::bigint)', [gateKey]);
+        await adminPool!.query(`
+          CREATE OR REPLACE FUNCTION omnis.g4_heartbeat_revoke_gate() RETURNS trigger
+          LANGUAGE plpgsql AS $gate$
+          BEGIN
+            IF NEW.event_type = 'authorization.revoked' THEN
+              PERFORM pg_advisory_xact_lock(${gateKey});
+            END IF;
+            RETURN NEW;
+          END
+          $gate$;
+          DROP TRIGGER IF EXISTS g4_heartbeat_revoke_gate ON omnis.authorization_audit;
+          CREATE TRIGGER g4_heartbeat_revoke_gate BEFORE INSERT ON omnis.authorization_audit
+            FOR EACH ROW EXECUTE FUNCTION omnis.g4_heartbeat_revoke_gate();
+        `);
+
+        const revoke = revoker.revoke(authorization.id, 'owner');
+        await waitForLockWait(adminPool!, 'omnis-g4-heartbeat-race-revoker');
+        const heartbeat = heartbeatStore.renewLease(
+          admitted.run.id,
+          'heartbeat-race-worker',
+          claim.generation,
+          30,
+        );
+        await waitForLockWait(adminPool!, 'omnis-g4-heartbeat-race-heartbeat');
+        await blocker.query('SELECT pg_advisory_unlock($1::bigint)', [gateKey]);
+
+        assert.equal((await revoke).status, 'revoked');
+        assert.equal(
+          await heartbeat,
+          false,
+          'heartbeat must re-read and lock the grant after the revoke commit',
+        );
+        assert.equal((await authorizations.get(authorization.id))?.status, 'revoked');
+        const lifecycle = (await authorizations.getAudit(authorization.id)).map(
+          (event) => event.eventType,
+        );
+        assert.deepEqual(lifecycle, [
+          'authorization.requested',
+          'authorization.approved',
+          'authorization.consumed',
+          'operation.started',
+          'authorization.revoked',
+        ]);
+      } finally {
+        await blocker
+          .query('SELECT pg_advisory_unlock($1::bigint)', [gateKey])
+          .catch(() => undefined);
+        await adminPool!.query(
+          'DROP TRIGGER IF EXISTS g4_heartbeat_revoke_gate ON omnis.authorization_audit; DROP FUNCTION IF EXISTS omnis.g4_heartbeat_revoke_gate()',
+        );
+        blocker.release();
+        await Promise.all([heartbeatPool.end(), revokerPool.end()]);
+      }
     });
 
     it('restricts the authorizer database role to authorization records and audit writes', async () => {
