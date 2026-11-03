@@ -74,19 +74,80 @@ The module spec writes the lifecycle as `draft -> available -> busy|offline|paus
 - **Profile lifecycle**: an owner-controlled property of the profile record (`draft`, `available`, `archived`).
 - **Observed operational state** (`busy`, `offline`, `paused`): derived from run and runtime-connection state. The module spec requires it to be derived, "not hand-edited fictional 'working'".
 
-**V1 reads expose lifecycle only.** Observed state is out of scope and **must not** be returned in, or inferred into, `lifecycle`. The word `available` here means "published profile that can be referenced", **not** "online" or "reachable". See D-2 for the naming risk.
+**V1 reads expose lifecycle only.** Observed state is out of scope and **must not** be returned in, or inferred into, `lifecycle`. The word `available` here means "published profile that can be referenced", **not** "online" or "reachable". The frontend therefore displays this value as "Published" (a display label only, consistent with the module spec's "publishes immutable version N"; no new lifecycle state is introduced). See D-2 for the naming risk.
 
-### 2.5 Page metadata (`AgentPage`)
+### 2.5 Collection metadata (`AgentPage`) and pagination invariants
+
+Applies to the two collection endpoints: `GET /agents` (3.1) and `GET /agents/:agentId/versions` (3.3).
+
+**Terms.** The *logical result set* is every item the collection contains for this request. A *traversal* is the sequence of responses that retrieves it: the first request carries no `cursor`; each continuation carries the `nextCursor` of the previous response. A *page* is one response's items. A response may be the only page.
+
+**Optional request parameters:** `cursor` (opaque; omitted on the first request) and `limit` (the server defines the default and maximum, and may return fewer items than requested; the frontend assumes no page size).
 
 ```json
-{ "total": 0, "complete": true, "nextCursor": null }
+{ "total": 5, "complete": false, "nextCursor": "cur_A" }
 ```
+
+**All three fields describe the logical result set, never the number of items in one page.**
 
 | Field | Meaning |
 |---|---|
-| `total` | Number of records in the full result set, independent of this response. |
-| `complete` | `true` only if the response contains **every** record of the result set. |
-| `nextCursor` | Opaque cursor for the next page, or `null` when none. |
+| `total` | Number of items in the **entire** logical result set (all pages together). An integer >= 0. |
+| `complete` | `true` if and only if **no items remain after this response** in the traversal. It does **not** mean this response's items are the whole set; on the final page of a multi-page traversal it is `true` while the page holds only part of the set. |
+| `nextCursor` | Opaque non-empty string if more items remain; `null` otherwise. |
+
+**Invariants.** The backend must satisfy them; the frontend verifies them on every response (a violation is an "unexpected response", never a partial or optimistic render). "Accumulated" means the number of unique items received so far in this traversal, including the current page.
+
+| ID | Invariant |
+|---|---|
+| PG-1 | Types: `total` is an integer >= 0, `complete` is boolean, `nextCursor` is a non-empty string or `null`. |
+| PG-2 | Agreement: `complete === (nextCursor === null)`. |
+| PG-3 | A first response (no `cursor` sent) with `complete: true` is the whole set: its item count equals `total`. |
+| PG-4 | If `complete` is `false`: `nextCursor` is usable, the page holds at least one item (so every page makes progress), accumulated < `total`, and `nextCursor` differs from the cursor that was just sent. |
+| PG-5 | If `complete` is `true`: accumulated equals `total` exactly. |
+| PG-6 | Empty set: `total: 0` implies zero items, `complete: true`, `nextCursor: null`, in a single response. |
+| PG-7 | Identity and order: item identity (agent `id`; version `versionNo`) is unique across the whole traversal (no duplicates). Order is one stable total order across pages. For versions: `versionNo` strictly descending within and across pages. |
+| PG-8 | No skipped items: a continuation resumes immediately after the last item of the previous page in the same order (keyset continuation, not offset). Every item that exists for the whole traversal appears exactly once. Items created during a traversal may be absent from it. |
+| PG-9 | Stable total: `total` is identical on every response of one traversal. If the backend cannot hold the set stable (for example a version is published mid-traversal), a changed `total` is how that is reported, and the frontend treats it as "changed while loading". |
+| PG-10 | Cursors are opaque: the frontend never constructs, parses, or alters one, and sends it back unchanged (URL-encoded). A cursor is valid only for the same collection and order. A malformed, expired, or foreign cursor is rejected with `422` and the standard error envelope (the existing documented validation status; no new error code). |
+
+**What the frontend may claim.** It treats a collection as *logically complete* only when every response satisfied PG-1 to PG-10, the traversal ended with `complete: true`, and accumulated equals `total`. Until then it never presents the items as the whole set and always shows how many of `total` it holds. A failed, loading, or invalid response is never rendered as an empty collection: the empty state requires a validated response with `total: 0` (PG-6).
+
+**Frontend reaction to a violation.** Stop the traversal and discard the offending page. For a single-response collection (the V1 directory) render no items. For a multi-page collection (version history) keep earlier verified pages visible, clearly labeled "Showing N of M" with an error and a Reload action. Never display a violation as complete or as empty.
+
+#### Worked example: version history with 5 versions, three pages
+
+```text
+1. GET /api/v1/agents/agt_1/versions
+   -> versions: [5, 4]   page: { total: 5, complete: false, nextCursor: "cur_A" }
+      accumulated 2 < 5, cursor present                      (PG-4 holds)   UI: "Showing 2 of 5 versions" + Load more
+2. GET /api/v1/agents/agt_1/versions?cursor=cur_A
+   -> versions: [3, 2]   page: { total: 5, complete: false, nextCursor: "cur_B" }
+      accumulated 4 < 5, strictly descending, no duplicates   (PG-4, PG-7)  UI: "Showing 4 of 5 versions"
+3. GET /api/v1/agents/agt_1/versions?cursor=cur_B
+   -> versions: [1]      page: { total: 5, complete: true,  nextCursor: null }
+      accumulated 5 == total, cursor null                     (PG-2, PG-5)  UI: "5 versions", Load more removed
+```
+
+The final page reports `complete: true` while holding one of five items: `complete` and `total` describe the logical set, and the frontend verifies completeness by reconciling the accumulated count (1 + 2 + 2 = 5).
+
+Single-response example (the V1 directory, 3 agents): `{ "agents": [A, B, C], "page": { "total": 3, "complete": true, "nextCursor": null } }`. Empty directory: `{ "agents": [], "page": { "total": 0, "complete": true, "nextCursor": null } }`.
+
+#### Contradictory or invalid metadata
+
+| Case | Violates | Frontend result |
+|---|---|---|
+| First response, 2 items, `total: 5`, `complete: true`, `nextCursor: null` | PG-3, PG-5 | Unexpected-response error; no list |
+| `complete: false` with `nextCursor: null`, or `complete: true` with a cursor | PG-2 | Unexpected-response error |
+| `complete: false`, empty items, cursor present | PG-4 | Stop; unexpected-response error |
+| Continuation returns the cursor it was just given | PG-4 | Stop; unexpected-response error |
+| Page 2 repeats `versionNo` 4 | PG-7 | Stop; keep verified pages labeled "Showing N of M"; Reload |
+| Page 2 is `[2, 3]` (ascending) | PG-7 | Same as above |
+| Pages `[5, 4]` then `[2, 1]`, final `complete: true`, `total: 5` (3 skipped; 4 accumulated) | PG-5 | Same as above; never labeled complete |
+| `total` is 5 on page 1 and 6 on page 2 | PG-9 | "History changed while loading" with Reload; never labeled complete |
+| `total: 0` with non-empty items, or `total: 3` with `complete: true` and no items | PG-6, PG-5 | Unexpected-response error; not the empty state |
+| Continuation answered with `422` (invalid or expired cursor) | PG-10 | Stop; keep verified pages labeled partial; Reload |
+| Network error, `429`, or `5xx` on any request | n/a | Error with Retry (same request) or Reload; never complete, never empty |
 
 ## 3. Endpoints
 
@@ -96,13 +157,13 @@ The module spec writes the lifecycle as `draft -> available -> busy|offline|paus
 - **Response:** `{ "agents": AgentSummary[], "page": AgentPage }`.
 - **Includes archived agents.** The frontend hides them by default and offers a "Show archived" toggle. (Alternatively the backend may offer `?includeArchived`; D-4.)
 - **Completeness rule (normative):**
-  1. The frontend filters and searches client-side **only** when `page.complete === true`.
+  1. The frontend filters and searches client-side **only** when the directory is logically complete in the sense of section 2.5: the first response satisfies PG-1 to PG-7 with `complete: true` and its item count equals `total`.
   2. If the backend cannot guarantee a complete bounded result, it must provide cursor pagination (`cursor`, `limit`, `nextCursor`) **and** backend filtering (`q`, `departmentId`, archived inclusion), and this document and the frontend spec must be amended before implementation.
-  3. V1 of the frontend implements only case 1. If a response arrives with `complete: false`, the UI shows an explicit "directory is incomplete" error state. It **never** presents a filtered or paged subset as the complete directory, and never disables the warning.
+  3. V1 of the frontend implements only case 1 and fetches a single response. A response with `complete: false` (a continuation exists) is an explicit **incomplete-directory** error state; contradictory metadata is an **unexpected-response** error state. In neither case is a filtered or paged subset presented as the complete directory, and the warning is never suppressed.
   4. The size bound, if any, is a **backend decision** to be justified with evidence (for example the expected size of a single-owner workforce). The frontend does not specify a scale requirement.
 - **Ordering:** unspecified; the frontend sorts by `name` then `id` for determinism.
 - **Errors:** see section 4.
-- **Frontend implication:** one request on entering the directory; all search and filtering is local; a `complete: false` response is a hard, visible failure rather than a silent truncation.
+- **Frontend implication:** one request on entering the directory; all search and filtering is local; an incomplete or contradictory response is a hard, visible failure rather than a silent truncation, and a failed request is never shown as an empty directory (PG-6).
 
 ### 3.2 `GET /api/v1/agents/:agentId` - **required**
 
@@ -117,7 +178,7 @@ The module spec writes the lifecycle as `draft -> available -> busy|offline|paus
 - **Response:** `{ "agent": AgentSummary, "versions": AgentProfileVersionSummary[], "page": AgentPage }`.
 - **`AgentProfileVersionSummary`:** `versionId`, `versionNo`, `profession`, `seniority`, `createdAt`, `createdBy`, `isCurrent` (server-computed; the frontend never infers "current" from the highest number).
 - **Ordering:** `versionNo` descending.
-- **Pagination:** cursor pagination (`cursor`, `limit`) is acceptable here, because the history needs no client-side filtering and the frontend renders only "Load more" driven by `nextCursor`. `page.complete` and `total` must still be truthful so the UI can say "Showing N of M versions".
+- **Pagination:** cursor pagination (`cursor`, `limit`) is acceptable here, because the history needs no client-side filtering and the frontend renders only "Load more" driven by `nextCursor`. The metadata contract and invariants of section 2.5 (PG-1 to PG-10) apply in full; the frontend loads one page at a time and reconciles the accumulated count against `total` before claiming the history is complete.
 - **These are summaries by design.** Snapshot bodies (`personality`, `behavior`, `instructions`) are not repeated per list item.
 
 ### 3.4 `GET /api/v1/agents/:agentId/versions/:version` - **required for V1** (the brief lists it as optional)
@@ -127,6 +188,7 @@ The module spec writes the lifecycle as `draft -> available -> busy|offline|paus
 - **Path parameter:** `:version` is the per-agent integer `versionNo` (a positive base-10 integer).
 - **Response:** `{ "agent": AgentSummary, "version": AgentProfileVersion, "isCurrent": boolean }`.
 - **Guarantees:** `version.agentId === agent.id === :agentId` and `version.versionNo === :version`. The frontend treats any mismatch as an invalid response and shows an error, never a fallback.
+- **Not-found behavior (generic by design):** an unknown agent and an unknown version of a known agent both produce the same standard `404` envelope. The backend is **not** required to distinguish them, and the frontend **must not** try to: it branches on the HTTP status only, never on the error `code` or `message` text, and shows one generic "not found" state for this route. This follows the hidden-resource rule already documented in [API Contract](API_CONTRACT.md) and avoids revealing whether an agent exists. No new error codes are requested.
 - **If the backend instead returns full snapshots from 3.3:** this endpoint could be dropped, but the list would carry large text fields for every version and the pagination bound would then need to account for payload size. Summaries plus a snapshot endpoint is the recommended design.
 
 ### 3.5 `GET /api/v1/departments` - **optional, not required for V1**
@@ -144,8 +206,8 @@ The frontend maps each case as follows. Codes below are requested behavior, not 
 | 200 | Success | Body matches the schema | Render; any schema or invariant violation is an "unexpected response" error, never a partial render |
 | 401 | No owner session | Standard envelope | Existing session-expiry flow (clear owner UI, show sign-in). No agent data remains on screen. |
 | 403 | Authenticated but not permitted | Standard envelope; **must not** end the session | "You don't have access to this" state; the session stays valid and other routes keep working |
-| 404 | Unknown agent or version | Standard envelope; hidden-resource rule applies | "Agent not found" / "Version not found" state with recovery link |
-| 422 | Syntactically invalid path parameter | Standard envelope | Treated as an invalid link (the frontend already validates grammar and should not normally send such a request) |
+| 404 | Resource not found. On `/agents/:id` the agent; on `/agents/:id/versions/:version` the agent **or** the version, deliberately indistinguishable | Standard envelope; hidden-resource rule applies; one generic response for every not-found cause | Profile route: "Agent not found". Version route: a **generic** resource-not-found state that does not name or infer the missing resource (frontend spec 5.3) |
+| 422 | Syntactically invalid path parameter, or an invalid/expired/foreign `cursor` (PG-10) | Standard envelope | Path parameter: treated as an invalid link (the frontend validates grammar first and should not normally send such a request). Cursor: stop the traversal, keep verified pages labeled partial, offer Reload |
 | 429 | Rate/limit | Standard envelope | Non-looping error with manual Retry |
 | 5xx / network | Service unavailable | Standard envelope where possible | Error state with Retry; no stale data presented as current |
 
@@ -153,7 +215,8 @@ The frontend sends no `POST`, `PATCH`, or `DELETE` for this feature and uses no 
 
 ## 5. Data completeness guarantees requested
 
-1. `GET /agents` is complete (`page.complete === true`) or the contract is amended (section 3.1).
+1. `GET /agents` is logically complete in a single response (section 2.5: `complete: true`, item count equals `total`) or the contract is amended (section 3.1).
+   Collection metadata obeys PG-1 to PG-10 in every response of both collection endpoints.
 2. A snapshot for `(agentId, versionNo)` never changes after publication.
 3. `isCurrent` and `currentVersion` are computed by the server and mutually consistent in every response.
 4. Embedded `agent` objects are consistent within a single response (one read, one consistent view).
@@ -179,8 +242,8 @@ Create/edit/archive/delete, draft-editing routes, runtime connections or binding
 | ID | Decision |
 |---|---|
 | D-1 | `API_CONTRACT.md` examples use `snake_case`; implemented contracts use `camelCase`. Confirm `camelCase` for the agent slice, and decide whether to correct the examples in `API_CONTRACT.md` separately. |
-| D-2 | `available` in the lifecycle reads like observed availability. Consider a name such as `published`, or keep it with the explicit UI wording in the frontend spec. Also confirm how `DATA_MODEL.md`'s single `agents.status` column maps to lifecycle versus derived operational state. |
+| D-2 | `available` in the lifecycle reads like observed availability. The frontend already shows it as "Published"; the backend may keep `available` or rename it (for example `published`), and only the frontend label map changes. Also confirm how `DATA_MODEL.md`'s single `agents.status` column maps to lifecycle versus derived operational state. |
 | D-3 | Whether `instructions` is returned in V1 reads. The frontend can render a snapshot without it, but then a historical view is not a complete snapshot of the configuration. |
 | D-4 | Whether archived agents are included by default or by `?includeArchived`. Either satisfies the frontend as long as the toggle's behavior is truthful. |
-| D-5 | The size bound (or pagination plan) for `GET /agents`, with justification. |
+| D-5 | The size bound (or pagination plan) for `GET /agents`, with justification; and, for `GET /agents/:id/versions`, whether the backend holds `total` stable during a traversal (PG-9) or reports changes by changing `total`. |
 | D-6 | How agents first come to exist before create/edit is implemented. The frontend will not seed or fabricate them; an empty directory is the correct, honest result until a backend path exists. |
