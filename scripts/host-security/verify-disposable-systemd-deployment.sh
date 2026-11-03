@@ -34,6 +34,7 @@ if [[ ! -d /opt || -L /opt || "$(stat -c '%U' /opt)" != root ]]; then
   exit 1
 fi
 original_opt_mode="$(stat -c '%a' /opt)"
+created_node_runtime=0
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 unit_dir=/etc/systemd/system
@@ -64,12 +65,34 @@ cleanup() {
     fi
   done
   chmod "$original_opt_mode" /opt || cleanup_failed=1
+  if (( created_node_runtime != 0 )); then
+    rm -f /usr/bin/node || cleanup_failed=1
+  fi
   if (( cleanup_failed != 0 )); then
     echo "Disposable systemd cleanup could not remove every created service resource." >&2
     exit 1
   fi
 }
 trap cleanup EXIT
+
+# GitHub's setup-node installs Node under the runner tool cache, while the
+# reviewed production units intentionally use the standard OS runtime path.
+# On this explicitly disposable runner only, provide that standard path when
+# it is absent. Never replace an existing host Node installation.
+if [[ ! -e /usr/bin/node && ! -L /usr/bin/node ]]; then
+  node_source="$(command -v node || true)"
+  if [[ -z "$node_source" || "$(node --version)" != v24.* ]]; then
+    echo "The disposable runner requires the repository's supported Node 24 runtime." >&2
+    exit 1
+  fi
+  node_source="$(realpath -e "$node_source")"
+  install -o root -g root -m 0755 "$node_source" /usr/bin/node
+  created_node_runtime=1
+fi
+if [[ ! -x /usr/bin/node || "$(/usr/bin/node --version)" != v24.* || "$(stat -c '%U' "$(realpath -e /usr/bin/node)")" != root ]]; then
+  echo "The disposable systemd probe requires a root-owned Node 24 executable at /usr/bin/node; existing host runtime was left untouched." >&2
+  exit 1
+fi
 
 # Hosted runners may ship /opt as root-owned but group-writable. Narrow only
 # this disposable CI parent for the duration of the probe; restore its mode on
