@@ -14,7 +14,7 @@ import {
   type Task,
 } from '@omnis/contracts';
 import { evaluateAllowedUse } from '@omnis/policy';
-import type { PostgresAuthorizationStore } from '@omnis/db';
+import type { RuntimeAuthorizationReader } from '@omnis/db';
 import type { RuntimeAdapter } from '@omnis/runtime-adapters';
 import { SandboxError } from './docker-sandbox.ts';
 
@@ -60,7 +60,7 @@ export class RunCoordinator {
   private readonly workerId = randomUUID();
   private readonly active = new Map<string, ActiveExecution>();
   private readonly runtime: RuntimeAdapter;
-  private readonly authorizations: PostgresAuthorizationStore;
+  private readonly authorizations: RuntimeAuthorizationReader;
   private shuttingDown = false;
   private readonly store: PostgresRunStore;
   private readonly heartbeatIntervalMs: number;
@@ -76,7 +76,7 @@ export class RunCoordinator {
     store: PostgresRunStore,
     queue: RunCoordinator['queue'],
     runtime: RuntimeAdapter,
-    authorizations: PostgresAuthorizationStore,
+    authorizations: RuntimeAuthorizationReader,
     heartbeatIntervalMs = leaseHeartbeatMs,
   ) {
     this.store = store;
@@ -100,7 +100,6 @@ export class RunCoordinator {
     taskId: string,
     idempotencyKey: string,
     authorizationId: string,
-    actorId: 'owner',
   ): Promise<{ run: Run; created: boolean }> {
     const authorization = await this.authorizations.get(authorizationId);
     if (
@@ -112,12 +111,11 @@ export class RunCoordinator {
       authorization.scope.taskId !== taskId ||
       !authorization.capabilities.includes('mock.execute') ||
       authorization.expiresAt <= new Date().toISOString() ||
-      authorization.requestingActor !== actorId
+      authorization.requestingActor !== 'owner'
     ) {
       await this.authorizations.recordEnforcementDenied(
         authorizationId,
         taskId,
-        actorId,
         authorization ? 'scope_status_or_expiry_mismatch' : 'authorization_missing',
       );
       throw new CoordinatorError(
@@ -138,7 +136,7 @@ export class RunCoordinator {
     let result: Awaited<ReturnType<PostgresRunStore['admitRun']>>;
     try {
       result = await translateStoreError(() =>
-        this.store.admitRun(taskId, idempotencyKey, authorizationId, actorId, (db, data) =>
+        this.store.admitRun(taskId, idempotencyKey, authorizationId, (db, data) =>
           this.queue.send(queueName, data, {
             retryLimit: 0,
             retryDelay: 0,
@@ -153,7 +151,6 @@ export class RunCoordinator {
         await this.authorizations.recordEnforcementDenied(
           authorizationId,
           taskId,
-          actorId,
           'admission_authorization_race',
         );
       }

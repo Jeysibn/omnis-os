@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import { after, beforeEach, describe, it } from 'node:test';
+import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { Pool } from 'pg';
 import {
@@ -49,7 +52,7 @@ const postgresSuite = describe(
         })();
         authorizationByIdempotency.set(cacheKey, authorizationId);
       }
-      return store.admitRun(taskId, idempotencyKey, await authorizationId, 'owner', enqueue);
+      return store.admitRun(taskId, idempotencyKey, await authorizationId, enqueue);
     }
 
     beforeEach(async () => {
@@ -107,6 +110,10 @@ const postgresSuite = describe(
       assert.equal(identity.rows[0]?.current_user, 'omnis_runtime');
       assert.equal(identity.rows[0]?.rolsuper, false);
       assert.equal(identity.rows[0]?.rolcreatedb, false);
+      await assert.rejects(
+        pool!.query('SET ROLE omnis_authorizer'),
+        /permission denied|cannot set role/,
+      );
       await assert.rejects(
         pool!.query('CREATE TABLE omnis.runtime_ddl_probe (id integer)'),
         /permission denied/,
@@ -194,6 +201,146 @@ const postgresSuite = describe(
           `ALTER ROLE omnis_runtime IN DATABASE ${quotedDatabase} RESET lock_timeout`,
         );
       }
+    });
+
+    it('detects runtime-persisted timeout changes and repairs them during privileged provisioning', async () => {
+      await pool!.query("SET lock_timeout = '0'");
+      assert.equal(
+        (await pool!.query<{ value: string }>("SELECT current_setting('lock_timeout') AS value"))
+          .rows[0]?.value,
+        '0',
+      );
+      await pool!.query('RESET lock_timeout');
+
+      await pool!.query("ALTER ROLE omnis_runtime SET lock_timeout = '0'");
+      const tampered = await adminPool!.query<{ role_security: unknown }>(restoreRoleSecurityQuery);
+      assert.throws(
+        () => assertRestoreRoleSecurity(tampered.rows[0]?.role_security),
+        /omnis_runtime timeout policy/,
+      );
+
+      await provisionDatabaseRoles(adminPool!, {
+        migration: decodeURIComponent(new URL(migrationUrl!).password),
+        runtime: decodeURIComponent(new URL(databaseUrl!).password),
+        authorizer: decodeURIComponent(new URL(authorizerUrl!).password),
+      });
+      const storedSetting = await adminPool!.query(
+        `SELECT 1 FROM pg_db_role_setting settings
+          JOIN pg_roles roles ON roles.oid = settings.setrole
+          CROSS JOIN LATERAL unnest(settings.setconfig) AS entry(setting)
+         WHERE roles.rolname='omnis_runtime'
+           AND settings.setdatabase=0
+           AND split_part(setting, '=', 1)='lock_timeout'`,
+      );
+      assert.equal(storedSetting.rowCount, 1, 'the provisioned timeout remains unchanged');
+      const repaired = await adminPool!.query<{ role_security: unknown }>(restoreRoleSecurityQuery);
+      assertRestoreRoleSecurity(repaired.rows[0]?.role_security);
+    });
+
+    it('detects cluster-visible database timeout overrides in the role integrity audit', async () => {
+      const currentDatabase = (
+        await adminPool!.query<{ name: string }>('SELECT current_database() AS name')
+      ).rows[0]!.name;
+      const quotedDatabase = `"${currentDatabase.replaceAll('"', '""')}"`;
+      try {
+        await adminPool!.query(`ALTER DATABASE ${quotedDatabase} SET statement_timeout TO '0'`);
+        const snapshot = await adminPool!.query<{ role_security: unknown }>(
+          restoreRoleSecurityQuery,
+        );
+        assert.throws(
+          () => assertRestoreRoleSecurity(snapshot.rows[0]?.role_security),
+          /database timeout overrides/,
+        );
+        await assert.rejects(
+          provisionDatabaseRoles(adminPool!, {
+            migration: decodeURIComponent(new URL(migrationUrl!).password),
+            runtime: decodeURIComponent(new URL(databaseUrl!).password),
+            authorizer: decodeURIComponent(new URL(authorizerUrl!).password),
+          }),
+          /Database-specific PostgreSQL timeout settings are not permitted/,
+        );
+      } finally {
+        await adminPool!.query(`ALTER DATABASE ${quotedDatabase} RESET statement_timeout`);
+      }
+    });
+
+    it('verifies role timeout precedence over cluster defaults on fresh connections', async () => {
+      const runtimeFreshPool = createPool({
+        connectionString: databaseUrl!,
+        max: 1,
+        application_name: 'omnis-cluster-timeout-precedence',
+      });
+      try {
+        await adminPool!.query("ALTER SYSTEM SET statement_timeout = '45s'");
+        await adminPool!.query('SELECT pg_reload_conf()');
+        const runtime = await runtimeFreshPool.query<{
+          statement: string;
+          source: string;
+        }>(
+          "SELECT current_setting('statement_timeout') AS statement, (SELECT source FROM pg_settings WHERE name='statement_timeout') AS source",
+        );
+        assert.equal(runtime.rows[0]?.statement, '20s');
+        assert.equal(runtime.rows[0]?.source, 'user');
+      } finally {
+        await adminPool!.query('ALTER SYSTEM RESET statement_timeout');
+        await adminPool!.query('SELECT pg_reload_conf()');
+        await runtimeFreshPool.end();
+      }
+    });
+
+    it('survives PostgreSQL terminating an idle transaction in a separate Node process', async () => {
+      const moduleUrl = new URL('./database.ts', import.meta.url).href;
+      const childScript = `
+        import { createPool, inTransaction } from ${JSON.stringify(moduleUrl)};
+        const pool = createPool({ connectionString: process.env.OMNIS_TEST_DATABASE_URL, max: 1 });
+        try {
+          await inTransaction(pool, async (client) => {
+            await client.query("SET LOCAL idle_in_transaction_session_timeout = '250ms'");
+            await client.query('SELECT 1');
+            await new Promise((resolve) => setTimeout(resolve, 500));
+            await client.query('SELECT 2');
+          });
+          console.log(JSON.stringify({ result: 'unexpected_success' }));
+          process.exitCode = 2;
+        } catch (error) {
+          const queryAfterDisconnect = await pool.query('SELECT 1 AS recovered');
+          console.log(JSON.stringify({
+            result: 'transaction_rejected',
+            recovered: queryAfterDisconnect.rows[0]?.recovered === 1,
+            errorCode: typeof error === 'object' && error !== null && 'code' in error ? error.code : null,
+            errorMessage: error instanceof Error ? error.message : String(error)
+          }));
+        } finally {
+          await pool.end();
+        }
+      `;
+      const child = spawn(
+        process.execPath,
+        ['--experimental-strip-types', '--input-type=module', '-e', childScript],
+        {
+          env: { ...process.env, OMNIS_TEST_DATABASE_URL: databaseUrl! },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        },
+      );
+      let stdout = '';
+      let stderr = '';
+      child.stdout.setEncoding('utf8').on('data', (chunk: string) => (stdout += chunk));
+      child.stderr.setEncoding('utf8').on('data', (chunk: string) => (stderr += chunk));
+      const [code, signal] = await once(child, 'exit');
+      assert.equal(code, 0, `isolated DB client process exited unexpectedly: ${stderr}`);
+      assert.equal(signal, null);
+      const outcome = JSON.parse(stdout.trim()) as {
+        result: string;
+        recovered: boolean;
+        errorCode: string | null;
+        errorMessage: string;
+      };
+      assert.equal(outcome.result, 'transaction_rejected');
+      assert.equal(outcome.recovered, true);
+      assert.ok(
+        outcome.errorCode || /connection|terminat|not queryable/i.test(outcome.errorMessage),
+        `the failed transaction error must remain observable: ${outcome.errorMessage}`,
+      );
     });
 
     it('recycles a backend killed by idle transaction timeout and leaves idle pooled sessions alone', async () => {
@@ -315,13 +462,7 @@ const postgresSuite = describe(
         detail: 'An authorization cannot cross task boundaries.',
       });
       await assert.rejects(
-        store.admitRun(
-          otherTask.id,
-          key('cross-scope-auth'),
-          pending.id,
-          'owner',
-          async () => 'job',
-        ),
+        store.admitRun(otherTask.id, key('cross-scope-auth'), pending.id, async () => 'job'),
         /active task-scoped authorization is required/,
       );
 
@@ -346,6 +487,37 @@ const postgresSuite = describe(
         (await restartedAuthorizer.getAudit(runAuthorization!.id)).some(
           (event) => event.eventType === 'authorization.revoked',
         ),
+      );
+    });
+
+    it('makes repeated authorizer request IDs idempotent and scope-bound', async () => {
+      const task = await store.createTask({
+        title: 'Authorizer request idempotency',
+        detail: 'A replayed internal control request must return the original grant.',
+      });
+      const requestId = randomUUID();
+      const first = await authorizations.request(task.id, 'owner', requestId);
+      const replay = await authorizations.request(task.id, 'owner', requestId);
+      assert.equal(replay.id, first.id);
+      assert.equal(replay.correlationId, requestId);
+      assert.equal(
+        (
+          await authorizerPool!.query(
+            `SELECT 1 FROM omnis.authorization_audit
+              WHERE authorization_id=$1 AND event_type='authorization.requested'`,
+            [first.id],
+          )
+        ).rowCount,
+        1,
+      );
+
+      const otherTask = await store.createTask({
+        title: 'Other request scope',
+        detail: 'An idempotency key cannot be rebound to a different task.',
+      });
+      await assert.rejects(
+        authorizations.request(otherTask.id, 'owner', requestId),
+        /idempotency key belongs to a different task/,
       );
     });
 
@@ -486,14 +658,18 @@ const postgresSuite = describe(
         task.id,
         key('audit-generated-consume'),
         grant.id,
-        'owner',
         async () => 'job',
       );
+      const consumedAudit = (await authorizations.getAudit(grant.id)).find(
+        (event) => event.eventType === 'authorization.consumed',
+      );
+      assert.equal(consumedAudit?.actorId, 'service:omnis-runtime');
+      assert.equal(consumedAudit?.effectiveIdentity, 'service:omnis-runtime');
       const started = await store.beginExecution(admitted.run.id, 'audit-worker', 30);
       assert.equal(started.started, true);
       await store.completeRun(admitted.run.id, 'audit-worker', started.generation, 'synthetic');
       await assert.rejects(
-        store.admitRun(task.id, key('audit-consume-twice'), grant.id, 'owner', async () => 'job'),
+        store.admitRun(task.id, key('audit-consume-twice'), grant.id, async () => 'job'),
         /active task-scoped authorization is required/,
       );
       assert.equal(
@@ -595,7 +771,6 @@ const postgresSuite = describe(
             consumeTask.id,
             key('mandatory-consume-audit'),
             consumeGrant.id,
-            'owner',
             async () => 'job',
           ),
           /controlled audit failure/,
@@ -625,7 +800,6 @@ const postgresSuite = describe(
           failureTask.id,
           key('mandatory-failure-audit'),
           failureGrant.id,
-          'owner',
           async () => 'job',
         );
         const failureClaim = await store.beginExecution(
@@ -750,8 +924,8 @@ const postgresSuite = describe(
       try {
         await holder.query('BEGIN');
         const locked = await holder.query<{ allowed: boolean }>(
-          'SELECT omnis.lock_run_authorization_for_admission($1, $2, $3) AS allowed',
-          [grant.id, task.id, 'owner'],
+          'SELECT omnis.lock_run_authorization_for_admission($1, $2) AS allowed',
+          [grant.id, task.id],
         );
         assert.equal(locked.rows[0]?.allowed, true);
         pending = revoker.revoke(grant.id, 'owner');
@@ -799,7 +973,6 @@ const postgresSuite = describe(
         task.id,
         key('consumed-revoke-lock'),
         grant.id,
-        'owner',
         async () => 'job',
       );
       const holder = await pool!.connect();
@@ -999,11 +1172,11 @@ const postgresSuite = describe(
       }>(`
         SELECT has_function_privilege(
                  'omnis_runtime',
-                 'omnis.lock_run_authorization_for_admission(text,text,text)', 'EXECUTE'
+                 'omnis.lock_run_authorization_for_admission(text,text)', 'EXECUTE'
                ) AS runtime_execute,
                has_function_privilege(
                  'omnis_authorizer',
-                 'omnis.lock_run_authorization_for_admission(text,text,text)', 'EXECUTE'
+                 'omnis.lock_run_authorization_for_admission(text,text)', 'EXECUTE'
                ) AS authorizer_execute,
                EXISTS (
                  SELECT 1 FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) x
@@ -1013,7 +1186,7 @@ const postgresSuite = describe(
                has_table_privilege('omnis_runtime', 'omnis.legacy_unscoped_runs', 'INSERT') AS runtime_insert,
                r.rolname AS routine_owner, p.proconfig AS routine_search_path
           FROM pg_proc p JOIN pg_roles r ON r.oid=p.proowner
-         WHERE p.oid='omnis.lock_run_authorization_for_admission(text,text,text)'::regprocedure
+         WHERE p.oid='omnis.lock_run_authorization_for_admission(text,text)'::regprocedure
       `);
       assert.deepEqual(result.rows[0], {
         runtime_execute: true,
@@ -1052,7 +1225,6 @@ const postgresSuite = describe(
             task.id,
             key(`admit-wins-${iteration}`),
             grant.id,
-            'owner',
             async () => {
               enteredQueue.resolve();
               await releaseAdmission.promise;
@@ -1127,7 +1299,7 @@ const postgresSuite = describe(
           await waitForLockWait(adminPool!, 'omnis-g4-revocation-wins-revoker');
           const admissionKey = key(`revoke-wins-${iteration}`);
           const admission = admissionStore
-            .admitRun(task.id, admissionKey, grant.id, 'owner', async () => 'job')
+            .admitRun(task.id, admissionKey, grant.id, async () => 'job')
             .then(
               (value) => ({ value }),
               (error: unknown) => ({ error }),
@@ -1199,7 +1371,7 @@ const postgresSuite = describe(
         await holder.query('SELECT pg_advisory_lock($1::bigint)', [lockKey]);
         const startedAt = Date.now();
         await assert.rejects(
-          store.admitRun(task.id, key('admission-key-held'), grant.id, 'owner', async () => 'job'),
+          store.admitRun(task.id, key('admission-key-held'), grant.id, async () => 'job'),
           (error: unknown) =>
             typeof error === 'object' &&
             error !== null &&
@@ -1229,7 +1401,6 @@ const postgresSuite = describe(
           task.id,
           key('admission-key-held'),
           grant.id,
-          'owner',
           async () => 'job',
         );
         assert.equal(admitted.created, true);
@@ -1257,7 +1428,7 @@ const postgresSuite = describe(
         await holder.query('SELECT pg_advisory_xact_lock($1::bigint)', ['70463909136524']);
         const startedAt = Date.now();
         await assert.rejects(
-          store.admitRun(task.id, key('admission-xact-held'), grant.id, 'owner', async () => 'job'),
+          store.admitRun(task.id, key('admission-xact-held'), grant.id, async () => 'job'),
           (error: unknown) =>
             typeof error === 'object' &&
             error !== null &&
@@ -1299,8 +1470,8 @@ const postgresSuite = describe(
             [runId, task.id, task.title],
           );
           const consumed = await consumer.query<{ allowed: boolean }>(
-            'SELECT omnis.consume_run_authorization($1,$2,$3,$4,$5) AS allowed',
-            [grant.id, task.id, 'owner', runId, grant.correlationId],
+            'SELECT omnis.consume_run_authorization($1,$2,$3,$4) AS allowed',
+            [grant.id, task.id, runId, grant.correlationId],
           );
           assert.equal(consumed.rows[0]?.allowed, true);
           const revoke = revoker.revoke(grant.id, 'owner');
@@ -1365,8 +1536,8 @@ const postgresSuite = describe(
           const revoke = revoker.revoke(grant.id, 'owner');
           await waitForLockWait(adminPool!, 'omnis-g4-direct-revoke-wins-revoker');
           const consume = consumer.query<{ allowed: boolean }>(
-            'SELECT omnis.consume_run_authorization($1,$2,$3,$4,$5) AS allowed',
-            [grant.id, task.id, 'owner', runId, grant.correlationId],
+            'SELECT omnis.consume_run_authorization($1,$2,$3,$4) AS allowed',
+            [grant.id, task.id, runId, grant.correlationId],
           );
           await waitForLockWait(adminPool!, 'omnis-g4-direct-revoke-wins-consumer');
           await blocker.query('SELECT pg_advisory_unlock($1)', [gateKey]);
@@ -1602,7 +1773,6 @@ const postgresSuite = describe(
           task.id,
           key(`heartbeat-${lockTarget}-timeout`),
           grant.id,
-          'owner',
           async () => 'job',
         );
         const claim = await store.beginExecution(admitted.run.id, 'timeout-worker', 30);

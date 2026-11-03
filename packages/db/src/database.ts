@@ -21,6 +21,11 @@ export function createPool(config: PoolConfig | string): Pool {
 
 export async function migrate(pool: Pool): Promise<void> {
   const client = await pool.connect();
+  let connectionError: Error | undefined;
+  const captureConnectionError = (error: Error) => {
+    connectionError = error;
+  };
+  client.on('error', captureConnectionError);
   try {
     await client.query('SELECT pg_advisory_lock($1::bigint)', [migrationLock]);
     await client.query('BEGIN');
@@ -89,7 +94,8 @@ export async function migrate(pool: Pool): Promise<void> {
     await client
       .query('SELECT pg_advisory_unlock($1::bigint)', [migrationLock])
       .catch(() => undefined);
-    client.release();
+    client.off('error', captureConnectionError);
+    client.release(connectionError);
   }
 }
 
@@ -98,16 +104,23 @@ export async function inTransaction<T>(
   action: (client: PoolClient) => Promise<T>,
 ): Promise<T> {
   const client = await pool.connect();
+  let connectionError: Error | undefined;
+  const captureConnectionError = (error: Error) => {
+    connectionError = error;
+  };
+  client.on('error', captureConnectionError);
   try {
     await client.query('BEGIN');
     const result = await action(client);
+    if (connectionError) throw connectionError;
     await client.query('COMMIT');
     return result;
   } catch (error) {
     await client.query('ROLLBACK').catch(() => undefined);
     throw error;
   } finally {
-    client.release();
+    client.off('error', captureConnectionError);
+    client.release(connectionError);
   }
 }
 

@@ -1,5 +1,6 @@
 import Fastify from 'fastify';
 import {
+  AuthorizationSchema,
   AuthorizationDecisionSchema,
   CreateAuthorizationSchema,
   CreateRunSchema,
@@ -13,13 +14,13 @@ import {
   verifyOrigin,
   verifyCsrf,
 } from './auth.ts';
+import { authorizerRequest, AuthorizerRequestError } from './authorizer-client.ts';
 import { env } from './env.ts';
 import { LocalSessionStore } from './session-store.ts';
 import { AuthThrottle } from './auth-throttle.ts';
 import {
   parseRun,
   parseRunList,
-  parseAuthorization,
   parseTask,
   parseTaskList,
   workerEventStream,
@@ -110,18 +111,26 @@ app.post(
   { preHandler: [requireOwner, requireMutationProtection] },
   async (request, reply) => {
     const parsed = CreateAuthorizationSchema.safeParse(request.body);
-    if (!parsed.success)
-      return reply
-        .code(400)
-        .send({ error: { code: 'invalid_input', message: 'Authorization request is invalid.' } });
-    const authorization = await workerRequest(
+    const idempotencyKey = request.headers['idempotency-key'];
+    if (
+      !parsed.success ||
+      typeof idempotencyKey !== 'string' ||
+      !/^[0-9a-f-]{36}$/i.test(idempotencyKey)
+    )
+      return reply.code(400).send({
+        error: {
+          code: 'invalid_input',
+          message: 'Authorization request and Idempotency-Key are required.',
+        },
+      });
+    const authorization = await authorizerRequest(
       '/internal/v1/authorizations',
       {
         method: 'POST',
-        headers: { 'x-omnis-trusted-actor': 'owner' },
+        headers: { 'idempotency-key': idempotencyKey },
         body: JSON.stringify(parsed.data),
       },
-      parseAuthorization,
+      parseAuthorizationResponse,
     );
     return reply.code(201).send(authorization);
   },
@@ -135,14 +144,13 @@ app.post<{ Params: { authorizationId: string } }>(
       return reply
         .code(400)
         .send({ error: { code: 'invalid_input', message: 'Authorization decision is invalid.' } });
-    const authorization = await workerRequest(
+    const authorization = await authorizerRequest(
       `/internal/v1/authorizations/${encodeURIComponent(request.params.authorizationId)}/decision`,
       {
         method: 'POST',
-        headers: { 'x-omnis-trusted-actor': 'owner' },
         body: JSON.stringify(parsed.data),
       },
-      parseAuthorization,
+      parseAuthorizationResponse,
     );
     return reply.send(authorization);
   },
@@ -155,10 +163,10 @@ app.post<{ Params: { authorizationId: string } }>(
       return reply
         .code(400)
         .send({ error: { code: 'invalid_input', message: 'Authorization ID is invalid.' } });
-    const authorization = await workerRequest(
+    const authorization = await authorizerRequest(
       `/internal/v1/authorizations/${encodeURIComponent(request.params.authorizationId)}/revoke`,
-      { method: 'POST', headers: { 'x-omnis-trusted-actor': 'owner' } },
-      parseAuthorization,
+      { method: 'POST' },
+      parseAuthorizationResponse,
     );
     return reply.send(authorization);
   },
@@ -217,7 +225,7 @@ app.post(
       '/internal/v1/runs',
       {
         method: 'POST',
-        headers: { 'idempotency-key': idempotencyKey, 'x-omnis-trusted-actor': 'owner' },
+        headers: { 'idempotency-key': idempotencyKey },
         body: JSON.stringify(parsed.data),
       },
       parseRun,
@@ -311,6 +319,7 @@ app.get<{ Params: { runId: string } }>(
 );
 
 app.setErrorHandler((error, request, reply) => {
+  if (error instanceof AuthorizerRequestError) return reply.code(error.statusCode).send(error.body);
   if (error instanceof WorkerRequestError) return reply.code(error.statusCode).send(error.body);
   app.log.error({ err: error, requestId: request.id }, 'API request failed');
   return reply.code(500).send({
@@ -324,3 +333,7 @@ app.setErrorHandler((error, request, reply) => {
 
 await app.listen({ host: env.host, port: env.port });
 app.log.info({ host: env.host, port: env.port }, 'Omnis OS API listening on loopback');
+
+function parseAuthorizationResponse(value: unknown) {
+  return AuthorizationSchema.parse(value);
+}

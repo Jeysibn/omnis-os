@@ -234,7 +234,10 @@ function App() {
         '/api/v1/tasks',
         {
           method: 'POST',
-          headers: { 'x-omnis-csrf': csrfToken },
+          headers: {
+            'x-omnis-csrf': csrfToken,
+            'idempotency-key': crypto.randomUUID(),
+          },
           body: JSON.stringify({ title, detail }),
         },
         (value) => TaskSchema.parse(value),

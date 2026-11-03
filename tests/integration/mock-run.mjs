@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
-import { createHash, randomBytes, scrypt as scryptCallback } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, scrypt as scryptCallback } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:net';
-import { mkdtemp, readdir, unlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -48,6 +48,7 @@ if (migration.error || migration.status !== 0) {
 const tempDirectory = await mkdtemp(join(tmpdir(), 'omnis-os-mock-smoke-'));
 const workerEnvPath = join(tempDirectory, 'worker.env');
 const apiEnvPath = join(tempDirectory, 'api.env');
+const authorizerEnvPath = join(tempDirectory, 'authorizer.env');
 const canaryName = `OMNIS_DUMMY_PROVIDER_SECRET_${randomBytes(12).toString('hex')}`;
 const canary = `OMNIS_SYNTHETIC_CANARY_${randomBytes(24).toString('hex')}`;
 const auditPool = createPool({
@@ -57,34 +58,72 @@ const auditPool = createPool({
 });
 const apiPort = await freePort();
 const workerPort = await freePort(new Set([apiPort]));
+const authorizerPort = await freePort(new Set([apiPort, workerPort]));
 const salt = randomBytes(16);
 const internalToken = randomBytes(48).toString('hex');
+const authorizerToken = randomBytes(48).toString('hex');
 const passwordHash = (await scrypt(password, salt, 64)).toString('hex');
 const sharedEnvLines = [
   `OMNIS_OWNER_PASSWORD_HASH=${salt.toString('hex')}:${passwordHash}`,
   `OMNIS_SESSION_SECRET=${randomBytes(48).toString('hex')}`,
   `OMNIS_INTERNAL_TOKEN=${internalToken}`,
+  `OMNIS_API_AUTHORIZER_TOKEN=${authorizerToken}`,
   `OMNIS_API_HOST=127.0.0.1`,
   `OMNIS_API_PORT=${apiPort}`,
   `OMNIS_WORKER_HOST=127.0.0.1`,
   `OMNIS_WORKER_PORT=${workerPort}`,
+  'OMNIS_AUTHORIZER_HOST=127.0.0.1',
+  `OMNIS_AUTHORIZER_PORT=${authorizerPort}`,
   `OMNIS_ALLOWED_ORIGIN=${origin}`,
   'OMNIS_SECURE_COOKIES=false',
 ];
-const authorizerPassword = decodeURIComponent(new URL(authorizerUrl).password);
 await writeFile(apiEnvPath, `${sharedEnvLines.join('\n')}\n`, { mode: 0o600 });
 await writeFile(
   workerEnvPath,
-  `${[...sharedEnvLines, `OMNIS_DATABASE_URL=${databaseUrl}`, `OMNIS_AUTHORIZER_DB_PASSWORD=${authorizerPassword}`].join('\n')}\n`,
+  `${[...sharedEnvLines.filter((line) => !line.startsWith('OMNIS_API_AUTHORIZER_TOKEN=')), `OMNIS_DATABASE_URL=${databaseUrl}`].join('\n')}\n`,
+  { mode: 0o600 },
+);
+await writeFile(
+  authorizerEnvPath,
+  [
+    `OMNIS_API_AUTHORIZER_TOKEN=${authorizerToken}`,
+    `OMNIS_AUTHORIZER_DATABASE_URL=${authorizerUrl}`,
+    'OMNIS_AUTHORIZER_HOST=127.0.0.1',
+    `OMNIS_AUTHORIZER_PORT=${authorizerPort}`,
+  ].join('\n') + '\n',
   { mode: 0o600 },
 );
 
 let worker = startWorker(workerEnvPath);
+let authorizer = startAuthorizer(authorizerEnvPath);
 let api = startApi(apiEnvPath);
 
 try {
   const baseUrl = `http://127.0.0.1:${apiPort}`;
-  await waitForHealth(baseUrl, `http://127.0.0.1:${workerPort}`, internalToken, worker, api);
+  await waitForHealth(
+    baseUrl,
+    `http://127.0.0.1:${workerPort}`,
+    internalToken,
+    worker,
+    api,
+    `http://127.0.0.1:${authorizerPort}`,
+    authorizer,
+  );
+
+  const workerEnvText = await readFile(workerEnvPath, 'utf8');
+  assert.doesNotMatch(
+    workerEnvText,
+    /OMNIS_(?:AUTHORIZER_DB_PASSWORD|AUTHORIZER_DATABASE_URL|API_AUTHORIZER_TOKEN)/,
+  );
+  const runtimeAuthorizerProbe = await fetch(
+    `http://127.0.0.1:${authorizerPort}/internal/v1/authorizations`,
+    {
+      method: 'POST',
+      headers: { 'idempotency-key': randomUUID(), 'content-type': 'application/json' },
+      body: JSON.stringify({ taskId: 'task-0001' }),
+    },
+  );
+  assert.equal(runtimeAuthorizerProbe.status, 401);
 
   const health = await fetch(`${baseUrl}/api/v1/health`);
   assert.equal(health.status, 200);
@@ -174,6 +213,51 @@ try {
   assert.equal(createTask.status, 201);
   const task = await createTask.json();
 
+  const forgedOwnerAdmission = await fetch(`http://127.0.0.1:${workerPort}/internal/v1/runs`, {
+    method: 'POST',
+    headers: {
+      'x-omnis-internal-token': internalToken,
+      'x-omnis-trusted-actor': 'owner',
+      'idempotency-key': `forged-owner-${randomUUID()}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      taskId: task.id,
+      authorizationId: '00000000-0000-4000-8000-000000000001',
+    }),
+  });
+  assert.equal(forgedOwnerAdmission.status, 409);
+  assert.equal((await forgedOwnerAdmission.json()).error.code, 'invalid_transition');
+  assert.equal(
+    (await auditPool.query('SELECT 1 FROM omnis.runs WHERE task_id=$1', [task.id])).rowCount,
+    0,
+  );
+
+  await stopProcess(authorizer);
+  const failedAuthorization = await fetch(`${baseUrl}/api/v1/authorizations`, {
+    method: 'POST',
+    headers: {
+      cookie: ownerCookie,
+      origin,
+      'x-omnis-csrf': ownerCsrf,
+      'idempotency-key': randomUUID(),
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ taskId: task.id }),
+  });
+  assert.equal(failedAuthorization.status, 503);
+  assert.equal((await failedAuthorization.json()).error.code, 'authorizer_unavailable');
+  assert.equal(
+    (
+      await auditPool.query('SELECT 1 FROM omnis.runtime_authorizations WHERE task_id=$1', [
+        task.id,
+      ])
+    ).rowCount,
+    0,
+  );
+  authorizer = startAuthorizer(authorizerEnvPath);
+  await waitForAuthorizer(`http://127.0.0.1:${authorizerPort}`, authorizer);
+
   const runHeaders = {
     cookie: ownerCookie,
     origin,
@@ -182,6 +266,24 @@ try {
     'content-type': 'application/json',
   };
   const authorization = await authorizeTask(baseUrl, ownerCookie, ownerCsrf, task.id);
+  await stopProcess(authorizer);
+  authorizer = startAuthorizer(authorizerEnvPath);
+  await waitForAuthorizer(`http://127.0.0.1:${authorizerPort}`, authorizer);
+  const persistedReplay = await fetch(`${baseUrl}/api/v1/authorizations`, {
+    method: 'POST',
+    headers: {
+      cookie: ownerCookie,
+      origin,
+      'x-omnis-csrf': ownerCsrf,
+      'idempotency-key': authorization.requestKey,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ taskId: task.id }),
+  });
+  assert.equal(persistedReplay.status, 201);
+  const persistedAuthorization = await persistedReplay.json();
+  assert.equal(persistedAuthorization.id, authorization.id);
+  assert.equal(persistedAuthorization.status, 'authorized');
   const runResponse = await fetch(`${baseUrl}/api/v1/runs`, {
     method: 'POST',
     headers: runHeaders,
@@ -232,7 +334,15 @@ try {
 
   await stopProcess(api);
   api = startApi(apiEnvPath);
-  await waitForHealth(baseUrl, `http://127.0.0.1:${workerPort}`, internalToken, worker, api);
+  await waitForHealth(
+    baseUrl,
+    `http://127.0.0.1:${workerPort}`,
+    internalToken,
+    worker,
+    api,
+    `http://127.0.0.1:${authorizerPort}`,
+    authorizer,
+  );
   ({ ownerCookie, ownerCsrf } = await signInOwner(baseUrl));
   const recoveredTasksResponse = await fetch(`${baseUrl}/api/v1/tasks`, {
     headers: { cookie: ownerCookie },
@@ -300,6 +410,15 @@ try {
   assert.equal(canaryRunText.includes(canary), false);
   const canaryRun = JSON.parse(canaryRunText);
   await waitForRunStatus(baseUrl, canaryRun.id, 'completed', ownerCookie, worker, api, 20_000);
+  const canaryRevocation = await fetch(
+    `${baseUrl}/api/v1/authorizations/${canaryAuthorization.id}/revoke`,
+    {
+      method: 'POST',
+      headers: { cookie: ownerCookie, origin, 'x-omnis-csrf': ownerCsrf },
+    },
+  );
+  assert.equal(canaryRevocation.status, 200);
+  assert.equal((await canaryRevocation.json()).status, 'revoked');
   const canaryRunRead = await fetch(`${baseUrl}/api/v1/runs/${canaryRun.id}`, {
     headers: { cookie: ownerCookie },
   });
@@ -325,7 +444,15 @@ try {
 
   await stopProcess(worker);
   worker = startWorker(workerEnvPath);
-  await waitForHealth(baseUrl, `http://127.0.0.1:${workerPort}`, internalToken, worker, api);
+  await waitForHealth(
+    baseUrl,
+    `http://127.0.0.1:${workerPort}`,
+    internalToken,
+    worker,
+    api,
+    `http://127.0.0.1:${authorizerPort}`,
+    authorizer,
+  );
   const afterWorkerRestartResponse = await fetch(`${baseUrl}/api/v1/runs/${run.id}`, {
     headers: { cookie: ownerCookie },
   });
@@ -371,7 +498,15 @@ try {
   await waitForRunStatus(baseUrl, interruptedRun.id, 'running', ownerCookie, worker, api);
   await stopProcess(worker);
   worker = startWorker(workerEnvPath);
-  await waitForHealth(baseUrl, `http://127.0.0.1:${workerPort}`, internalToken, worker, api);
+  await waitForHealth(
+    baseUrl,
+    `http://127.0.0.1:${workerPort}`,
+    internalToken,
+    worker,
+    api,
+    `http://127.0.0.1:${authorizerPort}`,
+    authorizer,
+  );
   await waitForRunStatus(
     baseUrl,
     interruptedRun.id,
@@ -414,7 +549,15 @@ try {
     await waitForSandboxContainer(crashedWorkerRun.id);
     await killProcessAbruptly(worker);
     worker = startWorker(workerEnvPath);
-    await waitForHealth(baseUrl, `http://127.0.0.1:${workerPort}`, internalToken, worker, api);
+    await waitForHealth(
+      baseUrl,
+      `http://127.0.0.1:${workerPort}`,
+      internalToken,
+      worker,
+      api,
+      `http://127.0.0.1:${authorizerPort}`,
+      authorizer,
+    );
     await waitForRunStatus(
       baseUrl,
       crashedWorkerRun.id,
@@ -455,6 +598,8 @@ try {
         internalToken,
         worker,
         api,
+        authorizer,
+        authorizerUrl: `http://127.0.0.1:${authorizerPort}`,
       });
     }
   }
@@ -467,9 +612,11 @@ try {
 } finally {
   await stopProcess(api);
   await stopProcess(worker);
+  await stopProcess(authorizer);
   await auditPool.end();
   await unlink(apiEnvPath).catch(() => undefined);
   await unlink(workerEnvPath).catch(() => undefined);
+  await unlink(authorizerEnvPath).catch(() => undefined);
 }
 
 function startWorker(envFile) {
@@ -500,6 +647,7 @@ function withoutDatabaseSecrets(environment) {
     'OMNIS_DB_PASSWORD',
     'OMNIS_RUNTIME_DB_PASSWORD',
     'OMNIS_AUTHORIZER_DB_PASSWORD',
+    'OMNIS_API_AUTHORIZER_TOKEN',
     'OMNIS_DATABASE_URL',
     'OMNIS_TEST_DATABASE_URL',
     'OMNIS_ADMIN_DATABASE_URL',
@@ -521,6 +669,23 @@ function startApi(envFile) {
     ['--experimental-strip-types', `--env-file=${envFile}`, 'src/server.ts'],
     {
       cwd: new URL('../../apps/api/', import.meta.url),
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+  return captureProcessOutput(child);
+}
+
+function startAuthorizer(envFile) {
+  const env = withoutDatabaseSecrets(process.env);
+  delete env.OMNIS_TEST_DATABASE_URL;
+  delete env.OMNIS_TEST_MIGRATION_DATABASE_URL;
+  delete env.OMNIS_TEST_ADMIN_DATABASE_URL;
+  const child = spawn(
+    process.execPath,
+    ['--experimental-strip-types', `--env-file=${envFile}`, 'src/server.ts'],
+    {
+      cwd: new URL('../../apps/authorizer/', import.meta.url),
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
     },
@@ -563,25 +728,53 @@ function cookieValue(response) {
   return cookie;
 }
 
-async function waitForHealth(apiUrl, workerUrl, internalToken, workerProcess, apiProcess) {
+async function waitForHealth(
+  apiUrl,
+  workerUrl,
+  internalToken,
+  workerProcess,
+  apiProcess,
+  authorizerUrl,
+  authorizerProcess,
+) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < 8000) {
-    if (workerProcess.exitCode !== null || apiProcess.exitCode !== null) {
-      throw new Error('The mock API or worker exited before becoming healthy.');
+    if (
+      workerProcess.exitCode !== null ||
+      apiProcess.exitCode !== null ||
+      authorizerProcess.exitCode !== null
+    ) {
+      throw new Error('The mock API, worker, or authorizer exited before becoming healthy.');
     }
     try {
-      const [apiHealth, workerHealth] = await Promise.all([
+      const [apiHealth, workerHealth, authorizerHealth] = await Promise.all([
         fetch(`${apiUrl}/api/v1/health`),
         fetch(`${workerUrl}/internal/v1/health`, {
           headers: { 'x-omnis-internal-token': internalToken },
         }),
+        fetch(`${authorizerUrl}/internal/v1/health`),
       ]);
-      if (apiHealth.ok && workerHealth.ok) return;
+      if (apiHealth.ok && workerHealth.ok && authorizerHealth.ok) return;
     } catch {
       await delay(80);
     }
   }
   throw new Error('The mock API did not become healthy within eight seconds.');
+}
+
+async function waitForAuthorizer(authorizerUrl, authorizerProcess) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 8_000) {
+    if (authorizerProcess.exitCode !== null) {
+      throw new Error('The mock authorizer exited before becoming healthy.');
+    }
+    try {
+      if ((await fetch(`${authorizerUrl}/internal/v1/health`)).ok) return;
+    } catch {
+      await delay(80);
+    }
+  }
+  throw new Error('The mock authorizer did not become healthy within eight seconds.');
 }
 
 async function readAll(body) {
@@ -676,10 +869,12 @@ async function createTaskAndRun(baseUrl, cookie, csrf, title) {
 }
 
 async function authorizeTask(baseUrl, cookie, csrf, taskId) {
+  const idempotencyKey = randomUUID();
   const headers = {
     cookie,
     origin,
     'x-omnis-csrf': csrf,
+    'idempotency-key': idempotencyKey,
     'content-type': 'application/json',
   };
   const requested = await fetch(`${baseUrl}/api/v1/authorizations`, {
@@ -692,6 +887,22 @@ async function authorizeTask(baseUrl, cookie, csrf, taskId) {
   const authorization = JSON.parse(requestText);
   assert.equal(authorization.status, 'pending');
   assert.deepEqual(authorization.scope, { kind: 'task', taskId });
+  const replay = await fetch(`${baseUrl}/api/v1/authorizations`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ taskId }),
+  });
+  assert.equal(replay.status, 201);
+  assert.equal((await replay.json()).id, authorization.id);
+  assert.equal(
+    (
+      await auditPool.query(
+        "SELECT count(*)::int AS count FROM omnis.authorization_audit WHERE authorization_id=$1 AND event_type='authorization.requested'",
+        [authorization.id],
+      )
+    ).rows[0].count,
+    1,
+  );
   const decision = await fetch(`${baseUrl}/api/v1/authorizations/${authorization.id}/decision`, {
     method: 'POST',
     headers,
@@ -701,7 +912,7 @@ async function authorizeTask(baseUrl, cookie, csrf, taskId) {
   assert.equal(decision.status, 200, decisionText);
   const approved = JSON.parse(decisionText);
   assert.equal(approved.status, 'authorized');
-  return approved;
+  return { ...approved, requestKey: idempotencyKey };
 }
 
 async function fetchRun(baseUrl, runId, cookie) {
@@ -835,6 +1046,8 @@ async function testDatabaseAvailabilityLoss({
   internalToken,
   worker,
   api,
+  authorizer,
+  authorizerUrl,
 }) {
   const labels = docker(['inspect', '--format', '{{json .Config.Labels}}', container]).trim();
   const parsedLabels = JSON.parse(labels);
@@ -900,7 +1113,7 @@ async function testDatabaseAvailabilityLoss({
 
   await waitForPostgresContainer(container);
   if (worker.exitCode !== null) worker = startWorker(workerEnvPath);
-  await waitForHealth(baseUrl, workerUrl, internalToken, worker, api);
+  await waitForHealth(baseUrl, workerUrl, internalToken, worker, api, authorizerUrl, authorizer);
   const startedAt = Date.now();
   let recoveryResponse;
   while (Date.now() - startedAt < 15_000) {
