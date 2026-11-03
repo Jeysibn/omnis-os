@@ -14,7 +14,7 @@ The launcher belongs to the rootful Docker group in the proposed systemd deploym
 
 `scripts/host-security/provision-identities.sh` creates the service users and socket groups but does not run automatically. `scripts/host-security/install-service-secrets.sh` verifies that the API, worker, authorizer, and launcher env files do not contain the other service's database credentials or owner/service secrets before installing them. `scripts/host-security/verify-worker-boundary.sh` runs negative file, process-environment, protected-socket, executable-tree, group-membership, and Docker-socket checks under the actual `omnis-worker` identity.
 
-These scripts were syntax-checked only. They were not executed because this environment has no Omnis service identities or systemd deployment, and changing the shared host's users/groups/services was outside scope. The actual Docker socket is `root:docker` mode `0660`; the current shell user is not in `docker`, and `docker info` returns permission denied. Docker and PostgreSQL integration could not be run locally. The rootful launcher, service user, `/proc`, secret-file and socket boundaries therefore remain unverified on a deployed Linux host.
+The production-host verifier was syntax-checked but not run because this environment has no Omnis service identities or systemd deployment, and changing the shared host's users/groups/services was outside scope. The disposable identity test did run in GitHub Actions as root on the ephemeral runner: it created temporary users/groups, dummy secret files, protected sockets and service processes, then verified the worker identity could not read the API/authorizer/launcher files or their process environments, modify trusted app files, enter the authorizer socket, or access the Docker socket; the worker could reach only the restricted launcher socket. It cleaned up its temporary identities and files. This verifies Linux permission behavior, not installation of the actual systemd units or protection of real host service secrets. The local Docker socket is `root:docker` mode `0660`; the current shell user is not in `docker`, and Docker access is denied. The rootful launcher and actual host deployment remain unverified.
 
 ## Trusted request and failure behavior
 
@@ -36,9 +36,14 @@ Environment: Node.js `24.22.1`, pnpm `12.16.1` invoked through `npm exec`; no `O
 | Actual Docker sandbox tests | Not run locally; Docker socket permission denied |
 | `integration:mock`, legacy upgrade, backup/restore | Not run locally; require disposable PostgreSQL and actual container infrastructure |
 | Host identity negative probe | Script added and shell syntax checked; not run because host users/services must not be changed here |
-| GitHub Actions | To be reported from the exact pushed branch SHA; not yet available |
+| `pnpm build` | Passed locally; the final exact-SHA CI build also passed |
+| `pnpm integration:legacy-upgrade` | Not run locally; passed in final exact-SHA CI against a disposable PostgreSQL database |
+| `pnpm integration:recovery` | Not run locally; passed in final exact-SHA CI, including abrupt worker and sandbox recovery |
+| `pnpm integration:backup-restore` | Not run locally; passed in final exact-SHA CI against disposable PostgreSQL |
+| Disposable Linux identity boundary | Not run against the shared host; passed with temporary identities and resources on the ephemeral CI runner |
+| GitHub Actions | Passed on `54c3f4b65bc1dc5565987c7058052ef2643e5cf0`: [run 41662145467](https://github.com/Jeysibn/omnis-os/actions/runs/41662145467) |
 
-The successful `pnpm check` run reported 50 workspace tests passing and the database-backed run-store suite skipped because test URLs were absent. The database recovery-policy suite separately passed 30/30. The exact CI workflow now also runs the disposable identity probe before role provisioning. `pnpm build` passed. `pnpm install --frozen-lockfile` passed. The standalone sandbox-launcher test command reported 5 passed. The Docker-only security subtest displayed as skipped in the broader workspace suite; actual Docker sandbox execution was not verified.
+The local `pnpm check` reported 50 workspace tests passing; its PostgreSQL run-store suite skipped because database URLs were absent, and its Docker-only sandbox security test skipped because the local daemon socket was inaccessible. The database recovery-policy suite separately passed 30/30. In CI, `pnpm check` passed 138 tests with 0 failures and 0 skips, including 50 real PostgreSQL run-store tests and the actual Docker sandbox security test (included once in the sandbox-launcher suite). The workflow also passed the temporary Linux identity probe, build, legacy upgrade, recovery integration, and backup/restore integration on the exact head SHA above. `pnpm install --frozen-lockfile` and `pnpm build` passed locally as well. The local systemd deployment and real service-account checks remain unverified.
 
 ## Finding disposition and remaining gates
 
