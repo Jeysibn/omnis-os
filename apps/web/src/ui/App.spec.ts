@@ -74,6 +74,8 @@ type FixtureOptions = {
   detailFailures?: number;
   eventCount?: number;
   eventDisconnects?: boolean;
+  eventOrder?: 'reverse';
+  eventDuplicates?: boolean;
 };
 
 type MockApi = ReturnType<typeof createMockApi>;
@@ -380,7 +382,11 @@ function createMockApi(page: Page) {
       if (!run) return fulfillError(route, 404, 'not_found', 'Run not found.');
       const after = Number(headers['last-event-id'] ?? '0');
       const events = makeEvents(run).filter((event) => event.sequence > after);
-      const bodyText = events
+      const orderedEvents = options.eventOrder === 'reverse' ? [...events].reverse() : events;
+      const deliveredEvents = options.eventDuplicates
+        ? orderedEvents.flatMap((event) => [event, event])
+        : orderedEvents;
+      const bodyText = deliveredEvents
         .map(
           (event) =>
             `id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
@@ -839,6 +845,21 @@ test('event stream retries with the last delivered event sequence', async ({ pag
   await expect(page.getByRole('heading', { name: 'Task list' })).toBeVisible();
 });
 
+test('event replay sorts out-of-order frames and ignores duplicate sequences', async ({
+  page,
+  api,
+}) => {
+  api.configure({ eventOrder: 'reverse', eventDuplicates: true });
+  await openWorkspace(page, '#runs/run-active');
+  const history = page.getByRole('region', { name: 'Event history for Review launch checklist' });
+  await expect(page.getByText('2 events')).toBeVisible();
+  const rows = history.locator('.event-row');
+  await expect(rows).toHaveCount(2);
+  await expect(rows.nth(0)).toContainText('queued');
+  await expect(rows.nth(1)).toContainText('started');
+  await expect(page.locator('.inspector-summary .status-pill')).toContainText('Running');
+});
+
 test('Stop targets the selected historical run, not the first run in the fixture', async ({
   page,
   api,
@@ -856,7 +877,13 @@ test('replays 600 events in order without per-event detail reads and reconciles 
   page,
   api,
 }) => {
-  api.configure({ eventCount: 600 });
+  api.configure({
+    eventCount: 600,
+    runs: [
+      makeRun('run-active', 'task-open', 'Review launch checklist', 'completed'),
+      defaultRuns[1]!,
+    ],
+  });
   await openWorkspace(page, '#runs/run-active');
   await expect(page.getByText('600 events')).toBeVisible();
   await expect(page.getByText('Event 600 · mock source · synthetic')).toBeVisible();
@@ -875,6 +902,7 @@ test('replays 600 events in order without per-event detail reads and reconciles 
   expect(eventNumbers).toHaveLength(600);
   expect(eventNumbers[0]).toBe(1);
   expect(eventNumbers.at(-1)).toBe(600);
+  await expect(page.locator('.inspector-summary .status-pill')).toContainText('Completed');
 });
 
 test('terminal reconciliation failure is visible and retryable', async ({ page, api }) => {
