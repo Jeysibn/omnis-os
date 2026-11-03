@@ -141,7 +141,12 @@ for unit in "${units[@]}"; do
   install -o root -g root -m 0644 "$repo_root/infra/systemd/$unit" "$unit_dir/$unit"
 done
 systemctl daemon-reload
-systemctl start omnis-sandbox-launcher.service omnis-authorizer.service omnis-api.service omnis-worker.service
+if ! systemctl start omnis-sandbox-launcher.service omnis-authorizer.service omnis-api.service omnis-worker.service; then
+  systemctl --no-pager --full status "${units[@]}" >&2 || true
+  journalctl -u omnis-api -u omnis-authorizer -u omnis-worker -u omnis-sandbox-launcher --no-pager -n 120 >&2 || true
+  echo "Disposable Omnis systemd services failed during startup." >&2
+  exit 1
+fi
 
 for _ in {1..50}; do
   if curl --silent --fail http://127.0.0.1:4100/api/v1/health >/dev/null &&
