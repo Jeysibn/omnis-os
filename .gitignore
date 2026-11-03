@@ -2,6 +2,8 @@ node_modules/
 dist/
 coverage/
 .playwright-cli/
+apps/web/test-results/
+apps/web/playwright-report/
 .env
 .env.*
 !.env.example
