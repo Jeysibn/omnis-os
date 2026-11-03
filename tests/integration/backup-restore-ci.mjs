@@ -110,7 +110,7 @@ try {
   });
 
   await addFutureMigrationAclFixtures(migrationUrl, randomSuffix);
-  await createSyntheticRecords(runtimeUrl, adminUrl, randomSuffix);
+  const provenanceRunId = await createSyntheticRecords(runtimeUrl, adminUrl, randomSuffix);
 
   const staleDump = path.join(directory, 'stale.dump');
   await setSequenceState(adminUrl, true);
@@ -132,6 +132,8 @@ try {
   });
   await verifyRestoredMigrationAcl(
     connectionUrl('omnis_runtime', runtimePassword, port, restoreDatabase),
+    connectionUrl('omnis', adminPassword, port, restoreDatabase),
+    provenanceRunId,
     randomSuffix,
   );
   await verifyRestoreRejectsUnauthorizedGrant(adminUrl, deniedGrantDatabase);
@@ -276,11 +278,16 @@ async function createSyntheticRecords(runtimeUrl, adminUrl, suffix) {
       'Synthetic backup integration result.',
       [],
     );
+    await admin.query('INSERT INTO omnis.legacy_unscoped_runs (run_id, task_id) VALUES ($1, $2)', [
+      admitted.run.id,
+      task.id,
+    ]);
     const { rows } = await admin.query(
       'SELECT count(*)::integer AS count FROM omnis.run_events WHERE run_id = $1',
       [admitted.run.id],
     );
     assert.equal(rows[0]?.count, 3);
+    return admitted.run.id;
   } finally {
     await boss.stop().catch(() => undefined);
     await runtime.end();
@@ -309,10 +316,24 @@ async function addFutureMigrationAclFixtures(migrationUrl, suffix) {
   }
 }
 
-async function verifyRestoredMigrationAcl(runtimeUrl, suffix) {
+async function verifyRestoredMigrationAcl(runtimeUrl, adminUrl, provenanceRunId, suffix) {
   const { createPool } = await import('../../packages/db/src/index.ts');
   const runtime = createPool(runtimeUrl);
+  const admin = createPool(adminUrl);
   try {
+    assert.equal(
+      (
+        await admin.query('SELECT 1 FROM omnis.legacy_unscoped_runs WHERE run_id=$1', [
+          provenanceRunId,
+        ])
+      ).rowCount,
+      1,
+      'restore must preserve trusted legacy provenance records',
+    );
+    await assert.rejects(
+      runtime.query('SELECT * FROM omnis.legacy_unscoped_runs'),
+      /permission denied/,
+    );
     await assert.rejects(
       runtime.query(`SELECT id FROM omnis.future_acl_${suffix}`),
       /permission denied/,
@@ -332,6 +353,7 @@ async function verifyRestoredMigrationAcl(runtimeUrl, suffix) {
     );
   } finally {
     await runtime.end();
+    await admin.end();
   }
 }
 

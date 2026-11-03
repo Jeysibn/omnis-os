@@ -136,7 +136,9 @@ export class PostgresRunStore {
     }
     const fingerprint = JSON.stringify({ taskId, authorizationId });
     return inTransaction(this.pool, async (client) => {
-      // Serialize admission so the idempotency check and global concurrency cap are race-safe.
+      // Bound waits on row locks and the publicly callable capacity lock. The
+      // transaction rolls back on timeout, before admission state is committed.
+      await client.query("SET LOCAL lock_timeout = '3s'");
       await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [admissionLock]);
       const previous = await client.query<
         QueryResultRow & { request_fingerprint: string; run_id: string }
@@ -394,27 +396,36 @@ export class PostgresRunStore {
     generation: number,
     leaseSeconds: number,
   ): Promise<boolean | 'stop_requested'> {
-    const result = await this.pool.query(
-      `
-        UPDATE omnis.runs
-        SET lease_expires_at = now() + ($4::int * interval '1 second'), updated_at = now()
-        WHERE id = $1 AND lease_owner = $2 AND execution_generation = $3 AND status = 'running'
-          AND lease_expires_at > now()
-          AND EXISTS (
-            SELECT 1 FROM omnis.runtime_authorizations a
-             WHERE a.consumed_run_id=omnis.runs.id AND a.status='authorized'
-               AND a.expires_at > now() AND a.revoked_at IS NULL
-          )
-      `,
-      [runId, workerId, generation, leaseSeconds],
-    );
-    if (result.rowCount === 1) return true;
-    const current = await this.pool.query(
-      'SELECT status FROM omnis.runs WHERE id = $1 AND lease_owner = $2 AND execution_generation = $3',
-      [runId, workerId, generation],
-    );
-    if (current.rows[0]?.status === 'stopping') return 'stop_requested';
-    return false;
+    return inTransaction(this.pool, async (client) => {
+      const selected = await client.query<RunRow>(`${runSelect} WHERE r.id = $1 FOR UPDATE`, [
+        runId,
+      ]);
+      const current = selected.rows[0];
+      if (!current) return false;
+      if (current.lease_owner !== workerId || current.execution_generation !== generation) {
+        return false;
+      }
+      if (current.status === 'stopping') return 'stop_requested';
+      if (current.status !== 'running') return false;
+
+      // Revocation also locks run then grant. Recheck under the grant row lock
+      // after acquiring the run lock so a pre-revocation statement snapshot
+      // cannot renew a lease after revocation commits.
+      const authorization = await client.query<{ allowed: boolean }>(
+        'SELECT omnis.lock_active_run_authorization($1) AS allowed',
+        [runId],
+      );
+      if (!authorization.rows[0]?.allowed) return false;
+
+      const renewed = await client.query(
+        `UPDATE omnis.runs
+            SET lease_expires_at = now() + ($4::int * interval '1 second'), updated_at = now()
+          WHERE id = $1 AND lease_owner = $2 AND execution_generation = $3
+            AND status = 'running' AND lease_expires_at > now()`,
+        [runId, workerId, generation, leaseSeconds],
+      );
+      return renewed.rowCount === 1;
+    });
   }
 
   async requestStop(runId: string): Promise<{ run: Run; events: DurableEvent[] }> {

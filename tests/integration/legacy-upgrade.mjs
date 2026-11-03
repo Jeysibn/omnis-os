@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:net';
-import { mkdtemp, rm, symlink } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -10,6 +10,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { PgBoss } from '../../apps/worker/node_modules/pg-boss/dist/index.js';
 import {
   createPool,
+  migrate,
   PostgresAuthorizationStore,
   PostgresRunStore,
 } from '../../packages/db/src/index.ts';
@@ -142,6 +143,7 @@ try {
   });
   await runCurrentMigration();
   await applyRestrictedPgBossMigrations();
+  await verifyPost0005ProvenanceUpgrade();
 
   const afterUpgrade = (await databaseAdminPool.query(metricsQuery)).rows[0].json_build_object;
   assert.deepEqual(afterUpgrade.recordFingerprints, beforeUpgrade.recordFingerprints);
@@ -287,35 +289,38 @@ try {
       [busyGrant.id, busyTask.id, 'owner'],
     );
     assert.equal(lockedGrant.rows[0]?.allowed, true);
-    const busyResponse = await fetch(
-      `${worker.baseUrl}/internal/v1/authorizations/${busyGrant.id}/revoke`,
-      {
-        method: 'POST',
-        headers: {
-          'x-omnis-internal-token': worker.internalToken,
-          'x-omnis-trusted-actor': 'owner',
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const busyResponse = await fetch(
+        `${worker.baseUrl}/internal/v1/authorizations/${busyGrant.id}/revoke`,
+        {
+          method: 'POST',
+          headers: {
+            'x-omnis-internal-token': worker.internalToken,
+            'x-omnis-trusted-actor': 'owner',
+          },
         },
-      },
-    );
-    assert.equal(busyResponse.status, 503);
-    assert.equal((await busyResponse.json()).error.code, 'authorization_busy');
-    assert.equal(
-      (
-        await authorizerPool.query('SELECT status FROM omnis.runtime_authorizations WHERE id=$1', [
-          busyGrant.id,
-        ])
-      ).rows[0]?.status,
-      'authorized',
-    );
-    assert.equal(
-      (
-        await databaseAdminPool.query(
-          "SELECT count(*)::int AS count FROM omnis.authorization_audit WHERE authorization_id=$1 AND event_type='authorization.revoked'",
-          [busyGrant.id],
-        )
-      ).rows[0].count,
-      0,
-    );
+      );
+      assert.equal(busyResponse.status, 503);
+      assert.equal((await busyResponse.json()).error.code, 'authorization_busy');
+      assert.equal(
+        (
+          await authorizerPool.query(
+            'SELECT status FROM omnis.runtime_authorizations WHERE id=$1',
+            [busyGrant.id],
+          )
+        ).rows[0]?.status,
+        'authorized',
+      );
+      assert.equal(
+        (
+          await databaseAdminPool.query(
+            "SELECT count(*)::int AS count FROM omnis.authorization_audit WHERE authorization_id=$1 AND event_type='authorization.revoked'",
+            [busyGrant.id],
+          )
+        ).rows[0].count,
+        0,
+      );
+    }
   } finally {
     await grantHolder.query('ROLLBACK').catch(() => undefined);
     grantHolder.release();
@@ -332,6 +337,72 @@ try {
   );
   assert.equal(retryResponse.status, 200);
   assert.equal((await retryResponse.json()).status, 'revoked');
+
+  const admissionTask = await migratedStore.createTask({
+    title: 'Admission lock API check',
+    detail: 'The public advisory key must produce a prompt and truthful retry response.',
+  });
+  const admissionRequest = await new PostgresAuthorizationStore(
+    runtimePool,
+    authorizerPool,
+  ).request(admissionTask.id, 'owner');
+  const admissionGrant = await new PostgresAuthorizationStore(runtimePool, authorizerPool).decide(
+    admissionRequest.id,
+    'owner',
+    'approve',
+  );
+  const admissionHolder = await runtimePool.connect();
+  const admissionIdempotencyKey = `api-admission-${suffix}-retry`;
+  try {
+    await admissionHolder.query('SELECT pg_advisory_lock(70463909136524)');
+    const response = await fetch(`${worker.baseUrl}/internal/v1/runs`, {
+      method: 'POST',
+      headers: {
+        'x-omnis-internal-token': worker.internalToken,
+        'x-omnis-trusted-actor': 'owner',
+        'idempotency-key': admissionIdempotencyKey,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ taskId: admissionTask.id, authorizationId: admissionGrant.id }),
+    });
+    assert.equal(response.status, 503);
+    const body = await response.json();
+    assert.equal(body.error.code, 'admission_busy');
+    assert.match(body.error.message, /no run was admitted/i);
+    assert.equal(
+      (
+        await authorizerPool.query(
+          'SELECT consumed_run_id FROM omnis.runtime_authorizations WHERE id=$1',
+          [admissionGrant.id],
+        )
+      ).rows[0].consumed_run_id,
+      null,
+    );
+    assert.equal(
+      (
+        await databaseAdminPool.query('SELECT 1 FROM omnis.runs WHERE task_id=$1', [
+          admissionTask.id,
+        ])
+      ).rowCount,
+      0,
+    );
+  } finally {
+    await admissionHolder.query('SELECT pg_advisory_unlock(70463909136524)').catch(() => undefined);
+    admissionHolder.release();
+  }
+  const admissionRetry = await fetch(`${worker.baseUrl}/internal/v1/runs`, {
+    method: 'POST',
+    headers: {
+      'x-omnis-internal-token': worker.internalToken,
+      'x-omnis-trusted-actor': 'owner',
+      'idempotency-key': admissionIdempotencyKey,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ taskId: admissionTask.id, authorizationId: admissionGrant.id }),
+  });
+  assert.equal(admissionRetry.status, 201);
+  const admittedBody = await admissionRetry.json();
+  await waitForRun(migratedStore, admittedBody.id, 'completed');
 
   const newTask = await migratedStore.createTask({
     title: 'Post-upgrade runtime task',
@@ -357,7 +428,7 @@ try {
   await waitForRun(migratedStore, newRun.run.id, 'completed');
 
   process.stdout.write(
-    `Legacy upgrade passed from ${legacyRevision}: pre-migration records preserved, grant-less legacy queued cancellation/running interruption/failure succeeded without synthetic grants, timed-out revoke returned 503 without committing and succeeded on retry, role ownership normalized, migration checksums upgraded, restricted pg-boss and worker operations completed, and post-upgrade task/run creation succeeded in ${databaseName}.\n`,
+    `Legacy upgrade passed from ${legacyRevision}: pre-migration records preserved; staged 0001–0007 provenance classified only the pre-0005 run; runtime timestamp backdating was denied; grantless legacy cancellation/interruption/failure succeeded without synthetic grants; repeated revoke attempts returned 503 without committing and succeeded on retry; admission lock contention returned a truthful 503 then succeeded on retry; role ownership, migration checksums, restricted pg-boss, worker execution, and post-upgrade task/run creation passed in ${databaseName}.\n`,
   );
 } finally {
   await stopWorker(worker?.child);
@@ -420,6 +491,152 @@ async function makeLegacyWorktree() {
       join(legacyWorktree, workspace, 'node_modules'),
       'dir',
     );
+  }
+}
+
+async function verifyPost0005ProvenanceUpgrade() {
+  const stagedName = `omnis_provenance_${suffix}`;
+  let created = false;
+  const stagedAdminUrl = databaseUrlFor(
+    'omnis',
+    decodeURIComponent(adminBase.password),
+    stagedName,
+  );
+  const stagedMigrationUrl = databaseUrlFor('omnis_migrator', migrationPassword, stagedName);
+  const stagedRuntimeUrl = databaseUrlFor('omnis_runtime', runtimePassword, stagedName);
+  const stagedAdmin = createPool(stagedAdminUrl);
+  const stagedMigrator = createPool(stagedMigrationUrl);
+  const stagedRuntime = createPool(stagedRuntimeUrl);
+  try {
+    await clusterAdminPool.query(`CREATE DATABASE ${quoteIdentifier(stagedName)}`);
+    created = true;
+    await provisionDatabaseRoles(stagedAdmin, {
+      migration: migrationPassword,
+      runtime: runtimePassword,
+      authorizer: authorizerPassword,
+    });
+    await stagedMigrator.query(`
+      CREATE TABLE omnis.schema_migrations (
+        id text PRIMARY KEY,
+        checksum text,
+        applied_at timestamptz NOT NULL DEFAULT now()
+      )
+    `);
+    const migrationDirectory = join(repositoryRoot, 'packages/db/migrations');
+    const migrationFiles = (await readdir(migrationDirectory))
+      .filter((name) => /^000[1-7]_[a-z0-9_]+\.sql$/.test(name))
+      .sort();
+    for (const file of migrationFiles) {
+      const id = file.slice(0, -4);
+      const sql = await readFile(join(migrationDirectory, file), 'utf8');
+      const checksum = createHash('sha256').update(sql).digest('hex');
+      await stagedMigrator.query('BEGIN');
+      try {
+        await stagedMigrator.query(sql);
+        await stagedMigrator.query(
+          'INSERT INTO omnis.schema_migrations (id, checksum) VALUES ($1, $2)',
+          [id, checksum],
+        );
+        await stagedMigrator.query('COMMIT');
+      } catch (error) {
+        await stagedMigrator.query('ROLLBACK').catch(() => undefined);
+        throw error;
+      }
+      if (id === '0004_narrow_runtime_sequence_defaults') {
+        await stagedMigrator.query(`
+          INSERT INTO omnis.tasks (id, title, detail, status)
+          VALUES ('legacy-before-0005-task', 'Historical task', 'Synthetic fixture', 'in_progress');
+          INSERT INTO omnis.runs (
+            id, task_id, task_title, status, runtime_kind, synthetic, usage
+          ) VALUES (
+            'run-legacy-before-0005', 'legacy-before-0005-task', 'Historical task',
+            'queued', 'mock', true,
+            '{"quality":"unknown","inputTokens":null,"outputTokens":null,"cost":null}'::jsonb
+          );
+        `);
+      }
+    }
+
+    const runtimeStore = new PostgresRunStore(stagedRuntime);
+    const modernTask = await runtimeStore.createTask({
+      title: 'Modern grantless task',
+      detail: 'Must not be classified as pre-authorization data.',
+    });
+    const modernRun = await stagedRuntime.query(
+      `
+      INSERT INTO omnis.runs (id, task_id, task_title)
+      VALUES ('run-' || lpad(nextval('omnis.run_id_seq')::text, 4, '0'), $1, $2)
+      RETURNING id
+      `,
+      [modernTask.id, 'Modern grantless task'],
+    );
+    await assert.rejects(
+      stagedRuntime.query(
+        `INSERT INTO omnis.runs (id, task_id, task_title, created_at)
+         VALUES ('run-forged-date', $1, $2, '2000-01-01T00:00:00Z')`,
+        [modernTask.id, 'Backdated run'],
+      ),
+      /permission denied/i,
+    );
+    await assert.rejects(
+      stagedRuntime.query("UPDATE omnis.runs SET created_at='2000-01-01T00:00:00Z' WHERE id=$1", [
+        modernRun.rows[0].id,
+      ]),
+      /permission denied/i,
+    );
+    assert.equal(
+      (
+        await stagedAdmin.query(
+          "SELECT has_column_privilege('omnis_runtime','omnis.runs','created_at','INSERT') AS can_insert, has_column_privilege('omnis_runtime','omnis.runs','created_at','UPDATE') AS can_update",
+        )
+      ).rows[0].can_insert,
+      false,
+    );
+    assert.equal(
+      (
+        await stagedAdmin.query(
+          "SELECT has_column_privilege('omnis_runtime','omnis.runs','created_at','UPDATE') AS allowed",
+        )
+      ).rows[0].allowed,
+      false,
+    );
+
+    await migrate(stagedMigrator);
+    const classifications = await stagedAdmin.query(
+      'SELECT run_id FROM omnis.legacy_unscoped_runs ORDER BY run_id',
+    );
+    assert.deepEqual(
+      classifications.rows.map((row) => row.run_id),
+      ['run-legacy-before-0005'],
+    );
+    const historicalTermination = await runtimeStore.beginExecution(
+      'run-legacy-before-0005',
+      'legacy-provenance-recovery',
+      30,
+    );
+    assert.equal(historicalTermination.started, false);
+    assert.equal(historicalTermination.run.status, 'interrupted');
+    await assert.rejects(
+      runtimeStore.beginExecution(modernRun.rows[0].id, 'modern-grantless-attempt', 30),
+      /audit event could not be associated/i,
+    );
+    assert.equal((await runtimeStore.getRun(modernRun.rows[0].id))?.status, 'queued');
+    const migrationRows = await stagedAdmin.query(
+      "SELECT id, length(checksum) AS checksum_length FROM omnis.schema_migrations WHERE id LIKE '000%' ORDER BY id",
+    );
+    assert.deepEqual(migrationRows.rows.at(-1), {
+      id: '0008_revocation_availability_and_legacy_run_recovery',
+      checksum_length: 64,
+    });
+  } finally {
+    await Promise.all([stagedAdmin.end(), stagedMigrator.end(), stagedRuntime.end()]);
+    if (created) {
+      await clusterAdminPool.query(
+        'SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=$1 AND pid<>pg_backend_pid()',
+        [stagedName],
+      );
+      await clusterAdminPool.query(`DROP DATABASE ${quoteIdentifier(stagedName)}`);
+    }
   }
 }
 
@@ -576,11 +793,11 @@ async function freePort() {
   return address.port;
 }
 
-function databaseUrlFor(username, password) {
+function databaseUrlFor(username, password, targetDatabase = databaseName) {
   const url = new URL(adminUrl);
   url.username = username;
   url.password = password;
-  url.pathname = `/${databaseName}`;
+  url.pathname = `/${targetDatabase}`;
   return url.toString();
 }
 
