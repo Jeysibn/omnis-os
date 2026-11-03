@@ -1,4 +1,10 @@
-import { ApiErrorSchema, RunSchema, TaskSchema, type ApiError } from '@omnis/contracts';
+import {
+  ApiErrorSchema,
+  AuthorizationSchema,
+  RunSchema,
+  TaskSchema,
+  type ApiError,
+} from '@omnis/contracts';
 import { env } from './env.ts';
 
 export class WorkerRequestError extends Error {
@@ -52,6 +58,7 @@ export const parseRunList = (value: unknown) => {
 };
 export const parseTask = (value: unknown) => TaskSchema.parse(value);
 export const parseRun = (value: unknown) => RunSchema.parse(value);
+export const parseAuthorization = (value: unknown) => AuthorizationSchema.parse(value);
 
 export async function workerEventStream(runId: string, afterSequence: number, signal: AbortSignal) {
   const response = await fetch(

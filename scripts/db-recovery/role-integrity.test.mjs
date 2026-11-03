@@ -26,11 +26,22 @@ const safeRoles = [
     bypassRls: false,
     membershipCount: 0,
   },
+  {
+    name: 'omnis_authorizer',
+    login: true,
+    inherit: false,
+    superuser: false,
+    createRole: false,
+    createDatabase: false,
+    replication: false,
+    bypassRls: false,
+    membershipCount: 0,
+  },
 ];
 
 test('restore role security policy', async (suite) => {
   await suite.test(
-    'accepts the provisioned administrator, migrator, and runtime role attributes',
+    'accepts the provisioned administrator, migrator, runtime, and authorizer role attributes',
     () => {
       assert.doesNotThrow(() => assertRestoreRoleSecurity(safeRoles));
     },

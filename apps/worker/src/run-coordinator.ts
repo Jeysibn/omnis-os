@@ -13,7 +13,8 @@ import {
   type RunEvent,
   type Task,
 } from '@omnis/contracts';
-import { evaluateAllowedUse, StaticRuntimeAuthorizer, type RuntimeAuthorizer } from '@omnis/policy';
+import { evaluateAllowedUse } from '@omnis/policy';
+import type { PostgresAuthorizationStore } from '@omnis/db';
 import type { RuntimeAdapter } from '@omnis/runtime-adapters';
 import { SandboxError } from './docker-sandbox.ts';
 
@@ -40,37 +41,6 @@ export const queueName = z
   .parse(process.env.OMNIS_QUEUE_NAME ?? 'omnis-mock-run');
 const runLeaseSeconds = 30;
 const leaseHeartbeatMs = 5_000;
-const defaultMockAuthorization = new StaticRuntimeAuthorizer([
-  {
-    id: 'local-mock-owner-v1',
-    actorId: 'owner',
-    runtimeId: 'mock',
-    operation: 'start_task',
-    capabilities: ['mock.execute'],
-    scope: { kind: 'all_tasks' },
-    approvalRequired: false,
-    status: 'authorized',
-    policyVersion: 'mock-only-v1',
-    expiresAt: Number.MAX_SAFE_INTEGER,
-    revokedAt: null,
-    provenance: 'Omnis OS local mock policy',
-  },
-  {
-    id: 'local-mock-owner-v1',
-    actorId: 'owner',
-    runtimeId: 'mock',
-    operation: 'execute_task',
-    capabilities: ['mock.execute'],
-    scope: { kind: 'all_tasks' },
-    approvalRequired: false,
-    status: 'authorized',
-    policyVersion: 'mock-only-v1',
-    expiresAt: Number.MAX_SAFE_INTEGER,
-    revokedAt: null,
-    provenance: 'Omnis OS local mock policy',
-  },
-]);
-
 type AbortCause = 'cancel-requested' | 'claim-lost' | 'worker-shutdown' | 'persistence-failed';
 type ActiveExecution = { controller: AbortController; promise: Promise<void> };
 
@@ -79,7 +49,7 @@ export class RunCoordinator {
   private readonly workerId = randomUUID();
   private readonly active = new Map<string, ActiveExecution>();
   private readonly runtime: RuntimeAdapter;
-  private readonly authorizer: RuntimeAuthorizer;
+  private readonly authorizations: PostgresAuthorizationStore;
   private shuttingDown = false;
   private readonly store: PostgresRunStore;
   private readonly heartbeatIntervalMs: number;
@@ -95,14 +65,14 @@ export class RunCoordinator {
     store: PostgresRunStore,
     queue: RunCoordinator['queue'],
     runtime: RuntimeAdapter,
+    authorizations: PostgresAuthorizationStore,
     heartbeatIntervalMs = leaseHeartbeatMs,
-    authorizer: RuntimeAuthorizer = defaultMockAuthorization,
   ) {
     this.store = store;
     this.queue = queue;
     this.heartbeatIntervalMs = heartbeatIntervalMs;
     this.runtime = runtime;
-    this.authorizer = authorizer;
+    this.authorizations = authorizations;
   }
 
   async createTask(input: CreateTaskInput): Promise<Task> {
@@ -115,15 +85,30 @@ export class RunCoordinator {
     return this.store.listTasks();
   }
 
-  async startRun(taskId: string, idempotencyKey: string): Promise<{ run: Run; created: boolean }> {
-    const authorization = this.authorizer.authorize({
-      actorId: 'owner',
-      runtimeId: 'mock',
-      operation: 'start_task',
-      requiredCapabilities: ['mock.execute'],
-      taskId,
-    });
-    if (!authorization) {
+  async startRun(
+    taskId: string,
+    idempotencyKey: string,
+    authorizationId: string,
+    actorId: 'owner',
+  ): Promise<{ run: Run; created: boolean }> {
+    const authorization = await this.authorizations.get(authorizationId);
+    if (
+      !authorization ||
+      authorization.status !== 'authorized' ||
+      authorization.runtimeId !== 'mock' ||
+      authorization.operation !== 'execute_task' ||
+      authorization.taskId !== taskId ||
+      authorization.scope.taskId !== taskId ||
+      !authorization.capabilities.includes('mock.execute') ||
+      authorization.expiresAt <= new Date().toISOString() ||
+      authorization.requestingActor !== actorId
+    ) {
+      await this.authorizations.recordEnforcementDenied(
+        authorizationId,
+        taskId,
+        actorId,
+        authorization ? 'scope_status_or_expiry_mismatch' : 'authorization_missing',
+      );
       throw new CoordinatorError(
         'invalid_transition',
         'Runtime authorization is missing or invalid.',
@@ -139,17 +124,30 @@ export class RunCoordinator {
         409,
       );
     }
-    const result = await translateStoreError(() =>
-      this.store.admitRun(taskId, idempotencyKey, (db, data) =>
-        this.queue.send(queueName, data, {
-          retryLimit: 0,
-          retryDelay: 0,
-          expireInSeconds: 60,
-          heartbeatSeconds: 10,
-          db,
-        }),
-      ),
-    );
+    let result: Awaited<ReturnType<PostgresRunStore['admitRun']>>;
+    try {
+      result = await translateStoreError(() =>
+        this.store.admitRun(taskId, idempotencyKey, authorizationId, actorId, (db, data) =>
+          this.queue.send(queueName, data, {
+            retryLimit: 0,
+            retryDelay: 0,
+            expireInSeconds: 60,
+            heartbeatSeconds: 10,
+            db,
+          }),
+        ),
+      );
+    } catch (error) {
+      if (error instanceof CoordinatorError && error.code === 'invalid_transition') {
+        await this.authorizations.recordEnforcementDenied(
+          authorizationId,
+          taskId,
+          actorId,
+          'admission_authorization_race',
+        );
+      }
+      throw error;
+    }
     this.publish(result.events);
     return { run: RunSchema.parse(result.run), created: result.created };
   }
@@ -246,14 +244,15 @@ export class RunCoordinator {
   ): Promise<void> {
     const queued = await this.store.getRun(runId);
     if (!queued) throw new CoordinatorError('not_found', 'Run was not found.', 404);
-    const authorization = this.authorizer.authorize({
-      actorId: 'owner',
-      runtimeId: 'mock',
-      operation: 'execute_task',
-      requiredCapabilities: ['mock.execute'],
-      taskId: queued.taskId,
-    });
-    if (!authorization) {
+    const authorization = await this.authorizations.getForRun(runId);
+    if (
+      !authorization ||
+      authorization.status !== 'authorized' ||
+      authorization.taskId !== queued.taskId ||
+      authorization.scope.taskId !== queued.taskId ||
+      !authorization.capabilities.includes('mock.execute') ||
+      authorization.expiresAt <= new Date().toISOString()
+    ) {
       const denied = await this.store.interruptQueuedRun(
         runId,
         'Runtime authorization expired or was revoked before execution.',

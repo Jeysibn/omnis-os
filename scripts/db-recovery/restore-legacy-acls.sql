@@ -30,6 +30,37 @@ GRANT INSERT (id, run_id, sequence, event_type, at, message)
   ON omnis.run_events TO omnis_runtime;
 GRANT INSERT (idempotency_key, request_fingerprint, run_id)
   ON omnis.run_idempotency TO omnis_runtime;
+GRANT SELECT ON omnis.runtime_authorizations TO omnis_runtime;
+REVOKE ALL PRIVILEGES ON TABLE omnis.authorization_audit FROM omnis_runtime;
+REVOKE INSERT (
+  id, authorization_id, task_id, run_id, event_type, actor_id,
+  effective_identity, capability, correlation_id, outcome, reason_code, occurred_at
+) ON omnis.authorization_audit FROM omnis_runtime;
+REVOKE ALL ON FUNCTION omnis.consume_run_authorization(text, text, text, text, text)
+  FROM PUBLIC, omnis_runtime;
+REVOKE ALL ON FUNCTION omnis.lock_active_run_authorization(text) FROM PUBLIC, omnis_runtime;
+GRANT EXECUTE ON FUNCTION omnis.consume_run_authorization(text, text, text, text, text)
+  TO omnis_runtime;
+GRANT EXECUTE ON FUNCTION omnis.lock_active_run_authorization(text) TO omnis_runtime;
+REVOKE ALL ON FUNCTION omnis.append_runtime_authorization_audit(text, text, text)
+  FROM PUBLIC, omnis_authorizer;
+GRANT EXECUTE ON FUNCTION omnis.append_runtime_authorization_audit(text, text, text)
+  TO omnis_runtime;
+REVOKE ALL ON FUNCTION omnis.revoke_run_authorization(text, text)
+  FROM PUBLIC, omnis_runtime;
+GRANT EXECUTE ON FUNCTION omnis.revoke_run_authorization(text, text)
+  TO omnis_authorizer;
+GRANT SELECT ON omnis.runtime_authorizations TO omnis_authorizer;
+GRANT SELECT, INSERT ON omnis.authorization_audit TO omnis_authorizer;
+GRANT INSERT (
+  id, requesting_actor, runtime_id, operation, task_id, capabilities,
+  scope, policy_version, correlation_id, expires_at
+) ON omnis.runtime_authorizations TO omnis_authorizer;
+GRANT UPDATE (status, decided_at, decided_by, revoked_at, revoked_by)
+  ON omnis.runtime_authorizations TO omnis_authorizer;
+GRANT SELECT ON omnis.tasks TO omnis_authorizer;
+GRANT UPDATE (status, decided_at, decided_by, revoked_at, revoked_by)
+  ON omnis.runtime_authorizations TO omnis_authorizer;
 GRANT USAGE, SELECT ON SEQUENCE omnis.task_id_seq, omnis.run_id_seq TO omnis_runtime;
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA pgboss TO omnis_runtime;

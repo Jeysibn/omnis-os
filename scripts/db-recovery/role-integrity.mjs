@@ -14,7 +14,7 @@ export const restoreRoleSecurityQuery = `SELECT COALESCE(jsonb_agg(jsonb_build_o
   )
 ) ORDER BY roles.rolname), '[]'::jsonb) AS role_security
 FROM pg_roles roles
-WHERE roles.rolname IN ('omnis', 'omnis_migrator', 'omnis_runtime')`;
+WHERE roles.rolname IN ('omnis', 'omnis_migrator', 'omnis_runtime', 'omnis_authorizer')`;
 
 const expectedRoles = {
   omnis: {
@@ -32,6 +32,16 @@ const expectedRoles = {
     membershipCount: 0,
   },
   omnis_runtime: {
+    login: true,
+    inherit: false,
+    superuser: false,
+    createRole: false,
+    createDatabase: false,
+    replication: false,
+    bypassRls: false,
+    membershipCount: 0,
+  },
+  omnis_authorizer: {
     login: true,
     inherit: false,
     superuser: false,

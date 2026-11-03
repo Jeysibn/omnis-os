@@ -3,10 +3,11 @@ import type { Pool } from 'pg';
 const databaseRoles = {
   migration: 'omnis_migrator',
   runtime: 'omnis_runtime',
+  authorizer: 'omnis_authorizer',
 } as const;
 export async function provisionDatabaseRoles(
   admin: Pool,
-  passwords: { migration: string; runtime: string },
+  passwords: { migration: string; runtime: string; authorizer: string },
 ): Promise<void> {
   for (const [name, password] of Object.entries(passwords)) {
     if (password.length < 32)
@@ -60,7 +61,7 @@ export async function provisionDatabaseRoles(
   }
 
   await admin.query(
-    `GRANT CONNECT ON DATABASE ${quoteIdentifier(databaseName)} TO omnis_migrator, omnis_runtime`,
+    `GRANT CONNECT ON DATABASE ${quoteIdentifier(databaseName)} TO omnis_migrator, omnis_runtime, omnis_authorizer`,
   );
   await admin.query(`GRANT CREATE ON DATABASE ${quoteIdentifier(databaseName)} TO omnis_migrator`);
   await admin.query('CREATE SCHEMA IF NOT EXISTS omnis AUTHORIZATION omnis_migrator');
@@ -108,6 +109,7 @@ export async function provisionDatabaseRoles(
   }
 
   await admin.query('GRANT USAGE ON SCHEMA omnis, pgboss TO omnis_runtime');
+  await admin.query('GRANT USAGE ON SCHEMA omnis TO omnis_authorizer');
   await admin.query(
     'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA pgboss TO omnis_runtime',
   );

@@ -75,8 +75,39 @@ export const RunEventSchema = z.object({
 });
 export type RunEvent = z.infer<typeof RunEventSchema>;
 
-export const CreateRunSchema = z.object({ taskId: z.string().min(1) });
+export const CreateRunSchema = z.object({
+  taskId: z.string().min(1),
+  authorizationId: z.string().uuid(),
+});
 export type CreateRunInput = z.infer<typeof CreateRunSchema>;
+
+export const CreateAuthorizationSchema = z.object({ taskId: z.string().min(1) }).strict();
+export const AuthorizationDecisionSchema = z
+  .object({ decision: z.enum(['approve', 'deny']) })
+  .strict();
+export const AuthorizationSchema = z
+  .object({
+    id: z.string().uuid(),
+    requestingActor: z.literal('owner'),
+    runtimeId: z.literal('mock'),
+    operation: z.literal('execute_task'),
+    taskId: z.string().min(1),
+    capabilities: z.array(z.literal('mock.execute')),
+    scope: z.object({ kind: z.literal('task'), taskId: z.string().min(1) }).strict(),
+    status: z.enum(['pending', 'authorized', 'denied', 'revoked', 'expired']),
+    policyVersion: z.string().min(1),
+    correlationId: z.string().min(1),
+    expiresAt: z.string().datetime(),
+    createdAt: z.string().datetime(),
+    decidedAt: z.string().datetime().nullable(),
+    decidedBy: z.literal('owner').nullable(),
+    revokedAt: z.string().datetime().nullable(),
+    revokedBy: z.literal('owner').nullable(),
+    consumedAt: z.string().datetime().nullable(),
+    consumedRunId: z.string().nullable(),
+  })
+  .strict();
+export type Authorization = z.infer<typeof AuthorizationSchema>;
 
 export const CapabilitiesSchema = z.object({
   runtimeKind: z.literal('mock'),

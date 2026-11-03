@@ -1,8 +1,14 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import Fastify from 'fastify';
 import { PgBoss } from 'pg-boss';
-import { createPool, PostgresRunStore, StoreError } from '@omnis/db';
-import { CreateRunSchema, CreateTaskSchema } from '@omnis/contracts';
+import { createPool, PostgresAuthorizationStore, PostgresRunStore, StoreError } from '@omnis/db';
+import {
+  AuthorizationDecisionSchema,
+  AuthorizationSchema,
+  CreateAuthorizationSchema,
+  CreateRunSchema,
+  CreateTaskSchema,
+} from '@omnis/contracts';
 import { DockerSandboxExecutor } from './docker-sandbox.ts';
 import { CoordinatorError, queueName, RunCoordinator } from './run-coordinator.ts';
 import { SandboxedMockRuntimeAdapter } from './sandboxed-mock-runtime.ts';
@@ -22,6 +28,12 @@ if (!internalToken || internalToken.length < 64) {
 }
 const connectionString = getDatabaseUrl();
 const pool = createPool({ connectionString, max: 8, application_name: 'omnis-worker' });
+const authorizerUrl = getAuthorizerDatabaseUrl(connectionString);
+const authorizerPool = createPool({
+  connectionString: authorizerUrl,
+  max: 4,
+  application_name: 'omnis-authorizer',
+});
 
 const boss = new PgBoss({
   connectionString,
@@ -51,7 +63,8 @@ const sandbox = new DockerSandboxExecutor({ scopeId: sandboxScope });
 const mockDelayMs =
   process.env.NODE_ENV === 'test' ? Number(process.env.OMNIS_MOCK_TEST_DELAY_MS ?? 500) : 500;
 const runtime = new SandboxedMockRuntimeAdapter(sandbox, mockDelayMs);
-const coordinator = new RunCoordinator(store, boss, runtime);
+const authorizationStore = new PostgresAuthorizationStore(pool, authorizerPool);
+const coordinator = new RunCoordinator(store, boss, runtime, authorizationStore);
 await coordinator.reconcileExpiredRuns();
 await boss.work(queueName, { batchSize: 1, localConcurrency: 1 }, async ([job]) => {
   if (job) await coordinator.handleQueueJob(job.data, job.signal);
@@ -96,6 +109,81 @@ app.post('/internal/v1/tasks', async (request, reply) => {
       .send({ error: { code: 'invalid_input', message: 'Task input is invalid.' } });
   return reply.code(201).send(await coordinator.createTask(parsed.data));
 });
+app.post('/internal/v1/authorizations', async (request, reply) => {
+  const parsed = CreateAuthorizationSchema.safeParse(request.body);
+  const actorId = trustedActor(request);
+  if (!parsed.success || !actorId)
+    return reply
+      .code(400)
+      .send({ error: { code: 'invalid_input', message: 'Authorization request is invalid.' } });
+  try {
+    const authorization = await authorizationStore.request(parsed.data.taskId, actorId);
+    return reply.code(201).send(AuthorizationSchema.parse(authorization));
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Authorization task was not found.')
+      return reply.code(404).send({ error: { code: 'not_found', message: error.message } });
+    throw error;
+  }
+});
+app.post<{ Params: { authorizationId: string } }>(
+  '/internal/v1/authorizations/:authorizationId/decision',
+  async (request, reply) => {
+    const parsed = AuthorizationDecisionSchema.safeParse(request.body);
+    const actorId = trustedActor(request);
+    if (!parsed.success || !actorId || !/^[0-9a-f-]{36}$/i.test(request.params.authorizationId))
+      return reply
+        .code(400)
+        .send({ error: { code: 'invalid_input', message: 'Authorization decision is invalid.' } });
+    try {
+      const authorization = await authorizationStore.decide(
+        request.params.authorizationId,
+        actorId,
+        parsed.data.decision,
+      );
+      return AuthorizationSchema.parse(authorization);
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('Authorization is missing'))
+        return reply
+          .code(409)
+          .send({ error: { code: 'invalid_transition', message: error.message } });
+      throw error;
+    }
+  },
+);
+app.post<{ Params: { authorizationId: string } }>(
+  '/internal/v1/authorizations/:authorizationId/revoke',
+  async (request, reply) => {
+    const actorId = trustedActor(request);
+    if (!actorId || !/^[0-9a-f-]{36}$/i.test(request.params.authorizationId))
+      return reply.code(400).send({
+        error: { code: 'invalid_input', message: 'Authorization revocation is invalid.' },
+      });
+    try {
+      const authorization = await authorizationStore.revoke(
+        request.params.authorizationId,
+        actorId,
+      );
+      return AuthorizationSchema.parse(authorization);
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('Only an active'))
+        return reply
+          .code(409)
+          .send({ error: { code: 'invalid_transition', message: error.message } });
+      throw error;
+    }
+  },
+);
+app.get<{ Params: { authorizationId: string } }>(
+  '/internal/v1/authorizations/:authorizationId',
+  async (request, reply) => {
+    const authorization = await authorizationStore.get(request.params.authorizationId);
+    return authorization
+      ? AuthorizationSchema.parse(authorization)
+      : reply
+          .code(404)
+          .send({ error: { code: 'not_found', message: 'Authorization was not found.' } });
+  },
+);
 app.get('/internal/v1/runs', async () => coordinator.listRuns());
 app.post('/internal/v1/runs', async (request, reply) => {
   const parsed = await parseRunInput(request.body);
@@ -111,7 +199,20 @@ app.post('/internal/v1/runs', async (request, reply) => {
     });
   }
   try {
-    const result = await coordinator.startRun(parsed.data.taskId, idempotencyKey);
+    const actorId = trustedActor(request);
+    if (!actorId || !parsed.data.authorizationId)
+      return reply.code(403).send({
+        error: {
+          code: 'authorization_denied',
+          message: 'Trusted owner authorization is required.',
+        },
+      });
+    const result = await coordinator.startRun(
+      parsed.data.taskId,
+      idempotencyKey,
+      parsed.data.authorizationId,
+      actorId,
+    );
     return reply.code(result.created ? 201 : 200).send(result.run);
   } catch (error) {
     if (error instanceof CoordinatorError) {
@@ -225,6 +326,7 @@ app.addHook('onClose', async () => {
   await coordinator.shutdown();
   await boss.stop();
   await pool.end();
+  await authorizerPool.end();
 });
 
 await app.listen({ host, port });
@@ -257,6 +359,12 @@ function parseRunInput(body: unknown) {
   return CreateRunSchema.safeParse(body);
 }
 
+function trustedActor(request: {
+  headers: Record<string, string | string[] | undefined>;
+}): 'owner' | undefined {
+  return request.headers['x-omnis-trusted-actor'] === 'owner' ? 'owner' : undefined;
+}
+
 function getDatabaseUrl(): string {
   const configured = process.env.OMNIS_DATABASE_URL;
   if (configured) {
@@ -275,4 +383,13 @@ function getDatabaseUrl(): string {
   if (!password)
     throw new Error('OMNIS_DATABASE_URL or OMNIS_RUNTIME_DB_PASSWORD must be configured.');
   return `postgresql://omnis_runtime:${encodeURIComponent(password)}@127.0.0.1:5432/omnis`;
+}
+
+function getAuthorizerDatabaseUrl(runtimeUrl: string): string {
+  const password = process.env.OMNIS_AUTHORIZER_DB_PASSWORD;
+  if (!password) throw new Error('OMNIS_AUTHORIZER_DB_PASSWORD must be configured for the worker.');
+  const url = new URL(runtimeUrl);
+  url.username = 'omnis_authorizer';
+  url.password = password;
+  return url.toString();
 }

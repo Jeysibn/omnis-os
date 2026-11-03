@@ -1,32 +1,45 @@
 # ADR-0009: Runtime authorization and credential boundaries
 
-**Status:** Accepted for mock-only authorization scaffolding; real runtime integrations remain blocked
-**Date:** 2026-11-02
+**Status:** Accepted for durable mock-only authorization foundation; real runtime integrations remain blocked
+
+**Date:** 2026-11-03
 
 ## Context
 
-A runtime adapter describes what it can do, but must not authorize itself to do it. Future integrations will also need to keep provider credentials away from untrusted tool processes and agent workspaces. Omnis OS currently supports only deterministic synthetic mock execution.
+A runtime adapter describes its capabilities but cannot authorize itself. R1-G4 needs durable, task-scoped approval and revocation that survive worker restarts, plus an auditable record of security decisions. The current application has one owner login and only deterministic synthetic mock execution; it is not a multi-user identity or general-purpose IAM system.
 
 ## Decision
 
-Omnis OS owns authorization records. Each record identifies the initiating actor, selected runtime, operation, allowed capabilities, scope, approval requirement, authorization status, policy version, expiry, revocation state, and provenance. Admission checks the Omnis-owned record before creating a queued run. The trusted worker checks it again immediately before claiming execution. Missing, expired, revoked, pending, denied, or insufficient records fail closed. Adapter capability discovery is descriptive and cannot grant permission.
+Omnis OS stores authorization requests, decisions, scope, expiry, consumption, revocation, and security audit events in PostgreSQL. The initial policy is intentionally fixed to the authenticated local `owner`, the `mock` runtime, the `execute_task` operation, the single `mock.execute` capability, and one task. Each authorization is consumed by at most one run.
 
-The initial implementation is deliberately limited to an explicit local owner grant for the mock runtime and `mock.execute`. It is an in-memory policy foundation for the current single-owner process, not a durable authorization registry, multi-user identity system, or approval workflow. No real runtime adapter is implemented. PostgreSQL checks requiring `runtime_kind = 'mock'` and `synthetic IS TRUE` remain unchanged.
+The API derives the actor from its verified owner session and CSRF-protected route; it does not accept a caller-provided actor field. The API-to-worker boundary uses the existing private loopback endpoint and internal token. The worker maps that trusted request to the fixed `owner` principal. Agent and adapter identities are never approval authorities. This trust model is only as strong as the existing single-owner login and internal-token boundary.
 
-For any future real integration, keep these responsibilities separate:
+`omnis_authorizer` is a separate restricted database login used only in the trusted worker process for authorization lifecycle writes. `omnis_runtime` cannot directly insert, update, or delete authorization records or directly insert audit rows. Run admission invokes a narrowly scoped, migration-owned `SECURITY DEFINER` routine in the same transaction as run and queue admission. It atomically consumes the exact approved authorization. A second narrowly scoped routine permits only allowlisted runtime operation events; it derives principal, task, authorization, and correlation from database rows and records the runtime database identity rather than accepting caller-supplied provenance. Authorizer decisions remain outside this runtime append interface.
 
-1. **Trusted model authentication:** a connector or provider broker owns provider credentials and refresh/revocation operations.
-2. **Provider communication:** a trusted connector applies the provider's supported authorization and policy requirements.
-3. **Runtime authorization:** Omnis OS authorizes each actor, runtime, operation, capability, scope, and run; approval and revocation are first-class.
-4. **Untrusted tool execution:** tool processes run in a separately restricted sandbox with explicit filesystem, process, and egress policy.
-5. **Agent workspace data:** task inputs and workspace data are passed through narrowly scoped interfaces; provider secrets are not copied into the workspace or sandbox environment.
-6. **Audit events:** authorization decisions, approvals, revocation, connector activity, and tool actions are recorded with actor, run, policy version, and outcome while redacting credential material.
+The worker rechecks durable state before claim and uses row locking at claim and completion to serialize revocation against those state transitions. Admission and the consumption routine acquire the run-admission transaction advisory lock before authorization locking. Revocation takes the same lock before inspecting consumption state; it locks and re-reads an unconsumed authorization without an explicit task `FOR UPDATE`, and returns a retry outcome if consumption appeared. The authorizer retries in a fresh transaction; the consumed branch locks run and then authorization, matching worker transitions. This prevents a stale `consumed_run_id` from selecting the wrong branch, including direct calls to the runtime consumption routine. Revocation takes effect when its database transaction commits: a claim or completion that acquired the authorization lock first may commit before revocation; operations reaching the lock after revocation commit fail closed. This cannot undo an external side effect already completed, and no external side effects exist in the mock-only runtime.
 
-Provider credentials must remain in the trusted connector or broker. Do not build a token tunnel, reuse local Claude/Codex/Hermes OAuth state, or mount provider credentials into arbitrary tool execution. Before any provider is authorized, verify provider policy compliance, consent for background operation, per-run grants, capability enforcement, deny-by-default network egress, revocation behavior, and synthetic credential-canary absence from runtime environment, files, output, events, database records, and logs.
+Authorization lifecycle and run-operation audit rows are written in the same database transactions as the corresponding request, decision, revocation, admission, claim, and terminal transition where practical. Audit IDs are generated by PostgreSQL UUID defaults; expiry is unique per authorization through a partial index and is recorded when an expired authorization is next read through the authorizer store. Required audit write failure rolls back the associated authorization or execution transition. Database or policy lookup errors prevent admission or execution.
 
-## Consequences
+The implementation does not change the database constraints requiring `runtime_kind = 'mock'` and `synthetic IS TRUE`. It does not add a provider adapter, credentials, network access, or arbitrary tool execution.
 
-- Mock task admission and execution are checked against Omnis policy independently of adapter declarations.
-- Revocation is checked again before a worker claims queued work; revoked queued work is interrupted without execution or automatic retry.
-- The authorization records are currently process-local. A durable, owner-managed policy store and audit trail are required before real runtimes or multiple actors.
-- No provider inference, credentials, or third-party network access are enabled by this decision.
+## Future connector boundary
+
+Any later model-only connector must keep these responsibilities separate:
+
+1. **Trusted credential broker:** holds provider credentials, supports revocation, and never passes secrets to an execution sandbox.
+2. **Provider communication:** applies the provider's supported authentication and policy requirements from a trusted connector identity.
+3. **Runtime authorization:** checks a durable actor-, operation-, capability-, scope-, and run-specific grant before each provider operation.
+4. **Untrusted tool execution:** remains separately sandboxed, with explicit filesystem, process, and deny-by-default egress controls. General-purpose tools are not authorized by this ADR.
+5. **Workspace data:** passes only task-scoped data; provider secrets do not enter workspaces, sandbox environments, logs, or events.
+6. **Audit:** records connector provenance, authorization checks, revocation outcomes, and safe reason codes without credentials or unnecessary prompt content.
+
+Before model-only execution, separately approve provider policy and authentication, a connector credential broker, in-run revocation behavior, network controls, connector identity, per-run authorization, and synthetic credential-canary verification. Do not reuse Hermes, Codex, or Claude local OAuth state or create a token tunnel.
+
+## Consequences and limitations
+
+- Authorization state and audit history survive API/worker restarts because PostgreSQL is authoritative.
+- The fixed owner principal is derived from the current owner-session boundary; multi-user identity, delegated approvals, and independently attributable human approvers are not implemented.
+- Runtime has no direct audit-table INSERT, UPDATE, or DELETE privilege. It can call the constrained runtime append function for its own allowlisted operation events. The database administrator and trusted authorizer process remain privileged, so the log is not cryptographically immutable or independently anchored.
+- Expiration is derived from the timestamp rather than a separate persisted `expired` status transition.
+- Revocation cannot reverse an operation that committed before the revocation transaction.
+- No Hermes, Codex, Claude, or other provider inference, credential access, connector network access, or arbitrary agent tool execution is enabled.

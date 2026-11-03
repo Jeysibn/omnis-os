@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import {
   ApiErrorSchema,
+  AuthorizationSchema,
   RunEventSchema,
   RunSchema,
   TaskSchema,
@@ -249,15 +250,37 @@ function App() {
   }
 
   async function startRun(task: Task) {
+    const approved = window.confirm(
+      `Approve the synthetic mock.execute capability for task “${task.title}” only? This approval expires in 20 minutes and can be used for one mock run.`,
+    );
+    if (!approved) return;
     setBusy(true);
     setError('');
     try {
+      const authorization = await request(
+        '/api/v1/authorizations',
+        {
+          method: 'POST',
+          headers: { 'x-omnis-csrf': csrfToken },
+          body: JSON.stringify({ taskId: task.id }),
+        },
+        (value) => AuthorizationSchema.parse(value),
+      );
+      const decision = await request(
+        `/api/v1/authorizations/${encodeURIComponent(authorization.id)}/decision`,
+        {
+          method: 'POST',
+          headers: { 'x-omnis-csrf': csrfToken },
+          body: JSON.stringify({ decision: 'approve' }),
+        },
+        (value) => AuthorizationSchema.parse(value),
+      );
       const run = await request(
         '/api/v1/runs',
         {
           method: 'POST',
           headers: { 'x-omnis-csrf': csrfToken, 'idempotency-key': crypto.randomUUID() },
-          body: JSON.stringify({ taskId: task.id }),
+          body: JSON.stringify({ taskId: task.id, authorizationId: decision.id }),
         },
         (value) => RunSchema.parse(value),
       );
@@ -485,10 +508,14 @@ function App() {
                         onClick={() => void startRun(task)}
                         disabled={busy || Boolean(activeRun)}
                         aria-label={`Start mock run for ${task.title}`}
-                        title={activeRun ? 'A run is already active' : 'Start mock run'}
+                        title={
+                          activeRun
+                            ? 'A run is already active'
+                            : 'Approve and start one synthetic mock run'
+                        }
                       >
                         {activeRun ? <Clock3 size={16} /> : <Play size={16} />}
-                        <span>{activeRun ? 'In progress' : 'Run mock'}</span>
+                        <span>{activeRun ? 'In progress' : 'Approve & run mock'}</span>
                         {!activeRun && <ArrowRight size={14} />}
                       </button>
                     </li>

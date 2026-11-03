@@ -4,7 +4,7 @@ export const aclSnapshotQuery = `WITH user_schemas AS (
    WHERE nspname NOT IN ('information_schema', 'pg_catalog', 'pg_toast')
      AND nspname !~ '^pg_(toast_)?temp_[0-9]+$'
 ), acl_entries AS (
-  SELECT 'schema'::text AS object_type, n.nspname AS schema_name, n.nspname AS object_name,
+  SELECT 'schema'::text AS object_type, n.nspname AS schema_name, n.nspname::text AS object_name,
          NULL::text AS column_name, acl.grantee, acl.privilege_type AS privilege,
          acl.is_grantable AS grantable, NULL::boolean AS security_definer
     FROM user_schemas n
@@ -41,7 +41,7 @@ export const aclSnapshotQuery = `WITH user_schemas AS (
      AND a.attnum > 0 AND NOT a.attisdropped AND a.attacl IS NOT NULL
   UNION ALL
   SELECT 'routine', n.nspname,
-         p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')',
+         p.proname::text || '(' || pg_get_function_identity_arguments(p.oid) || ')',
          NULL::text, acl.grantee, acl.privilege_type, acl.is_grantable, p.prosecdef
     FROM pg_proc p
     JOIN user_schemas n ON n.oid = p.pronamespace
@@ -90,11 +90,18 @@ const knownRoles = new Set([
   'omnis',
   'omnis_migrator',
   'omnis_runtime',
+  'omnis_authorizer',
   'postgres',
   'pg_database_owner',
   'PUBLIC',
 ]);
-const applicationReadTables = new Set(['tasks', 'runs', 'run_events', 'run_idempotency']);
+const applicationReadTables = new Set([
+  'tasks',
+  'runs',
+  'run_events',
+  'run_idempotency',
+  'runtime_authorizations',
+]);
 const applicationColumnPrivileges = new Map([
   ['tasks', new Set(['INSERT:id', 'INSERT:title', 'INSERT:detail', 'UPDATE:status'])],
   [
@@ -131,6 +138,24 @@ const applicationColumnPrivileges = new Map([
     ),
   ],
 ]);
+const approvedSecurityDefinerRoutineArities = new Map([
+  ['consume_run_authorization', 5],
+  ['lock_active_run_authorization', 1],
+  ['append_runtime_authorization_audit', 3],
+]);
+
+function isApprovedRuntimeSecurityDefiner(entry) {
+  if (entry.objectType !== 'routine' || entry.schema !== 'omnis') return false;
+  const match = /^([a-z_][a-z0-9_]*)\((.*)\)$/.exec(entry.object);
+  if (!match) return false;
+  const arity = approvedSecurityDefinerRoutineArities.get(match[1]);
+  const argumentsList = match[2] ? match[2].split(',') : [];
+  return (
+    arity !== undefined &&
+    argumentsList.length === arity &&
+    argumentsList.every((argument) => argument.trim().split(/\s+/).at(-1) === 'text')
+  );
+}
 
 export function normalizeAclSnapshot(snapshot) {
   if (!Array.isArray(snapshot)) throw new Error('PostgreSQL ACL snapshot must be an array.');
@@ -176,7 +201,7 @@ export function runtimeAclSnapshotsMatch(source, restored) {
   return JSON.stringify(runtimeEntries(source)) === JSON.stringify(runtimeEntries(restored));
 }
 
-const deferredDatabaseConnectGrantees = new Set(['PUBLIC', 'omnis_runtime']);
+const deferredDatabaseConnectGrantees = new Set(['PUBLIC', 'omnis_runtime', 'omnis_authorizer']);
 
 export function assertRestoreDatabaseClosed(snapshot) {
   for (const entry of normalizeAclSnapshot(snapshot)) {
@@ -241,6 +266,69 @@ export function assertRuntimeAclPolicy(snapshot) {
         `PostgreSQL ACL grants ${entry.privilege} to PUBLIC on ${entry.schema || 'database'}.${entry.object}.`,
       );
     }
+    if (entry.grantee === 'omnis_authorizer') {
+      if (entry.grantable) {
+        throw new Error(
+          `Authorizer ACL grant option is prohibited on ${entry.schema}.${entry.object}.`,
+        );
+      }
+      if (entry.objectType === 'database' && entry.privilege === 'CONNECT') continue;
+      if (
+        entry.objectType === 'routine' &&
+        entry.schema === 'omnis' &&
+        entry.object === 'revoke_run_authorization(p_authorization_id text, p_actor_id text)' &&
+        entry.privilege === 'EXECUTE' &&
+        entry.securityDefiner === true
+      )
+        continue;
+      if (entry.objectType === 'schema' && entry.schema === 'omnis' && entry.privilege === 'USAGE')
+        continue;
+      if (
+        entry.objectType === 'table' &&
+        entry.schema === 'omnis' &&
+        ((entry.object === 'authorization_audit' &&
+          ['SELECT', 'INSERT'].includes(entry.privilege)) ||
+          (entry.object === 'runtime_authorizations' && entry.privilege === 'SELECT'))
+      )
+        continue;
+      if (
+        entry.objectType === 'column' &&
+        entry.schema === 'omnis' &&
+        entry.object === 'runtime_authorizations' &&
+        entry.privilege === 'INSERT' &&
+        [
+          'id',
+          'requesting_actor',
+          'runtime_id',
+          'operation',
+          'task_id',
+          'capabilities',
+          'scope',
+          'policy_version',
+          'correlation_id',
+          'expires_at',
+        ].includes(entry.column)
+      )
+        continue;
+      if (
+        entry.objectType === 'table' &&
+        entry.schema === 'omnis' &&
+        entry.object === 'tasks' &&
+        entry.privilege === 'SELECT'
+      )
+        continue;
+      if (
+        entry.objectType === 'column' &&
+        entry.schema === 'omnis' &&
+        entry.object === 'runtime_authorizations' &&
+        entry.privilege === 'UPDATE' &&
+        ['status', 'decided_at', 'decided_by', 'revoked_at', 'revoked_by'].includes(entry.column)
+      )
+        continue;
+      throw new Error(
+        `Authorizer ACL ${entry.privilege} is prohibited on ${entry.schema}.${entry.object}.`,
+      );
+    }
     if (entry.grantee !== 'omnis_runtime') continue;
     if (entry.grantable) {
       throw new Error(`Runtime ACL grant option is prohibited on ${entry.schema}.${entry.object}.`);
@@ -278,6 +366,14 @@ export function assertRuntimeAclPolicy(snapshot) {
           `Runtime column privilege ${entry.privilege} on omnis.${entry.object}.${entry.column} is prohibited.`,
         );
       }
+      continue;
+    }
+
+    if (
+      isApprovedRuntimeSecurityDefiner(entry) &&
+      entry.privilege === 'EXECUTE' &&
+      entry.securityDefiner === true
+    ) {
       continue;
     }
 

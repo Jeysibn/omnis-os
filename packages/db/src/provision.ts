@@ -4,6 +4,7 @@ import { provisionDatabaseRoles } from './provision-roles.ts';
 const adminUrl = process.env.OMNIS_ADMIN_DATABASE_URL ?? databaseUrl('omnis', 'OMNIS_DB_PASSWORD');
 const migrationPassword = required('OMNIS_MIGRATION_DB_PASSWORD');
 const runtimePassword = required('OMNIS_RUNTIME_DB_PASSWORD');
+const authorizerPassword = required('OMNIS_AUTHORIZER_DB_PASSWORD');
 const pool = createPool({
   connectionString: adminUrl,
   max: 1,
@@ -11,7 +12,11 @@ const pool = createPool({
 });
 
 try {
-  await provisionDatabaseRoles(pool, { migration: migrationPassword, runtime: runtimePassword });
+  await provisionDatabaseRoles(pool, {
+    migration: migrationPassword,
+    runtime: runtimePassword,
+    authorizer: authorizerPassword,
+  });
   process.stdout.write(
     'Omnis migration and runtime roles provisioned with scoped schema privileges.\n',
   );

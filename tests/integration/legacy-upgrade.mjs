@@ -8,7 +8,11 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { PgBoss } from '../../apps/worker/node_modules/pg-boss/dist/index.js';
-import { createPool, PostgresRunStore } from '../../packages/db/src/index.ts';
+import {
+  createPool,
+  PostgresAuthorizationStore,
+  PostgresRunStore,
+} from '../../packages/db/src/index.ts';
 import { provisionDatabaseRoles } from '../../packages/db/src/provision-roles.ts';
 import { metricsQuery } from '../../scripts/db-recovery/metrics.mjs';
 
@@ -23,8 +27,11 @@ if (adminBase.username !== 'omnis' || !/(?:^|[_-])tests?$/i.test(adminBase.pathn
 }
 const migrationBase = process.env.OMNIS_TEST_MIGRATION_DATABASE_URL;
 const runtimeBase = process.env.OMNIS_TEST_DATABASE_URL;
-if (!migrationBase || !runtimeBase) {
-  throw new Error('Set test migration and runtime database URLs for the legacy upgrade drill.');
+const authorizerBase = process.env.OMNIS_TEST_AUTHORIZER_DATABASE_URL;
+if (!migrationBase || !runtimeBase || !authorizerBase) {
+  throw new Error(
+    'Set test migration, runtime, and authorizer database URLs for the legacy upgrade drill.',
+  );
 }
 if (
   new URL(migrationBase).username !== 'omnis_migrator' ||
@@ -36,11 +43,13 @@ if (
 }
 const migrationPassword = decodeURIComponent(new URL(migrationBase).password);
 const runtimePassword = decodeURIComponent(new URL(runtimeBase).password);
+const authorizerPassword = decodeURIComponent(new URL(authorizerBase).password);
 
 const suffix = `${process.pid}_${Date.now().toString(36)}`.toLowerCase();
 const databaseName = `omnis_legacy_upgrade_${suffix}`;
 const databaseUrl = databaseUrlFor('omnis_runtime', runtimePassword);
 const migrationUrl = databaseUrlFor('omnis_migrator', migrationPassword);
+const authorizerUrl = databaseUrlFor('omnis_authorizer', authorizerPassword);
 const clusterAdminPool = createPool(adminUrl);
 const databaseAdminPool = createPool(
   databaseUrlFor('omnis', decodeURIComponent(adminBase.password)),
@@ -48,6 +57,7 @@ const databaseAdminPool = createPool(
 const legacyPool = createPool(databaseUrlFor('omnis', decodeURIComponent(adminBase.password)));
 const runtimePool = createPool(databaseUrl);
 const migrationPool = createPool(migrationUrl);
+const authorizerPool = createPool(authorizerUrl);
 const legacyWorktree = await mkdtemp(join(tmpdir(), 'omnis-r1-legacy-worktree-'));
 let legacyBoss;
 let runtimeBoss;
@@ -109,6 +119,7 @@ try {
   await provisionDatabaseRoles(databaseAdminPool, {
     migration: migrationPassword,
     runtime: runtimePassword,
+    authorizer: authorizerPassword,
   });
   await runCurrentMigration();
   await applyRestrictedPgBossMigrations();
@@ -120,6 +131,9 @@ try {
     '0002_runtime_grants',
     '0003_runtime_privileges',
     '0004_narrow_runtime_sequence_defaults',
+    '0005_durable_authorization',
+    '0006_authorization_revocation_lock_order',
+    '0007_authorization_audit_and_revoke_order',
   ]);
   assert.equal(afterUpgrade.unsafeRunStates, 1);
   assert.equal(
@@ -172,10 +186,10 @@ try {
 
   worker = await startRestrictedWorker();
   const migratedStore = new PostgresRunStore(runtimePool);
-  await waitForRun(migratedStore, legacyRun.id, 'completed');
+  await waitForRun(migratedStore, legacyRun.id, 'interrupted');
   const completedLegacyEvents = await migratedStore.getEvents(legacyRun.id);
   assert.equal(completedLegacyEvents[0]?.type, 'run.queued');
-  assert.equal(completedLegacyEvents.at(-1)?.type, 'run.completed');
+  assert.equal(completedLegacyEvents.at(-1)?.type, 'run.interrupted');
   const queueState = await runtimePool.query('SELECT state FROM pgboss.job WHERE id = $1::uuid', [
     (
       await databaseAdminPool.query('SELECT pg_boss_job_id FROM omnis.runs WHERE id = $1', [
@@ -189,14 +203,22 @@ try {
     title: 'Post-upgrade runtime task',
     detail: 'Verify current restricted runtime inserts after legacy conversion.',
   });
-  const newRun = await migratedStore.admitRun(newTask.id, `current-upgrade-${suffix}`, (db, data) =>
-    runtimeBoss.send('omnis-mock-run', data, {
-      retryLimit: 0,
-      retryDelay: 0,
-      expireInSeconds: 60,
-      heartbeatSeconds: 10,
-      db,
-    }),
+  const authorizationStore = new PostgresAuthorizationStore(runtimePool, authorizerPool);
+  const request = await authorizationStore.request(newTask.id, 'owner');
+  const authorization = await authorizationStore.decide(request.id, 'owner', 'approve');
+  const newRun = await migratedStore.admitRun(
+    newTask.id,
+    `current-upgrade-${suffix}`,
+    authorization.id,
+    'owner',
+    (db, data) =>
+      runtimeBoss.send('omnis-mock-run', data, {
+        retryLimit: 0,
+        retryDelay: 0,
+        expireInSeconds: 60,
+        heartbeatSeconds: 10,
+        db,
+      }),
   );
   await waitForRun(migratedStore, newRun.run.id, 'completed');
 
@@ -209,6 +231,7 @@ try {
   await legacyBoss?.stop().catch(() => undefined);
   await Promise.all([
     migrationPool.end(),
+    authorizerPool.end(),
     runtimePool.end(),
     legacyPool.end(),
     databaseAdminPool.end(),
@@ -317,6 +340,7 @@ async function startRestrictedWorker() {
       ...workerEnvironment(),
       NODE_ENV: 'test',
       OMNIS_DATABASE_URL: databaseUrl,
+      OMNIS_AUTHORIZER_DB_PASSWORD: authorizerPassword,
       OMNIS_INTERNAL_TOKEN: internalToken,
       OMNIS_WORKER_HOST: '127.0.0.1',
       OMNIS_WORKER_PORT: String(port),

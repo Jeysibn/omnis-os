@@ -14,12 +14,18 @@ const password = 'test-owner-password-2026';
 const origin = 'http://127.0.0.1:5173';
 const databaseUrl = process.env.OMNIS_TEST_DATABASE_URL;
 const migrationUrl = process.env.OMNIS_TEST_MIGRATION_DATABASE_URL;
+const authorizerUrl = process.env.OMNIS_TEST_AUTHORIZER_DATABASE_URL;
+const adminAuditUrl = process.env.OMNIS_TEST_ADMIN_DATABASE_URL;
 if (!databaseUrl)
   throw new Error('Set OMNIS_TEST_DATABASE_URL to a disposable PostgreSQL database.');
 if (!migrationUrl)
   throw new Error(
     'Set OMNIS_TEST_MIGRATION_DATABASE_URL to a disposable migration-role connection.',
   );
+if (!authorizerUrl || new URL(authorizerUrl).username !== 'omnis_authorizer')
+  throw new Error('Set OMNIS_TEST_AUTHORIZER_DATABASE_URL to the restricted authorization role.');
+if (!adminAuditUrl || new URL(adminAuditUrl).username !== 'omnis')
+  throw new Error('Set OMNIS_TEST_ADMIN_DATABASE_URL to the disposable test administrator URL.');
 if (!/(?:^|[_-])test(?:s)?$/i.test(new URL(databaseUrl).pathname.slice(1))) {
   throw new Error('OMNIS_TEST_DATABASE_URL must point to a database ending in test or tests.');
 }
@@ -45,7 +51,7 @@ const apiEnvPath = join(tempDirectory, 'api.env');
 const canaryName = `OMNIS_DUMMY_PROVIDER_SECRET_${randomBytes(12).toString('hex')}`;
 const canary = `OMNIS_SYNTHETIC_CANARY_${randomBytes(24).toString('hex')}`;
 const auditPool = createPool({
-  connectionString: databaseUrl,
+  connectionString: adminAuditUrl,
   max: 1,
   application_name: 'omnis-canary-check',
 });
@@ -65,10 +71,11 @@ const sharedEnvLines = [
   `OMNIS_ALLOWED_ORIGIN=${origin}`,
   'OMNIS_SECURE_COOKIES=false',
 ];
+const authorizerPassword = decodeURIComponent(new URL(authorizerUrl).password);
 await writeFile(apiEnvPath, `${sharedEnvLines.join('\n')}\n`, { mode: 0o600 });
 await writeFile(
   workerEnvPath,
-  `${[...sharedEnvLines, `OMNIS_DATABASE_URL=${databaseUrl}`].join('\n')}\n`,
+  `${[...sharedEnvLines, `OMNIS_DATABASE_URL=${databaseUrl}`, `OMNIS_AUTHORIZER_DB_PASSWORD=${authorizerPassword}`].join('\n')}\n`,
   { mode: 0o600 },
 );
 
@@ -174,10 +181,11 @@ try {
     'idempotency-key': `mock-run-idempotency-key-${randomBytes(16).toString('hex')}`,
     'content-type': 'application/json',
   };
+  const authorization = await authorizeTask(baseUrl, ownerCookie, ownerCsrf, task.id);
   const runResponse = await fetch(`${baseUrl}/api/v1/runs`, {
     method: 'POST',
     headers: runHeaders,
-    body: JSON.stringify({ taskId: task.id }),
+    body: JSON.stringify({ taskId: task.id, authorizationId: authorization.id }),
   });
   assert.equal(runResponse.status, 201);
   const run = await runResponse.json();
@@ -187,7 +195,7 @@ try {
   const retryResponse = await fetch(`${baseUrl}/api/v1/runs`, {
     method: 'POST',
     headers: runHeaders,
-    body: JSON.stringify({ taskId: task.id }),
+    body: JSON.stringify({ taskId: task.id, authorizationId: authorization.id }),
   });
   assert.ok([200, 201].includes(retryResponse.status));
   assert.equal((await retryResponse.json()).id, run.id);
@@ -275,6 +283,7 @@ try {
   assert.equal(canaryTaskResponse.status, 201);
   assert.equal(canaryTaskText.includes(canary), false);
   const canaryTask = JSON.parse(canaryTaskText);
+  const canaryAuthorization = await authorizeTask(baseUrl, ownerCookie, ownerCsrf, canaryTask.id);
   const canaryRunResponse = await fetch(`${baseUrl}/api/v1/runs`, {
     method: 'POST',
     headers: {
@@ -284,7 +293,7 @@ try {
       'idempotency-key': `canary-probe-${randomBytes(16).toString('hex')}`,
       'content-type': 'application/json',
     },
-    body: JSON.stringify({ taskId: canaryTask.id }),
+    body: JSON.stringify({ taskId: canaryTask.id, authorizationId: canaryAuthorization.id }),
   });
   const canaryRunText = await canaryRunResponse.text();
   assert.equal(canaryRunResponse.status, 201);
@@ -306,6 +315,8 @@ try {
       UNION ALL SELECT to_jsonb(r) FROM omnis.runs r
       UNION ALL SELECT to_jsonb(e) FROM omnis.run_events e
       UNION ALL SELECT to_jsonb(i) FROM omnis.run_idempotency i
+      UNION ALL SELECT to_jsonb(a) FROM omnis.runtime_authorizations a
+      UNION ALL SELECT to_jsonb(a) FROM omnis.authorization_audit a
     ) records
   `);
   assert.equal(persistedRecords.rows[0]?.records.includes(canary), false);
@@ -335,6 +346,12 @@ try {
   });
   assert.equal(interruptedTaskResponse.status, 201);
   const interruptedTask = await interruptedTaskResponse.json();
+  const interruptedAuthorization = await authorizeTask(
+    baseUrl,
+    ownerCookie,
+    ownerCsrf,
+    interruptedTask.id,
+  );
   const interruptedAdmission = await fetch(`${baseUrl}/api/v1/runs`, {
     method: 'POST',
     headers: {
@@ -344,7 +361,10 @@ try {
       'idempotency-key': `restart-recovery-${randomBytes(16).toString('hex')}`,
       'content-type': 'application/json',
     },
-    body: JSON.stringify({ taskId: interruptedTask.id }),
+    body: JSON.stringify({
+      taskId: interruptedTask.id,
+      authorizationId: interruptedAuthorization.id,
+    }),
   });
   assert.equal(interruptedAdmission.status, 201);
   const interruptedRun = await interruptedAdmission.json();
@@ -479,6 +499,7 @@ function withoutDatabaseSecrets(environment) {
   for (const key of [
     'OMNIS_DB_PASSWORD',
     'OMNIS_RUNTIME_DB_PASSWORD',
+    'OMNIS_AUTHORIZER_DB_PASSWORD',
     'OMNIS_DATABASE_URL',
     'OMNIS_TEST_DATABASE_URL',
     'OMNIS_ADMIN_DATABASE_URL',
@@ -486,6 +507,7 @@ function withoutDatabaseSecrets(environment) {
     'OMNIS_MIGRATION_DB_PASSWORD',
     'OMNIS_TEST_ADMIN_DATABASE_URL',
     'OMNIS_TEST_MIGRATION_DATABASE_URL',
+    'OMNIS_TEST_AUTHORIZER_DATABASE_URL',
   ])
     delete clean[key];
   return clean;
@@ -637,6 +659,7 @@ async function createTaskAndRun(baseUrl, cookie, csrf, title) {
   });
   assert.equal(taskResponse.status, 201);
   const task = await taskResponse.json();
+  const authorization = await authorizeTask(baseUrl, cookie, csrf, task.id);
   const runResponse = await fetch(`${baseUrl}/api/v1/runs`, {
     method: 'POST',
     headers: {
@@ -646,10 +669,39 @@ async function createTaskAndRun(baseUrl, cookie, csrf, title) {
       'idempotency-key': `r1-g3-${randomBytes(16).toString('hex')}`,
       'content-type': 'application/json',
     },
-    body: JSON.stringify({ taskId: task.id }),
+    body: JSON.stringify({ taskId: task.id, authorizationId: authorization.id }),
   });
   assert.equal(runResponse.status, 201);
   return runResponse.json();
+}
+
+async function authorizeTask(baseUrl, cookie, csrf, taskId) {
+  const headers = {
+    cookie,
+    origin,
+    'x-omnis-csrf': csrf,
+    'content-type': 'application/json',
+  };
+  const requested = await fetch(`${baseUrl}/api/v1/authorizations`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ taskId }),
+  });
+  const requestText = await requested.text();
+  assert.equal(requested.status, 201, requestText);
+  const authorization = JSON.parse(requestText);
+  assert.equal(authorization.status, 'pending');
+  assert.deepEqual(authorization.scope, { kind: 'task', taskId });
+  const decision = await fetch(`${baseUrl}/api/v1/authorizations/${authorization.id}/decision`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ decision: 'approve' }),
+  });
+  const decisionText = await decision.text();
+  assert.equal(decision.status, 200, decisionText);
+  const approved = JSON.parse(decisionText);
+  assert.equal(approved.status, 'authorized');
+  return approved;
 }
 
 async function fetchRun(baseUrl, runId, cookie) {
@@ -808,6 +860,12 @@ async function testDatabaseAvailabilityLoss({
   assert.equal(recoveryTaskResponse.status, 201);
   const recoveryTask = await recoveryTaskResponse.json();
   const idempotencyKey = `r1-g3-database-recovery-${randomBytes(16).toString('hex')}`;
+  const recoveryAuthorization = await authorizeTask(
+    baseUrl,
+    ownerCookie,
+    ownerCsrf,
+    recoveryTask.id,
+  );
 
   docker(['stop', '--time', '1', container]);
   try {
@@ -832,7 +890,7 @@ async function testDatabaseAvailabilityLoss({
         'idempotency-key': idempotencyKey,
         'content-type': 'application/json',
       },
-      body: JSON.stringify({ taskId: recoveryTask.id }),
+      body: JSON.stringify({ taskId: recoveryTask.id, authorizationId: recoveryAuthorization.id }),
     });
     assert.equal(admissionResponse.status, 500);
     assert.equal((await fetch(`${baseUrl}/api/v1/health`)).status, 200);
@@ -871,7 +929,7 @@ async function testDatabaseAvailabilityLoss({
       'idempotency-key': idempotencyKey,
       'content-type': 'application/json',
     },
-    body: JSON.stringify({ taskId: recoveryTask.id }),
+    body: JSON.stringify({ taskId: recoveryTask.id, authorizationId: recoveryAuthorization.id }),
   };
   const firstAdmission = await fetch(`${baseUrl}/api/v1/runs`, runRequest);
   assert.equal(firstAdmission.status, 201);
