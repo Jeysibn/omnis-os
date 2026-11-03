@@ -113,11 +113,11 @@ for unit in omnis-api.service omnis-authorizer.service omnis-worker.service omni
   }
 done
 [[ "$(stat -c '%U:%G:%a' /run/omnis-authorizer)" == "omnis-authorizer:omnis-authorizer-socket:750" ]] || {
-  echo "Authorizer socket directory owner, group, or mode differs from the approved policy." >&2
+  echo "Authorizer socket directory owner, group, or mode differs from policy (observed $(stat -c '%U:%G:%a' /run/omnis-authorizer))." >&2
   exit 1
 }
 [[ "$(stat -c '%U:%G:%a' /run/omnis-sandbox)" == "omnis-launcher:omnis-launcher-socket:750" ]] || {
-  echo "Launcher socket directory owner, group, or mode differs from the approved policy." >&2
+  echo "Launcher socket directory owner, group, or mode differs from policy (observed $(stat -c '%U:%G:%a' /run/omnis-sandbox))." >&2
   exit 1
 }
 if find /opt/omnis-os -xdev \( ! -user root -o \( ! -type l -a -perm /022 \) \) -print -quit | grep -q .; then
