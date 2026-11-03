@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import {
   Activity,
   ArrowRight,
@@ -7,6 +7,8 @@ import {
   Clock3,
   Command,
   FilePlus2,
+  FolderKanban,
+  ListChecks,
   LockKeyhole,
   LogOut,
   Play,
@@ -16,49 +18,45 @@ import {
   X,
 } from 'lucide-react';
 import {
-  ApiErrorSchema,
   AuthorizationSchema,
   RunEventSchema,
   RunSchema,
   TaskSchema,
+  type Authorization,
   type Run,
   type RunEvent,
   type Task,
 } from '@omnis/contracts';
+import { ApiRequestError, request } from './api.js';
 
 type Owner = { id: string; displayName: string };
-
-async function request<T>(
-  path: string,
-  init: RequestInit = {},
-  parse: (value: unknown) => T,
-): Promise<T> {
-  const response = await fetch(path, {
-    credentials: 'same-origin',
-    ...init,
-    headers: { ...(init.body ? { 'content-type': 'application/json' } : {}), ...init.headers },
-  });
-  if (!response.ok) {
-    const payload: unknown = await response.json().catch(() => null);
-    const error = ApiErrorSchema.safeParse(payload);
-    throw new Error(
-      error.success ? error.data.error.message : `Request failed (${response.status}).`,
-    );
-  }
-  if (response.status === 204) return undefined as T;
-  return parse(await response.json());
-}
+type Page = 'command-center' | 'tasks' | 'runs';
+type StreamState = 'connecting' | 'connected' | 'reconnecting' | 'closed' | 'ended';
+type ApprovalOperation = {
+  taskId: string;
+  authorizationKey: string;
+  runKey: string;
+  authorization: Authorization | null;
+  canRetry: boolean;
+  authorizationUncertain: boolean;
+  decisionUncertain: boolean;
+  runUncertain: boolean;
+};
 
 const parseOwner = (value: unknown): Owner => {
   if (
     typeof value !== 'object' ||
     value === null ||
     !('id' in value) ||
-    !('displayName' in value)
+    typeof value.id !== 'string' ||
+    value.id.length === 0 ||
+    !('displayName' in value) ||
+    typeof value.displayName !== 'string' ||
+    value.displayName.length === 0
   ) {
     throw new Error('Owner session response is invalid.');
   }
-  return { id: String(value.id), displayName: String(value.displayName) };
+  return { id: value.id, displayName: value.displayName };
 };
 
 const parseTaskList = (value: unknown): Task[] => {
@@ -71,67 +69,256 @@ const parseRunList = (value: unknown): Run[] => {
   return value.map((item) => RunSchema.parse(item));
 };
 
-function statusLabel(status: Run['status']): string {
-  switch (status) {
-    case 'queued':
-      return 'Queued';
-    case 'running':
-      return 'Running';
-    case 'stopping':
-      return 'Stopping';
-    case 'completed':
-      return 'Completed';
-    case 'cancelled':
-      return 'Cancelled';
-    case 'failed':
-      return 'Failed';
-    case 'interrupted':
-      return 'Interrupted';
-    case 'unknown':
-      return 'Unknown';
+const isActive = (status: Run['status']) => ['queued', 'running', 'stopping'].includes(status);
+const terminalStatus = (type: RunEvent['type']): Run['status'] | null => {
+  switch (type) {
+    case 'run.completed':
+      return 'completed';
+    case 'run.cancelled':
+      return 'cancelled';
+    case 'run.failed':
+      return 'failed';
+    case 'run.interrupted':
+      return 'interrupted';
+    default:
+      return null;
   }
+};
+const statusForEvent = (type: RunEvent['type']): Run['status'] => {
+  const terminal = terminalStatus(type);
+  if (terminal) return terminal;
+  if (type === 'run.stop_requested') return 'stopping';
+  if (type === 'run.queued') return 'queued';
+  return 'running';
+};
+const failureMessage = (cause: unknown, fallback: string) =>
+  cause instanceof ApiRequestError ? cause.message : fallback;
+
+function authorizationScopeError(authorization: Authorization, task: Task): string | null {
+  if (
+    authorization.requestingActor !== 'owner' ||
+    authorization.runtimeId !== 'mock' ||
+    authorization.operation !== 'execute_task'
+  ) {
+    return 'The approval did not come from the expected owner mock-execution flow.';
+  }
+  if (
+    authorization.taskId !== task.id ||
+    authorization.scope.kind !== 'task' ||
+    authorization.scope.taskId !== task.id
+  ) {
+    return 'The approval is scoped to a different task.';
+  }
+  if (!authorization.capabilities.includes('mock.execute')) {
+    return 'The approval does not grant the mock execution capability.';
+  }
+  if (Date.parse(authorization.expiresAt) <= Date.now()) {
+    return 'The approval has expired.';
+  }
+  if (
+    authorization.status === 'authorized' &&
+    (authorization.decidedBy !== 'owner' || authorization.decidedAt === null)
+  ) {
+    return 'The owner approval is missing a confirmed decision.';
+  }
+  if (authorization.consumedAt !== null || authorization.consumedRunId !== null) {
+    return 'The approval has already been consumed.';
+  }
+  return null;
+}
+
+function statusLabel(status: Run['status'] | Task['status']): string {
+  return status.replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function formatDate(value: string, options: Intl.DateTimeFormatOptions = {}) {
+  return new Intl.DateTimeFormat('en-PH', {
+    timeZone: 'Asia/Manila',
+    dateStyle: 'medium',
+    timeStyle: 'short',
+    ...options,
+  }).format(new Date(value));
 }
 
 function App() {
   const [owner, setOwner] = useState<Owner | null>(null);
   const [checking, setChecking] = useState(true);
   const [csrfToken, setCsrfToken] = useState('');
+  const [csrfLoading, setCsrfLoading] = useState(false);
+  const [csrfBootstrapError, setCsrfBootstrapError] = useState('');
   const [tasks, setTasks] = useState<Task[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
+  const [tasksLoading, setTasksLoading] = useState(true);
+  const [runsLoading, setRunsLoading] = useState(true);
+  const [tasksError, setTasksError] = useState('');
+  const [runsError, setRunsError] = useState('');
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [events, setEvents] = useState<RunEvent[]>([]);
+  const [streamState, setStreamState] = useState<StreamState>('connecting');
+  const [page, setPage] = useState<Page>(() => readRoute().page);
   const [title, setTitle] = useState('');
   const [detail, setDetail] = useState('');
   const [password, setPassword] = useState('');
+  const [approvalTask, setApprovalTask] = useState<Task | null>(null);
+  const [approvalOperation, setApprovalOperation] = useState<ApprovalOperation | null>(null);
+  const [approvalExpiry, setApprovalExpiry] = useState('');
+  const [approvalError, setApprovalError] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [reconcileError, setReconcileError] = useState('');
+  const [announcement, setAnnouncement] = useState('');
+  const approvalTrigger = useRef<HTMLButtonElement | null>(null);
+  const focusRunInspector = useRef(false);
+  const sessionRecoveryInFlight = useRef(false);
+  const stopInFlight = useRef(new Set<string>());
+  const seenSequences = useRef(new Map<string, Set<number>>());
 
   const selectedRun = useMemo(
     () => runs.find((run) => run.id === selectedRunId) ?? null,
     [runs, selectedRunId],
   );
+  const selectedRunExists = selectedRun !== null;
+  const selectedTask = useMemo(
+    () => tasks.find((task) => task.id === selectedTaskId) ?? null,
+    [tasks, selectedTaskId],
+  );
+
   const refreshCsrf = useCallback(async () => {
-    const value = await request('/api/v1/auth/csrf', {}, (payload) => {
-      if (typeof payload !== 'object' || payload === null || !('csrfToken' in payload)) {
-        throw new Error('Could not start a secure session.');
-      }
-      return String(payload.csrfToken);
-    });
-    setCsrfToken(value);
-    return value;
+    setCsrfLoading(true);
+    setCsrfBootstrapError('');
+    try {
+      const value = await request('/api/v1/auth/csrf', {}, (payload) => {
+        if (
+          typeof payload !== 'object' ||
+          payload === null ||
+          !('csrfToken' in payload) ||
+          typeof payload.csrfToken !== 'string' ||
+          payload.csrfToken.length === 0
+        )
+          throw new Error('Secure sign-in setup returned an invalid token.');
+        return payload.csrfToken;
+      });
+      setCsrfToken(value);
+      return value;
+    } catch (cause) {
+      setCsrfToken('');
+      setCsrfBootstrapError(
+        'Secure sign-in could not be prepared. Check your connection and retry secure sign-in setup.',
+      );
+      throw cause;
+    } finally {
+      setCsrfLoading(false);
+    }
   }, []);
 
+  const expireSessionIfNeeded = useCallback(
+    (cause: unknown) => {
+      if (!(cause instanceof ApiRequestError) || cause.status !== 401) return false;
+      setOwner(null);
+      setCsrfToken('');
+      setTasks([]);
+      setRuns([]);
+      setSelectedRunId(null);
+      setSelectedTaskId(null);
+      setEvents([]);
+      setApprovalTask(null);
+      setApprovalOperation(null);
+      setApprovalExpiry('');
+      setPassword('');
+      setError('Your owner session expired. Sign in again to continue.');
+      setCsrfBootstrapError('');
+      if (!sessionRecoveryInFlight.current) {
+        sessionRecoveryInFlight.current = true;
+        void refreshCsrf()
+          .catch(() => undefined)
+          .finally(() => {
+            sessionRecoveryInFlight.current = false;
+          });
+      }
+      return true;
+    },
+    [refreshCsrf],
+  );
+
+  const loadTasks = useCallback(async () => {
+    setTasksLoading(true);
+    setTasksError('');
+    try {
+      const taskData = await request('/api/v1/tasks', {}, parseTaskList);
+      setTasks(taskData);
+      setSelectedTaskId((current) =>
+        current && taskData.some((task) => task.id === current)
+          ? current
+          : (taskData[0]?.id ?? null),
+      );
+    } catch (cause) {
+      if (!expireSessionIfNeeded(cause))
+        setTasksError(failureMessage(cause, 'Tasks could not be loaded.'));
+    } finally {
+      setTasksLoading(false);
+    }
+  }, [expireSessionIfNeeded]);
+
+  const loadRuns = useCallback(async () => {
+    setRunsLoading(true);
+    setRunsError('');
+    try {
+      const runData = await request('/api/v1/runs', {}, parseRunList);
+      setRuns(runData);
+      setSelectedRunId((current) => {
+        const requestedRunId = readRunId();
+        if (requestedRunId) return requestedRunId;
+        return current && runData.some((run) => run.id === current)
+          ? current
+          : (runData[0]?.id ?? null);
+      });
+    } catch (cause) {
+      if (!expireSessionIfNeeded(cause))
+        setRunsError(failureMessage(cause, 'Runs could not be loaded.'));
+    } finally {
+      setRunsLoading(false);
+    }
+  }, [expireSessionIfNeeded]);
+
   const loadWorkspace = useCallback(async () => {
-    const [taskData, runData] = await Promise.all([
-      request('/api/v1/tasks', {}, parseTaskList),
-      request('/api/v1/runs', {}, parseRunList),
-    ]);
-    setTasks(taskData);
-    setRuns(runData);
-    setSelectedRunId((current) =>
-      current && runData.some((run) => run.id === current) ? current : (runData[0]?.id ?? null),
-    );
+    await Promise.all([loadTasks(), loadRuns()]);
+  }, [loadRuns, loadTasks]);
+
+  const reconcileRun = useCallback(
+    async (runId: string) => {
+      setReconcileError('');
+      try {
+        const run = await request(`/api/v1/runs/${encodeURIComponent(runId)}`, {}, (value) =>
+          RunSchema.parse(value),
+        );
+        setRuns((current) => current.map((entry) => (entry.id === run.id ? run : entry)));
+      } catch (cause) {
+        if (!expireSessionIfNeeded(cause)) {
+          setReconcileError(failureMessage(cause, 'The final run state could not be confirmed.'));
+        }
+      }
+    },
+    [expireSessionIfNeeded],
+  );
+
+  useEffect(() => {
+    const onHashChange = () => {
+      const route = readRoute();
+      setPage(route.page);
+      if (route.page === 'runs') setSelectedRunId(route.runId ?? null);
+    };
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
+
+  useEffect(() => {
+    if (!focusRunInspector.current || page !== 'runs' || !selectedRunId) return;
+    window.requestAnimationFrame(() => {
+      document.getElementById('run-inspector-heading')?.focus();
+      focusRunInspector.current = false;
+    });
+  }, [page, selectedRunId]);
 
   useEffect(() => {
     void (async () => {
@@ -139,10 +326,12 @@ function App() {
         await refreshCsrf();
         const currentOwner = await request('/api/v1/me', {}, parseOwner);
         setOwner(currentOwner);
-        await loadWorkspace();
+        setChecking(false);
+        void loadWorkspace();
       } catch (cause) {
-        if (cause instanceof Error && cause.message !== 'Sign in to continue.')
-          setError(cause.message);
+        if (!(cause instanceof ApiRequestError && cause.status === 401)) {
+          setError(failureMessage(cause, 'Omnis OS could not open this workspace.'));
+        }
       } finally {
         setChecking(false);
       }
@@ -150,10 +339,17 @@ function App() {
   }, [loadWorkspace, refreshCsrf]);
 
   useEffect(() => {
-    if (!owner || !selectedRunId) {
+    if (!owner || page !== 'runs' || !selectedRunId || !selectedRunExists) {
       setEvents([]);
+      setStreamState('closed');
       return;
     }
+    setEvents([]);
+    setReconcileError('');
+    setAnnouncement('');
+    seenSequences.current.set(selectedRunId, new Set());
+    setStreamState('connecting');
+    let terminalHandled = false;
     const source = new EventSource(`/api/v1/runs/${encodeURIComponent(selectedRunId)}/events`);
     const eventNames = [
       'run.queued',
@@ -165,38 +361,72 @@ function App() {
       'run.failed',
       'run.interrupted',
     ];
+    source.onopen = () => setStreamState('connected');
     const handlers = eventNames.map((name) => {
       const handler = (message: Event) => {
         try {
-          const parsed = RunEventSchema.parse(JSON.parse((message as MessageEvent<string>).data));
-          setEvents((current) =>
-            current.some((event) => event.sequence === parsed.sequence)
-              ? current
-              : [...current, parsed].sort((a, b) => a.sequence - b.sequence),
+          const eventMessage = message as MessageEvent<string>;
+          const parsed = RunEventSchema.parse(JSON.parse(eventMessage.data));
+          if (
+            parsed.runId !== selectedRunId ||
+            parsed.type !== name ||
+            eventMessage.lastEventId !== String(parsed.sequence)
+          ) {
+            throw new Error('The event stream cursor or run identity did not match its event.');
+          }
+          const received = seenSequences.current.get(selectedRunId) ?? new Set<number>();
+          if (received.has(parsed.sequence)) return;
+          const newestSequence = Math.max(0, ...received);
+          received.add(parsed.sequence);
+          seenSequences.current.set(selectedRunId, received);
+          setEvents((current) => [...current, parsed].sort((a, b) => a.sequence - b.sequence));
+          if (parsed.sequence > newestSequence) {
+            const status = statusForEvent(parsed.type);
+            setRuns((current) =>
+              current.map((run) =>
+                run.id === selectedRunId ? { ...run, status, updatedAt: parsed.at } : run,
+              ),
+            );
+          }
+          if (
+            [
+              'run.queued',
+              'run.started',
+              'run.stop_requested',
+              'run.completed',
+              'run.cancelled',
+              'run.failed',
+              'run.interrupted',
+            ].includes(parsed.type)
+          ) {
+            setAnnouncement(
+              `${parsed.type.replace('run.', '').replaceAll('_', ' ')}: ${parsed.message}`,
+            );
+          }
+          if (parsed.sequence > newestSequence && terminalStatus(parsed.type) && !terminalHandled) {
+            terminalHandled = true;
+            setStreamState('ended');
+            source.close();
+            void reconcileRun(selectedRunId);
+          }
+        } catch (cause) {
+          setError(
+            cause instanceof Error ? cause.message : 'A run event did not match its contract.',
           );
-          void request(`/api/v1/runs/${encodeURIComponent(selectedRunId)}`, {}, (value) =>
-            RunSchema.parse(value),
-          )
-            .then((run) =>
-              setRuns((current) => current.map((entry) => (entry.id === run.id ? run : entry))),
-            )
-            .catch(() => undefined);
-        } catch {
-          setError('The run event did not match the expected schema.');
         }
       };
       source.addEventListener(name, handler);
       return [name, handler] as const;
     });
     source.onerror = () => {
-      if (source.readyState === EventSource.CLOSED)
-        setError('Run event stream closed. Reload the workspace to reconnect.');
+      if (!terminalHandled)
+        setStreamState(source.readyState === EventSource.CLOSED ? 'closed' : 'reconnecting');
     };
     return () => {
       handlers.forEach(([name, handler]) => source.removeEventListener(name, handler));
       source.close();
     };
-  }, [owner, selectedRunId]);
+  }, [owner, page, reconcileRun, selectedRunExists, selectedRunId]);
 
   async function signIn(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -219,7 +449,7 @@ function App() {
       setCsrfToken(token);
       await loadWorkspace();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Sign in failed.');
+      setError(failureMessage(cause, 'Sign in could not be completed.'));
     } finally {
       setBusy(false);
     }
@@ -234,87 +464,254 @@ function App() {
         '/api/v1/tasks',
         {
           method: 'POST',
-          headers: {
-            'x-omnis-csrf': csrfToken,
-            'idempotency-key': crypto.randomUUID(),
-          },
+          headers: { 'x-omnis-csrf': csrfToken },
           body: JSON.stringify({ title, detail }),
         },
         (value) => TaskSchema.parse(value),
       );
       setTasks((current) => [task, ...current]);
+      setSelectedTaskId(task.id);
       setTitle('');
       setDetail('');
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Task could not be created.');
+      if (!expireSessionIfNeeded(cause)) {
+        setError(
+          cause instanceof ApiRequestError && cause.outcome !== 'rejected'
+            ? 'Task creation could not be confirmed. Reload Tasks and check for the task before trying again.'
+            : failureMessage(cause, 'Task could not be created.'),
+        );
+      }
     } finally {
       setBusy(false);
     }
+  }
+
+  function openApproval(task: Task, trigger: HTMLButtonElement) {
+    approvalTrigger.current = trigger;
+    setApprovalError('');
+    setApprovalExpiry('');
+    setApprovalOperation({
+      taskId: task.id,
+      authorizationKey: crypto.randomUUID(),
+      runKey: crypto.randomUUID(),
+      authorization: null,
+      canRetry: true,
+      authorizationUncertain: false,
+      decisionUncertain: false,
+      runUncertain: false,
+    });
+    setApprovalTask(task);
+  }
+
+  function closeApproval() {
+    if (busy) return;
+    setApprovalTask(null);
+    setApprovalOperation(null);
+    setApprovalError('');
+    window.requestAnimationFrame(() => {
+      if (approvalTrigger.current?.isConnected) approvalTrigger.current.focus();
+    });
   }
 
   async function startRun(task: Task) {
-    const approved = window.confirm(
-      `Approve the synthetic mock.execute capability for task “${task.title}” only? This approval expires in 20 minutes and can be used for one mock run.`,
-    );
-    if (!approved) return;
+    let operation = approvalOperation;
+    if (!operation || operation.taskId !== task.id) {
+      setApprovalError('This approval request is no longer available. Close it and start again.');
+      return;
+    }
     setBusy(true);
     setError('');
+    setApprovalError('');
     try {
-      const authorization = await request(
-        '/api/v1/authorizations',
-        {
-          method: 'POST',
-          headers: { 'x-omnis-csrf': csrfToken },
-          body: JSON.stringify({ taskId: task.id }),
-        },
-        (value) => AuthorizationSchema.parse(value),
-      );
-      const decision = await request(
-        `/api/v1/authorizations/${encodeURIComponent(authorization.id)}/decision`,
-        {
-          method: 'POST',
-          headers: { 'x-omnis-csrf': csrfToken },
-          body: JSON.stringify({ decision: 'approve' }),
-        },
-        (value) => AuthorizationSchema.parse(value),
-      );
-      const run = await request(
-        '/api/v1/runs',
-        {
-          method: 'POST',
-          headers: { 'x-omnis-csrf': csrfToken, 'idempotency-key': crypto.randomUUID() },
-          body: JSON.stringify({ taskId: task.id, authorizationId: decision.id }),
-        },
-        (value) => RunSchema.parse(value),
-      );
+      let authorization = operation.authorization;
+      let requestedAuthorizationId = authorization?.id ?? null;
+      if (!authorization) {
+        try {
+          authorization = await request(
+            '/api/v1/authorizations',
+            {
+              method: 'POST',
+              headers: { 'x-omnis-csrf': csrfToken, 'idempotency-key': operation.authorizationKey },
+              body: JSON.stringify({ taskId: task.id }),
+            },
+            (value) => AuthorizationSchema.parse(value),
+          );
+        } catch (cause) {
+          if (expireSessionIfNeeded(cause)) return;
+          if (cause instanceof ApiRequestError && cause.outcome !== 'rejected') {
+            operation = { ...operation, authorizationUncertain: true };
+            setApprovalOperation(operation);
+            setApprovalError(
+              'The approval request may have reached Omnis OS, but its result was not confirmed. Retry this same request to safely reconcile it.',
+            );
+          } else {
+            operation = { ...operation, canRetry: false };
+            setApprovalOperation(operation);
+            setApprovalError(
+              failureMessage(cause, 'Omnis OS could not create the approval request.'),
+            );
+          }
+          return;
+        }
+        if (authorization.status !== 'pending' || authorizationScopeError(authorization, task)) {
+          operation = { ...operation, authorization, canRetry: false };
+          setApprovalOperation(operation);
+          setApprovalError(
+            authorizationScopeError(authorization, task) ??
+              `Omnis OS returned an unexpected ${authorization.status} approval. No run was requested.`,
+          );
+          return;
+        }
+        operation = { ...operation, authorization, authorizationUncertain: false };
+        setApprovalOperation(operation);
+        setApprovalExpiry(authorization.expiresAt);
+      }
+      requestedAuthorizationId = authorization.id;
+
+      if (operation.decisionUncertain) {
+        setApprovalError(
+          'The owner approval result is uncertain. The API has no authorization lookup route, so this decision cannot be safely repeated and no run was requested. Close this dialog and review the authorization record before proceeding.',
+        );
+        return;
+      }
+
+      if (authorization.status === 'pending') {
+        try {
+          authorization = await request(
+            `/api/v1/authorizations/${encodeURIComponent(authorization.id)}/decision`,
+            {
+              method: 'POST',
+              headers: { 'x-omnis-csrf': csrfToken },
+              body: JSON.stringify({ decision: 'approve' }),
+            },
+            (value) => AuthorizationSchema.parse(value),
+          );
+        } catch (cause) {
+          if (expireSessionIfNeeded(cause)) return;
+          if (cause instanceof ApiRequestError && cause.outcome !== 'rejected') {
+            operation = { ...operation, authorization, decisionUncertain: true };
+            setApprovalOperation(operation);
+            setApprovalError(
+              'The approval decision may have been recorded, but the response was lost. No run was requested. The API cannot look up this decision, so do not repeat it.',
+            );
+          } else {
+            setApprovalError(
+              failureMessage(cause, 'Omnis OS could not record the approval decision.'),
+            );
+          }
+          return;
+        }
+        operation = { ...operation, authorization };
+        setApprovalOperation(operation);
+        setApprovalExpiry(authorization.expiresAt);
+      }
+
+      if (authorization.status !== 'authorized') {
+        operation = { ...operation, authorization, canRetry: false };
+        setApprovalOperation(operation);
+        setApprovalError(`Authorization is ${authorization.status}; no run was requested.`);
+        return;
+      }
+      if (requestedAuthorizationId && authorization.id !== requestedAuthorizationId) {
+        operation = { ...operation, authorization, canRetry: false };
+        setApprovalOperation(operation);
+        setApprovalError(
+          'The authorization identity changed during approval. No run was requested.',
+        );
+        return;
+      }
+      const scopeError = authorizationScopeError(authorization, task);
+      if (scopeError) {
+        operation = { ...operation, authorization, canRetry: false };
+        setApprovalOperation(operation);
+        setApprovalError(`${scopeError} No run was requested.`);
+        return;
+      }
+
+      let run: Run;
+      try {
+        run = await request(
+          '/api/v1/runs',
+          {
+            method: 'POST',
+            headers: { 'x-omnis-csrf': csrfToken, 'idempotency-key': operation.runKey },
+            body: JSON.stringify({ taskId: task.id, authorizationId: authorization.id }),
+          },
+          (value) => RunSchema.parse(value),
+        );
+      } catch (cause) {
+        if (expireSessionIfNeeded(cause)) return;
+        if (cause instanceof ApiRequestError && cause.outcome !== 'rejected') {
+          operation = { ...operation, runUncertain: true };
+          setApprovalOperation(operation);
+          setApprovalError(
+            'The run request may have been accepted, but its response was not confirmed. Retry with the same request key to reconcile it safely.',
+          );
+          return;
+        }
+        let revokeMessage = '';
+        if (authorization.consumedAt === null && authorization.consumedRunId === null) {
+          try {
+            const revoked = await request(
+              `/api/v1/authorizations/${encodeURIComponent(authorization.id)}/revoke`,
+              { method: 'POST', headers: { 'x-omnis-csrf': csrfToken } },
+              (value) => AuthorizationSchema.parse(value),
+            );
+            revokeMessage =
+              revoked.id === authorization.id &&
+              revoked.status === 'revoked' &&
+              revoked.consumedAt === null &&
+              revoked.consumedRunId === null
+                ? ' The unused approval was revoked.'
+                : ' Omnis OS could not confirm revocation; review the authorization before another attempt.';
+          } catch {
+            revokeMessage =
+              ' Omnis OS could not confirm revocation; review the authorization before another attempt.';
+          }
+        }
+        operation = { ...operation, canRetry: false };
+        setApprovalOperation(operation);
+        setApprovalError(
+          `${failureMessage(cause, 'Omnis OS rejected the run request.')}${revokeMessage}`,
+        );
+        return;
+      }
+
       setRuns((current) => [run, ...current.filter((entry) => entry.id !== run.id)]);
       setSelectedRunId(run.id);
       setEvents([]);
-      await loadWorkspace();
+      setPage('runs');
+      navigate('runs', setPage, run.id);
+      setApprovalTask(null);
+      setApprovalOperation(null);
+      setApprovalExpiry('');
+      focusRunInspector.current = true;
+      void loadRuns();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Run could not be started.');
+      if (!expireSessionIfNeeded(cause))
+        setApprovalError(failureMessage(cause, 'Omnis OS could not start this mock run.'));
     } finally {
       setBusy(false);
     }
   }
 
-  async function stopRun() {
-    if (!selectedRun) return;
+  async function stopRun(run: Run) {
+    if (stopInFlight.current.has(run.id)) return;
+    stopInFlight.current.add(run.id);
     setBusy(true);
     setError('');
     try {
-      const run = await request(
-        `/api/v1/runs/${encodeURIComponent(selectedRun.id)}/stop`,
-        {
-          method: 'POST',
-          headers: { 'x-omnis-csrf': csrfToken },
-        },
+      const updated = await request(
+        `/api/v1/runs/${encodeURIComponent(run.id)}/stop`,
+        { method: 'POST', headers: { 'x-omnis-csrf': csrfToken } },
         (value) => RunSchema.parse(value),
       );
-      setRuns((current) => current.map((entry) => (entry.id === run.id ? run : entry)));
+      setRuns((current) => current.map((entry) => (entry.id === updated.id ? updated : entry)));
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Run could not be stopped.');
+      if (!expireSessionIfNeeded(cause))
+        setError(failureMessage(cause, 'Omnis OS could not stop this run.'));
     } finally {
+      stopInFlight.current.delete(run.id);
       setBusy(false);
     }
   }
@@ -330,22 +727,24 @@ function App() {
       setTasks([]);
       setRuns([]);
       setSelectedRunId(null);
+      setSelectedTaskId(null);
+      setEvents([]);
       await refreshCsrf();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Sign out failed.');
+      if (!expireSessionIfNeeded(cause)) setError(failureMessage(cause, 'Sign out failed.'));
     }
   }
 
   if (checking)
     return (
-      <main className="loading-screen">
+      <main className="loading-screen" aria-live="polite">
         <span className="loading-mark">
           <Command size={22} />
         </span>
         <p>Opening Omnis OS…</p>
       </main>
     );
-  if (!owner) {
+  if (!owner)
     return (
       <main className="auth-screen">
         <div className="auth-panel">
@@ -365,10 +764,23 @@ function App() {
               required
             />
             {error && <ErrorNote message={error} />}
+            {csrfBootstrapError && (
+              <div className="error-note" role="alert">
+                <X size={16} />
+                <span>{csrfBootstrapError}</span>
+                <button
+                  type="button"
+                  onClick={() => void refreshCsrf().catch(() => undefined)}
+                  disabled={csrfLoading}
+                >
+                  {csrfLoading ? 'Preparing secure sign-in…' : 'Retry secure sign-in setup'}
+                </button>
+              </div>
+            )}
             <button
               className="primary-button auth-submit"
               type="submit"
-              disabled={busy || !csrfToken}
+              disabled={busy || csrfLoading || !csrfToken}
             >
               <LockKeyhole size={16} /> {busy ? 'Signing in…' : 'Sign in'}
             </button>
@@ -380,233 +792,197 @@ function App() {
         </div>
       </main>
     );
-  }
 
   return (
     <div className="app-shell">
+      <a className="skip-link" href="#main-content">
+        Skip to main content
+      </a>
       <header className="topbar">
         <Brand />
         <nav className="primary-nav" aria-label="Primary navigation">
-          <a className="nav-active" href="#command-center">
-            <Activity size={16} /> <span>Command Center</span>
-          </a>
+          {navItems.map((item) => (
+            <a
+              key={item.id}
+              href={`#${item.id}`}
+              aria-current={page === item.id ? 'page' : undefined}
+              className={page === item.id ? 'nav-active' : ''}
+            >
+              <item.icon size={16} />
+              <span>{item.label}</span>
+            </a>
+          ))}
         </nav>
         <div className="topbar-actions">
           <div className="owner-chip">
-            <span className="owner-avatar">D</span>
+            <span className="owner-avatar" aria-hidden="true">
+              {owner.displayName.slice(0, 1)}
+            </span>
             <span>{owner.displayName}</span>
           </div>
-          <button className="icon-button" onClick={signOut} aria-label="Sign out" title="Sign out">
+          <button
+            className="icon-button"
+            onClick={() => void signOut()}
+            aria-label="Sign out"
+            title="Sign out"
+          >
             <LogOut size={17} />
           </button>
         </div>
       </header>
-
-      <main id="command-center" className="main-content">
+      <main id="main-content" className="main-content">
         <section className="page-heading">
           <div>
             <div className="heading-row">
-              <h1>Command Center</h1>
+              <h1>{pageTitles[page]}</h1>
               <span className="mock-badge">
                 <Sparkles size={13} /> Mock-only mode
               </span>
             </div>
-            <p>Every task has a source, every run has a trail.</p>
+            <p>{pageSubtitles[page]}</p>
           </div>
           <div className="local-status">
-            <span className="status-dot" /> Local workspace <span className="status-divider" /> One
-            run at a time
+            <span className="status-dot" /> Local workspace <span className="status-divider" />{' '}
+            Asia/Manila time
           </div>
         </section>
-
         {error && <ErrorNote message={error} onDismiss={() => setError('')} />}
-
-        <section className="workspace-grid" aria-label="Mock run workspace">
-          <div className="work-column">
-            <div className="section-heading">
-              <div>
-                <h2>Task queue</h2>
-                <p>Create a task, then start its synthetic run.</p>
-              </div>
-              <span className="section-count">{tasks.length.toString().padStart(2, '0')}</span>
-            </div>
-
-            <form className="task-composer" onSubmit={createTask}>
-              <div className="composer-title">
-                <span className="composer-icon">
-                  <FilePlus2 size={16} />
-                </span>
-                <h3>New task</h3>
-                <span className="composer-caption">Local record</span>
-              </div>
-              <label className="sr-only" htmlFor="task-title">
-                Task title
-              </label>
-              <input
-                id="task-title"
-                maxLength={120}
-                minLength={3}
-                placeholder="Give this task a clear outcome"
-                value={title}
-                onChange={(event) => setTitle(event.target.value)}
-                required
-              />
-              <label className="sr-only" htmlFor="task-detail">
-                Task detail
-              </label>
-              <textarea
-                id="task-detail"
-                maxLength={2000}
-                minLength={10}
-                placeholder="Describe the read-only work you want to inspect…"
-                value={detail}
-                onChange={(event) => setDetail(event.target.value)}
-                required
-                rows={3}
-              />
-              <div className="composer-footer">
-                <span>Runs in this gate are synthetic.</span>
-                <button className="primary-button" type="submit" disabled={busy}>
-                  <Plus size={16} /> Create task
-                </button>
-              </div>
-            </form>
-
-            <div className="task-list-heading">
-              <h3>Open work</h3>
-              <span>
-                {tasks.length} {tasks.length === 1 ? 'task' : 'tasks'}
-              </span>
-            </div>
-            {tasks.length === 0 ? (
-              <div className="empty-state">
-                <span className="empty-icon">
-                  <FilePlus2 size={19} />
-                </span>
-                <strong>No tasks yet</strong>
-                <p>Add one above to begin the mock lifecycle.</p>
-              </div>
-            ) : (
-              <ul className="task-list">
-                {tasks.map((task) => {
-                  const activeRun = runs.find(
-                    (run) =>
-                      run.taskId === task.id &&
-                      ['queued', 'running', 'stopping'].includes(run.status),
-                  );
-                  return (
-                    <li className="task-row" key={task.id}>
-                      <div className="task-mark">
-                        <span className={`task-state state-${task.status}`} />
-                      </div>
-                      <div className="task-copy">
-                        <strong>{task.title}</strong>
-                        <p>{task.detail}</p>
-                        <span className="task-meta">
-                          {task.id} <span>·</span> {task.status.replace('_', ' ')}
-                        </span>
-                      </div>
-                      <button
-                        className="run-task-button"
-                        onClick={() => void startRun(task)}
-                        disabled={busy || Boolean(activeRun)}
-                        aria-label={`Start mock run for ${task.title}`}
-                        title={
-                          activeRun
-                            ? 'A run is already active'
-                            : 'Approve and start one synthetic mock run'
-                        }
-                      >
-                        {activeRun ? <Clock3 size={16} /> : <Play size={16} />}
-                        <span>{activeRun ? 'In progress' : 'Approve & run mock'}</span>
-                        {!activeRun && <ArrowRight size={14} />}
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-          </div>
-
-          <aside className="run-panel" aria-label="Run inspector">
-            <div className="run-panel-top">
-              <div>
-                <h2>Run inspector</h2>
-                <p>Ordered events · reconnectable stream</p>
-              </div>
-              <span className="stream-indicator">
-                <span /> SSE
-              </span>
-            </div>
-            {!selectedRun ? (
-              <div className="run-empty">
-                <span className="empty-icon">
-                  <Activity size={19} />
-                </span>
-                <strong>No run selected</strong>
-                <p>Start a mock run to inspect its lifecycle.</p>
-              </div>
-            ) : (
-              <>
-                <div className="run-summary">
-                  <div className="run-summary-line">
-                    <span className={`run-status status-${selectedRun.status}`}>
-                      <span />
-                      {statusLabel(selectedRun.status)}
-                    </span>
-                    <span className="runtime-kind">MOCK RUNTIME</span>
-                  </div>
-                  <h3>{selectedRun.taskTitle}</h3>
-                  <div className="run-id-line">
-                    <span>{selectedRun.id}</span>
-                    <span>Usage unknown</span>
-                  </div>
-                  {['queued', 'running', 'stopping'].includes(selectedRun.status) && (
-                    <button
-                      className="stop-button"
-                      onClick={() => void stopRun()}
-                      disabled={busy || selectedRun.status === 'stopping'}
-                    >
-                      <CircleStop size={15} />{' '}
-                      {selectedRun.status === 'stopping' ? 'Waiting for stop' : 'Request stop'}
-                    </button>
-                  )}
-                </div>
-                <div className="event-heading">
-                  <h3>Event trail</h3>
-                  <span>
-                    {events.length} {events.length === 1 ? 'event' : 'events'}
-                  </span>
-                </div>
-                <ol className="event-list" aria-live="polite">
-                  {events.map((event) => (
-                    <EventRow key={event.id} event={event} />
-                  ))}
-                  {events.length === 0 && (
-                    <li className="event-placeholder">
-                      <Clock3 size={15} /> Waiting for the first event…
-                    </li>
-                  )}
-                </ol>
-                {selectedRun.status === 'completed' && (
-                  <div className="unverified-note">
-                    <X size={15} />
-                    <p>Mock output is synthetic and cannot be accepted as a verified result.</p>
-                  </div>
-                )}
-              </>
-            )}
-          </aside>
-        </section>
+        {page === 'command-center' && (
+          <CommandCenter
+            tasks={tasks}
+            runs={runs}
+            tasksLoading={tasksLoading}
+            runsLoading={runsLoading}
+            tasksError={tasksError}
+            runsError={runsError}
+            busy={busy}
+            onRetryTasks={() => void loadTasks()}
+            onRetryRuns={() => void loadRuns()}
+            onNavigate={(destination) => navigate(destination, setPage)}
+            onSelectRun={(run) => {
+              setSelectedRunId(run.id);
+              navigate('runs', setPage, run.id);
+            }}
+            onStop={(run) => void stopRun(run)}
+            onCreate={() => {
+              navigate('tasks', setPage);
+              window.setTimeout(() => document.getElementById('task-title')?.focus(), 0);
+            }}
+          />
+        )}
+        {page === 'tasks' && (
+          <TasksWorkspace
+            tasks={tasks}
+            runs={runs}
+            loading={tasksLoading}
+            error={tasksError}
+            runsAvailable={!runsLoading && !runsError}
+            onRetry={() => void loadTasks()}
+            busy={busy}
+            title={title}
+            detail={detail}
+            selectedTask={selectedTask}
+            onTitle={setTitle}
+            onDetail={setDetail}
+            onCreate={createTask}
+            onSelectTask={(task) => setSelectedTaskId(task.id)}
+            onStart={(task, trigger) => openApproval(task, trigger)}
+          />
+        )}
+        {page === 'runs' && (
+          <RunsWorkspace
+            runs={runs}
+            tasks={tasks}
+            selectedRun={selectedRun}
+            events={events}
+            loading={runsLoading}
+            error={runsError}
+            onRetry={() => void loadRuns()}
+            streamState={streamState}
+            busy={busy}
+            reconcileError={reconcileError}
+            onReconcile={() => selectedRunId && void reconcileRun(selectedRunId)}
+            announcement={announcement}
+            onSelectRun={(run) => {
+              setSelectedRunId(run.id);
+              navigate('runs', setPage, run.id);
+            }}
+            onClearRun={() => {
+              setSelectedRunId(null);
+              navigate('runs', setPage);
+            }}
+            onStop={(run) => void stopRun(run)}
+          />
+        )}
         <footer className="page-foot">
           <ShieldCheck size={14} />
-          <span>Mock activity is never provider activity. No model was contacted.</span>
-          <span className="foot-divider" />
-          <span>Task and run history persists across API and worker restarts.</span>
+          <span>
+            Mock activity is synthetic and never provider activity. No model was contacted.
+          </span>
         </footer>
       </main>
+      {approvalTask && (
+        <ApprovalDialog
+          task={approvalTask}
+          busy={busy}
+          error={approvalError}
+          expiresAt={approvalExpiry}
+          decisionUncertain={Boolean(approvalOperation?.decisionUncertain)}
+          retryKind={
+            approvalOperation?.decisionUncertain || approvalOperation?.canRetry === false
+              ? 'close'
+              : approvalOperation?.runUncertain
+                ? 'run'
+                : approvalOperation?.authorizationUncertain
+                  ? 'authorization'
+                  : 'start'
+          }
+          onCancel={closeApproval}
+          onApprove={() => void startRun(approvalTask)}
+        />
+      )}
     </div>
   );
+}
+
+const navItems = [
+  { id: 'command-center' as const, label: 'Command Center', icon: Activity },
+  { id: 'tasks' as const, label: 'Tasks', icon: ListChecks },
+  { id: 'runs' as const, label: 'Runs', icon: FolderKanban },
+];
+const pageTitles: Record<Page, string> = {
+  'command-center': 'Command Center',
+  tasks: 'Tasks',
+  runs: 'Runs',
+};
+const pageSubtitles: Record<Page, string> = {
+  'command-center': 'Your operational overview for tasks and synthetic runs.',
+  tasks: 'Create and review work in your local workspace.',
+  runs: 'Follow current and historical mock run activity.',
+};
+
+function readRoute(): { page: Page; runId?: string } {
+  const [destination, encodedRunId] = window.location.hash.slice(1).split('/', 2);
+  if (destination === 'tasks') return { page: 'tasks' };
+  if (destination === 'runs') {
+    if (!encodedRunId) return { page: 'runs' };
+    try {
+      return { page: 'runs', runId: decodeURIComponent(encodedRunId) };
+    } catch {
+      return { page: 'runs', runId: encodedRunId };
+    }
+  }
+  return { page: 'command-center' };
+}
+function readRunId() {
+  const route = readRoute();
+  return route.page === 'runs' ? route.runId : undefined;
+}
+function navigate(destination: Page, setPage: (page: Page) => void, runId?: string) {
+  setPage(destination);
+  const hash =
+    destination === 'runs' && runId ? `#runs/${encodeURIComponent(runId)}` : `#${destination}`;
+  if (window.location.hash !== hash) window.location.hash = hash;
 }
 
 function Brand() {
@@ -621,7 +997,6 @@ function Brand() {
     </a>
   );
 }
-
 function ErrorNote({ message, onDismiss }: { message: string; onDismiss?: () => void }) {
   return (
     <div className="error-note" role="alert">
@@ -636,30 +1011,794 @@ function ErrorNote({ message, onDismiss }: { message: string; onDismiss?: () => 
   );
 }
 
-function EventRow({ event }: { event: RunEvent }) {
-  const terminal = ['run.completed', 'run.cancelled', 'run.failed', 'run.interrupted'].includes(
-    event.type,
-  );
+function ResourceLoading({ resource }: { resource: string }) {
   return (
-    <li className={`event-row ${terminal ? 'event-terminal' : ''}`}>
-      <span className={`event-marker marker-${event.type.split('.')[1]}`}>
-        {terminal && event.type === 'run.completed' ? <Check size={12} /> : <span />}
+    <div className="resource-loading" role="status">
+      Loading {resource}…
+    </div>
+  );
+}
+
+function ResourceFailure({
+  resource,
+  message,
+  onRetry,
+}: {
+  resource: string;
+  message: string;
+  onRetry: () => void;
+}) {
+  return (
+    <div className="resource-failure" role="alert">
+      <div>
+        <strong>{resource} unavailable</strong>
+        <p>{message}</p>
+      </div>
+      <button className="secondary-button" onClick={onRetry}>
+        Retry {resource.toLowerCase()}
+      </button>
+    </div>
+  );
+}
+
+function CommandCenter({
+  tasks,
+  runs,
+  tasksLoading,
+  runsLoading,
+  tasksError,
+  runsError,
+  busy,
+  onRetryTasks,
+  onRetryRuns,
+  onNavigate,
+  onSelectRun,
+  onStop,
+  onCreate,
+}: {
+  tasks: Task[];
+  runs: Run[];
+  tasksLoading: boolean;
+  runsLoading: boolean;
+  tasksError: string;
+  runsError: string;
+  busy: boolean;
+  onRetryTasks: () => void;
+  onRetryRuns: () => void;
+  onNavigate: (page: Page) => void;
+  onSelectRun: (run: Run) => void;
+  onStop: (run: Run) => void;
+  onCreate: () => void;
+}) {
+  const recentTasks = [...tasks].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 4);
+  const recentRuns = [...runs].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 5);
+  const activeRun = runs.find((run) => isActive(run.status));
+  const openTaskCount = tasks.filter((task) => task.status === 'open').length;
+  return (
+    <div className="dashboard-grid">
+      <section className="panel operational-summary" aria-label="Operational summary">
+        <div className="summary-run">
+          <span className="eyebrow">CURRENT ACTIVITY</span>
+          {activeRun ? (
+            <>
+              <button className="summary-run-link" onClick={() => onSelectRun(activeRun)}>
+                <StatusPill status={activeRun.status} />
+                <strong>{activeRun.taskTitle}</strong>
+                <ArrowRight size={15} />
+              </button>
+              <button
+                className="stop-button"
+                onClick={() => onStop(activeRun)}
+                disabled={busy || activeRun.status === 'stopping'}
+              >
+                <CircleStop size={15} />
+                {activeRun.status === 'stopping' ? 'Stop requested' : 'Request stop'}
+              </button>
+            </>
+          ) : runsLoading ? (
+            <p role="status">Checking current runs…</p>
+          ) : runsError ? (
+            <ResourceFailure resource="Runs" message={runsError} onRetry={onRetryRuns} />
+          ) : (
+            <p>No active run</p>
+          )}
+        </div>
+        <div className="summary-task">
+          <span className="eyebrow">OPEN TASKS</span>
+          {tasksLoading ? (
+            <p role="status">Checking tasks…</p>
+          ) : tasksError ? (
+            <ResourceFailure resource="Tasks" message={tasksError} onRetry={onRetryTasks} />
+          ) : (
+            <strong>{openTaskCount}</strong>
+          )}
+          <button className="primary-button" onClick={onCreate}>
+            <Plus size={16} /> New task
+          </button>
+        </div>
+      </section>
+      <section className="panel dashboard-section">
+        <div className="section-heading">
+          <div>
+            <h2>Recent tasks</h2>
+            <p>Latest records in this workspace</p>
+          </div>
+          <button className="text-button" onClick={() => onNavigate('tasks')}>
+            All tasks <ArrowRight size={14} />
+          </button>
+        </div>
+        {tasksLoading ? (
+          <ResourceLoading resource="tasks" />
+        ) : tasksError ? (
+          <ResourceFailure resource="Tasks" message={tasksError} onRetry={onRetryTasks} />
+        ) : recentTasks.length ? (
+          <ul className="compact-list">
+            {recentTasks.map((task) => (
+              <li key={task.id}>
+                <div>
+                  <strong>{task.title}</strong>
+                  <span>{formatDate(task.createdAt)}</span>
+                </div>
+                <StatusPill status={task.status} />
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <EmptyState
+            icon={<FilePlus2 size={18} />}
+            title="No tasks yet"
+            detail="Create a task to start a mock workflow."
+            action={
+              <button className="text-button" onClick={onCreate}>
+                Create a task <ArrowRight size={14} />
+              </button>
+            }
+          />
+        )}
+      </section>
+      <section className="panel dashboard-section">
+        <div className="section-heading">
+          <div>
+            <h2>Recent runs</h2>
+            <p>Current and persisted run history</p>
+          </div>
+          <button className="text-button" onClick={() => onNavigate('runs')}>
+            All runs <ArrowRight size={14} />
+          </button>
+        </div>
+        {runsLoading ? (
+          <ResourceLoading resource="runs" />
+        ) : runsError ? (
+          <ResourceFailure resource="Runs" message={runsError} onRetry={onRetryRuns} />
+        ) : recentRuns.length ? (
+          <ul className="compact-list">
+            {recentRuns.map((run) => (
+              <li key={run.id}>
+                <button className="run-link" onClick={() => onSelectRun(run)}>
+                  <span className="run-link-copy">
+                    <strong>{run.taskTitle}</strong>
+                    <span>{formatDate(run.createdAt)}</span>
+                  </span>
+                  <StatusPill status={run.status} />
+                  <ArrowRight size={15} />
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <EmptyState
+            icon={<Activity size={18} />}
+            title="No runs yet"
+            detail="Runs will appear after an owner approves a mock execution."
+            action={
+              <button className="text-button" onClick={() => onNavigate('tasks')}>
+                Review tasks <ArrowRight size={14} />
+              </button>
+            }
+          />
+        )}
+      </section>
+    </div>
+  );
+}
+
+function TasksWorkspace({
+  tasks,
+  runs,
+  loading,
+  error,
+  runsAvailable,
+  onRetry,
+  busy,
+  title,
+  detail,
+  selectedTask,
+  onTitle,
+  onDetail,
+  onCreate,
+  onSelectTask,
+  onStart,
+}: {
+  tasks: Task[];
+  runs: Run[];
+  loading: boolean;
+  error: string;
+  runsAvailable: boolean;
+  onRetry: () => void;
+  busy: boolean;
+  title: string;
+  detail: string;
+  selectedTask: Task | null;
+  onTitle: (value: string) => void;
+  onDetail: (value: string) => void;
+  onCreate: (event: FormEvent<HTMLFormElement>) => void;
+  onSelectTask: (task: Task) => void;
+  onStart: (task: Task, trigger: HTMLButtonElement) => void;
+}) {
+  return (
+    <div className="tasks-layout">
+      <div className="tasks-primary">
+        <section className="panel composer-panel">
+          <div className="section-heading">
+            <div>
+              <h2>Create a task</h2>
+              <p>Describe a clear, inspectable outcome.</p>
+            </div>
+            <span className="composer-icon">
+              <FilePlus2 size={17} />
+            </span>
+          </div>
+          <form className="task-composer" onSubmit={onCreate}>
+            <label htmlFor="task-title">Task title</label>
+            <input
+              id="task-title"
+              maxLength={120}
+              minLength={3}
+              placeholder="Give this task a clear outcome"
+              value={title}
+              onChange={(event) => onTitle(event.target.value)}
+              required
+            />
+            <label htmlFor="task-detail">Task detail</label>
+            <textarea
+              id="task-detail"
+              maxLength={2000}
+              minLength={10}
+              placeholder="Describe the read-only work you want to inspect…"
+              value={detail}
+              onChange={(event) => onDetail(event.target.value)}
+              required
+              rows={3}
+            />
+            <div className="composer-footer">
+              <span>Mock runs are synthetic.</span>
+              <button className="primary-button" type="submit" disabled={busy}>
+                <Plus size={16} /> Create task
+              </button>
+            </div>
+          </form>
+        </section>
+        <section className="panel list-panel">
+          <div className="section-heading">
+            <div>
+              <h2>Task list</h2>
+              <p>
+                {tasks.length} {tasks.length === 1 ? 'task' : 'tasks'} in this workspace
+              </p>
+            </div>
+          </div>
+          {loading ? (
+            <ResourceLoading resource="tasks" />
+          ) : error ? (
+            <ResourceFailure resource="Tasks" message={error} onRetry={onRetry} />
+          ) : tasks.length === 0 ? (
+            <EmptyState
+              icon={<FilePlus2 size={18} />}
+              title="No tasks yet"
+              detail="Your tasks will appear here after creation."
+            />
+          ) : (
+            <ul className="task-list">
+              {[...tasks]
+                .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+                .map((task) => {
+                  const activeRun = runs.find(
+                    (run) => run.taskId === task.id && isActive(run.status),
+                  );
+                  const disabledReason =
+                    task.status === 'completed'
+                      ? 'Completed tasks cannot be run again.'
+                      : activeRun
+                        ? 'An active run already exists for this task.'
+                        : !runsAvailable
+                          ? 'Load current runs before starting another run.'
+                          : '';
+                  return (
+                    <li
+                      key={task.id}
+                      className={selectedTask?.id === task.id ? 'task-row selected' : 'task-row'}
+                    >
+                      <button
+                        className="task-select"
+                        onClick={() => onSelectTask(task)}
+                        aria-pressed={selectedTask?.id === task.id}
+                      >
+                        <span className="task-mark">
+                          <span className={`task-state state-${task.status}`} />
+                        </span>
+                        <span className="task-copy">
+                          <strong>{task.title}</strong>
+                          <span>{task.detail}</span>
+                          <small>{formatDate(task.createdAt)}</small>
+                        </span>
+                      </button>
+                      <StatusPill status={task.status} />
+                      <button
+                        className="run-task-button"
+                        onClick={(event) => onStart(task, event.currentTarget)}
+                        disabled={busy || Boolean(disabledReason)}
+                        aria-describedby={disabledReason ? `task-run-reason-${task.id}` : undefined}
+                        title={disabledReason || 'Review and approve a synthetic mock run'}
+                      >
+                        <Play size={15} />
+                        <span>{activeRun ? 'In progress' : 'Approve & run'}</span>
+                      </button>
+                      {disabledReason && (
+                        <span className="sr-only" id={`task-run-reason-${task.id}`}>
+                          {disabledReason}
+                        </span>
+                      )}
+                    </li>
+                  );
+                })}
+            </ul>
+          )}
+        </section>
+      </div>
+      <aside className="panel task-detail-panel">
+        <div className="section-heading">
+          <div>
+            <h2>Task details</h2>
+            <p>Selected task record</p>
+          </div>
+        </div>
+        {selectedTask ? (
+          <>
+            <StatusPill status={selectedTask.status} />
+            <h3>{selectedTask.title}</h3>
+            <p className="detail-copy">{selectedTask.detail}</p>
+            <dl className="metadata-list">
+              <div>
+                <dt>Created</dt>
+                <dd>{formatDate(selectedTask.createdAt)}</dd>
+              </div>
+              <div>
+                <dt>Task ID</dt>
+                <dd>{selectedTask.id}</dd>
+              </div>
+              <div>
+                <dt>Related runs</dt>
+                <dd>{runs.filter((run) => run.taskId === selectedTask.id).length}</dd>
+              </div>
+            </dl>
+          </>
+        ) : (
+          <EmptyState
+            icon={<ListChecks size={18} />}
+            title="Select a task"
+            detail="Choose a task from the list to inspect its details."
+          />
+        )}
+      </aside>
+    </div>
+  );
+}
+
+function RunsWorkspace({
+  runs,
+  tasks,
+  selectedRun,
+  events,
+  loading,
+  error,
+  onRetry,
+  streamState,
+  busy,
+  reconcileError,
+  onReconcile,
+  announcement,
+  onSelectRun,
+  onStop,
+  onClearRun,
+}: {
+  runs: Run[];
+  tasks: Task[];
+  selectedRun: Run | null;
+  events: RunEvent[];
+  loading: boolean;
+  error: string;
+  onRetry: () => void;
+  streamState: StreamState;
+  busy: boolean;
+  reconcileError: string;
+  onReconcile: () => void;
+  announcement: string;
+  onSelectRun: (run: Run) => void;
+  onStop: (run: Run) => void;
+  onClearRun: () => void;
+}) {
+  const orderedRuns = [...runs].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  return (
+    <div className="runs-layout">
+      <section className="panel run-history">
+        <div className="section-heading">
+          <div>
+            <h2>Run history</h2>
+            <p>
+              {runs.length} persisted {runs.length === 1 ? 'run' : 'runs'}
+            </p>
+          </div>
+        </div>
+        {loading ? (
+          <ResourceLoading resource="runs" />
+        ) : error ? (
+          <ResourceFailure resource="Runs" message={error} onRetry={onRetry} />
+        ) : runs.length ? (
+          <ul className="history-list">
+            {orderedRuns.map((run) => (
+              <li key={run.id}>
+                <button
+                  className={selectedRun?.id === run.id ? 'history-row selected' : 'history-row'}
+                  aria-pressed={selectedRun?.id === run.id}
+                  onClick={() => onSelectRun(run)}
+                >
+                  <span className="history-icon">
+                    <Activity size={16} />
+                  </span>
+                  <span className="history-copy">
+                    <strong>{run.taskTitle}</strong>
+                    <small>{formatDate(run.createdAt)}</small>
+                  </span>
+                  <StatusPill status={run.status} />
+                  <ArrowRight size={15} />
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <EmptyState
+            icon={<Activity size={18} />}
+            title="No runs recorded"
+            detail="Approved mock runs will appear here."
+          />
+        )}
+      </section>
+      <RunInspector
+        run={selectedRun}
+        loading={loading}
+        error={error}
+        unknownRunId={!loading && !error && !selectedRun && readRunId() ? readRunId() : undefined}
+        onRetry={onRetry}
+        onClearRun={onClearRun}
+        tasks={tasks}
+        events={events}
+        streamState={streamState}
+        busy={busy}
+        onStop={onStop}
+        reconcileError={reconcileError}
+        onReconcile={onReconcile}
+        announcement={announcement}
+      />
+    </div>
+  );
+}
+
+function RunInspector({
+  run,
+  loading,
+  error,
+  unknownRunId,
+  onRetry,
+  onClearRun,
+  tasks,
+  events,
+  streamState,
+  busy,
+  onStop,
+  reconcileError,
+  onReconcile,
+  announcement,
+}: {
+  run: Run | null;
+  loading: boolean;
+  error: string;
+  unknownRunId: string | undefined;
+  onRetry: () => void;
+  onClearRun: () => void;
+  tasks: Task[];
+  events: RunEvent[];
+  streamState: StreamState;
+  busy: boolean;
+  onStop: (run: Run) => void;
+  reconcileError: string;
+  onReconcile: () => void;
+  announcement: string;
+}) {
+  const task = run ? tasks.find((item) => item.id === run.taskId) : null;
+  return (
+    <aside className="panel run-inspector" aria-label="Run inspector">
+      <div className="section-heading">
+        <div>
+          <h2 id="run-inspector-heading" tabIndex={-1}>
+            Run inspector
+          </h2>
+          <p>State and ordered event trail</p>
+        </div>
+        {run && (
+          <span className={`stream-badge stream-${streamState}`}>
+            <span />
+            {streamLabel(streamState)}
+          </span>
+        )}
+      </div>
+      {!run ? (
+        loading ? (
+          <ResourceLoading resource="run details" />
+        ) : error ? (
+          <ResourceFailure resource="Runs" message={error} onRetry={onRetry} />
+        ) : unknownRunId ? (
+          <EmptyState
+            icon={<Activity size={18} />}
+            title="Run not found"
+            detail={`No run with ID ${unknownRunId} is available in the current run history.`}
+            action={
+              <button className="text-button" onClick={onClearRun}>
+                Return to run history
+              </button>
+            }
+          />
+        ) : (
+          <EmptyState
+            icon={<Activity size={18} />}
+            title="Select a run"
+            detail="Choose a run from history to inspect its state and events."
+          />
+        )
+      ) : (
+        <>
+          <div className="inspector-summary">
+            <StatusPill status={run.status} />
+            <span className="runtime-kind">SYNTHETIC MOCK</span>
+            <h3>{run.taskTitle}</h3>
+            <div className="metadata-list">
+              <div>
+                <span>Task</span>
+                <strong>{task?.title ?? run.taskId}</strong>
+              </div>
+              <div>
+                <span>Run ID</span>
+                <strong>{run.id}</strong>
+              </div>
+              <div>
+                <span>Created</span>
+                <strong>{formatDate(run.createdAt)}</strong>
+              </div>
+              <div>
+                <span>Updated</span>
+                <strong>{formatDate(run.updatedAt)}</strong>
+              </div>
+            </div>
+            {isActive(run.status) && (
+              <button
+                className="stop-button"
+                onClick={() => onStop(run)}
+                disabled={busy || run.status === 'stopping'}
+              >
+                <CircleStop size={15} />
+                {run.status === 'stopping' ? 'Stop requested' : 'Request stop'}
+              </button>
+            )}
+          </div>
+          <div className="event-heading">
+            <h3>Event trail</h3>
+            <span>
+              {events.length} {events.length === 1 ? 'event' : 'events'}
+            </span>
+          </div>
+          {reconcileError && (
+            <div className="error-note reconcile-error" role="alert">
+              <X size={16} />
+              <span>{reconcileError}</span>
+              <button onClick={onReconcile}>Retry state check</button>
+            </div>
+          )}
+          <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+            {announcement}
+          </span>
+          {events.length ? (
+            <div
+              className="event-scroll"
+              tabIndex={0}
+              role="region"
+              aria-label={`Event history for ${run.taskTitle}`}
+            >
+              <ol className="event-list">
+                {events.map((event) => (
+                  <EventRow key={event.id} event={event} />
+                ))}
+              </ol>
+            </div>
+          ) : (
+            <div className="event-empty" role="status">
+              <Clock3 size={15} />
+              {streamState === 'connecting'
+                ? 'Connecting to the run event stream…'
+                : streamState === 'reconnecting'
+                  ? 'Event stream disconnected. Reconnecting…'
+                  : streamState === 'closed'
+                    ? 'Event stream closed. Refresh the page to reconnect.'
+                    : 'Waiting for run events…'}
+            </div>
+          )}
+          {run.status === 'completed' && (
+            <div className="unverified-note">
+              <Check size={15} />
+              <p>This run completed. Its output remains synthetic and is not a verified result.</p>
+            </div>
+          )}
+          {run.status === 'failed' && (
+            <div className="run-notice">
+              <X size={15} />
+              <p>This run failed. Review the event trail for its recorded state changes.</p>
+            </div>
+          )}
+        </>
+      )}
+    </aside>
+  );
+}
+
+function StatusPill({ status }: { status: Run['status'] | Task['status'] }) {
+  return (
+    <span className={`status-pill status-${status}`}>
+      <span />
+      {statusLabel(status)}
+    </span>
+  );
+}
+function EmptyState({
+  icon,
+  title,
+  detail,
+  action,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  detail: string;
+  action?: React.ReactNode;
+}) {
+  return (
+    <div className="empty-state">
+      <span className="empty-icon">{icon}</span>
+      <strong>{title}</strong>
+      <p>{detail}</p>
+      {action}
+    </div>
+  );
+}
+function streamLabel(state: StreamState) {
+  return {
+    connecting: 'Connecting',
+    connected: 'Live stream',
+    reconnecting: 'Reconnecting',
+    closed: 'Disconnected',
+    ended: 'Stream ended',
+  }[state];
+}
+
+function EventRow({ event }: { event: RunEvent }) {
+  return (
+    <li className={`event-row event-${event.type.split('.')[1]}`}>
+      <span className="event-marker">
+        {event.type === 'run.completed' ? <Check size={12} /> : <span />}
       </span>
       <div className="event-body">
         <div className="event-title">
           <strong>{event.type.replace('run.', '').replaceAll('_', ' ')}</strong>
           <time dateTime={event.at}>
-            {new Date(event.at).toLocaleTimeString([], {
-              hour: '2-digit',
-              minute: '2-digit',
-              second: '2-digit',
-            })}
+            {formatDate(event.at, { dateStyle: undefined, timeStyle: 'medium' })}
           </time>
         </div>
         <p>{event.message}</p>
-        <span className="event-source">{event.id} · mock source · synthetic</span>
+        <span className="event-source">Event {event.sequence} · mock source · synthetic</span>
       </div>
     </li>
+  );
+}
+
+function ApprovalDialog({
+  task,
+  busy,
+  error,
+  expiresAt,
+  decisionUncertain,
+  retryKind,
+  onCancel,
+  onApprove,
+}: {
+  task: Task;
+  busy: boolean;
+  error: string;
+  expiresAt: string;
+  decisionUncertain: boolean;
+  retryKind: 'start' | 'authorization' | 'run' | 'close';
+  onCancel: () => void;
+  onApprove: () => void;
+}) {
+  useEffect(() => {
+    const dialog = document.getElementById('approval-dialog') as HTMLDialogElement | null;
+    if (dialog && !dialog.open) {
+      dialog.showModal();
+      dialog.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
+    }
+    return () => {
+      if (dialog?.open) dialog.close();
+    };
+  }, []);
+  return (
+    <dialog
+      id="approval-dialog"
+      className="approval-dialog"
+      aria-labelledby="approval-title"
+      onCancel={(event) => {
+        event.preventDefault();
+        onCancel();
+      }}
+    >
+      <form method="dialog" onSubmit={(event) => event.preventDefault()}>
+        <div className="dialog-icon">
+          <ShieldCheck size={20} />
+        </div>
+        <span className="eyebrow">OWNER APPROVAL</span>
+        <h2 id="approval-title">Approve one synthetic run?</h2>
+        <p>
+          This approval is limited to the task below and the mock execution capability. Omnis OS
+          sets the expiry and permits one mock run.
+        </p>
+        {expiresAt && (
+          <p className="approval-expiry">
+            Approval expires <time dateTime={expiresAt}>{formatDate(expiresAt)}</time>.
+          </p>
+        )}
+        <div className="approval-task">
+          <strong>{task.title}</strong>
+          <span>{task.detail}</span>
+        </div>
+        {error && (
+          <div className="error-note dialog-error" role="alert">
+            <X size={16} />
+            <span>{error}</span>
+          </div>
+        )}
+        <div className="dialog-foot">
+          <button type="button" className="secondary-button" onClick={onCancel} disabled={busy}>
+            {decisionUncertain ? 'Close' : 'Cancel'}
+          </button>
+          {retryKind !== 'close' && (
+            <button type="button" className="primary-button" onClick={onApprove} disabled={busy}>
+              <ShieldCheck size={15} />
+              {busy
+                ? 'Working…'
+                : retryKind === 'authorization'
+                  ? 'Retry approval request'
+                  : retryKind === 'run'
+                    ? 'Retry run request'
+                    : 'Approve & run'}
+            </button>
+          )}
+        </div>
+      </form>
+    </dialog>
   );
 }
 
