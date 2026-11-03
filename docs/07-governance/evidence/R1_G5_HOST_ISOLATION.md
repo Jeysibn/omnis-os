@@ -12,7 +12,7 @@
 
 ## Deployment and privilege boundaries
 
-The CI-only `scripts/host-security/verify-disposable-systemd-deployment.sh` requires `CI=true`, an explicit opt-in variable, root, a running systemd PID 1, and an active Docker service. It refuses pre-existing Omnis users, groups, service paths, units, and occupied ports. On the ephemeral Ubuntu 24.04 GitHub runner, run `41677410902` passed: it provisioned identities, installed a root-owned application copy and synthetic secrets, applied the actual systemd units, ran worker-boundary checks, and created/approved/completed a synthetic task through API → authorizer → worker → restricted launcher → mock container. The installed-service probe removed the service resources during cleanup. The development host was not touched.
+The CI-only `scripts/host-security/verify-disposable-systemd-deployment.sh` requires `CI=true`, an explicit opt-in variable, root, a running systemd PID 1, and an active Docker service. It refuses pre-existing Omnis users, groups, service paths, units, and occupied ports. On the ephemeral Ubuntu 24.04 GitHub runner, run `41679158146` passed on implementation SHA `a83e36954e3983caeadc262bbfecbbbe79e85a0b`: it provisioned identities, installed a root-owned application copy and synthetic secrets, applied the actual systemd units, ran worker-boundary checks, and created/approved/completed a synthetic task through API → authorizer → worker → restricted launcher → mock container. The installed-service probe removed the service resources during cleanup. The subsequent full run `41679817463` also passed on SHA `78ac5ca34c14db0525eba022b39c3354a7b9247f`, including the same systemd deployment check. The development host was not touched.
 
 The shared development machine was not changed: no privileged host script was executed, no identities/groups/units were installed, and no shared Docker service was restarted. Local `pnpm dev` runs under one developer identity and is not isolation evidence. The runner test demonstrates the proposed systemd deployment on a disposable Ubuntu 24.04 host; it is not verification of a production or homelab installation. The launcher retains rootful Docker group membership, which is root-equivalent; the launcher, kernel, Docker daemon, host supervisor, and trusted API remain in the trusted computing base.
 
@@ -28,9 +28,9 @@ Environment: Node.js `24.22.1`; pnpm `12.16.1` via `npm exec`. The repository's 
 
 ## CI evidence
 
-**Validated implementation SHA:** `3ec1e8b2f8e469460091fbf5d0c6a44a9964244c`
+**Validated implementation SHA:** `78ac5ca34c14db0525eba022b39c3354a7b9247f`
 
-**CI run:** [41677410902](https://github.com/Jeysibn/omnis-os/actions/runs/41677410902) — SUCCESS on the exact SHA above. The workflow passed frozen install, disposable identity checks, role provisioning, `pnpm check`, build, legacy upgrade, recovery, backup/restore, and installed systemd deployment. `pnpm check` reported 109 workspace tests plus 30 recovery-policy tests (139 total; no double-counting). The Docker-dependent sandbox suite ran in CI with the pinned image. Database, legacy-upgrade, recovery, backup/restore, and systemd deployment gates passed; no gate skipped in this CI run.
+**CI run:** [41679817463](https://github.com/Jeysibn/omnis-os/actions/runs/41679817463) — SUCCESS on the exact SHA above. The workflow passed frozen install, disposable identity checks, role provisioning, `pnpm check`, build, legacy upgrade, recovery, backup/restore, and installed systemd deployment. `pnpm check` reported 109 workspace tests plus 30 recovery-policy tests (139 total; no double-counting). The Docker-dependent sandbox suite ran in CI with the pinned image. Database, legacy-upgrade, recovery, backup/restore, and systemd deployment gates passed; no gate skipped in this CI run. This SHA is the implementation and ADR revision; the later evidence-only commit is independently validated by its own exact-head workflow run and is reported in the PR status.
 
 ## Disposition
 
