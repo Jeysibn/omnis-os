@@ -1,5 +1,6 @@
 export { asPgBossTransaction, createPool, inTransaction, migrate } from './database.ts';
 export { PostgresRunStore, StoreError } from './run-store.ts';
+export { AgentProfileStoreError, PostgresAgentProfileStore } from './agent-profile-store.ts';
 export {
   PostgresAuthorizationStore,
   PostgresRuntimeAuthorizationReader,

@@ -1,6 +1,10 @@
 import {
   ApiErrorSchema,
   AuthorizationSchema,
+  AgentDirectoryResponseSchema,
+  AgentProfileResponseSchema,
+  AgentProfileVersionResponseSchema,
+  AgentProfileVersionsResponseSchema,
   RunSchema,
   TaskSchema,
   type ApiError,
@@ -59,6 +63,11 @@ export const parseRunList = (value: unknown) => {
 export const parseTask = (value: unknown) => TaskSchema.parse(value);
 export const parseRun = (value: unknown) => RunSchema.parse(value);
 export const parseAuthorization = (value: unknown) => AuthorizationSchema.parse(value);
+export const parseAgentDirectory = (value: unknown) => AgentDirectoryResponseSchema.parse(value);
+export const parseAgentProfile = (value: unknown) => AgentProfileResponseSchema.parse(value);
+export const parseAgentVersions = (value: unknown) =>
+  AgentProfileVersionsResponseSchema.parse(value);
+export const parseAgentVersion = (value: unknown) => AgentProfileVersionResponseSchema.parse(value);
 
 export async function workerEventStream(runId: string, afterSequence: number, signal: AbortSignal) {
   const response = await fetch(

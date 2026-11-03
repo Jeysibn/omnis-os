@@ -9,6 +9,7 @@ import type { Pool } from 'pg';
 import {
   createPool,
   migrate,
+  PostgresAgentProfileStore,
   PostgresAuthorizationStore,
   PostgresRunStore,
   StoreError,
@@ -71,11 +72,231 @@ const postgresSuite = describe(
         'GRANT SELECT, INSERT, UPDATE, DELETE ON omnis.test_queue_outbox TO omnis_runtime',
       );
       await adminPool!.query(
-        'TRUNCATE omnis.test_queue_outbox, omnis.mock_sandbox_launches, omnis.legacy_unscoped_runs, omnis.authorization_audit, omnis.runtime_authorizations, omnis.run_idempotency, omnis.run_events, omnis.runs, omnis.tasks',
+        'TRUNCATE omnis.test_queue_outbox, omnis.agent_profile_versions, omnis.agents, omnis.departments, omnis.mock_sandbox_launches, omnis.legacy_unscoped_runs, omnis.authorization_audit, omnis.runtime_authorizations, omnis.run_idempotency, omnis.run_events, omnis.runs, omnis.tasks',
       );
       await adminPool!.query('ALTER SEQUENCE omnis.task_id_seq RESTART WITH 1');
       await adminPool!.query('ALTER SEQUENCE omnis.run_id_seq RESTART WITH 1');
       nextKey += 1;
+    });
+
+    it('returns an honestly empty complete agent directory', async () => {
+      const profiles = new PostgresAgentProfileStore(
+        pool!,
+        'ao104-test-cursor-key-0123456789abcdef',
+      );
+      assert.deepEqual(await profiles.listAgents(), {
+        agents: [],
+        page: { total: 0, complete: true, nextCursor: null },
+      });
+    });
+
+    it('fails closed instead of silently truncating a directory above the response bound', async () => {
+      await adminPool!.query(
+        `INSERT INTO omnis.agents (id, name, slug, lifecycle, provenance)
+         SELECT 'agt_' || n, 'Agent ' || n, 'agent-' || n, 'draft', 'owner_created'
+           FROM generate_series(1, 1001) AS n`,
+      );
+      const profiles = new PostgresAgentProfileStore(
+        pool!,
+        'ao104-test-cursor-key-0123456789abcdef',
+      );
+      await assert.rejects(profiles.listAgents(), (error: { statusCode: number; code: string }) => {
+        assert.equal(error.statusCode, 503);
+        assert.equal(error.code, 'directory_limit_exceeded');
+        return true;
+      });
+    });
+
+    it('keeps directory ordering stable when display names tie', async () => {
+      await adminPool!.query(
+        `INSERT INTO omnis.agents (id, name, slug, lifecycle, provenance) VALUES
+          ('agt_tie_b', 'Atlas', 'atlas-b', 'draft', 'owner_created'),
+          ('agt_tie_a', 'Atlas', 'atlas-a', 'draft', 'owner_created')`,
+      );
+      const profiles = new PostgresAgentProfileStore(
+        pool!,
+        'ao104-test-cursor-key-0123456789abcdef',
+      );
+      assert.deepEqual(
+        (await profiles.listAgents()).agents.map((agent) => agent.id),
+        ['agt_tie_a', 'agt_tie_b'],
+      );
+    });
+
+    it('preserves exact immutable history and snapshot-consistent version pagination', async () => {
+      const profiles = new PostgresAgentProfileStore(
+        pool!,
+        'ao104-test-cursor-key-0123456789abcdef',
+      );
+      const createdAt = new Date('2026-11-03T00:00:00.000Z');
+      await adminPool!.query('BEGIN');
+      try {
+        await adminPool!.query(
+          `INSERT INTO omnis.departments (id, slug, name) VALUES ('dep_engineering', 'engineering', 'Engineering')`,
+        );
+        await adminPool!.query(
+          `INSERT INTO omnis.agents
+             (id, department_id, name, slug, lifecycle, current_version_no, provenance, created_at, updated_at)
+           VALUES ('agt_atlas', 'dep_engineering', 'Atlas', 'atlas', 'available', 3, 'owner_created', $1, $1)`,
+          [createdAt],
+        );
+        for (const [versionNo, profession] of [
+          [1, 'Systems Analyst'],
+          [2, 'Systems Designer'],
+          [3, 'Systems Architect'],
+        ] as const) {
+          await adminPool!.query(
+            `INSERT INTO omnis.agent_profile_versions
+               (version_id, agent_id, version_no, profession, seniority, specialties, personality, behavior, instructions, created_at)
+             VALUES ($1, 'agt_atlas', $2, $3, 'senior', '["system-design"]',
+               '{"traits":["methodical"],"tone":"professional","principles":["explain tradeoffs"]}',
+               '{"autonomy":null,"escalation":"request owner review"}', $4, $5)`,
+            [`apv_atlas_${versionNo}`, versionNo, profession, `Snapshot ${versionNo}`, createdAt],
+          );
+        }
+        await adminPool!.query(
+          `INSERT INTO omnis.agents (id, name, slug, lifecycle, provenance)
+           VALUES ('agt_draft', 'Draft', 'draft', 'draft', 'owner_created')`,
+        );
+        await adminPool!.query('COMMIT');
+      } catch (error) {
+        await adminPool!.query('ROLLBACK');
+        throw error;
+      }
+
+      const directory = await profiles.listAgents();
+      assert.equal(directory.page.total, 2);
+      assert.deepEqual(
+        directory.agents.map((agent) => agent.id),
+        ['agt_atlas', 'agt_draft'],
+      );
+      assert.equal(directory.agents[0]?.department?.id, 'dep_engineering');
+      assert.equal(directory.agents[1]?.currentVersion, null);
+      const profile = await profiles.getAgent('agt_atlas');
+      assert.equal(profile?.currentVersion?.versionNo, 3);
+      assert.equal(profile?.currentVersion?.instructions, 'Snapshot 3');
+      assert.equal((await profiles.getVersion('agt_atlas', 1))?.version.instructions, 'Snapshot 1');
+      assert.equal(await profiles.getVersion('agt_atlas', 99), null);
+      assert.equal(await profiles.getVersion('agt_other', 1), null);
+      const fullHistory = await profiles.listVersions('agt_atlas', { limit: 100 });
+      assert.deepEqual(
+        fullHistory?.versions.map((version) => version.versionNo),
+        [3, 2, 1],
+      );
+      assert.equal(fullHistory?.page.complete, true);
+
+      const firstPage = await profiles.listVersions('agt_atlas', { limit: 1 });
+      assert.equal(firstPage?.page.total, 3);
+      assert.equal(firstPage?.versions[0]?.versionNo, 3);
+      assert.equal(firstPage?.versions[0]?.isCurrent, true);
+      assert.ok(firstPage?.page.nextCursor);
+
+      await adminPool!.query('BEGIN');
+      try {
+        await adminPool!.query(
+          `INSERT INTO omnis.agent_profile_versions (version_id, agent_id, version_no, profession)
+           VALUES ('apv_atlas_4', 'agt_atlas', 4, 'Systems Director')`,
+        );
+        await adminPool!.query(
+          `UPDATE omnis.agents SET current_version_no = 4, lifecycle = 'archived', archived_at = now(), updated_at = now()
+            WHERE id = 'agt_atlas'`,
+        );
+        await adminPool!.query('COMMIT');
+      } catch (error) {
+        await adminPool!.query('ROLLBACK');
+        throw error;
+      }
+      const secondPage = await profiles.listVersions('agt_atlas', {
+        limit: 1,
+        cursor: firstPage!.page.nextCursor!,
+      });
+      assert.equal(secondPage?.page.total, 3);
+      assert.equal(secondPage?.agent.currentVersion?.versionNo, 3);
+      assert.equal(secondPage?.versions[0]?.versionNo, 2);
+      assert.equal(secondPage?.versions[0]?.isCurrent, false);
+      assert.equal(secondPage?.agent.lifecycle, 'archived');
+      assert.ok(secondPage?.agent.archivedAt);
+      assert.ok(secondPage?.page.nextCursor);
+      const finalPage = await profiles.listVersions('agt_atlas', {
+        limit: 1,
+        cursor: secondPage!.page.nextCursor!,
+      });
+      assert.deepEqual(
+        finalPage?.versions.map((version) => version.versionNo),
+        [1],
+      );
+      assert.equal(finalPage?.versions[0]?.isCurrent, false);
+      assert.equal(finalPage?.page.complete, true);
+      assert.equal(finalPage?.page.total, 3);
+      assert.equal((await profiles.listAgents()).agents[0]?.lifecycle, 'archived');
+
+      await assert.rejects(
+        adminPool!.query(
+          `UPDATE omnis.agent_profile_versions SET instructions = 'changed' WHERE version_id = 'apv_atlas_1'`,
+        ),
+        /immutable/,
+      );
+      await assert.rejects(
+        adminPool!.query(
+          `DELETE FROM omnis.agent_profile_versions WHERE version_id = 'apv_atlas_1'`,
+        ),
+        /immutable/,
+      );
+      assert.equal((await profiles.getVersion('agt_atlas', 1))?.version.instructions, 'Snapshot 1');
+
+      await adminPool!.query('BEGIN');
+      try {
+        await adminPool!.query(
+          `INSERT INTO omnis.agents (id, name, slug, lifecycle, current_version_no, provenance)
+           VALUES ('agt_unsafe', 'Unsafe', 'unsafe', 'available', 1, 'owner_created')`,
+        );
+        await adminPool!.query(
+          `INSERT INTO omnis.agent_profile_versions (version_id, agent_id, version_no, profession, instructions)
+           VALUES ('apv_unsafe_1', 'agt_unsafe', 1, 'Analyst', 'password=fixture-secret-123456')`,
+        );
+        await adminPool!.query('COMMIT');
+      } catch (error) {
+        await adminPool!.query('ROLLBACK');
+        throw error;
+      }
+      await assert.rejects(profiles.getVersion('agt_unsafe', 1), (error: Error) => {
+        assert.match(error.message, /disallowed credential material/);
+        assert.doesNotMatch(error.message, /fixture-secret-123456/);
+        return true;
+      });
+    });
+
+    it('limits the runtime database role to reading profile tables and rejects malformed snapshots', async () => {
+      const privileges = await pool!.query<{ table_name: string; privilege_type: string }>(
+        `SELECT table_name, privilege_type FROM information_schema.role_table_grants
+          WHERE table_schema = 'omnis' AND grantee = 'omnis_runtime'
+            AND table_name IN ('departments', 'agents', 'agent_profile_versions')
+          ORDER BY table_name, privilege_type`,
+      );
+      assert.deepEqual(privileges.rows, [
+        { table_name: 'agent_profile_versions', privilege_type: 'SELECT' },
+        { table_name: 'agents', privilege_type: 'SELECT' },
+        { table_name: 'departments', privilege_type: 'SELECT' },
+      ]);
+      const functionPrivilege = await adminPool!.query<{ executable: boolean }>(
+        `SELECT has_function_privilege('omnis_runtime',
+           'omnis.is_bounded_string_array(jsonb,integer,integer)', 'EXECUTE') AS executable`,
+      );
+      assert.equal(functionPrivilege.rows[0]?.executable, false);
+      await assert.rejects(
+        pool!.query(`INSERT INTO omnis.departments (id, slug, name) VALUES ('dep_x', 'x', 'X')`),
+        /permission denied/,
+      );
+      await assert.rejects(
+        adminPool!.query(`INSERT INTO omnis.agent_profile_versions
+          (version_id, agent_id, version_no, profession, specialties)
+          VALUES ('apv_invalid', 'missing', 1, 'Unsafe', '{"not":"an array"}')`),
+        /violates check constraint|violates foreign key constraint/,
+      );
+      const bounded = await adminPool!.query<{ accepted: boolean }>(
+        `SELECT omnis.is_bounded_string_array(jsonb_build_array(repeat('x', 101)), 32, 100) AS accepted`,
+      );
+      assert.equal(bounded.rows[0]?.accepted, false);
     });
 
     it('commits task, run, initial event, idempotency, and queue outbox atomically', async () => {
@@ -2628,7 +2849,8 @@ const postgresSuite = describe(
       if (pool && databaseUrl) {
         assertTestDatabase(databaseUrl);
         await adminPool!.query(`
-        TRUNCATE omnis.test_queue_outbox, omnis.mock_sandbox_launches, omnis.legacy_unscoped_runs, omnis.authorization_audit,
+        TRUNCATE omnis.test_queue_outbox, omnis.agent_profile_versions, omnis.agents, omnis.departments,
+          omnis.mock_sandbox_launches, omnis.legacy_unscoped_runs, omnis.authorization_audit,
           omnis.runtime_authorizations, omnis.run_idempotency,
           omnis.run_events, omnis.runs, omnis.tasks
       `);
@@ -2646,6 +2868,38 @@ const postgresSuite = describe(
 );
 
 void postgresSuite;
+
+describe('agent profile cursor validation', () => {
+  it('rejects malformed and foreign cursors before opening a database connection', async () => {
+    const unusedPool = createPool('postgres://unused:unused@127.0.0.1:1/unused');
+    const profiles = new PostgresAgentProfileStore(
+      unusedPool,
+      'ao104-test-cursor-key-0123456789abcdef',
+    );
+    try {
+      await assert.rejects(profiles.listVersions('agt_atlas', { cursor: 'not-a-cursor' }), {
+        code: 'invalid_cursor',
+        statusCode: 422,
+      });
+      const forged = Buffer.from(
+        JSON.stringify({
+          version: 1,
+          agentId: 'agt_someone_else',
+          highWaterVersionNo: 2,
+          currentVersionNo: 2,
+          total: 2,
+          lastVersionNo: 1,
+        }),
+      ).toString('base64url');
+      await assert.rejects(profiles.listVersions('agt_atlas', { cursor: `${forged}.AAAA` }), {
+        code: 'invalid_cursor',
+        statusCode: 422,
+      });
+    } finally {
+      await unusedPool.end();
+    }
+  });
+});
 
 function key(prefix: string): string {
   return `${prefix}-${String(nextKey).padStart(4, '0')}-unique`;
