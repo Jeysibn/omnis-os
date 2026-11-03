@@ -80,8 +80,8 @@ trap cleanup EXIT
 # On this explicitly disposable runner only, provide that standard path when
 # it is absent. Never replace an existing host Node installation.
 if [[ ! -e /usr/bin/node && ! -L /usr/bin/node ]]; then
-  node_source="$(command -v node || true)"
-  if [[ -z "$node_source" || "$(node --version)" != v24.* ]]; then
+  node_source="${OMNIS_TEST_NODE_EXECUTABLE:-}"
+  if [[ -z "$node_source" || ! -x "$node_source" || "$("$node_source" --version)" != v24.* ]]; then
     echo "The disposable runner requires the repository's supported Node 24 runtime." >&2
     exit 1
   fi
