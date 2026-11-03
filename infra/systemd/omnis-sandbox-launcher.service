@@ -10,7 +10,6 @@ Group=omnis-launcher
 RuntimeDirectory=omnis-sandbox
 RuntimeDirectoryMode=0750
 SupplementaryGroups=omnis-launcher-socket docker
-ExecStartPre=/usr/bin/chgrp omnis-launcher-socket /run/omnis-sandbox
 ExecStartPost=/opt/omnis-os/scripts/host-security/set-service-socket-group.sh launcher
 WorkingDirectory=/opt/omnis-os/apps/sandbox-launcher
 EnvironmentFile=/etc/omnis/sandbox-launcher.env

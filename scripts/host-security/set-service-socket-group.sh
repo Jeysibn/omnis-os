@@ -28,6 +28,22 @@ if [[ "$(id -un)" != "$expected_user" ]]; then
   exit 1
 fi
 
+socket_dir="$(dirname "$socket")"
+[[ -d "$socket_dir" && ! -L "$socket_dir" ]] || {
+  echo "Refusing to change a missing or symlinked service socket directory." >&2
+  exit 1
+}
+[[ "$(stat -c '%U' "$socket_dir")" == "$expected_user" ]] || {
+  echo "Refusing to change a socket directory not owned by $expected_user." >&2
+  exit 1
+}
+chgrp "$expected_group" "$socket_dir"
+chmod 0750 "$socket_dir"
+[[ "$(stat -c '%U:%G:%a' "$socket_dir")" == "$expected_user:$expected_group:750" ]] || {
+  echo "Socket directory did not reach the expected owner, group, and mode." >&2
+  exit 1
+}
+
 for _ in {1..100}; do
   if [[ -S "$socket" ]]; then
     [[ "$(stat -c '%U' "$socket")" == "$expected_user" ]] || {
