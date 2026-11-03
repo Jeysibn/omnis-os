@@ -2,7 +2,7 @@
 
 ## Scope and disposition
 
-This evidence covers PR #7 findings G4-9 and G4-10 on top of PR #6's squash merge `e463bf503b1344d56624745a20c75816a5661b42`. The feature branch is `security/r1g4-authorization-availability`; the final tested SHA and CI run will be added after publication.
+This evidence covers PR #7 findings G4-9 and G4-10 on top of PR #6's squash merge `e463bf503b1344d56624745a20c75816a5661b42`. The feature branch is `security/r1g4-authorization-availability`. Implementation SHA `a54934889d85cba66254c410e4e8e40d7b794952` passed the complete local and GitHub Actions workflows. The evidence-only closeout commit is validated separately by the current PR check.
 
 No provider integration, provider credentials, or general-purpose tool execution was added. The runtime remains limited to the deterministic synthetic mock.
 
@@ -51,7 +51,7 @@ Environment: disposable PostgreSQL 17.6 container `omnis-pr7-authz-pg`, loopback
 | Worker recovery | `pnpm integration:recovery` — passed; PostgreSQL-backed lifecycle, SSE, worker restart, sandbox cleanup, and no duplicate execution. |
 | Backup/restore | `pnpm integration:backup-restore` — passed; actual custom-format backup/restore and existing ACL/sequence/security checks succeeded, with temporary resources removed. |
 | Production build | `npm exec --yes --package=pnpm@12.16.1 -- pnpm build` — passed. |
-| GitHub Actions | Pending publication of the final feature branch. The workflow URL and tested commit SHA will be appended after completion. |
+| GitHub Actions | Passed on implementation SHA `a54934889d85cba66254c410e4e8e40d7b794952`: [run 41618765733](https://github.com/Jeysibn/omnis-os/actions/runs/41618765733). Frozen installation, role provisioning, `pnpm check`, production build, legacy upgrade, recovery, backup/restore, and resource cleanup all passed. The docs-only closeout commit runs the same workflow again. |
 
 The first full `pnpm check` attempt found an ordering-only assertion mismatch after the new legacy test added a fourth run. The implementation paths had committed the expected state; the assertion was corrected to match the query's `ORDER BY run_id`. The full check then passed. The legacy-upgrade drill also found incomplete synthetic fixture fields; the fixture was corrected to satisfy the historical schema and then the complete drill passed.
 
