@@ -1,0 +1,18 @@
+{
+  "name": "@omnis/sandbox-launcher",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch --experimental-strip-types --env-file=../../.env.sandbox-launcher src/server.ts",
+    "build": "pnpm typecheck",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --experimental-strip-types --test src/docker-sandbox.test.ts src/docker-sandbox.security.test.ts src/server.test.ts",
+    "test:sandbox": "OMNIS_SANDBOX_INTEGRATION=1 node --experimental-strip-types --test src/docker-sandbox.security.test.ts"
+  },
+  "dependencies": {
+    "@omnis/db": "workspace:*",
+    "@omnis/runtime-adapters": "workspace:*",
+    "fastify": "5.12.7",
+    "zod": "4.6.7"
+  }
+}

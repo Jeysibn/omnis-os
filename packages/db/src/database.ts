@@ -15,8 +15,25 @@ export type PgBossTransaction = {
   executeSql(text: string, values?: unknown[]): Promise<{ rows: QueryResultRow[] }>;
 };
 
-export function createPool(config: PoolConfig | string): Pool {
-  return new Pool(typeof config === 'string' ? { connectionString: config, max: 8 } : config);
+export function createPool(
+  config: PoolConfig | string,
+  onIdleClientError?: (error: { name: string; code?: string }) => void,
+): Pool {
+  const pool = new Pool(typeof config === 'string' ? { connectionString: config, max: 8 } : config);
+  pool.on('error', (error: Error & { code?: string }) => {
+    const safeError = {
+      name: error.name,
+      ...(error.code ? { code: error.code } : {}),
+    };
+    if (onIdleClientError) {
+      onIdleClientError(safeError);
+      return;
+    }
+    process.emitWarning('PostgreSQL discarded an idle pooled connection.', {
+      code: 'OMNIS_DB_IDLE_CLIENT_ERROR',
+    });
+  });
+  return pool;
 }
 
 export async function migrate(pool: Pool): Promise<void> {

@@ -57,6 +57,23 @@ const safeRoles = [
     },
     databaseTimeoutOverrides: [],
   },
+  {
+    name: 'omnis_launcher',
+    login: true,
+    inherit: false,
+    superuser: false,
+    createRole: false,
+    createDatabase: false,
+    replication: false,
+    bypassRls: false,
+    membershipCount: 0,
+    timeoutSettings: {
+      lock_timeout: '3s',
+      statement_timeout: '10s',
+      idle_in_transaction_session_timeout: '10s',
+    },
+    databaseTimeoutOverrides: [],
+  },
 ];
 
 function cloneSafeRoles() {

@@ -21,6 +21,7 @@ describe('mock runtime adapter contract', () => {
     const events: unknown[] = [];
     const execution = adapter.execute({
       runId: 'run-0001',
+      lease: { workerId: 'worker-test', generation: 1 },
       task: {
         id: 'task-0001',
         title: 'Inspect the workspace',

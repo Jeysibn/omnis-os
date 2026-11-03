@@ -5,6 +5,7 @@ const adminUrl = process.env.OMNIS_ADMIN_DATABASE_URL ?? databaseUrl('omnis', 'O
 const migrationPassword = required('OMNIS_MIGRATION_DB_PASSWORD');
 const runtimePassword = required('OMNIS_RUNTIME_DB_PASSWORD');
 const authorizerPassword = required('OMNIS_AUTHORIZER_DB_PASSWORD');
+const launcherPassword = required('OMNIS_LAUNCHER_DB_PASSWORD');
 const pool = createPool({
   connectionString: adminUrl,
   max: 1,
@@ -16,6 +17,7 @@ try {
     migration: migrationPassword,
     runtime: runtimePassword,
     authorizer: authorizerPassword,
+    launcher: launcherPassword,
   });
   process.stdout.write(
     'Omnis migration and runtime roles provisioned with scoped schema privileges.\n',

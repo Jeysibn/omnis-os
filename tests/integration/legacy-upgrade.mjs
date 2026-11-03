@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:net';
+import { request as httpRequest } from 'node:http';
 import { mkdtemp, readFile, readdir, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -29,7 +30,8 @@ if (adminBase.username !== 'omnis' || !/(?:^|[_-])tests?$/i.test(adminBase.pathn
 const migrationBase = process.env.OMNIS_TEST_MIGRATION_DATABASE_URL;
 const runtimeBase = process.env.OMNIS_TEST_DATABASE_URL;
 const authorizerBase = process.env.OMNIS_TEST_AUTHORIZER_DATABASE_URL;
-if (!migrationBase || !runtimeBase || !authorizerBase) {
+const launcherBase = process.env.OMNIS_TEST_LAUNCHER_DATABASE_URL;
+if (!migrationBase || !runtimeBase || !authorizerBase || !launcherBase) {
   throw new Error(
     'Set test migration, runtime, and authorizer database URLs for the legacy upgrade drill.',
   );
@@ -45,12 +47,14 @@ if (
 const migrationPassword = decodeURIComponent(new URL(migrationBase).password);
 const runtimePassword = decodeURIComponent(new URL(runtimeBase).password);
 const authorizerPassword = decodeURIComponent(new URL(authorizerBase).password);
+const launcherPassword = decodeURIComponent(new URL(launcherBase).password);
 
 const suffix = `${process.pid}_${Date.now().toString(36)}`.toLowerCase();
 const databaseName = `omnis_legacy_upgrade_${suffix}`;
 const databaseUrl = databaseUrlFor('omnis_runtime', runtimePassword);
 const migrationUrl = databaseUrlFor('omnis_migrator', migrationPassword);
 const authorizerUrl = databaseUrlFor('omnis_authorizer', authorizerPassword);
+const launcherUrl = databaseUrlFor('omnis_launcher', launcherPassword);
 const clusterAdminPool = createPool(adminUrl);
 const databaseAdminPool = createPool(
   databaseUrlFor('omnis', decodeURIComponent(adminBase.password)),
@@ -59,11 +63,16 @@ const legacyPool = createPool(databaseUrlFor('omnis', decodeURIComponent(adminBa
 const runtimePool = createPool(databaseUrl);
 const migrationPool = createPool(migrationUrl);
 const authorizerPool = createPool(authorizerUrl);
+const launcherPool = createPool(launcherUrl);
 const legacyWorktree = await mkdtemp(join(tmpdir(), 'omnis-r1-legacy-worktree-'));
+const serviceSocketDirectory = await mkdtemp(join(tmpdir(), 'omnis-r1-service-sockets-'));
+const launcherSocket = join(serviceSocketDirectory, 'launcher.sock');
+const authorizerSocket = join(serviceSocketDirectory, 'authorizer.sock');
 let legacyBoss;
 let runtimeBoss;
 let worker;
 let authorizerService;
+let launcherService;
 let workerLogs = '';
 let createdDatabase = false;
 
@@ -141,6 +150,7 @@ try {
     migration: migrationPassword,
     runtime: runtimePassword,
     authorizer: authorizerPassword,
+    launcher: launcherPassword,
   });
   await runCurrentMigration();
   await applyRestrictedPgBossMigrations();
@@ -159,6 +169,7 @@ try {
     '0008_revocation_availability_and_legacy_run_recovery',
     '0009_authorizer_process_boundary',
     '0010_runtime_admission_identity',
+    '0011_authorized_mock_sandbox_launch',
   ]);
   assert.equal(afterUpgrade.unsafeRunStates, 3);
   assert.equal(
@@ -264,7 +275,9 @@ try {
     ],
   );
 
-  worker = await startRestrictedWorker();
+  launcherService = await startRestrictedLauncher(launcherSocket);
+  await waitForSocketHealth(launcherSocket, launcherService.child, '/health');
+  worker = await startRestrictedWorker(launcherSocket);
   const finalLegacyEvents = await migratedStore.getEvents(legacyRun.id);
   assert.deepEqual(
     finalLegacyEvents.map((event) => event.type),
@@ -295,14 +308,10 @@ try {
     assert.equal(lockedGrant.rows[0]?.allowed, true);
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const startedAt = Date.now();
-      const busyResponse = await fetch(
-        `${authorizerService.baseUrl}/internal/v1/authorizations/${busyGrant.id}/revoke`,
-        {
-          method: 'POST',
-          headers: {
-            'x-omnis-authorizer-token': authorizerService.token,
-          },
-        },
+      const busyResponse = await socketRequest(
+        authorizerService.socketPath,
+        `/internal/v1/authorizations/${busyGrant.id}/revoke`,
+        { method: 'POST', headers: { 'x-omnis-authorizer-token': authorizerService.token } },
       );
       assert.equal(busyResponse.status, 503);
       const body = await busyResponse.json();
@@ -332,14 +341,10 @@ try {
     await grantHolder.query('ROLLBACK').catch(() => undefined);
     grantHolder.release();
   }
-  const retryResponse = await fetch(
-    `${authorizerService.baseUrl}/internal/v1/authorizations/${busyGrant.id}/revoke`,
-    {
-      method: 'POST',
-      headers: {
-        'x-omnis-authorizer-token': authorizerService.token,
-      },
-    },
+  const retryResponse = await socketRequest(
+    authorizerService.socketPath,
+    `/internal/v1/authorizations/${busyGrant.id}/revoke`,
+    { method: 'POST', headers: { 'x-omnis-authorizer-token': authorizerService.token } },
   );
   assert.equal(retryResponse.status, 200);
   assert.equal((await retryResponse.json()).status, 'revoked');
@@ -446,17 +451,20 @@ try {
   );
 } finally {
   await stopWorker(authorizerService?.child);
+  await stopWorker(launcherService?.child);
   await stopWorker(worker?.child);
   await runtimeBoss?.stop().catch(() => undefined);
   await legacyBoss?.stop().catch(() => undefined);
   await Promise.all([
     migrationPool.end(),
     authorizerPool.end(),
+    launcherPool.end(),
     runtimePool.end(),
     legacyPool.end(),
     databaseAdminPool.end(),
     clusterAdminPool.end(),
   ]);
+  await rm(serviceSocketDirectory, { recursive: true, force: true });
   if (createdDatabase) {
     const cleanupPool = createPool(adminUrl);
     await cleanupPool.query(
@@ -529,6 +537,7 @@ async function verifyPost0005ProvenanceUpgrade() {
       migration: migrationPassword,
       runtime: runtimePassword,
       authorizer: authorizerPassword,
+      launcher: launcherPassword,
     });
     await stagedMigrator.query(`
       CREATE TABLE omnis.schema_migrations (
@@ -640,7 +649,7 @@ async function verifyPost0005ProvenanceUpgrade() {
       "SELECT id, length(checksum) AS checksum_length FROM omnis.schema_migrations WHERE id LIKE '00%' ORDER BY id",
     );
     assert.deepEqual(migrationRows.rows.at(-1), {
-      id: '0010_runtime_admission_identity',
+      id: '0011_authorized_mock_sandbox_launch',
       checksum_length: 64,
     });
   } finally {
@@ -722,7 +731,7 @@ async function insertLegacyRunningRun(taskId, taskTitle, workerId) {
   return runId;
 }
 
-async function startRestrictedWorker() {
+async function startRestrictedWorker(launcherSocket) {
   const port = await freePort();
   const internalToken = randomBytes(64).toString('hex');
   const child = spawn(process.execPath, ['--experimental-strip-types', 'src/server.ts'], {
@@ -734,7 +743,7 @@ async function startRestrictedWorker() {
       OMNIS_INTERNAL_TOKEN: internalToken,
       OMNIS_WORKER_HOST: '127.0.0.1',
       OMNIS_WORKER_PORT: String(port),
-      OMNIS_MOCK_TEST_DELAY_MS: '100',
+      OMNIS_SANDBOX_LAUNCHER_SOCKET: launcherSocket,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -773,7 +782,6 @@ async function startRestrictedWorker() {
 }
 
 async function startRestrictedAuthorizer() {
-  const port = await freePort();
   const token = randomBytes(64).toString('hex');
   const childEnvironment = { ...process.env };
   for (const key of [
@@ -786,14 +794,22 @@ async function startRestrictedAuthorizer() {
     'OMNIS_TEST_DATABASE_URL',
     'OMNIS_TEST_AUTHORIZER_DATABASE_URL',
     'OMNIS_TEST_AUTHORIZER_DATABASE_URL',
+    'OMNIS_TEST_LAUNCHER_DATABASE_URL',
     'OMNIS_AUTHORIZER_DB_PASSWORD',
     'OMNIS_AUTHORIZER_DATABASE_URL',
+    'OMNIS_LAUNCHER_DB_PASSWORD',
+    'OMNIS_LAUNCHER_DATABASE_URL',
     'OMNIS_API_AUTHORIZER_TOKEN',
+    'OMNIS_OWNER_PASSWORD_HASH',
+    'OMNIS_SESSION_SECRET',
+    'OMNIS_INTERNAL_TOKEN',
+    'OMNIS_ALLOWED_ORIGIN',
+    'OMNIS_SECURE_COOKIES',
   ])
     delete childEnvironment[key];
   childEnvironment.OMNIS_AUTHORIZER_DATABASE_URL = authorizerUrl;
-  childEnvironment.OMNIS_AUTHORIZER_HOST = '127.0.0.1';
-  childEnvironment.OMNIS_AUTHORIZER_PORT = String(port);
+  childEnvironment.OMNIS_AUTHORIZER_SOCKET = authorizerSocket;
+  childEnvironment.OMNIS_AUTHORIZER_SOCKET_MODE = '600';
   childEnvironment.OMNIS_API_AUTHORIZER_TOKEN = token;
   const child = spawn(process.execPath, ['--experimental-strip-types', 'src/server.ts'], {
     cwd: join(repositoryRoot, 'apps/authorizer'),
@@ -805,12 +821,11 @@ async function startRestrictedAuthorizer() {
       workerLogs = `${workerLogs}${chunk.toString('utf8')}`.slice(-64_000);
     });
   }
-  const baseUrl = `http://127.0.0.1:${port}`;
   for (let attempt = 0; attempt < 120; attempt += 1) {
     if (child.exitCode !== null) throw new Error('Authorizer exited during legacy-upgrade test.');
     try {
-      const response = await fetch(`${baseUrl}/internal/v1/health`);
-      if (response.ok) return { child, baseUrl, token };
+      const response = await socketRequest(authorizerSocket, '/internal/v1/health');
+      if (response.ok) return { child, socketPath: authorizerSocket, token };
     } catch {
       // Retry until the bounded startup deadline.
     }
@@ -818,6 +833,42 @@ async function startRestrictedAuthorizer() {
   }
   await stopWorker(child);
   throw new Error('Authorizer did not become healthy during legacy-upgrade test.');
+}
+
+async function startRestrictedLauncher(socketPath) {
+  const childEnvironment = { ...workerEnvironment() };
+  const workspaceRoot = join(serviceSocketDirectory, 'workspaces');
+  const child = spawn(process.execPath, ['--experimental-strip-types', 'src/server.ts'], {
+    cwd: join(repositoryRoot, 'apps/sandbox-launcher'),
+    env: {
+      ...childEnvironment,
+      OMNIS_LAUNCHER_DATABASE_URL: launcherUrl,
+      OMNIS_SANDBOX_LAUNCHER_SOCKET: socketPath,
+      OMNIS_SANDBOX_LAUNCHER_SOCKET_MODE: '600',
+      OMNIS_SANDBOX_WORKSPACE_ROOT: workspaceRoot,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  for (const stream of [child.stdout, child.stderr]) {
+    stream?.on('data', (chunk) => {
+      workerLogs = `${workerLogs}${chunk.toString('utf8')}`.slice(-64_000);
+    });
+  }
+  return { child, socketPath };
+}
+
+async function waitForSocketHealth(socketPath, child, requestPath) {
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    if (child.exitCode !== null)
+      throw new Error('Sandbox launcher exited before becoming healthy.');
+    try {
+      const response = await socketRequest(socketPath, requestPath);
+      if (response.ok) return;
+    } catch {
+      await delay(100);
+    }
+  }
+  throw new Error('Sandbox launcher did not become healthy within the startup deadline.');
 }
 
 async function waitForRun(store, runId, expectedStatus) {
@@ -839,6 +890,30 @@ async function stopWorker(child) {
     new Promise((resolveExit) => child.once('exit', resolveExit)),
     delay(5_000).then(() => child.kill('SIGKILL')),
   ]);
+}
+
+function socketRequest(socketPath, requestPath, init = {}) {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      {
+        socketPath,
+        path: requestPath,
+        method: init.method ?? 'GET',
+        headers: init.headers ?? {},
+      },
+      (res) => {
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => {
+          body += chunk;
+        });
+        res.once('end', () => resolve(new Response(body, { status: res.statusCode ?? 503 })));
+      },
+    );
+    req.once('error', reject);
+    req.setTimeout(10_000, () => req.destroy(new Error('unix_socket_request_timeout')));
+    req.end(init.body);
+  });
 }
 
 async function freePort() {
@@ -882,6 +957,14 @@ function workerEnvironment() {
     'OMNIS_TEST_MIGRATION_DATABASE_URL',
     'OMNIS_TEST_DATABASE_URL',
     'OMNIS_TEST_AUTHORIZER_DATABASE_URL',
+    'OMNIS_TEST_LAUNCHER_DATABASE_URL',
+    'OMNIS_LAUNCHER_DB_PASSWORD',
+    'OMNIS_LAUNCHER_DATABASE_URL',
+    'OMNIS_OWNER_PASSWORD_HASH',
+    'OMNIS_SESSION_SECRET',
+    'OMNIS_INTERNAL_TOKEN',
+    'OMNIS_ALLOWED_ORIGIN',
+    'OMNIS_SECURE_COOKIES',
   ]) {
     delete environment[key];
   }

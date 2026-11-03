@@ -4,7 +4,7 @@ import type { Run, Task } from '@omnis/contracts';
 import type { PostgresRunStore } from '@omnis/db';
 import { MockRuntimeAdapter, type RuntimeAdapter } from '@omnis/runtime-adapters';
 import { CoordinatorError, RunCoordinator } from './run-coordinator.ts';
-import { SandboxError } from './docker-sandbox.ts';
+import { SandboxError } from '@omnis/runtime-adapters/sandbox-error';
 
 const authId = '11111111-1111-4111-8111-111111111111';
 const authorizationRecord = {

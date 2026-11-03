@@ -28,6 +28,7 @@ const adminPassword = randomBytes(32).toString('hex');
 const migrationPassword = randomBytes(32).toString('hex');
 const runtimePassword = randomBytes(32).toString('hex');
 const authorizerPassword = randomBytes(32).toString('hex');
+const launcherPassword = randomBytes(32).toString('hex');
 const composeArgs = [
   'compose',
   '--project-name',
@@ -50,6 +51,7 @@ const baseEnv = {
   OMNIS_MIGRATION_DB_PASSWORD: migrationPassword,
   OMNIS_RUNTIME_DB_PASSWORD: runtimePassword,
   OMNIS_AUTHORIZER_DB_PASSWORD: authorizerPassword,
+  OMNIS_LAUNCHER_DB_PASSWORD: launcherPassword,
   OMNIS_R1G3_DISPOSABLE: 'true',
   OMNIS_TRUSTED_ARCHIVE_ACKNOWLEDGED: 'true',
 };
@@ -57,6 +59,7 @@ const adminUrl = connectionUrl('omnis', adminPassword, port, databaseName);
 const migrationUrl = connectionUrl('omnis_migrator', migrationPassword, port, databaseName);
 const runtimeUrl = connectionUrl('omnis_runtime', runtimePassword, port, databaseName);
 const authorizerUrl = connectionUrl('omnis_authorizer', authorizerPassword, port, databaseName);
+const launcherUrl = connectionUrl('omnis_launcher', launcherPassword, port, databaseName);
 
 await writeFile(
   envPath,
@@ -106,6 +109,7 @@ try {
       OMNIS_TEST_MIGRATION_DATABASE_URL: migrationUrl,
       OMNIS_TEST_DATABASE_URL: runtimeUrl,
       OMNIS_TEST_AUTHORIZER_DATABASE_URL: authorizerUrl,
+      OMNIS_TEST_LAUNCHER_DATABASE_URL: launcherUrl,
     },
   });
 

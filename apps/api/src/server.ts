@@ -106,6 +106,22 @@ app.post(
     return reply.code(204).send();
   },
 );
+app.get<{ Params: { authorizationId: string } }>(
+  '/api/v1/authorizations/:authorizationId',
+  { preHandler: requireOwner },
+  async (request, reply) => {
+    if (!/^[0-9a-f-]{36}$/i.test(request.params.authorizationId)) {
+      return reply
+        .code(400)
+        .send({ error: { code: 'invalid_input', message: 'Authorization ID is invalid.' } });
+    }
+    return authorizerRequest(
+      `/internal/v1/authorizations/${encodeURIComponent(request.params.authorizationId)}`,
+      {},
+      parseAuthorizationResponse,
+    );
+  },
+);
 app.post(
   '/api/v1/authorizations',
   { preHandler: [requireOwner, requireMutationProtection] },

@@ -12,12 +12,12 @@
     "node": ">=24.0.0"
   },
   "scripts": {
-    "dev": "pnpm db:migrate && pnpm --parallel --filter @omnis/authorizer --filter @omnis/worker --filter @omnis/api --filter @omnis/web dev",
+    "dev": "pnpm db:migrate && pnpm --parallel --filter @omnis/authorizer --filter @omnis/sandbox-launcher --filter @omnis/worker --filter @omnis/api --filter @omnis/web dev",
     "configure:owner": "node --experimental-strip-types scripts/configure-owner.ts",
     "prepare": "node --experimental-strip-types scripts/configure-hooks.ts",
     "db:up": "docker compose --env-file .env.db-admin -f infra/compose/docker-compose.yml up -d postgres",
     "db:down": "docker compose --env-file .env.db-admin -f infra/compose/docker-compose.yml down",
-    "db:roles": "node --env-file=.env.worker --env-file=.env.authorizer --env-file=.env.migration --env-file=.env.db-admin --experimental-strip-types packages/db/src/provision.ts",
+    "db:roles": "node --env-file=.env.worker --env-file=.env.authorizer --env-file=.env.sandbox-launcher --env-file=.env.migration --env-file=.env.db-admin --experimental-strip-types packages/db/src/provision.ts",
     "db:migrate": "pnpm --filter @omnis/worker db:migrate",
     "sandbox:image:pull": "docker pull node@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85",
     "integration:mock": "node --experimental-strip-types tests/integration/mock-run.mjs",

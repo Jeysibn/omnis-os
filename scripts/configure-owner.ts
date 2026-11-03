@@ -1,14 +1,40 @@
 import { randomBytes, scrypt as scryptCallback } from 'node:crypto';
 import { promisify } from 'node:util';
-import { chmod, readFile, writeFile } from 'node:fs/promises';
+import { lstat } from 'node:fs/promises';
+import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
 const scrypt = promisify(scryptCallback);
+const localUid = process.getuid?.();
+if (localUid === undefined)
+  throw new Error('Local Omnis socket setup requires a POSIX user identity.');
+const localSocketDirectory = path.join(tmpdir(), `omnis-os-${localUid}`);
+try {
+  await mkdir(localSocketDirectory, { mode: 0o700 });
+} catch (error) {
+  if (!(error instanceof Error) || !('code' in error) || error.code !== 'EEXIST') throw error;
+  const existingDirectory = await lstat(localSocketDirectory);
+  if (
+    !existingDirectory.isDirectory() ||
+    existingDirectory.isSymbolicLink() ||
+    existingDirectory.uid !== localUid
+  ) {
+    throw new Error('The local Omnis socket directory exists with an untrusted owner or type.', {
+      cause: error,
+    });
+  }
+  await chmod(localSocketDirectory, 0o700);
+}
+const localAuthorizerSocket = path.join(localSocketDirectory, 'authorizer.sock');
+const localLauncherSocket = path.join(localSocketDirectory, 'launcher.sock');
 const destinations = [
   '.env',
   '.env.worker',
   '.env.authorizer',
+  '.env.sandbox-launcher',
   '.env.migration',
   '.env.db-admin',
 ].map((name) => new URL(`../${name}`, import.meta.url));
@@ -40,8 +66,7 @@ try {
     'OMNIS_ALLOWED_ORIGIN=http://127.0.0.1:5173',
     'OMNIS_API_HOST=127.0.0.1',
     'OMNIS_API_PORT=4100',
-    'OMNIS_AUTHORIZER_HOST=127.0.0.1',
-    'OMNIS_AUTHORIZER_PORT=4102',
+    `OMNIS_AUTHORIZER_SOCKET=${localAuthorizerSocket}`,
     'OMNIS_SECURE_COOKIES=false',
   ];
   const files = [
@@ -51,16 +76,22 @@ try {
       `OMNIS_RUNTIME_DB_PASSWORD=${randomBytes(32).toString('hex')}`,
       'OMNIS_WORKER_HOST=127.0.0.1',
       'OMNIS_WORKER_PORT=4101',
+      `OMNIS_SANDBOX_LAUNCHER_SOCKET=${localLauncherSocket}`,
       'OMNIS_QUEUE_NAME=omnis-mock-run',
     ],
     [
       `OMNIS_API_AUTHORIZER_TOKEN=${apiAuthorizerToken}`,
       `OMNIS_AUTHORIZER_DB_PASSWORD=${randomBytes(32).toString('hex')}`,
-      'OMNIS_AUTHORIZER_HOST=127.0.0.1',
-      'OMNIS_AUTHORIZER_PORT=4102',
+      `OMNIS_AUTHORIZER_SOCKET=${localAuthorizerSocket}`,
+      'OMNIS_AUTHORIZER_SOCKET_MODE=660',
       'OMNIS_DB_HOST=127.0.0.1',
       'OMNIS_DB_PORT=5432',
       'OMNIS_DB_NAME=omnis',
+    ],
+    [
+      `OMNIS_LAUNCHER_DB_PASSWORD=${randomBytes(32).toString('hex')}`,
+      `OMNIS_SANDBOX_LAUNCHER_SOCKET=${localLauncherSocket}`,
+      'OMNIS_SANDBOX_LAUNCHER_SOCKET_MODE=660',
     ],
     [`OMNIS_MIGRATION_DB_PASSWORD=${randomBytes(32).toString('hex')}`],
     [`OMNIS_DB_PASSWORD=${randomBytes(32).toString('hex')}`],
@@ -74,7 +105,7 @@ try {
     await chmod(destination, 0o600);
   }
   stdout.write(
-    'Created private Omnis API, worker, authorizer, migration, and database-admin environment files.\n',
+    'Created private Omnis API, worker, authorizer, sandbox-launcher, migration, and database-admin environment files.\n',
   );
 } finally {
   input.close();

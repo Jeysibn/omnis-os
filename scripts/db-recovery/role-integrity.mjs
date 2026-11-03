@@ -41,7 +41,7 @@ export const restoreRoleSecurityQuery = `SELECT COALESCE(jsonb_agg(jsonb_build_o
   ), '[]'::jsonb)
 ) ORDER BY roles.rolname), '[]'::jsonb) AS role_security
 FROM pg_roles roles
-WHERE roles.rolname IN ('omnis', 'omnis_migrator', 'omnis_runtime', 'omnis_authorizer')`;
+WHERE roles.rolname IN ('omnis', 'omnis_migrator', 'omnis_runtime', 'omnis_authorizer', 'omnis_launcher')`;
 
 const expectedRoles = {
   omnis: {
@@ -78,6 +78,16 @@ const expectedRoles = {
     bypassRls: false,
     membershipCount: 0,
   },
+  omnis_launcher: {
+    login: true,
+    inherit: false,
+    superuser: false,
+    createRole: false,
+    createDatabase: false,
+    replication: false,
+    bypassRls: false,
+    membershipCount: 0,
+  },
 };
 
 const expectedTimeoutSettings = {
@@ -94,6 +104,11 @@ const expectedTimeoutSettings = {
     lock_timeout: '3s',
     statement_timeout: '15s',
     idle_in_transaction_session_timeout: '20s',
+  },
+  omnis_launcher: {
+    lock_timeout: '3s',
+    statement_timeout: '10s',
+    idle_in_transaction_session_timeout: '10s',
   },
 };
 

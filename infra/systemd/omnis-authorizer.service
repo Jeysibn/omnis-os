@@ -1,0 +1,34 @@
+[Unit]
+Description=Omnis OS authorization control plane
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=omnis-authorizer
+Group=omnis-authorizer
+RuntimeDirectory=omnis-authorizer
+RuntimeDirectoryMode=0750
+SupplementaryGroups=omnis-authorizer-socket
+ExecStartPost=/opt/omnis-os/scripts/host-security/set-service-socket-group.sh authorizer
+WorkingDirectory=/opt/omnis-os/apps/authorizer
+EnvironmentFile=/etc/omnis/authorizer.env
+ExecStart=/usr/bin/node --experimental-strip-types src/server.ts
+Restart=on-failure
+RestartSec=2
+UMask=0007
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

@@ -2,7 +2,7 @@
   "name": "@omnis/runtime-adapters",
   "private": true,
   "type": "module",
-  "exports": { ".": "./src/index.ts" },
+  "exports": { ".": "./src/index.ts", "./sandbox-error": "./src/sandbox-error.ts" },
   "scripts": {
     "build": "pnpm typecheck",
     "typecheck": "tsc -p tsconfig.json --noEmit",

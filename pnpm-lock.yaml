@@ -256,6 +256,21 @@ importers:
         specifier: 5.12.7
         version: 5.12.7
 
+  apps/sandbox-launcher:
+    dependencies:
+      '@omnis/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@omnis/runtime-adapters':
+        specifier: workspace:*
+        version: link:../../packages/runtime-adapters
+      fastify:
+        specifier: 5.12.7
+        version: 5.12.7
+      zod:
+        specifier: 4.6.7
+        version: 4.6.7
+
   apps/web:
     dependencies:
       '@omnis/contracts':
