@@ -1,19 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ "${CI:-}" != true || "${OMNIS_HOST_ISOLATION_TEST:-}" != true || "$(id -u)" -ne 0 ]]; then
-  echo "Refusing host provisioning: this probe requires an explicitly enabled ephemeral CI runner and root." >&2
+if [[ "${CI:-}" != true || "${GITHUB_ACTIONS:-}" != true || "${RUNNER_OS:-}" != Linux || \
+  "${RUNNER_ENVIRONMENT:-}" != github-hosted || "${OMNIS_HOST_ISOLATION_TEST:-}" != true || "$(id -u)" -ne 0 ]]; then
+  echo "Refusing host provisioning: this probe requires an explicitly enabled GitHub-hosted Linux runner and root." >&2
+  exit 1
+fi
+if [[ "${OMNIS_SYSTEMD_VERIFICATION_REQUIRED:-}" != true ]]; then
+  echo "Required CI systemd verification was not explicitly enabled." >&2
   exit 1
 fi
 systemd_state="$(systemctl is-system-running 2>/dev/null || true)"
 if [[ "$(ps -p 1 -o comm= | tr -d ' ')" != systemd ]] || [[ "$systemd_state" != active && "$systemd_state" != degraded ]]; then
-  echo "SKIP: the CI environment does not provide a running systemd PID 1. No identities or services were changed."
-  exit 0
+  echo "Required CI verification unavailable: a running systemd PID 1 is required." >&2
+  exit 1
 fi
 if [[ ! -S /var/run/docker.sock ]] || ! systemctl is-active --quiet docker.service; then
-  echo "SKIP: the disposable runner Docker daemon is not available as an active systemd service."
-  exit 0
+  echo "Required CI verification unavailable: Docker must be an active systemd service with its socket." >&2
+  exit 1
 fi
+for variable in OMNIS_TEST_MIGRATION_DATABASE_URL OMNIS_TEST_DATABASE_URL OMNIS_TEST_AUTHORIZER_DATABASE_URL OMNIS_TEST_LAUNCHER_DATABASE_URL OMNIS_RUNTIME_DB_PASSWORD OMNIS_AUTHORIZER_DB_PASSWORD OMNIS_LAUNCHER_DB_PASSWORD OMNIS_TEST_NODE_EXECUTABLE; do
+  if [[ -z "${!variable:-}" ]]; then
+    echo "Required CI verification input $variable is missing." >&2
+    exit 1
+  fi
+done
 for user in omnis-api omnis-authorizer omnis-worker omnis-launcher; do
   if id "$user" >/dev/null 2>&1; then echo "Refusing to replace existing identity $user." >&2; exit 1; fi
 done
@@ -34,51 +45,9 @@ if [[ ! -d /opt || -L /opt || "$(stat -c '%U' /opt)" != root ]]; then
   exit 1
 fi
 original_opt_mode="$(stat -c '%a' /opt)"
-created_node_runtime=0
-
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-unit_dir=/etc/systemd/system
-units=(omnis-api.service omnis-authorizer.service omnis-worker.service omnis-sandbox-launcher.service)
-created_envs=(.env .env.worker .env.authorizer .env.sandbox-launcher)
-cleanup() {
-  local cleanup_failed=0
-  systemctl stop "${units[@]}" >/dev/null 2>&1 || true
-  for unit in "${units[@]}"; do
-    if systemctl is-active --quiet "$unit"; then
-      systemctl kill --kill-who=all --signal=KILL "$unit" >/dev/null 2>&1 || true
-      systemctl stop "$unit" >/dev/null 2>&1 || cleanup_failed=1
-    fi
-  done
-  rm -f -- "${units[@]/#/$unit_dir/}"
-  systemctl daemon-reload >/dev/null 2>&1 || true
-  rm -rf -- /opt/omnis-os /etc/omnis /var/lib/omnis-sandbox /run/omnis-authorizer /run/omnis-sandbox
-  rm -f -- "${created_envs[@]/#/$repo_root/}"
-  for user in omnis-api omnis-authorizer omnis-worker omnis-launcher; do
-    if id "$user" >/dev/null 2>&1; then
-      pkill -KILL -u "$user" >/dev/null 2>&1 || true
-      userdel "$user" >/dev/null 2>&1 || cleanup_failed=1
-    fi
-  done
-  for group in omnis-api omnis-authorizer omnis-worker omnis-launcher omnis-authorizer-socket omnis-launcher-socket; do
-    if getent group "$group" >/dev/null 2>&1; then
-      groupdel "$group" >/dev/null 2>&1 || cleanup_failed=1
-    fi
-  done
-  chmod "$original_opt_mode" /opt || cleanup_failed=1
-  if (( created_node_runtime != 0 )); then
-    rm -f /usr/bin/node || cleanup_failed=1
-  fi
-  if (( cleanup_failed != 0 )); then
-    echo "Disposable systemd cleanup could not remove every created service resource." >&2
-    exit 1
-  fi
-}
-trap cleanup EXIT
-
-# GitHub's setup-node installs Node under the runner tool cache, while the
-# reviewed production units intentionally use the standard OS runtime path.
-# On this explicitly disposable runner only, provide that standard path when
-# it is absent. Never replace an existing host Node installation.
+node_source=""
+needs_node_runtime=0
 if [[ ! -e /usr/bin/node && ! -L /usr/bin/node ]]; then
   node_source="${OMNIS_TEST_NODE_EXECUTABLE:-}"
   if [[ -z "$node_source" || ! -x "$node_source" || "$("$node_source" --version)" != v24.* ]]; then
@@ -86,19 +55,11 @@ if [[ ! -e /usr/bin/node && ! -L /usr/bin/node ]]; then
     exit 1
   fi
   node_source="$(realpath -e "$node_source")"
-  install -o root -g root -m 0755 "$node_source" /usr/bin/node
-  created_node_runtime=1
-fi
-if [[ ! -x /usr/bin/node || "$(/usr/bin/node --version)" != v24.* || "$(stat -c '%U' "$(realpath -e /usr/bin/node)")" != root ]]; then
+  needs_node_runtime=1
+elif [[ ! -x /usr/bin/node || "$(/usr/bin/node --version)" != v24.* || "$(stat -c '%U' "$(realpath -e /usr/bin/node)")" != root ]]; then
   echo "The disposable systemd probe requires a root-owned Node 24 executable at /usr/bin/node; existing host runtime was left untouched." >&2
   exit 1
 fi
-
-# Hosted runners may ship /opt as root-owned but group-writable. Narrow only
-# this disposable CI parent for the duration of the probe; restore its mode on
-# every exit. Production installation continues to reject unsafe /opt paths.
-chmod 0755 /opt
-
 for port in 4100 4101; do
   if ss -ltn "sport = :$port" | tail -n +2 | grep -q .; then
     echo "Refusing to start Omnis services because TCP port $port is already in use." >&2
@@ -112,8 +73,86 @@ for env_file in .env .env.worker .env.authorizer .env.sandbox-launcher; do
   fi
 done
 
-bash "$repo_root/scripts/host-security/provision-identities.sh"
+# All refusal checks are read-only and complete before cleanup is registered.
+unit_dir=/etc/systemd/system
+units=(omnis-api.service omnis-authorizer.service omnis-worker.service omnis-sandbox-launcher.service)
+created_units=()
+created_envs=()
+created_node_runtime=0
+created_application_tree=0
+opt_mode_changed=0
+resource_manifest="$(mktemp /tmp/omnis-systemd-resources.XXXXXX)"
+chmod 0600 "$resource_manifest"
+cleanup() {
+  local cleanup_failed=0
+  if ((${#created_units[@]})); then systemctl stop "${created_units[@]}" >/dev/null 2>&1 || true; fi
+  for unit in "${created_units[@]}"; do
+    if systemctl is-active --quiet "$unit"; then
+      systemctl kill --kill-who=all --signal=KILL "$unit" >/dev/null 2>&1 || true
+      systemctl stop "$unit" >/dev/null 2>&1 || cleanup_failed=1
+    fi
+  done
+  if ((${#created_units[@]})); then rm -f -- "${created_units[@]/#/$unit_dir/}"; fi
+  if ((${#created_units[@]})); then systemctl daemon-reload >/dev/null 2>&1 || cleanup_failed=1; fi
+  for path in "${created_envs[@]}"; do rm -f -- "$path" || cleanup_failed=1; done
+  if ((created_application_tree)); then rm -rf -- /opt/omnis-os || cleanup_failed=1; fi
+  local kind value
+  while IFS=$'\t' read -r kind value; do
+    case "$kind" in
+      user)
+        if id "$value" >/dev/null 2>&1; then
+          pkill -KILL -u "$value" >/dev/null 2>&1 || true
+          userdel "$value" >/dev/null 2>&1 || cleanup_failed=1
+        fi
+        ;;
+      group)
+        if getent group "$value" >/dev/null; then groupdel "$value" >/dev/null 2>&1 || cleanup_failed=1; fi
+        ;;
+      file) rm -f -- "$value" || cleanup_failed=1 ;;
+      directory)
+        case "$value" in
+          /etc/omnis|/run/omnis-authorizer|/run/omnis-sandbox) rmdir -- "$value" 2>/dev/null || cleanup_failed=1 ;;
+          /var/lib/omnis-sandbox/workspaces) rm -rf -- "$value" || cleanup_failed=1 ;;
+          /var/lib/omnis-sandbox) rmdir -- "$value" 2>/dev/null || cleanup_failed=1 ;;
+          *) echo "Refusing cleanup of unrecognized manifest directory $value." >&2; cleanup_failed=1 ;;
+        esac
+        ;;
+    esac
+  done < <(tac "$resource_manifest")
+  if ((opt_mode_changed)); then chmod "$original_opt_mode" /opt || cleanup_failed=1; fi
+  if (( created_node_runtime != 0 )); then
+    rm -f /usr/bin/node || cleanup_failed=1
+  fi
+  rm -f -- "$resource_manifest"
+  if (( cleanup_failed != 0 )); then
+    echo "Disposable systemd cleanup could not remove every created service resource." >&2
+    exit 1
+  fi
+}
+trap cleanup EXIT
+
+# GitHub's setup-node installs Node under the runner tool cache, while the
+# reviewed production units intentionally use the standard OS runtime path.
+# On this explicitly disposable runner only, provide that standard path when
+# it is absent. Never replace an existing host Node installation.
+if ((needs_node_runtime)); then
+  install -o root -g root -m 0755 "$node_source" /usr/bin/node
+  created_node_runtime=1
+fi
+if [[ ! -x /usr/bin/node || "$(/usr/bin/node --version)" != v24.* || "$(stat -c '%U' "$(realpath -e /usr/bin/node)")" != root ]]; then
+  echo "The disposable systemd probe requires a root-owned Node 24 executable at /usr/bin/node; existing host runtime was left untouched." >&2
+  exit 1
+fi
+
+# Hosted runners may ship /opt as root-owned but group-writable. Narrow only
+# this disposable CI parent for the duration of the probe; restore its mode on
+# every exit. Production installation continues to reject unsafe /opt paths.
+chmod 0755 /opt
+opt_mode_changed=1
+
+OMNIS_RESOURCE_MANIFEST="$resource_manifest" bash "$repo_root/scripts/host-security/provision-identities.sh"
 bash "$repo_root/scripts/host-security/install-application-tree.sh"
+created_application_tree=1
 OMNIS_MIGRATION_DATABASE_URL="$OMNIS_TEST_MIGRATION_DATABASE_URL" \
   node --experimental-strip-types "$repo_root/apps/worker/src/migrate.ts"
 
@@ -123,6 +162,12 @@ session_secret="$(od -An -N48 -tx1 /dev/urandom | tr -d ' \n')"
 worker_token="$(od -An -N48 -tx1 /dev/urandom | tr -d ' \n')"
 authorizer_token="$(od -An -N48 -tx1 /dev/urandom | tr -d ' \n')"
 
+create_env_file() {
+  local path="$1"
+  (set -o noclobber; : > "$path")
+  created_envs+=("$path")
+}
+create_env_file "$repo_root/.env"
 cat > "$repo_root/.env" <<EOF
 OMNIS_OWNER_PASSWORD_HASH=$owner_hash
 OMNIS_SESSION_SECRET=$session_secret
@@ -134,6 +179,7 @@ OMNIS_AUTHORIZER_SOCKET=/run/omnis-authorizer/authorizer.sock
 OMNIS_ALLOWED_ORIGIN=http://127.0.0.1:5173
 OMNIS_SECURE_COOKIES=false
 EOF
+create_env_file "$repo_root/.env.worker"
 cat > "$repo_root/.env.worker" <<EOF
 OMNIS_INTERNAL_TOKEN=$worker_token
 OMNIS_RUNTIME_DB_PASSWORD=$OMNIS_RUNTIME_DB_PASSWORD
@@ -143,6 +189,7 @@ OMNIS_WORKER_PORT=4101
 OMNIS_SANDBOX_LAUNCHER_SOCKET=/run/omnis-sandbox/launcher.sock
 OMNIS_QUEUE_NAME=omnis-mock-run
 EOF
+create_env_file "$repo_root/.env.authorizer"
 cat > "$repo_root/.env.authorizer" <<EOF
 OMNIS_API_AUTHORIZER_TOKEN=$authorizer_token
 OMNIS_AUTHORIZER_DB_PASSWORD=$OMNIS_AUTHORIZER_DB_PASSWORD
@@ -150,6 +197,7 @@ OMNIS_AUTHORIZER_DATABASE_URL=$OMNIS_TEST_AUTHORIZER_DATABASE_URL
 OMNIS_AUTHORIZER_SOCKET=/run/omnis-authorizer/authorizer.sock
 OMNIS_AUTHORIZER_SOCKET_MODE=660
 EOF
+create_env_file "$repo_root/.env.sandbox-launcher"
 cat > "$repo_root/.env.sandbox-launcher" <<EOF
 OMNIS_LAUNCHER_DB_PASSWORD=$OMNIS_LAUNCHER_DB_PASSWORD
 OMNIS_LAUNCHER_DATABASE_URL=$OMNIS_TEST_LAUNCHER_DATABASE_URL
@@ -157,11 +205,12 @@ OMNIS_SANDBOX_LAUNCHER_SOCKET=/run/omnis-sandbox/launcher.sock
 OMNIS_SANDBOX_LAUNCHER_SOCKET_MODE=660
 OMNIS_SANDBOX_WORKSPACE_ROOT=/var/lib/omnis-sandbox/workspaces
 EOF
-chmod 0600 "${created_envs[@]/#/$repo_root/}"
-bash "$repo_root/scripts/host-security/install-service-secrets.sh"
+chmod 0600 "${created_envs[@]}"
+OMNIS_RESOURCE_MANIFEST="$resource_manifest" bash "$repo_root/scripts/host-security/install-service-secrets.sh"
 
 for unit in "${units[@]}"; do
   install -o root -g root -m 0644 "$repo_root/infra/systemd/$unit" "$unit_dir/$unit"
+  created_units+=("$unit")
 done
 systemctl daemon-reload
 if ! systemctl start omnis-sandbox-launcher.service omnis-authorizer.service omnis-api.service omnis-worker.service; then
@@ -253,4 +302,4 @@ assert.equal((await finalResponse.json()).status, 'completed', 'Authorized synth
 console.log('Disposable systemd deployment passed: owner approval, restricted launcher communication, synthetic execution, and completion.');
 NODE
 
-echo "Disposable systemd deployment and worker-boundary probes passed. Services, identities, secrets, and installed application tree will be removed by cleanup."
+echo "CI_REQUIRED_SYSTEMD_E2E_VERIFICATION_PASSED: disposable Ubuntu systemd deployment completed API → authorizer → worker → launcher → Docker synthetic execution; created resources will be removed by cleanup."

@@ -36,11 +36,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-tar -C "$source_root" \
-  --exclude='./.git' \
-  --exclude='./.env' --exclude='./.env.*' \
-  --exclude='./.env-*' \
-  -cf - . | tar -C "$stage" -xf -
+bash "$source_root/scripts/host-security/package-application-tree.sh" "$source_root" "$stage"
 
 if find "$stage" ! -type d ! -type f ! -type l -print -quit | grep -q .; then
   echo "Deployment contains a special file; only directories, regular files, and confined symlinks are allowed." >&2

@@ -63,11 +63,14 @@ jobs:
       - run: pnpm integration:recovery
       - name: Verify disposable PostgreSQL backup and restore
         run: pnpm integration:backup-restore
+      - name: Verify host cleanup, packaging, and required CI checks
+        run: node --test scripts/host-security/*.test.mjs
       - name: Verify host isolation in disposable systemd deployment
         env:
           CI: 'true'
           OMNIS_HOST_ISOLATION_TEST: 'true'
+          OMNIS_SYSTEMD_VERIFICATION_REQUIRED: 'true'
           OMNIS_RUNTIME_DB_PASSWORD: omnis_runtime_test_password_2026
           OMNIS_AUTHORIZER_DB_PASSWORD: omnis_authorizer_test_password_2026
           OMNIS_LAUNCHER_DB_PASSWORD: omnis_launcher_test_password_2026
-        run: OMNIS_TEST_NODE_EXECUTABLE="$(command -v node)" sudo --preserve-env=CI,OMNIS_HOST_ISOLATION_TEST,OMNIS_TEST_NODE_EXECUTABLE,OMNIS_RUNTIME_DB_PASSWORD,OMNIS_AUTHORIZER_DB_PASSWORD,OMNIS_LAUNCHER_DB_PASSWORD,OMNIS_TEST_MIGRATION_DATABASE_URL,OMNIS_TEST_DATABASE_URL,OMNIS_TEST_AUTHORIZER_DATABASE_URL,OMNIS_TEST_LAUNCHER_DATABASE_URL bash scripts/host-security/verify-disposable-systemd-deployment.sh
+        run: OMNIS_TEST_NODE_EXECUTABLE="$(command -v node)" sudo --preserve-env=CI,OMNIS_HOST_ISOLATION_TEST,OMNIS_SYSTEMD_VERIFICATION_REQUIRED,OMNIS_TEST_NODE_EXECUTABLE,OMNIS_RUNTIME_DB_PASSWORD,OMNIS_AUTHORIZER_DB_PASSWORD,OMNIS_LAUNCHER_DB_PASSWORD,OMNIS_TEST_MIGRATION_DATABASE_URL,OMNIS_TEST_DATABASE_URL,OMNIS_TEST_AUTHORIZER_DATABASE_URL,OMNIS_TEST_LAUNCHER_DATABASE_URL bash scripts/host-security/verify-disposable-systemd-deployment.sh

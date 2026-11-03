@@ -10,11 +10,24 @@ if ! getent group docker >/dev/null; then
   exit 1
 fi
 
+record_created() {
+  local kind="$1" value="$2"
+  if [[ -n "${OMNIS_RESOURCE_MANIFEST:-}" ]]; then
+    printf '%s\t%s\n' "$kind" "$value" >> "$OMNIS_RESOURCE_MANIFEST"
+  fi
+}
+
 for group in omnis-api omnis-authorizer omnis-worker omnis-launcher omnis-authorizer-socket omnis-launcher-socket; do
-  getent group "$group" >/dev/null || groupadd --system "$group"
+  if ! getent group "$group" >/dev/null; then
+    groupadd --system "$group"
+    record_created group "$group"
+  fi
 done
 for user in omnis-api omnis-authorizer omnis-worker omnis-launcher; do
-  id "$user" >/dev/null 2>&1 || useradd --system --no-user-group --no-create-home --shell /usr/sbin/nologin "$user"
+  if ! id "$user" >/dev/null 2>&1; then
+    useradd --system --no-user-group --no-create-home --shell /usr/sbin/nologin "$user"
+    record_created user "$user"
+  fi
 done
 usermod --gid omnis-api omnis-api
 usermod --gid omnis-authorizer omnis-authorizer
@@ -26,8 +39,13 @@ usermod --groups omnis-launcher-socket omnis-worker
 usermod --groups omnis-launcher-socket,docker omnis-launcher
 
 install -d -o root -g root -m 0755 /etc/omnis
+record_created directory /etc/omnis
 install -d -o omnis-authorizer -g omnis-authorizer-socket -m 0750 /run/omnis-authorizer
+record_created directory /run/omnis-authorizer
 install -d -o omnis-launcher -g omnis-launcher-socket -m 0750 /run/omnis-sandbox
+record_created directory /run/omnis-sandbox
 install -d -o omnis-launcher -g omnis-launcher -m 0700 /var/lib/omnis-sandbox/workspaces
+record_created directory /var/lib/omnis-sandbox/workspaces
+record_created directory /var/lib/omnis-sandbox
 echo "Created Omnis service identities. Worker and launcher share only omnis-launcher-socket; only launcher is in docker."
 echo "Install reviewed service-specific environment files and systemd units separately; this script does not enable or start services."

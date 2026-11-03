@@ -41,12 +41,21 @@ fi
 umask 0077
 temporary_env_dir="$(mktemp -d)"
 trap 'rm -rf -- "$temporary_env_dir"' EXIT
+record_created_file() {
+  if [[ -n "${OMNIS_RESOURCE_MANIFEST:-}" ]]; then
+    printf 'file\t%s\n' "$1" >> "$OMNIS_RESOURCE_MANIFEST"
+  fi
+}
 sed 's|^OMNIS_AUTHORIZER_SOCKET=.*$|OMNIS_AUTHORIZER_SOCKET=/run/omnis-authorizer/authorizer.sock|' .env > "$temporary_env_dir/api.env"
 sed 's|^OMNIS_AUTHORIZER_SOCKET=.*$|OMNIS_AUTHORIZER_SOCKET=/run/omnis-authorizer/authorizer.sock|' .env.authorizer > "$temporary_env_dir/authorizer.env"
 sed 's|^OMNIS_SANDBOX_LAUNCHER_SOCKET=.*$|OMNIS_SANDBOX_LAUNCHER_SOCKET=/run/omnis-sandbox/launcher.sock|' .env.worker > "$temporary_env_dir/worker.env"
 sed 's|^OMNIS_SANDBOX_LAUNCHER_SOCKET=.*$|OMNIS_SANDBOX_LAUNCHER_SOCKET=/run/omnis-sandbox/launcher.sock|' .env.sandbox-launcher > "$temporary_env_dir/sandbox-launcher.env"
 install -o omnis-api -g omnis-api -m 0600 "$temporary_env_dir/api.env" /etc/omnis/api.env
+record_created_file /etc/omnis/api.env
 install -o omnis-worker -g omnis-worker -m 0600 "$temporary_env_dir/worker.env" /etc/omnis/worker.env
+record_created_file /etc/omnis/worker.env
 install -o omnis-authorizer -g omnis-authorizer -m 0600 "$temporary_env_dir/authorizer.env" /etc/omnis/authorizer.env
+record_created_file /etc/omnis/authorizer.env
 install -o omnis-launcher -g omnis-launcher -m 0600 "$temporary_env_dir/sandbox-launcher.env" /etc/omnis/sandbox-launcher.env
+record_created_file /etc/omnis/sandbox-launcher.env
 echo "Installed service-specific environment files with restricted ownership and modes."
