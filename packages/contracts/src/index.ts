@@ -15,22 +15,39 @@ export type RunStatus = z.infer<typeof RunStatusSchema>;
 export const TaskStatusSchema = z.enum(['open', 'in_progress', 'completed']);
 export type TaskStatus = z.infer<typeof TaskStatusSchema>;
 
+export const ProjectIdSchema = z.string().regex(/^prj_[0-9a-f]{32}$/);
+export const TaskIdSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .refine((value) => !value.includes('\0'));
+
 export const TaskSchema = z.object({
   id: z.string().min(1),
   title: z.string().min(1).max(120),
   detail: z.string().max(2000),
   status: TaskStatusSchema,
   createdAt: z.string().datetime(),
+  projectId: ProjectIdSchema.nullable().optional(),
+  associationRevision: z.number().int().positive().safe().optional(),
 });
 export type Task = z.infer<typeof TaskSchema>;
 
 export const CreateTaskSchema = z.object({
   title: z.string().trim().min(3).max(120),
   detail: z.string().trim().min(10).max(2000),
+  projectId: ProjectIdSchema.nullable().optional(),
 });
 export type CreateTaskInput = z.infer<typeof CreateTaskSchema>;
 
-export const ProjectIdSchema = z.string().regex(/^prj_[0-9a-f]{32}$/);
+export const SetTaskProjectSchema = z
+  .object({
+    projectId: ProjectIdSchema.nullable(),
+    expectedAssociationRevision: z.number().int().positive().safe(),
+  })
+  .strict();
+export type SetTaskProjectInput = z.infer<typeof SetTaskProjectSchema>;
+
 export const ProjectStatusSchema = z.enum([
   'proposed',
   'active',

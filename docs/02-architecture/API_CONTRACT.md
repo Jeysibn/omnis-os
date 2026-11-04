@@ -13,25 +13,28 @@
 
 ## Stage 1 endpoints
 
-| Method | Path | Meaning |
-|---|---|---|
-| GET | `/api/v1/health` | App health, no secret details |
-| GET | `/api/v1/me` | Authenticated director identity |
-| GET/POST | `/api/v1/departments` | List/create departments |
-| GET/POST | `/api/v1/agents` | List/create agent |
-| GET/PATCH | `/api/v1/agents/{agentId}` | Agent details and versioned profile edit |
-| GET | `/api/v1/runtime-connections` | Display configured runtime status/capabilities |
-| POST | `/api/v1/runtime-connections/{id}/probe` | Re-check capability under privileged backend policy |
-| GET/POST | `/api/v1/projects` | List/create project |
-| GET | `/api/v1/projects/{id}` | Read project details |
-| GET/POST | `/api/v1/projects/{id}/tasks` | List/create task |
-| GET | `/api/v1/tasks/{id}` | Task, acceptance criteria, verification status |
-| POST | `/api/v1/tasks/{id}/runs` | Admit execution attempt (Idempotency-Key required) |
-| GET | `/api/v1/runs/{id}` | Run state and sanitized evidence |
-| GET | `/api/v1/runs/{id}/events` | SSE, supports cursor resume |
-| POST | `/api/v1/runs/{id}/cancel` | Request stop, not guaranteed immediate |
-| POST | `/api/v1/runs/{id}/accept` | Explicitly accept verified task result |
-| GET | `/api/v1/runs/{id}/usage` | Measured token telemetry or unknown |
+| Method    | Path                                     | Meaning                                             |
+| --------- | ---------------------------------------- | --------------------------------------------------- |
+| GET       | `/api/v1/health`                         | App health, no secret details                       |
+| GET       | `/api/v1/me`                             | Authenticated director identity                     |
+| GET/POST  | `/api/v1/departments`                    | List/create departments                             |
+| GET/POST  | `/api/v1/agents`                         | List/create agent                                   |
+| GET/PATCH | `/api/v1/agents/{agentId}`               | Agent details and versioned profile edit            |
+| GET       | `/api/v1/runtime-connections`            | Display configured runtime status/capabilities      |
+| POST      | `/api/v1/runtime-connections/{id}/probe` | Re-check capability under privileged backend policy |
+| GET/POST  | `/api/v1/projects`                       | List/create project                                 |
+| GET       | `/api/v1/projects/{id}`                  | Read project details                                |
+| PUT       | `/api/v1/tasks/{taskId}/project`         | Associate or unassign a task from a project         |
+| POST      | `/api/v1/tasks`                          | Create an unassigned or project-associated task     |
+| GET       | `/api/v1/tasks`                          | List owner-visible tasks with project association   |
+| GET/POST  | `/api/v1/projects/{id}/tasks`            | List/create task                                    |
+| GET       | `/api/v1/tasks/{id}`                     | Task, acceptance criteria, verification status      |
+| POST      | `/api/v1/tasks/{id}/runs`                | Admit execution attempt (Idempotency-Key required)  |
+| GET       | `/api/v1/runs/{id}`                      | Run state and sanitized evidence                    |
+| GET       | `/api/v1/runs/{id}/events`               | SSE, supports cursor resume                         |
+| POST      | `/api/v1/runs/{id}/cancel`               | Request stop, not guaranteed immediate              |
+| POST      | `/api/v1/runs/{id}/accept`               | Explicitly accept verified task result              |
+| GET       | `/api/v1/runs/{id}/usage`                | Measured token telemetry or unknown                 |
 
 ### Implemented Project Foundation
 
@@ -39,7 +42,11 @@ The owner-authenticated project API implements `GET` and `POST /api/v1/projects`
 
 List summaries use `id`, `ownerId`, `key`, `name`, `status`, `priority`, `revision`, `createdAt`, and `updatedAt`; detail adds `objective`. `revision` starts at 1 and increments atomically after every successful edit or archive. The compact list is ordered by creation time and stable ID, remains complete up to 500 projects, and fails closed with `503` if the bound is exceeded. Archived projects remain visible in the list and readable by ID; this preserves existing read behavior. Project keys are immutable. `PATCH` accepts at least one of `name`, `objective`, or `priority`, plus `expectedRevision`. Archive accepts `expectedRevision`. Both mutations require a UUID `Idempotency-Key`, owner authentication, and session-bound CSRF. Matching retries replay the stored response; reuse for another operation or payload returns `409`. A stale revision returns `409`; unknown IDs return `404`; edits after archival and a new archive request for an already archived project return `409`. There is no restore endpoint in V1.
 
-Mutations and metadata-only audit rows commit in the same transaction. Update audit entries record only changed field names; archive entries contain no field values. `omnis_runtime` remains SELECT-only for its approved tables and has no project table access or project mutation function grants. The authorizer has no direct project-table privileges and may invoke only the constrained project functions. Archiving does not delete or cascade project, task, run, or authorization records. Task-to-project association is deferred; because current runs are not project-scoped, enforcing the module rule that archived projects prevent new runs must be implemented with that separately reviewed association. No task/run behavior or grants change in this increment.
+Mutations and metadata-only audit rows commit in the same transaction. Update audit entries record only changed field names; archive entries contain no field values. `omnis_runtime` has no project table access and no direct permission to insert tasks or change their project association. It can create tasks or change a pre-history task association only through the narrowly scoped `omnis.create_task` and `omnis.set_task_project` functions. Those functions have a fixed search path, enforce the runtime session identity, and atomically validate owner/project state. The runtime role remains without direct `tasks.project_id` update privileges.
+
+Task responses include `projectId` and `associationRevision`; legacy tasks without a project remain unassigned (`projectId: null`) and are not backfilled. `POST /api/v1/tasks` accepts an optional `projectId`. Project-associated creation requires a UUID `Idempotency-Key`; old unassigned task creation without a key remains supported. `PUT /api/v1/tasks/{taskId}/project` accepts `{ "projectId": "prj_…" | null, "expectedAssociationRevision": 1 }` and requires owner authentication, session-bound CSRF and a UUID `Idempotency-Key`. A stale revision returns `409`; unknown task/project IDs return `404`; archived-project assignment returns `409`. Association changes are allowed only before the task has any run or runtime authorization; this freezes project history once execution authorization begins. A task already linked to an archived project cannot be unassigned or reassigned, so removing the link cannot bypass archive enforcement. Same-key, same-input retries replay the original response, including after a project is later archived.
+
+Only `archived` project status blocks association and new run admission; `proposed`, `active`, `paused`, and `completed` projects remain admissible in this mock-only increment. A database trigger guards every run-row insert, including the supported runtime admission transaction, by locking the task and associated project through commit. Project archival takes a conflicting row lock, so either a run admission commits before the archive or it observes the archived status and fails with `409 project_archived`. Legacy tasks with no project remain admissible. Already admitted runs, queue entries and recovery continue after archival; an exact retry returns the previously admitted run, while a new admission is denied. Archiving does not cancel runs or mutate task/run/authorization history. No project-based runtime permissions or general runtime database grants are added.
 
 The implemented department endpoints (`GET`/`POST /departments`, `PATCH /departments/{id}`, `POST /departments/{id}/archive`) and their error behavior are defined by `packages/contracts` and the [AO-104 department evidence](../07-governance/evidence/AO_104_DEPARTMENT_MANAGEMENT.md); the planned web screens are in the [Department Management V1 frontend specification](../04-design/DEPARTMENT_MANAGEMENT_V1_FRONTEND.md). That specification is documentation only and changes no contract.
 

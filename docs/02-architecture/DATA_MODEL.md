@@ -105,6 +105,10 @@ Migration source: `packages/db/migrations/0001_initial.sql`. PostgreSQL is autho
 9. Archive/soft-delete an agent without cascading destruction of past runs, reviews, billing and audit logs.
 10. Restrict all file references to immutable object IDs or canonical reviewed paths.
 
+### Implemented task/project relationship
+
+Migration `0017_task_project_admission.sql` adds nullable `tasks.project_id` with a restrictive project foreign key and a positive `association_revision`. Existing tasks remain unassigned; there is no synthetic project backfill. Task association changes are recorded in append-only metadata-only audit rows and use idempotency receipts. A task can be assigned or reassigned only before any run or runtime authorization exists. The current mock admission path rejects new runs when the associated project is archived, using a database trigger that holds task/project row locks through transaction commit. Already-admitted runs are not cancelled. `omnis_runtime` receives no project-table access or direct task-project mutation grants; task creation and association updates go through two tightly scoped `SECURITY DEFINER` functions.
+
 ## DB reliability / migration practices
 
 - Use migrations (e.g., Drizzle or Prisma migrations; tool to select during scaffold) and require a dedicated migration step before deployment.

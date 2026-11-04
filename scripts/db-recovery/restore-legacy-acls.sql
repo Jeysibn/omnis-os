@@ -19,7 +19,6 @@ ALTER DEFAULT PRIVILEGES FOR ROLE omnis_migrator IN SCHEMA pgboss
 
 GRANT SELECT ON omnis.tasks, omnis.runs, omnis.run_events, omnis.run_idempotency
   TO omnis_runtime;
-GRANT INSERT (id, title, detail) ON omnis.tasks TO omnis_runtime;
 GRANT UPDATE (status) ON omnis.tasks TO omnis_runtime;
 GRANT INSERT (id, task_id, task_title) ON omnis.runs TO omnis_runtime;
 GRANT UPDATE (
@@ -211,7 +210,22 @@ BEGIN
   END IF;
 END
 $project_management_acl$;
-GRANT USAGE, SELECT ON SEQUENCE omnis.task_id_seq, omnis.run_id_seq TO omnis_runtime;
+GRANT USAGE, SELECT ON SEQUENCE omnis.run_id_seq TO omnis_runtime;
+DO $task_project_acl$
+BEGIN
+  IF pg_catalog.to_regprocedure('omnis.create_task(text,text,text,uuid,bytea)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.create_task(text, text, text, uuid, bytea) FROM PUBLIC, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.create_task(text, text, text, uuid, bytea) TO omnis_runtime';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.set_task_project(text,integer,text,uuid,bytea)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.set_task_project(text, integer, text, uuid, bytea) FROM PUBLIC, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.set_task_project(text, integer, text, uuid, bytea) TO omnis_runtime';
+  END IF;
+END
+$task_project_acl$;
+REVOKE ALL ON TABLE omnis.task_project_management_audit,
+  omnis.task_project_management_idempotency FROM PUBLIC, omnis_runtime,
+  omnis_authorizer, omnis_launcher;
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA pgboss TO omnis_runtime;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA pgboss TO omnis_runtime;

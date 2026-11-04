@@ -25,6 +25,10 @@ export const metricsQuery = `SELECT json_build_object(
     'managementAudits', (SELECT count(*) FROM omnis.project_management_audit),
     'managementIdempotency', (SELECT count(*) FROM omnis.project_management_idempotency)
   ),
+  'taskProjectManagementCounts', json_build_object(
+    'audits', (SELECT count(*) FROM omnis.task_project_management_audit),
+    'idempotency', (SELECT count(*) FROM omnis.task_project_management_idempotency)
+  ),
   'leasedRuns', (SELECT count(*) FROM omnis.runs WHERE lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL),
   'recordFingerprints', json_build_object(
     'tasks', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(t)::text), ':' ORDER BY t.id), '')) FROM omnis.tasks t),
@@ -39,7 +43,9 @@ export const metricsQuery = `SELECT json_build_object(
     'agentManagementIdempotency', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(i)::text), ':' ORDER BY i.request_id), '')) FROM omnis.agent_management_idempotency i),
     'projects', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(p)::text), ':' ORDER BY p.id), '')) FROM omnis.projects p),
     'projectManagementAudit', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(a)::text), ':' ORDER BY a.id), '')) FROM omnis.project_management_audit a),
-    'projectManagementIdempotency', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(i)::text), ':' ORDER BY i.request_id), '')) FROM omnis.project_management_idempotency i)
+    'projectManagementIdempotency', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(i)::text), ':' ORDER BY i.request_id), '')) FROM omnis.project_management_idempotency i),
+    'taskProjectManagementAudit', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(a)::text), ':' ORDER BY a.id), '')) FROM omnis.task_project_management_audit a),
+    'taskProjectManagementIdempotency', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(i)::text), ':' ORDER BY i.request_id), '')) FROM omnis.task_project_management_idempotency i)
   ),
   'syntheticOnly', (SELECT COALESCE(bool_and(synthetic IS TRUE AND runtime_kind = 'mock'), true) FROM omnis.runs),
   'sequenceInvariants', (
@@ -114,8 +120,10 @@ export function assertValidMetrics(report) {
     !report.migrations.includes('0014_agent_profile_lifecycle') ||
     !report.migrations.includes('0015_project_management') ||
     !report.migrations.includes('0016_project_lifecycle') ||
+    !report.migrations.includes('0017_task_project_admission') ||
     !validAgentManagementCounts(report.agentManagementCounts) ||
     !validProjectManagementCounts(report.projectManagementCounts) ||
+    !validTaskProjectManagementCounts(report.taskProjectManagementCounts) ||
     !validManagementFingerprints(report.recordFingerprints) ||
     report.syntheticOnly !== true ||
     report.sequenceInvariants !== true ||
@@ -130,6 +138,13 @@ export function assertValidMetrics(report) {
 function validProjectManagementCounts(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   return ['projects', 'managementAudits', 'managementIdempotency'].every(
+    (key) => Number.isSafeInteger(value[key]) && value[key] >= 0,
+  );
+}
+
+function validTaskProjectManagementCounts(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  return ['audits', 'idempotency'].every(
     (key) => Number.isSafeInteger(value[key]) && value[key] >= 0,
   );
 }
@@ -181,6 +196,7 @@ export function metricsMatch(source, restored) {
     'recordFingerprints',
     'agentManagementCounts',
     'projectManagementCounts',
+    'taskProjectManagementCounts',
     'recordFingerprints',
   ]) {
     if (JSON.stringify(canonical(source[key])) !== JSON.stringify(canonical(restored[key]))) {
@@ -220,6 +236,8 @@ function validManagementFingerprints(value) {
     'projects',
     'projectManagementAudit',
     'projectManagementIdempotency',
+    'taskProjectManagementAudit',
+    'taskProjectManagementIdempotency',
   ].every((key) => typeof value[key] === 'string' && /^[a-f0-9]{32}$/.test(value[key]));
 }
 

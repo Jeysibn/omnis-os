@@ -5,6 +5,8 @@ import {
   AgentIdSchema,
   AgentVersionQuerySchema,
   AgentVersionRouteParamSchema,
+  SetTaskProjectSchema,
+  TaskIdSchema,
 } from '@omnis/contracts';
 import { PgBoss } from 'pg-boss';
 import {
@@ -201,12 +203,50 @@ app.get<{ Params: { agentId: string; version: string } }>(
 );
 app.post('/internal/v1/tasks', async (request, reply) => {
   const parsed = await parseTaskInput(request.body);
+  const requestId = taskIdempotencyKey(request.headers['idempotency-key']);
+  const keyWasSupplied = request.headers['idempotency-key'] !== undefined;
   if (!parsed.success)
     return reply
       .code(400)
       .send({ error: { code: 'invalid_input', message: 'Task input is invalid.' } });
-  return reply.code(201).send(await coordinator.createTask(parsed.data));
+  if ((keyWasSupplied && !requestId) || (parsed.data.projectId != null && !requestId))
+    return reply.code(400).send({
+      error: {
+        code: 'invalid_input',
+        message: 'Project task creation requires a valid Idempotency-Key.',
+      },
+    });
+  try {
+    return reply.code(201).send(await coordinator.createTask(parsed.data, requestId));
+  } catch (error) {
+    if (error instanceof CoordinatorError)
+      return reply
+        .code(error.statusCode)
+        .send({ error: { code: error.code, message: error.message } });
+    throw error;
+  }
 });
+app.put<{ Params: { taskId: string } }>(
+  '/internal/v1/tasks/:taskId/project',
+  async (request, reply) => {
+    const taskId = TaskIdSchema.safeParse(request.params.taskId);
+    const body = SetTaskProjectSchema.safeParse(request.body);
+    const requestId = taskIdempotencyKey(request.headers['idempotency-key']);
+    if (!taskId.success || !body.success || !requestId)
+      return reply.code(400).send({
+        error: { code: 'invalid_input', message: 'Task project input is invalid.' },
+      });
+    try {
+      return await coordinator.setTaskProject(taskId.data, body.data, requestId);
+    } catch (error) {
+      if (error instanceof CoordinatorError)
+        return reply
+          .code(error.statusCode)
+          .send({ error: { code: error.code, message: error.message } });
+      throw error;
+    }
+  },
+);
 app.get('/internal/v1/runs', async () => coordinator.listRuns());
 app.post('/internal/v1/runs', async (request, reply) => {
   const parsed = await parseRunInput(request.body);
@@ -373,6 +413,16 @@ process.once('SIGINT', shutdown);
 
 function parseTaskInput(body: unknown) {
   return CreateTaskSchema.safeParse(body);
+}
+
+function taskIdempotencyKey(value: string | string[] | undefined): string | undefined {
+  if (
+    typeof value !== 'string' ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+  ) {
+    return undefined;
+  }
+  return value;
 }
 
 function parseRunInput(body: unknown) {

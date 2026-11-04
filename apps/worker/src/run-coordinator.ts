@@ -7,6 +7,7 @@ import {
   CreateTaskSchema,
   RunEventSchema,
   RunSchema,
+  SetTaskProjectSchema,
   TaskSchema,
   type CreateTaskInput,
   type Run,
@@ -23,6 +24,7 @@ export class CoordinatorError extends Error {
     | 'invalid_input'
     | 'not_found'
     | 'invalid_transition'
+    | 'project_archived'
     | 'concurrency_limit'
     | 'admission_busy'
     | 'conflict';
@@ -33,6 +35,7 @@ export class CoordinatorError extends Error {
       | 'invalid_input'
       | 'not_found'
       | 'invalid_transition'
+      | 'project_archived'
       | 'concurrency_limit'
       | 'admission_busy'
       | 'conflict',
@@ -86,10 +89,17 @@ export class RunCoordinator {
     this.authorizations = authorizations;
   }
 
-  async createTask(input: CreateTaskInput): Promise<Task> {
+  async createTask(input: CreateTaskInput, requestId?: string): Promise<Task> {
     const parsed = CreateTaskSchema.safeParse(input);
     if (!parsed.success) throw new CoordinatorError('invalid_input', 'Task input is invalid.', 400);
-    return translateStoreError(() => this.store.createTask(parsed.data));
+    return translateStoreError(() => this.store.createTask(parsed.data, requestId));
+  }
+
+  async setTaskProject(taskId: string, input: unknown, requestId: string): Promise<Task> {
+    const parsed = SetTaskProjectSchema.safeParse(input);
+    if (!parsed.success)
+      throw new CoordinatorError('invalid_input', 'Task project input is invalid.', 400);
+    return translateStoreError(() => this.store.setTaskProject(taskId, parsed.data, requestId));
   }
 
   async listTasks(): Promise<Task[]> {
@@ -147,11 +157,14 @@ export class RunCoordinator {
         ),
       );
     } catch (error) {
-      if (error instanceof CoordinatorError && error.code === 'invalid_transition') {
+      if (
+        error instanceof CoordinatorError &&
+        ['invalid_transition', 'project_archived'].includes(error.code)
+      ) {
         await this.authorizations.recordEnforcementDenied(
           authorizationId,
           taskId,
-          'admission_authorization_race',
+          error.code === 'project_archived' ? 'project_archived' : 'admission_authorization_race',
         );
       }
       if (error && typeof error === 'object' && 'code' in error && error.code === '55P03') {

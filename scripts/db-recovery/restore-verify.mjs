@@ -252,14 +252,14 @@ try {
     '--username=omnis',
     `--dbname=${targetDatabase}`,
     '--command',
-    `SET ROLE omnis_runtime;
+    `SET SESSION AUTHORIZATION omnis_runtime;
      DO $restore_probe$
-     DECLARE task_identifier text; run_identifier text;
+     DECLARE task_identifier text; run_identifier text; task_receipt jsonb;
      BEGIN
-       INSERT INTO omnis.tasks (id, title, detail)
-       VALUES ('task-' || lpad(nextval('omnis.task_id_seq')::text, 4, '0'),
-         '${probeTitle}', 'Committed synthetic post-restore verification.')
-       RETURNING id INTO task_identifier;
+       task_receipt := omnis.create_task(
+         '${probeTitle}', 'Committed synthetic post-restore verification.', NULL, NULL, NULL
+       );
+       task_identifier := task_receipt->>'id';
        INSERT INTO omnis.runs (id, task_id, task_title)
        VALUES ('run-' || lpad(nextval('omnis.run_id_seq')::text, 4, '0'),
          task_identifier, '${probeTitle}')
@@ -267,7 +267,7 @@ try {
        UPDATE omnis.runs SET status = 'completed' WHERE id = run_identifier;
      END
      $restore_probe$;
-     RESET ROLE;`,
+     RESET SESSION AUTHORIZATION;`,
   ]);
 
   const probeText = await dockerOutput([

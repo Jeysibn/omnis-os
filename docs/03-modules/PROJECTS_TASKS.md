@@ -29,6 +29,8 @@ Each project has key, objective, scope/non-goals, priority, lifecycle (`proposed
 6. Resolved profile version, skills snapshots, workspace and idempotency key persisted.
 7. Job admitted. Browser immediately receives receipt and can reconnect later.
 
+The current mock-only AO-105 slice associates tasks with projects through a nullable `tasks.project_id` foreign key. Existing tasks remain unassigned without backfill. Only an archived project blocks new task association and run admission; legacy unassigned tasks remain admissible. The database run-insert guard locks the associated project through the admission transaction, so a concurrent archive and admission serialize. A run admitted before archival remains queued/runnable and recoverable; archival does not cancel or rewrite run history. Tasks cannot be reassigned after any run or runtime authorization exists.
+
 ### Execution
 
 Worker claims job, starts allowed adapter, streams sanitized status, tool events and usage, stores artifact IDs/checksums, reconciles terminal status, then submits result for automated tests/human review. Worker must not claim `completed` based solely on output text.
@@ -52,4 +54,4 @@ Worker claims job, starts allowed adapter, streams sanitized status, tool events
 - Two concurrent `POST .../runs` requests using same idempotency key create one canonical run.
 - Cyclic task dependency is rejected.
 - A reviewed write action cannot be changed after authorization by editing arguments.
-- Archiving a project preserves its audit history and is intended to prevent new runs unless reopened. Project Lifecycle V1 marks projects archived, keeps them visible in reads, and does not add restore or cascade behavior. Current tasks have no project association, so run-admission enforcement for archived projects is deferred until that association receives separate security review.
+- Archiving a project preserves its audit history and prevents new run admissions for associated tasks. Project Lifecycle V1 keeps archived projects visible in reads and adds no restore or cascade behavior. Already admitted work and exact idempotent retries remain readable and recoverable.

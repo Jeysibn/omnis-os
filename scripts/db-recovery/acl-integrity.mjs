@@ -107,7 +107,7 @@ const applicationReadTables = new Set([
   'agent_profile_versions',
 ]);
 const applicationColumnPrivileges = new Map([
-  ['tasks', new Set(['INSERT:id', 'INSERT:title', 'INSERT:detail', 'UPDATE:status'])],
+  ['tasks', new Set(['UPDATE:status'])],
   [
     'runs',
     new Set([
@@ -149,9 +149,14 @@ const approvedSecurityDefinerRoutineArities = new Map([
   ['append_runtime_admission_denial', 3],
   ['append_runtime_authorization_audit', 3],
 ]);
+const approvedTaskProjectRoutines = new Set([
+  'create_task(p_title text, p_detail text, p_project_id text, p_request_id uuid, p_fingerprint bytea)',
+  'set_task_project(p_task_id text, p_expected_association_revision integer, p_project_id text, p_request_id uuid, p_fingerprint bytea)',
+]);
 
 function isApprovedRuntimeSecurityDefiner(entry) {
   if (entry.objectType !== 'routine' || entry.schema !== 'omnis') return false;
+  if (approvedTaskProjectRoutines.has(entry.object)) return true;
   const match = /^([a-z_][a-z0-9_]*)\((.*)\)$/.exec(entry.object);
   if (!match) return false;
   const arity = approvedSecurityDefinerRoutineArities.get(match[1]);
@@ -470,7 +475,7 @@ export function assertRuntimeAclPolicy(snapshot) {
     if (
       entry.objectType === 'sequence' &&
       entry.schema === 'omnis' &&
-      ['task_id_seq', 'run_id_seq'].includes(entry.object) &&
+      entry.object === 'run_id_seq' &&
       ['USAGE', 'SELECT'].includes(entry.privilege)
     ) {
       continue;
