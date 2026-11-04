@@ -42,6 +42,8 @@ Persistent AI employees with personality, professional responsibilities, model/r
 
 Directory cards, filter by department/status/runtime; editor tabs `Identity`, `Profession`, `Personality`, `Runtime`, `Skills & MCP`, `Memory`, `Permissions`, `History`. Show actual availability and entitlement; do not allow user to pick a model that installed runtime cannot run.
 
+The first, read-only frontend slice (Agent Directory, Agent Profile, immutable version history) is specified in [Agents & Profiles V1 - Frontend Specification](../04-design/AGENTS_PROFILES_V1_FRONTEND.md); its requested backend reads are in the [proposed read API contract](../02-architecture/AGENTS_READ_API_PROPOSAL.md). Those documents refine presentation and API requests only; this module spec remains authoritative for domain rules.
+
 ## Safety
 
 - A 'System Administrator' profession is descriptive, not `sudo` authority.
