@@ -30,7 +30,8 @@ CREATE TABLE omnis.agent_profile_drafts (
 );
 
 CREATE FUNCTION omnis.guard_agent_profile_draft()
-RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, omnis AS $function$
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, omnis AS $function$
 DECLARE v_agent omnis.agents%ROWTYPE;
 BEGIN
   SELECT * INTO v_agent FROM omnis.agents WHERE id=NEW.agent_id FOR UPDATE;
@@ -47,6 +48,36 @@ $function$;
 CREATE TRIGGER agent_profile_drafts_match_agent_head
   BEFORE INSERT OR UPDATE ON omnis.agent_profile_drafts
   FOR EACH ROW EXECUTE FUNCTION omnis.guard_agent_profile_draft();
+
+CREATE OR REPLACE FUNCTION omnis.assert_agent_profile_version_head()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, omnis AS $function$
+DECLARE
+  v_agent_id text;
+  v_current integer;
+  v_lifecycle text;
+  v_latest integer;
+  v_count integer;
+BEGIN
+  IF TG_TABLE_NAME = 'agents' THEN
+    v_agent_id := COALESCE(NEW.id, OLD.id);
+  ELSE
+    v_agent_id := COALESCE(NEW.agent_id, OLD.agent_id);
+  END IF;
+  SELECT lifecycle, current_version_no INTO v_lifecycle, v_current
+    FROM omnis.agents WHERE id = v_agent_id;
+  IF NOT FOUND THEN RETURN NULL; END IF;
+  SELECT max(version_no), count(*)::int INTO v_latest, v_count
+    FROM omnis.agent_profile_versions WHERE agent_id = v_agent_id;
+  IF (v_lifecycle = 'draft' AND (v_current IS NOT NULL OR v_latest IS NOT NULL)) OR
+     (v_lifecycle <> 'draft' AND
+       (v_current IS NULL OR v_latest IS DISTINCT FROM v_current OR v_count IS DISTINCT FROM v_latest)) THEN
+    RAISE EXCEPTION 'agent lifecycle and published profile head are inconsistent'
+      USING ERRCODE = '23514';
+  END IF;
+  RETURN NULL;
+END
+$function$;
 
 CREATE TABLE omnis.agent_management_audit (
   id text PRIMARY KEY CHECK (id ~ '^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$'),
@@ -267,6 +298,7 @@ REVOKE ALL ON omnis.agent_profile_drafts, omnis.agent_management_audit, omnis.ag
   FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher;
 REVOKE ALL ON FUNCTION omnis.reject_agent_management_audit_mutation() FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher;
 REVOKE ALL ON FUNCTION omnis.guard_agent_profile_draft() FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher;
+REVOKE ALL ON FUNCTION omnis.assert_agent_profile_version_head() FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher;
 REVOKE ALL ON FUNCTION omnis.agent_management_replay(uuid,text,text,integer,bytea) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher;
 REVOKE ALL ON FUNCTION omnis.agent_management_remember(uuid,text,text,integer,bytea,jsonb) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher;
 REVOKE ALL ON FUNCTION omnis.create_agent(text,text,text,text,uuid,integer,bytea) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher;

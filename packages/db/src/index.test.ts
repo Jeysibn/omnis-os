@@ -368,6 +368,55 @@ const postgresSuite = describe(
       assert.equal(bounded.rows[0]?.accepted, false);
     });
 
+    it('keeps lifecycle trigger reads behind migration-owned definer functions', async () => {
+      const functions = await adminPool!.query<{
+        function_name: string;
+        security_definer: boolean;
+        owner: string;
+        search_path: string[];
+        public_execute: boolean;
+        authorizer_execute: boolean;
+        runtime_execute: boolean;
+      }>(`
+        SELECT p.proname AS function_name,
+               p.prosecdef AS security_definer,
+               owner.rolname AS owner,
+               p.proconfig AS search_path,
+               EXISTS (
+                 SELECT 1 FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) acl
+                  WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
+               ) AS public_execute,
+               has_function_privilege('omnis_authorizer', p.oid, 'EXECUTE') AS authorizer_execute,
+               has_function_privilege('omnis_runtime', p.oid, 'EXECUTE') AS runtime_execute
+          FROM pg_proc p JOIN pg_roles owner ON owner.oid = p.proowner
+         WHERE p.oid IN (
+           'omnis.guard_agent_profile_draft()'::regprocedure,
+           'omnis.assert_agent_profile_version_head()'::regprocedure
+         )
+         ORDER BY p.proname
+      `);
+      assert.deepEqual(functions.rows, [
+        {
+          function_name: 'assert_agent_profile_version_head',
+          security_definer: true,
+          owner: 'omnis_migrator',
+          search_path: ['search_path=pg_catalog, omnis'],
+          public_execute: false,
+          authorizer_execute: false,
+          runtime_execute: false,
+        },
+        {
+          function_name: 'guard_agent_profile_draft',
+          security_definer: true,
+          owner: 'omnis_migrator',
+          search_path: ['search_path=pg_catalog, omnis'],
+          public_execute: false,
+          authorizer_execute: false,
+          runtime_execute: false,
+        },
+      ]);
+    });
+
     it('creates, renames, and archives departments with atomic metadata-only audit records', async () => {
       const departments = new PostgresDepartmentManagementStore(authorizerPool!);
       const created = await departments.create(
