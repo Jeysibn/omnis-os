@@ -8,6 +8,7 @@ const safeSnapshot = {
     '0014_agent_profile_lifecycle',
     '0015_project_management',
     '0016_project_lifecycle',
+    '0017_task_project_admission',
   ],
   agentManagementCounts: {
     departments: 0,
@@ -18,6 +19,7 @@ const safeSnapshot = {
     managementIdempotency: 0,
   },
   projectManagementCounts: { projects: 0, managementAudits: 0, managementIdempotency: 0 },
+  taskProjectManagementCounts: { audits: 0, idempotency: 0 },
   recordFingerprints: {
     departments: 'd41d8cd98f00b204e9800998ecf8427e',
     agents: 'd41d8cd98f00b204e9800998ecf8427e',
@@ -28,6 +30,8 @@ const safeSnapshot = {
     projects: 'd41d8cd98f00b204e9800998ecf8427e',
     projectManagementAudit: 'd41d8cd98f00b204e9800998ecf8427e',
     projectManagementIdempotency: 'd41d8cd98f00b204e9800998ecf8427e',
+    taskProjectManagementAudit: 'd41d8cd98f00b204e9800998ecf8427e',
+    taskProjectManagementIdempotency: 'd41d8cd98f00b204e9800998ecf8427e',
   },
   syntheticOnly: true,
   sequenceInvariants: true,

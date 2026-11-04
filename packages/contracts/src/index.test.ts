@@ -15,6 +15,9 @@ import {
   CreateDepartmentSchema,
   DepartmentListResponseSchema,
   CreateProjectSchema,
+  CreateTaskSchema,
+  SetTaskProjectSchema,
+  TaskSchema,
   UpdateProjectSchema,
   ArchiveProjectSchema,
   ProjectListResponseSchema,
@@ -22,6 +25,53 @@ import {
   RunSchema,
   RunStatusSchema,
 } from './index.ts';
+
+describe('task project association contracts', () => {
+  const task = {
+    id: 'task-0001',
+    title: 'Review a synthetic report',
+    detail: 'Read the local report and summarize it.',
+    status: 'open',
+    createdAt: '2026-11-05T00:00:00.000Z',
+  };
+  const projectId = 'prj_0123456789abcdef0123456789abcdef';
+
+  it('keeps legacy task payloads valid and represents unassigned association explicitly', () => {
+    assert.equal(TaskSchema.parse(task).id, task.id);
+    assert.deepEqual(TaskSchema.parse({ ...task, projectId: null, associationRevision: 1 }), {
+      ...task,
+      projectId: null,
+      associationRevision: 1,
+    });
+  });
+
+  it('accepts optional project assignment on task creation and validates project reassignment', () => {
+    assert.equal(CreateTaskSchema.parse({ ...task, projectId }).projectId, projectId);
+    assert.equal(CreateTaskSchema.parse(task).projectId, undefined);
+    assert.equal(
+      SetTaskProjectSchema.safeParse({ projectId, expectedAssociationRevision: 1 }).success,
+      true,
+    );
+    assert.equal(
+      SetTaskProjectSchema.safeParse({ projectId: null, expectedAssociationRevision: 1 }).success,
+      true,
+    );
+    assert.equal(
+      SetTaskProjectSchema.safeParse({ projectId: 'unknown', expectedAssociationRevision: 1 })
+        .success,
+      false,
+    );
+    assert.equal(
+      SetTaskProjectSchema.safeParse({ projectId, expectedAssociationRevision: 0 }).success,
+      false,
+    );
+    assert.equal(
+      SetTaskProjectSchema.safeParse({ projectId, expectedAssociationRevision: 1, extra: true })
+        .success,
+      false,
+    );
+  });
+});
 
 describe('run contracts', () => {
   it('accepts only events marked as synthetic mock activity', () => {

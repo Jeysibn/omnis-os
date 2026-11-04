@@ -78,7 +78,7 @@ const postgresSuite = describe(
         'GRANT SELECT, INSERT, UPDATE, DELETE ON omnis.test_queue_outbox TO omnis_runtime',
       );
       await adminPool!.query(
-        'TRUNCATE omnis.test_queue_outbox, omnis.project_management_idempotency, omnis.project_management_audit, omnis.projects, omnis.agent_management_idempotency, omnis.agent_management_audit, omnis.agent_profile_drafts, omnis.department_management_audit, omnis.agent_profile_versions, omnis.agents, omnis.departments, omnis.mock_sandbox_launches, omnis.legacy_unscoped_runs, omnis.authorization_audit, omnis.runtime_authorizations, omnis.run_idempotency, omnis.run_events, omnis.runs, omnis.tasks',
+        'TRUNCATE omnis.test_queue_outbox, omnis.task_project_management_idempotency, omnis.task_project_management_audit, omnis.project_management_idempotency, omnis.project_management_audit, omnis.projects, omnis.agent_management_idempotency, omnis.agent_management_audit, omnis.agent_profile_drafts, omnis.department_management_audit, omnis.agent_profile_versions, omnis.agents, omnis.departments, omnis.mock_sandbox_launches, omnis.legacy_unscoped_runs, omnis.authorization_audit, omnis.runtime_authorizations, omnis.run_idempotency, omnis.run_events, omnis.runs, omnis.tasks',
       );
       await adminPool!.query('ALTER SEQUENCE omnis.task_id_seq RESTART WITH 1');
       await adminPool!.query('ALTER SEQUENCE omnis.run_id_seq RESTART WITH 1');
@@ -185,6 +185,284 @@ const postgresSuite = describe(
       await assert.rejects(
         pool!.query("UPDATE omnis.projects SET status='archived'"),
         /permission denied/,
+      );
+    });
+
+    it('associates legacy tasks with active projects using revision checks and freezes history', async () => {
+      const projects = new PostgresProjectManagementStore(authorizerPool!, Buffer.alloc(32, 23));
+      const active = await projects.create(
+        { key: 'TASK-ACTIVE', name: 'Active', objective: 'Task association integration.' },
+        randomUUID(),
+      );
+      const archived = await projects.create(
+        { key: 'TASK-ARCHIVED', name: 'Archived', objective: 'Reject task association.' },
+        randomUUID(),
+      );
+      const archivedProject = await projects.archive(
+        archived.id,
+        { expectedRevision: 1 },
+        randomUUID(),
+      );
+      const legacyTask = await store.createTask({
+        title: 'Legacy unassigned task',
+        detail: 'Existing tasks remain valid without a project.',
+      });
+      assert.deepEqual(
+        { projectId: legacyTask.projectId, associationRevision: legacyTask.associationRevision },
+        { projectId: null, associationRevision: 1 },
+      );
+      const assignmentKey = randomUUID();
+      const assigned = await store.setTaskProject(
+        legacyTask.id,
+        { projectId: active.id, expectedAssociationRevision: 1 },
+        assignmentKey,
+      );
+      assert.equal(assigned.projectId, active.id);
+      assert.equal(assigned.associationRevision, 2);
+      assert.deepEqual(
+        await store.setTaskProject(
+          legacyTask.id,
+          { projectId: active.id, expectedAssociationRevision: 1 },
+          assignmentKey,
+        ),
+        assigned,
+      );
+      await assert.rejects(
+        store.setTaskProject(
+          legacyTask.id,
+          { projectId: null, expectedAssociationRevision: 1 },
+          randomUUID(),
+        ),
+        (error: unknown) => error instanceof StoreError && error.code === 'conflict',
+      );
+
+      const archivedTargetTask = await store.createTask({
+        title: 'Rejected archived task',
+        detail: 'An archived project cannot receive new tasks.',
+      });
+      await assert.rejects(
+        store.setTaskProject(
+          archivedTargetTask.id,
+          { projectId: archivedProject.id, expectedAssociationRevision: 1 },
+          randomUUID(),
+        ),
+        (error: unknown) => error instanceof StoreError && error.code === 'project_archived',
+      );
+
+      const archivedAssociationProject = await projects.create(
+        {
+          key: 'ARCHIVED-LINK',
+          name: 'Archived link',
+          objective: 'Keep the archived association stable.',
+        },
+        randomUUID(),
+      );
+      const linkedTask = await store.createTask(
+        {
+          title: 'Keep archived association',
+          detail: 'The task cannot escape admission restrictions by unassigning.',
+          projectId: archivedAssociationProject.id,
+        },
+        randomUUID(),
+      );
+      await projects.archive(archivedAssociationProject.id, { expectedRevision: 1 }, randomUUID());
+      await assert.rejects(
+        store.setTaskProject(
+          linkedTask.id,
+          { projectId: null, expectedAssociationRevision: 1 },
+          randomUUID(),
+        ),
+        (error: unknown) => error instanceof StoreError && error.code === 'project_archived',
+      );
+
+      const authorizedTask = await store.createTask({
+        title: 'Authorized task',
+        detail: 'Association must freeze after authorization exists.',
+      });
+      await authorizations.request(authorizedTask.id, 'owner');
+      await assert.rejects(
+        store.setTaskProject(
+          authorizedTask.id,
+          { projectId: active.id, expectedAssociationRevision: 1 },
+          randomUUID(),
+        ),
+        (error: unknown) => error instanceof StoreError && error.code === 'conflict',
+      );
+
+      const privileges = await adminPool!.query<{
+        runtime_project_select: boolean;
+        runtime_task_project_update: boolean;
+        runtime_task_insert: boolean;
+        runtime_create_task: boolean;
+        authorizer_create_task: boolean;
+      }>(`
+        SELECT has_table_privilege('omnis_runtime', 'omnis.projects', 'SELECT') AS runtime_project_select,
+               has_column_privilege('omnis_runtime', 'omnis.tasks', 'project_id', 'UPDATE') AS runtime_task_project_update,
+               has_table_privilege('omnis_runtime', 'omnis.tasks', 'INSERT') AS runtime_task_insert,
+               has_function_privilege('omnis_runtime', 'omnis.create_task(text,text,text,uuid,bytea)', 'EXECUTE') AS runtime_create_task,
+               has_function_privilege('omnis_authorizer', 'omnis.create_task(text,text,text,uuid,bytea)', 'EXECUTE') AS authorizer_create_task
+      `);
+      assert.deepEqual(privileges.rows[0], {
+        runtime_project_select: false,
+        runtime_task_project_update: false,
+        runtime_task_insert: false,
+        runtime_create_task: true,
+        authorizer_create_task: false,
+      });
+      await assert.rejects(
+        pool!.query('UPDATE omnis.tasks SET project_id = NULL'),
+        /permission denied/,
+      );
+    });
+
+    it('blocks archived-project run admission but preserves admitted work and exact retries', async () => {
+      const projects = new PostgresProjectManagementStore(authorizerPool!, Buffer.alloc(32, 23));
+      const admittedProject = await projects.create(
+        {
+          key: 'ADMITTED',
+          name: 'Admitted',
+          objective: 'Allow already admitted work to continue.',
+        },
+        randomUUID(),
+      );
+      const admittedTask = await store.createTask(
+        {
+          title: 'Already admitted task',
+          detail: 'A queued run survives the later project archival.',
+          projectId: admittedProject.id,
+        },
+        randomUUID(),
+      );
+      let enqueueCalls = 0;
+      const runKey = `archived-project-retry-${randomUUID()}`;
+      const original = await admit(admittedTask.id, runKey, async () => {
+        enqueueCalls += 1;
+        return 'job-before-archive';
+      });
+      await projects.archive(admittedProject.id, { expectedRevision: 1 }, randomUUID());
+      const replay = await admit(admittedTask.id, runKey, async () => {
+        enqueueCalls += 1;
+        return 'unexpected-new-job';
+      });
+      assert.equal(original.created, true);
+      assert.equal(replay.created, false);
+      assert.equal(replay.run.id, original.run.id);
+      assert.equal(enqueueCalls, 1);
+      assert.equal((await store.getRun(original.run.id))?.status, 'queued');
+      await adminPool!.query("UPDATE omnis.runs SET status='completed' WHERE id=$1", [
+        original.run.id,
+      ]);
+
+      const rejectedProject = await projects.create(
+        { key: 'REJECTED', name: 'Rejected', objective: 'No new run admission after archival.' },
+        randomUUID(),
+      );
+      const rejectedTask = await store.createTask(
+        {
+          title: 'Archived project task',
+          detail: 'Run admission must fail closed after archive.',
+          projectId: rejectedProject.id,
+        },
+        randomUUID(),
+      );
+      await projects.archive(rejectedProject.id, { expectedRevision: 1 }, randomUUID());
+      const deniedKey = `archived-project-denial-${randomUUID()}`;
+      const authorizationRequest = await authorizations.request(rejectedTask.id, 'owner');
+      const deniedAuthorizationId = (
+        await authorizations.decide(authorizationRequest.id, 'owner', 'approve')
+      ).id;
+      await assert.rejects(
+        store.admitRun(rejectedTask.id, deniedKey, deniedAuthorizationId, async () => {
+          throw new Error('An archived task must never be enqueued.');
+        }),
+        (error: unknown) => error instanceof StoreError && error.code === 'project_archived',
+      );
+      const deniedState = await adminPool!.query<{ run_count: number; auth_status: string }>(
+        `SELECT (SELECT count(*)::int FROM omnis.runs WHERE task_id=$1) AS run_count,
+                (SELECT status FROM omnis.runtime_authorizations WHERE id=$2) AS auth_status`,
+        [rejectedTask.id, deniedAuthorizationId],
+      );
+      assert.deepEqual(deniedState.rows[0], { run_count: 0, auth_status: 'authorized' });
+      await assert.rejects(
+        pool!.query(
+          "INSERT INTO omnis.runs (id, task_id, task_title) VALUES ('run-direct-archived', $1, $2)",
+          [rejectedTask.id, rejectedTask.title],
+        ),
+        (error: unknown) => (error as { code?: string }).code === 'P2001',
+        'direct runtime run INSERT must remain guarded by the database trigger',
+      );
+
+      const legacyTask = await store.createTask({
+        title: 'Legacy run task',
+        detail: 'Tasks without an association remain admissible.',
+      });
+      const legacyAdmission = await admit(
+        legacyTask.id,
+        `legacy-task-admission-${randomUUID()}`,
+        async () => 'legacy-task-job',
+      );
+      assert.equal(legacyAdmission.created, true);
+    });
+
+    it('serializes concurrent project archival and run admission at the database boundary', async () => {
+      const projects = new PostgresProjectManagementStore(authorizerPool!, Buffer.alloc(32, 23));
+      const project = await projects.create(
+        {
+          key: 'ARCHIVE-RACE',
+          name: 'Archive race',
+          objective: 'Serialize archive and run admission.',
+        },
+        randomUUID(),
+      );
+      const task = await store.createTask(
+        {
+          title: 'Archive race task',
+          detail: 'Run admission and archive must serialize safely.',
+          projectId: project.id,
+        },
+        randomUUID(),
+      );
+      const authorizationRequest = await authorizations.request(task.id, 'owner');
+      const authorizationId = (
+        await authorizations.decide(authorizationRequest.id, 'owner', 'approve')
+      ).id;
+      const admissionPromise = store.admitRun(
+        task.id,
+        `archive-race-${randomUUID()}`,
+        authorizationId,
+        async () => 'archive-race-job',
+      );
+      const archivePromise = projects.archive(project.id, { expectedRevision: 1 }, randomUUID());
+      const [admissionResult, archived] = await Promise.allSettled([
+        admissionPromise,
+        archivePromise,
+      ]);
+      assert.equal(archived.status, 'fulfilled');
+      if (admissionResult.status === 'rejected') {
+        assert.ok(
+          admissionResult.reason instanceof StoreError &&
+            admissionResult.reason.code === 'project_archived',
+        );
+      } else {
+        assert.equal(admissionResult.value.created, true);
+        assert.equal(
+          (await store.getRun(admissionResult.value.run.id))?.id,
+          admissionResult.value.run.id,
+        );
+      }
+      assert.equal((await projects.get(project.id))?.status, 'archived');
+      const retryAuthorization = await authorizations.request(task.id, 'owner');
+      const retryAuthorizationId = (
+        await authorizations.decide(retryAuthorization.id, 'owner', 'approve')
+      ).id;
+      await assert.rejects(
+        store.admitRun(
+          task.id,
+          `after-archive-${randomUUID()}`,
+          retryAuthorizationId,
+          async () => 'never',
+        ),
+        (error: unknown) => error instanceof StoreError && error.code === 'project_archived',
       );
     });
 
@@ -3575,7 +3853,9 @@ const postgresSuite = describe(
       if (pool && databaseUrl) {
         assertTestDatabase(databaseUrl);
         await adminPool!.query(`
-        TRUNCATE omnis.test_queue_outbox, omnis.agent_management_idempotency,
+        TRUNCATE omnis.test_queue_outbox, omnis.task_project_management_idempotency,
+          omnis.task_project_management_audit, omnis.project_management_idempotency,
+          omnis.project_management_audit, omnis.projects, omnis.agent_management_idempotency,
           omnis.agent_management_audit, omnis.agent_profile_drafts, omnis.department_management_audit,
           omnis.agent_profile_versions, omnis.agents, omnis.departments,
           omnis.mock_sandbox_launches, omnis.legacy_unscoped_runs, omnis.authorization_audit,

@@ -2,6 +2,8 @@ import {
   CreateTaskSchema,
   RunEventSchema,
   RunSchema,
+  SetTaskProjectSchema,
+  TaskIdSchema,
   TaskSchema,
   type CreateTaskInput,
   type Run,
@@ -11,10 +13,15 @@ import {
 } from '@omnis/contracts';
 import type { Pool, PoolClient, QueryResultRow } from 'pg';
 import { asPgBossTransaction, inTransaction, type PgBossTransaction } from './database.ts';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 export type StoreErrorCode =
-  'invalid_input' | 'not_found' | 'invalid_transition' | 'concurrency_limit' | 'conflict';
+  | 'invalid_input'
+  | 'not_found'
+  | 'invalid_transition'
+  | 'project_archived'
+  | 'concurrency_limit'
+  | 'conflict';
 
 export class StoreError extends Error {
   readonly code: StoreErrorCode;
@@ -33,6 +40,8 @@ type TaskRow = QueryResultRow & {
   detail: string;
   status: Task['status'];
   created_at: Date | string;
+  project_id?: string | null;
+  association_revision?: number | string;
 };
 
 type RunRow = QueryResultRow & {
@@ -86,35 +95,67 @@ export class PostgresRunStore {
     this.pool = pool;
   }
 
-  async createTask(input: CreateTaskInput): Promise<Task> {
+  async createTask(input: CreateTaskInput, requestId?: string): Promise<Task> {
     const parsed = CreateTaskSchema.safeParse(input);
     if (!parsed.success) throw new StoreError('invalid_input', 'Task input is invalid.', 400);
-    return inTransaction(this.pool, async (client) => {
-      const result = await client.query<TaskRow>(
-        `
-          INSERT INTO omnis.tasks (id, title, detail)
-          VALUES (
-            'task-' || lpad(nextval('omnis.task_id_seq')::text, 4, '0'),
-            $1, $2
-          )
-          RETURNING id, title, detail, status, created_at
-        `,
-        [parsed.data.title, parsed.data.detail],
+    if (parsed.data.projectId && !requestId)
+      throw new StoreError(
+        'invalid_input',
+        'An Idempotency-Key is required when creating a project task.',
+        400,
       );
-      return mapTask(result.rows[0]!);
-    });
+    if (requestId && !isUuid(requestId))
+      throw new StoreError('invalid_input', 'Idempotency-Key is invalid.', 400);
+    const fingerprint = requestId ? taskFingerprint('task.created', parsed.data) : null;
+    try {
+      const result = await this.pool.query<{ result: unknown }>(
+        'SELECT omnis.create_task($1,$2,$3,$4,$5) AS result',
+        [
+          parsed.data.title,
+          parsed.data.detail,
+          parsed.data.projectId ?? null,
+          requestId ?? null,
+          fingerprint,
+        ],
+      );
+      return TaskSchema.parse(result.rows[0]?.result);
+    } catch (error) {
+      return mapStoreError(error);
+    }
+  }
+
+  async setTaskProject(taskId: string, inputValue: unknown, requestId: string): Promise<Task> {
+    const parsedTaskId = TaskIdSchema.safeParse(taskId);
+    const parsed = SetTaskProjectSchema.safeParse(inputValue);
+    if (!parsedTaskId.success || !parsed.success || !isUuid(requestId))
+      throw new StoreError('invalid_input', 'Task project input is invalid.', 400);
+    try {
+      const result = await this.pool.query<{ result: unknown }>(
+        'SELECT omnis.set_task_project($1,$2,$3,$4,$5) AS result',
+        [
+          parsedTaskId.data,
+          parsed.data.expectedAssociationRevision,
+          parsed.data.projectId,
+          requestId,
+          taskFingerprint('task.project_set', { taskId: parsedTaskId.data, input: parsed.data }),
+        ],
+      );
+      return TaskSchema.parse(result.rows[0]?.result);
+    } catch (error) {
+      return mapStoreError(error);
+    }
   }
 
   async listTasks(): Promise<Task[]> {
     const result = await this.pool.query<TaskRow>(
-      'SELECT id, title, detail, status, created_at FROM omnis.tasks ORDER BY created_at DESC, id DESC',
+      'SELECT id, title, detail, status, created_at, project_id, association_revision FROM omnis.tasks ORDER BY created_at DESC, id DESC',
     );
     return result.rows.map(mapTask);
   }
 
   async getTask(taskId: string): Promise<Task | undefined> {
     const result = await this.pool.query<TaskRow>(
-      'SELECT id, title, detail, status, created_at FROM omnis.tasks WHERE id = $1',
+      'SELECT id, title, detail, status, created_at, project_id, association_revision FROM omnis.tasks WHERE id = $1',
       [taskId],
     );
     return result.rows[0] ? mapTask(result.rows[0]) : undefined;
@@ -177,7 +218,7 @@ export class PostgresRunStore {
       }
 
       const taskResult = await client.query<TaskRow>(
-        'SELECT id, title, detail, status, created_at FROM omnis.tasks WHERE id = $1 FOR UPDATE',
+        'SELECT id, title, detail, status, created_at, project_id, association_revision FROM omnis.tasks WHERE id = $1 FOR UPDATE',
         [taskId],
       );
       const task = taskResult.rows[0];
@@ -239,6 +280,9 @@ export class PostgresRunStore {
       );
       await client.query("UPDATE omnis.tasks SET status = 'in_progress' WHERE id = $1", [task.id]);
       return { run, created: true, events: [{ runId: run.id, event: queuedEvent }] };
+    }).catch((error: unknown) => {
+      if ((error as { code?: string })?.code === 'P2001') return mapStoreError(error);
+      throw error;
     });
   }
 
@@ -876,7 +920,37 @@ function mapTask(row: TaskRow): Task {
     detail: row.detail,
     status: row.status,
     createdAt: asIso(row.created_at),
+    projectId: row.project_id ?? null,
+    associationRevision: Number(row.association_revision ?? 1),
   });
+}
+
+function taskFingerprint(operation: string, value: unknown): Buffer {
+  return createHash('sha256')
+    .update(JSON.stringify({ operation, input: value }))
+    .digest();
+}
+
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+function mapStoreError(error: unknown): never {
+  const code = (error as { code?: string })?.code;
+  if (code === 'P0002') throw new StoreError('not_found', 'Task or project was not found.', 404);
+  if (code === 'P2001')
+    throw new StoreError(
+      'project_archived',
+      'Archived-project task associations cannot be changed or admitted to run.',
+      409,
+    );
+  if (code === 'P2002' || code === 'P2003' || code === '23505' || code === '40001')
+    throw new StoreError('conflict', 'Task project association conflicts with current state.', 409);
+  if (code === '22023' || code === '22001' || code === '23514')
+    throw new StoreError('invalid_input', 'Task input is invalid.', 400);
+  if (code === '55P03')
+    throw new StoreError('concurrency_limit', 'Task admission is busy; retry the request.', 409);
+  throw error;
 }
 
 function mapRun(row: RunRow): Run {

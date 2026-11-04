@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { Run, Task } from '@omnis/contracts';
-import type { PostgresRunStore } from '@omnis/db';
+import { StoreError, type PostgresRunStore } from '@omnis/db';
 import { MockRuntimeAdapter, type RuntimeAdapter } from '@omnis/runtime-adapters';
 import { CoordinatorError, RunCoordinator } from './run-coordinator.ts';
 import { SandboxError } from '@omnis/runtime-adapters/sandbox-error';
@@ -48,6 +48,44 @@ function testCoordinator(
 }
 
 describe('durable mock run coordinator', () => {
+  it('translates archived-project admission failures into a stable conflict', async () => {
+    const denials: string[] = [];
+    const coordinator = testCoordinator(
+      {
+        admitRun: async () => {
+          throw new StoreError(
+            'project_archived',
+            'Archived-project task associations cannot be changed or admitted to run.',
+            409,
+          );
+        },
+      } as unknown as PostgresRunStore,
+      { send: async () => 'job', findJobs: async () => [] },
+      new MockRuntimeAdapter(),
+      undefined,
+      {
+        ...defaultAuthorizationStore,
+        recordEnforcementDenied: async (
+          _authorizationId: string,
+          _taskId: string,
+          reason: string,
+        ) => {
+          denials.push(reason);
+        },
+      },
+    );
+    await assert.rejects(
+      coordinator.startRun('task-0001', 'idempotency-key-0001', authId),
+      (error: unknown) =>
+        error instanceof CoordinatorError &&
+        error.code === 'project_archived' &&
+        error.statusCode === 409 &&
+        error.message ===
+          'Archived-project task associations cannot be changed or admitted to run.',
+    );
+    assert.deepEqual(denials, ['project_archived']);
+  });
+
   it('rejects admission without independent Omnis authorization', async () => {
     let admissions = 0;
     const coordinator = testCoordinator(

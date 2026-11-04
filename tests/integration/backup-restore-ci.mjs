@@ -653,6 +653,24 @@ async function verifyLegacyRuntimeAclParity(sourceUrl, restoredUrl) {
     ]);
     assert.equal(functionPrivilege[0].rows[0]?.allowed, false);
     assert.equal(functionPrivilege[1].rows[0]?.allowed, false);
+    for (const database of [source, restored]) {
+      const taskBoundary = await database.query(`
+        SELECT has_function_privilege('omnis_runtime',
+                 'omnis.create_task(text,text,text,uuid,bytea)', 'EXECUTE') AS create_task,
+               has_function_privilege('omnis_runtime',
+                 'omnis.set_task_project(text,integer,text,uuid,bytea)', 'EXECUTE') AS set_project,
+               has_table_privilege('omnis_runtime', 'omnis.tasks', 'INSERT') AS direct_insert,
+               has_column_privilege('omnis_runtime', 'omnis.tasks', 'project_id', 'UPDATE') AS direct_project_update,
+               has_sequence_privilege('omnis_runtime', 'omnis.task_id_seq', 'USAGE') AS task_sequence_usage
+      `);
+      assert.deepEqual(taskBoundary.rows[0], {
+        create_task: true,
+        set_project: true,
+        direct_insert: false,
+        direct_project_update: false,
+        task_sequence_usage: false,
+      });
+    }
   } finally {
     await Promise.all([source.end(), restored.end()]);
   }

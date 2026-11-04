@@ -12,6 +12,7 @@ import {
   aclSnapshotQuery,
   assertRestoreDatabaseClosed,
   assertRuntimeAclPolicy,
+  normalizeAclSnapshot,
   restoreAclSnapshotsMatch,
 } from './acl-integrity.mjs';
 import { assertRestoreRoleSecurity, restoreRoleSecurityQuery } from './role-integrity.mjs';
@@ -191,11 +192,53 @@ try {
   const restoredAclSnapshot = JSON.parse(restoredAclText.trim());
   assertRestoreDatabaseClosed(restoredAclSnapshot);
   assertRuntimeAclPolicy(restoredAclSnapshot);
+  const taskSequenceOwner = await dockerOutput([
+    ...composeArgs,
+    'exec',
+    '-T',
+    'postgres',
+    'psql',
+    '-X',
+    '--no-psqlrc',
+    '--set=ON_ERROR_STOP=1',
+    '--tuples-only',
+    '--no-align',
+    '--username=omnis',
+    `--dbname=${targetDatabase}`,
+    '--command',
+    `SELECT pg_catalog.pg_get_userbyid(class.relowner)
+       FROM pg_catalog.pg_class AS class
+       JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = class.relnamespace
+      WHERE namespace.nspname = 'omnis' AND class.relname = 'task_id_seq'
+        AND class.relkind = 'S'`,
+  ]);
+  if (taskSequenceOwner.trim() !== 'omnis_migrator') {
+    throw new Error('Restored task identifier sequence is not owned by the migration role.');
+  }
   if (
     manifest.format === 'postgres-custom-acl-v1' &&
     !restoreAclSnapshotsMatch(manifest.aclSnapshot, restoredAclSnapshot)
   ) {
-    throw new Error('Restored PostgreSQL ACLs do not match the source ACL snapshot.');
+    const sourceAclEntries = normalizeAclSnapshot(manifest.aclSnapshot);
+    const restoredAclEntries = normalizeAclSnapshot(restoredAclSnapshot);
+    const restoredKeys = new Set(restoredAclEntries.map((entry) => JSON.stringify(entry)));
+    const sourceKeys = new Set(sourceAclEntries.map((entry) => JSON.stringify(entry)));
+    const summarize = (entries) =>
+      entries
+        .slice(0, 20)
+        .map(
+          (entry) =>
+            `${entry.objectType}:${entry.schema || 'database'}.${entry.object} ` +
+            `${entry.privilege} for ${entry.grantee}`,
+        );
+    const missing = sourceAclEntries.filter((entry) => !restoredKeys.has(JSON.stringify(entry)));
+    const unexpected = restoredAclEntries.filter((entry) => !sourceKeys.has(JSON.stringify(entry)));
+    throw new Error(
+      `Restored PostgreSQL ACLs do not match the source ACL snapshot ` +
+        `(${missing.length} missing, ${unexpected.length} unexpected; ` +
+        `missing: ${JSON.stringify(summarize(missing))}; ` +
+        `unexpected: ${JSON.stringify(summarize(unexpected))}).`,
+    );
   }
 
   const roleSecurityText = await dockerOutput([
@@ -252,14 +295,14 @@ try {
     '--username=omnis',
     `--dbname=${targetDatabase}`,
     '--command',
-    `SET ROLE omnis_runtime;
+    `SET SESSION AUTHORIZATION omnis_runtime;
      DO $restore_probe$
-     DECLARE task_identifier text; run_identifier text;
+     DECLARE task_identifier text; run_identifier text; task_receipt jsonb;
      BEGIN
-       INSERT INTO omnis.tasks (id, title, detail)
-       VALUES ('task-' || lpad(nextval('omnis.task_id_seq')::text, 4, '0'),
-         '${probeTitle}', 'Committed synthetic post-restore verification.')
-       RETURNING id INTO task_identifier;
+       task_receipt := omnis.create_task(
+         '${probeTitle}', 'Committed synthetic post-restore verification.', NULL, NULL, NULL
+       );
+       task_identifier := task_receipt->>'id';
        INSERT INTO omnis.runs (id, task_id, task_title)
        VALUES ('run-' || lpad(nextval('omnis.run_id_seq')::text, 4, '0'),
          task_identifier, '${probeTitle}')
@@ -267,7 +310,7 @@ try {
        UPDATE omnis.runs SET status = 'completed' WHERE id = run_identifier;
      END
      $restore_probe$;
-     RESET ROLE;`,
+     RESET SESSION AUTHORIZATION;`,
   ]);
 
   const probeText = await dockerOutput([
