@@ -591,6 +591,38 @@ test('navigation and skip link support keyboard operation', async ({ page, api }
   await expect(page.getByRole('link', { name: 'Tasks' })).toHaveAttribute('aria-current', 'page');
 });
 
+async function expectVisibleFocusIndicator(page: Page, viewportWidth: number) {
+  const main = page.locator('#main-content');
+  await expect(main).toBeFocused();
+  const state = await main.evaluate((el) => {
+    const style = getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return {
+      focusVisible: el.matches(':focus-visible'),
+      outlineStyle: style.outlineStyle,
+      outlineWidth: Number.parseFloat(style.outlineWidth),
+      outlineColor: style.outlineColor,
+      outlineOffset: Number.parseFloat(style.outlineOffset),
+      top: rect.top,
+      left: rect.left,
+      right: rect.right,
+      scrollWidth: document.documentElement.scrollWidth,
+      clientWidth: document.documentElement.clientWidth,
+    };
+  });
+  expect(state.focusVisible).toBe(true);
+  expect(state.outlineStyle).not.toBe('none');
+  expect(state.outlineWidth).toBeGreaterThanOrEqual(2);
+  expect(state.outlineColor).not.toMatch(/rgba\(.*,\s*0\)$/);
+  expect(state.outlineColor).not.toBe('transparent');
+  // The ring (width + offset) must stay inside the viewport on both sides and add no overflow.
+  const ring = state.outlineWidth + Math.max(state.outlineOffset, 0);
+  expect(state.top - ring).toBeGreaterThanOrEqual(0);
+  expect(state.left - ring).toBeGreaterThanOrEqual(0);
+  expect(state.right + ring).toBeLessThanOrEqual(viewportWidth);
+  expect(state.scrollWidth).toBeLessThanOrEqual(state.clientWidth);
+}
+
 const skipLinkRoutes = [
   { hash: '#command-center', heading: 'Command Center' },
   { hash: '#tasks', heading: 'Tasks' },
@@ -623,6 +655,7 @@ for (const route of skipLinkRoutes) {
 
       await page.keyboard.press('Enter');
       await expect(page.locator('#main-content')).toBeFocused();
+      await expectVisibleFocusIndicator(page, viewport.width);
       expect(new URL(page.url()).hash).toBe(route.hash);
       await expect(page.getByRole('heading', { level: 1, name: route.heading })).toBeVisible();
       expect(await page.evaluate(() => window.history.length)).toBe(historyBefore);

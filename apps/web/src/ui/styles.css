@@ -82,7 +82,13 @@ textarea {
 .skip-link:focus {
   transform: translateY(0);
 }
-.main-content:focus {
+.main-content:focus-visible {
+  outline: 3px solid var(--blue);
+  outline-offset: 3px;
+  /* Keep the whole ring, including its top edge, inside the viewport after skip-link scroll. */
+  scroll-margin-top: 12px;
+}
+.main-content:focus:not(:focus-visible) {
   outline: none;
 }
 .topbar {
