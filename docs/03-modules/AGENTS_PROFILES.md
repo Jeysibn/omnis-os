@@ -44,6 +44,8 @@ Directory cards, filter by department/status/runtime; editor tabs `Identity`, `P
 
 The first, read-only frontend slice (Agent Directory, Agent Profile, immutable version history) is specified in [Agents & Profiles V1 - Frontend Specification](../04-design/AGENTS_PROFILES_V1_FRONTEND.md); its requested backend reads are in the [proposed read API contract](../02-architecture/AGENTS_READ_API_PROPOSAL.md). Those documents refine presentation and API requests only; this module spec remains authoritative for domain rules.
 
+The frontend for department list, create, rename and archive is specified in [Department Management V1 - Frontend Specification](../04-design/DEPARTMENT_MANAGEMENT_V1_FRONTEND.md). It is a specification only; it describes the department endpoints already implemented (see the [AO-104 department evidence](../07-governance/evidence/AO_104_DEPARTMENT_MANAGEMENT.md)) and leaves domain rules to this module spec.
+
 ## Safety
 
 - A 'System Administrator' profession is descriptive, not `sudo` authority.
