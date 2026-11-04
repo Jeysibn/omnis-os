@@ -37,7 +37,9 @@ No profile write route calls this validator yet; profile writes remain disabled 
 
 ## Verification
 
-Base: `a5a29325d8bb3187c1601b82e799ca54b2810d37`.
+Starting baseline: `a5a29325d8bb3187c1601b82e799ca54b2810d37`.
+
+PR base after integrating the subsequent `main` update: `d865015b4440990c3dbb6fad45cfa667c01ea2d7`.
 
 Local formatting, lint, serialized workspace typecheck/build, API, authorizer, contracts, database unit, and database-recovery policy checks passed. The test suites cover owner/CSRF handling, request schemas, department audit events, archive and assignment rules, least-privilege grants, nested credential-like values, and the 16 KiB input bound.
 
