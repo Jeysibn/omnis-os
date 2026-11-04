@@ -15,6 +15,8 @@ import {
   CreateDepartmentSchema,
   DepartmentListResponseSchema,
   CreateProjectSchema,
+  UpdateProjectSchema,
+  ArchiveProjectSchema,
   ProjectListResponseSchema,
   RunEventSchema,
   RunSchema,
@@ -84,6 +86,7 @@ describe('project management contracts', () => {
     objective: 'A synthetic project objective.',
     status: 'proposed',
     priority: 'normal',
+    revision: 1,
     createdAt: '2026-11-04T00:00:00.000Z',
     updatedAt: '2026-11-04T00:00:00.000Z',
   };
@@ -120,6 +123,7 @@ describe('project management contracts', () => {
       name: project.name,
       status: project.status,
       priority: project.priority,
+      revision: project.revision,
       createdAt: project.createdAt,
       updatedAt: project.updatedAt,
     };
@@ -141,6 +145,35 @@ describe('project management contracts', () => {
     assert.equal(
       ProjectListResponseSchema.safeParse({ projects: [project], total: 1, complete: false })
         .success,
+      false,
+    );
+  });
+
+  it('validates partial project updates with an expected revision', () => {
+    assert.deepEqual(UpdateProjectSchema.parse({ expectedRevision: 3, name: ' New name ' }), {
+      expectedRevision: 3,
+      name: 'New name',
+    });
+    assert.equal(UpdateProjectSchema.safeParse({ expectedRevision: 1 }).success, false);
+    assert.equal(
+      UpdateProjectSchema.safeParse({ expectedRevision: 0, name: 'Name' }).success,
+      false,
+    );
+    assert.equal(
+      UpdateProjectSchema.safeParse({ expectedRevision: 1, key: 'NEW-KEY' }).success,
+      false,
+    );
+    assert.equal(
+      UpdateProjectSchema.safeParse({ expectedRevision: 1, name: '   ' }).success,
+      false,
+    );
+    assert.equal(
+      UpdateProjectSchema.safeParse({ expectedRevision: 1, objective: 'x\0y' }).success,
+      false,
+    );
+    assert.equal(ArchiveProjectSchema.safeParse({ expectedRevision: 2 }).success, true);
+    assert.equal(
+      ArchiveProjectSchema.safeParse({ expectedRevision: 2, restore: true }).success,
       false,
     );
   });

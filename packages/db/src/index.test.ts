@@ -112,6 +112,7 @@ const postgresSuite = describe(
       ]);
       assert.equal(created.id, replayed.id);
       assert.equal(created.status, 'proposed');
+      assert.equal(created.revision, 1);
       assert.equal(created.ownerId, 'owner');
       assert.equal((await projects.get(created.id))?.key, 'AO-105');
       assert.deepEqual(
@@ -148,23 +149,206 @@ const postgresSuite = describe(
         authorizer_project_select: boolean;
         runtime_create_function: boolean;
         authorizer_create_function: boolean;
+        runtime_update_function: boolean;
+        authorizer_update_function: boolean;
+        runtime_archive_function: boolean;
+        authorizer_archive_function: boolean;
       }>(`
         SELECT has_table_privilege('omnis_runtime', 'omnis.projects', 'SELECT') AS runtime_project_select,
                has_table_privilege('omnis_authorizer', 'omnis.projects', 'SELECT') AS authorizer_project_select,
                has_function_privilege('omnis_runtime', 'omnis.create_project(text,text,text,text,text,uuid,integer,bytea)', 'EXECUTE') AS runtime_create_function,
-               has_function_privilege('omnis_authorizer', 'omnis.create_project(text,text,text,text,text,uuid,integer,bytea)', 'EXECUTE') AS authorizer_create_function
+               has_function_privilege('omnis_authorizer', 'omnis.create_project(text,text,text,text,text,uuid,integer,bytea)', 'EXECUTE') AS authorizer_create_function,
+               has_function_privilege('omnis_runtime', 'omnis.update_project(text,integer,text,text,text,uuid,integer,bytea)', 'EXECUTE') AS runtime_update_function,
+               has_function_privilege('omnis_authorizer', 'omnis.update_project(text,integer,text,text,text,uuid,integer,bytea)', 'EXECUTE') AS authorizer_update_function,
+               has_function_privilege('omnis_runtime', 'omnis.archive_project(text,integer,uuid,integer,bytea)', 'EXECUTE') AS runtime_archive_function,
+               has_function_privilege('omnis_authorizer', 'omnis.archive_project(text,integer,uuid,integer,bytea)', 'EXECUTE') AS authorizer_archive_function
       `);
       assert.deepEqual(roleAccess.rows[0], {
         runtime_project_select: false,
         authorizer_project_select: false,
         runtime_create_function: false,
         authorizer_create_function: true,
+        runtime_update_function: false,
+        authorizer_update_function: true,
+        runtime_archive_function: false,
+        authorizer_archive_function: true,
       });
       await assert.rejects(
         authorizerPool!.query('SELECT * FROM omnis.projects'),
         /permission denied/,
       );
       await assert.rejects(pool!.query('SELECT * FROM omnis.projects'), /permission denied/);
+      await assert.rejects(
+        authorizerPool!.query("UPDATE omnis.projects SET status='archived'"),
+        /permission denied/,
+      );
+      await assert.rejects(
+        pool!.query("UPDATE omnis.projects SET status='archived'"),
+        /permission denied/,
+      );
+    });
+
+    it('serializes concurrent edits, replays exact retries, and archives without hiding history', async () => {
+      const projects = new PostgresProjectManagementStore(authorizerPool!, Buffer.alloc(32, 23));
+      const created = await projects.create(
+        { key: 'LIFECYCLE', name: 'Lifecycle', objective: 'Exercise project lifecycle.' },
+        randomUUID(),
+      );
+      assert.equal(created.revision, 1);
+      const updateRequests = [
+        {
+          input: { expectedRevision: 1, name: 'Renamed lifecycle' },
+          requestId: randomUUID(),
+        },
+        {
+          input: { expectedRevision: 1, priority: 'high' as const },
+          requestId: randomUUID(),
+        },
+      ];
+      const edits = await Promise.allSettled(
+        updateRequests.map(({ input, requestId }) => projects.update(created.id, input, requestId)),
+      );
+      assert.equal(edits.filter((result) => result.status === 'fulfilled').length, 1);
+      assert.equal(edits.filter((result) => result.status === 'rejected').length, 1);
+      const winnerIndex = edits.findIndex((result) => result.status === 'fulfilled');
+      const winner = edits[winnerIndex];
+      assert.equal(winner?.status, 'fulfilled');
+      if (winner?.status !== 'fulfilled') throw new Error('Expected one concurrent project edit.');
+      assert.equal(winner.value.revision, 2);
+      assert.equal(winner.value.key, created.key);
+      assert.equal(winner.value.ownerId, 'owner');
+      const replay = await projects.update(
+        created.id,
+        updateRequests[winnerIndex]!.input,
+        updateRequests[winnerIndex]!.requestId,
+      );
+      assert.deepEqual(replay, winner.value);
+      await assert.rejects(
+        projects.update(created.id, { expectedRevision: 1, name: 'Stale edit' }, randomUUID()),
+        (error: unknown) => error instanceof ProjectStoreError && error.statusCode === 409,
+      );
+
+      const archiveRequestId = randomUUID();
+      const [archived, archivedReplay] = await Promise.all([
+        projects.archive(created.id, { expectedRevision: 2 }, archiveRequestId),
+        projects.archive(created.id, { expectedRevision: 2 }, archiveRequestId),
+      ]);
+      assert.deepEqual(archivedReplay, archived);
+      assert.equal(archived.status, 'archived');
+      assert.equal(archived.revision, 3);
+      await assert.rejects(
+        projects.archive(created.id, { expectedRevision: 3 }, randomUUID()),
+        (error: unknown) =>
+          error instanceof ProjectStoreError &&
+          error.code === 'invalid_transition' &&
+          error.statusCode === 409,
+      );
+      await assert.rejects(
+        projects.update(created.id, { expectedRevision: 3, priority: 'urgent' }, randomUUID()),
+        (error: unknown) =>
+          error instanceof ProjectStoreError &&
+          error.code === 'invalid_transition' &&
+          error.statusCode === 409,
+      );
+      assert.equal((await projects.get(created.id))?.status, 'archived');
+      const directory = await projects.list();
+      assert.equal(directory.total, 1);
+      assert.equal(directory.projects[0]?.status, 'archived');
+      assert.equal(directory.projects[0]?.revision, 3);
+
+      const audit = await adminPool!.query<{
+        action: string;
+        changed_fields: string[];
+      }>(
+        'SELECT action, changed_fields FROM omnis.project_management_audit WHERE project_id=$1 AND action <> $2 ORDER BY occurred_at, action',
+        [created.id, 'created'],
+      );
+      assert.equal(audit.rows.length, 2);
+      const updateAudit = audit.rows.find((row) => row.action === 'updated');
+      assert.deepEqual(updateAudit?.changed_fields, [
+        winner.value.name !== created.name ? 'name' : 'priority',
+      ]);
+      assert.deepEqual(audit.rows.find((row) => row.action === 'archived')?.changed_fields, []);
+    });
+
+    it('rolls back the project revision and idempotency receipt if archive audit insertion fails', async () => {
+      const projects = new PostgresProjectManagementStore(authorizerPool!, Buffer.alloc(32, 23));
+      const created = await projects.create(
+        { key: 'ROLLBACK', name: 'Rollback', objective: 'Verify atomic archive behavior.' },
+        randomUUID(),
+      );
+      const requestId = randomUUID();
+      await adminPool!.query(`
+        CREATE FUNCTION omnis.test_reject_project_archive_audit()
+        RETURNS trigger LANGUAGE plpgsql AS $function$
+        BEGIN
+          IF NEW.action = 'archived' THEN
+            RAISE EXCEPTION 'synthetic audit rejection' USING ERRCODE = '22023';
+          END IF;
+          RETURN NEW;
+        END
+        $function$;
+        CREATE TRIGGER test_reject_project_archive_audit
+        BEFORE INSERT ON omnis.project_management_audit
+        FOR EACH ROW EXECUTE FUNCTION omnis.test_reject_project_archive_audit();
+      `);
+      try {
+        await assert.rejects(
+          projects.archive(created.id, { expectedRevision: 1 }, requestId),
+          (error: unknown) => error instanceof ProjectStoreError && error.statusCode === 422,
+        );
+        const afterFailure = await projects.get(created.id);
+        assert.equal(afterFailure?.status, 'proposed');
+        assert.equal(afterFailure?.revision, 1);
+        const auditCount = await adminPool!.query<{ count: number }>(
+          "SELECT count(*)::int AS count FROM omnis.project_management_audit WHERE project_id=$1 AND action='archived'",
+          [created.id],
+        );
+        assert.equal(auditCount.rows[0]?.count, 0);
+        const idempotencyCount = await adminPool!.query<{ count: number }>(
+          'SELECT count(*)::int AS count FROM omnis.project_management_idempotency WHERE request_id=$1',
+          [requestId],
+        );
+        assert.equal(idempotencyCount.rows[0]?.count, 0);
+      } finally {
+        await adminPool!.query(
+          'DROP TRIGGER test_reject_project_archive_audit ON omnis.project_management_audit',
+        );
+        await adminPool!.query('DROP FUNCTION omnis.test_reject_project_archive_audit()');
+      }
+    });
+
+    it('serializes an edit racing with archive and leaves unrelated tasks unchanged', async () => {
+      const projects = new PostgresProjectManagementStore(authorizerPool!, Buffer.alloc(32, 23));
+      const created = await projects.create(
+        { key: 'RACE', name: 'Race', objective: 'Exercise edit/archive concurrency.' },
+        randomUUID(),
+      );
+      await adminPool!.query(
+        "INSERT INTO omnis.tasks (id, title, detail) VALUES ('task-project-lifecycle', 'Unrelated task', 'Project lifecycle must not change this task.')",
+      );
+      const outcomes = await Promise.allSettled([
+        projects.update(created.id, { expectedRevision: 1, name: 'Updated in race' }, randomUUID()),
+        projects.archive(created.id, { expectedRevision: 1 }, randomUUID()),
+      ]);
+      assert.equal(outcomes.filter((outcome) => outcome.status === 'fulfilled').length, 1);
+      assert.equal(outcomes.filter((outcome) => outcome.status === 'rejected').length, 1);
+      const rejected = outcomes.find((outcome) => outcome.status === 'rejected');
+      assert.equal(rejected?.status, 'rejected');
+      if (rejected?.status === 'rejected') {
+        assert.ok(
+          rejected.reason instanceof ProjectStoreError &&
+            rejected.reason.statusCode === 409 &&
+            ['conflict', 'invalid_transition'].includes(rejected.reason.code),
+        );
+      }
+      const projectAfterRace = await projects.get(created.id);
+      assert.equal(projectAfterRace?.revision, 2);
+      assert.ok(['proposed', 'archived'].includes(projectAfterRace?.status ?? ''));
+      const task = await adminPool!.query<{ status: string }>(
+        "SELECT status FROM omnis.tasks WHERE id='task-project-lifecycle'",
+      );
+      assert.equal(task.rows[0]?.status, 'open');
     });
 
     it('fails closed instead of silently truncating a directory above the response bound', async () => {

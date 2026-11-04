@@ -198,6 +198,14 @@ BEGIN
     EXECUTE 'REVOKE ALL ON FUNCTION omnis.get_project(text) FROM PUBLIC, omnis_runtime, omnis_launcher';
     EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.get_project(text) TO omnis_authorizer';
   END IF;
+  IF pg_catalog.to_regprocedure('omnis.update_project(text,integer,text,text,text,uuid,integer,bytea)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.update_project(text, integer, text, text, text, uuid, integer, bytea) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.update_project(text, integer, text, text, text, uuid, integer, bytea) TO omnis_authorizer';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.archive_project(text,integer,uuid,integer,bytea)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.archive_project(text, integer, uuid, integer, bytea) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.archive_project(text, integer, uuid, integer, bytea) TO omnis_authorizer';
+  END IF;
   IF pg_catalog.to_regprocedure('omnis.reject_project_audit_mutation()') IS NOT NULL THEN
     EXECUTE 'REVOKE ALL ON FUNCTION omnis.reject_project_audit_mutation() FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
   END IF;

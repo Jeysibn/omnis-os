@@ -39,6 +39,7 @@ export const ProjectStatusSchema = z.enum([
   'archived',
 ]);
 export const ProjectPrioritySchema = z.enum(['low', 'normal', 'high', 'urgent']);
+export const ProjectRevisionSchema = z.number().int().positive().safe();
 export const CreateProjectSchema = z
   .object({
     key: z
@@ -61,6 +62,30 @@ export const CreateProjectSchema = z
   );
 export type CreateProjectInput = z.infer<typeof CreateProjectSchema>;
 
+export const UpdateProjectSchema = z
+  .object({
+    expectedRevision: ProjectRevisionSchema,
+    name: z.string().trim().min(1).max(120).optional(),
+    objective: z.string().trim().min(1).max(4000).optional(),
+    priority: ProjectPrioritySchema.optional(),
+  })
+  .strict()
+  .refine(
+    (project) =>
+      project.name !== undefined ||
+      project.objective !== undefined ||
+      project.priority !== undefined,
+    'At least one project field must be changed.',
+  )
+  .refine(
+    (project) => !project.name?.includes('\0') && !project.objective?.includes('\0'),
+    'Project text cannot contain NUL characters.',
+  );
+export type UpdateProjectInput = z.infer<typeof UpdateProjectSchema>;
+
+export const ArchiveProjectSchema = z.object({ expectedRevision: ProjectRevisionSchema }).strict();
+export type ArchiveProjectInput = z.infer<typeof ArchiveProjectSchema>;
+
 export const ProjectSummarySchema = z
   .object({
     id: ProjectIdSchema,
@@ -69,6 +94,7 @@ export const ProjectSummarySchema = z
     name: z.string().min(1).max(120),
     status: ProjectStatusSchema,
     priority: ProjectPrioritySchema,
+    revision: ProjectRevisionSchema,
     createdAt: z.string().datetime(),
     updatedAt: z.string().datetime(),
   })

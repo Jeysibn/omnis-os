@@ -25,6 +25,8 @@ import {
   ProjectSchema,
   type Project,
   type ProjectListResponse,
+  UpdateProjectSchema,
+  ArchiveProjectSchema,
 } from '@omnis/contracts';
 import { AgentLifecycleStoreError, DepartmentStoreError, ProjectStoreError } from '@omnis/db';
 
@@ -44,6 +46,8 @@ export type AuthorizerStore = {
   listProjects(): Promise<ProjectListResponse>;
   getProject(id: string): Promise<Project | undefined>;
   createProject(input: unknown, requestId: string): Promise<Project>;
+  updateProject(id: string, input: unknown, requestId: string): Promise<Project>;
+  archiveProject(id: string, input: unknown, requestId: string): Promise<Project>;
   agentLifecycle?:
     | {
         getDraft(agentId: string): Promise<unknown>;
@@ -210,6 +214,44 @@ export function createAuthorizerApp(input: {
       return sendProjectStoreError(error, reply);
     }
   });
+
+  app.patch<{ Params: { projectId: string } }>(
+    '/internal/v1/projects/:projectId',
+    { bodyLimit: 32 * 1024 },
+    async (request, reply) => {
+      const id = ProjectIdSchema.safeParse(request.params.projectId);
+      const body = UpdateProjectSchema.safeParse(request.body);
+      const requestId = request.headers['idempotency-key'];
+      if (!id.success || !body.success || typeof requestId !== 'string' || !isUuid(requestId))
+        return reply.code(400).send({
+          error: { code: 'invalid_input', message: 'Project update input is invalid.' },
+        });
+      try {
+        return ProjectSchema.parse(await input.store.updateProject(id.data, body.data, requestId));
+      } catch (error) {
+        return sendProjectStoreError(error, reply);
+      }
+    },
+  );
+
+  app.post<{ Params: { projectId: string } }>(
+    '/internal/v1/projects/:projectId/archive',
+    { bodyLimit: 32 * 1024 },
+    async (request, reply) => {
+      const id = ProjectIdSchema.safeParse(request.params.projectId);
+      const body = ArchiveProjectSchema.safeParse(request.body);
+      const requestId = request.headers['idempotency-key'];
+      if (!id.success || !body.success || typeof requestId !== 'string' || !isUuid(requestId))
+        return reply.code(400).send({
+          error: { code: 'invalid_input', message: 'Project archive input is invalid.' },
+        });
+      try {
+        return ProjectSchema.parse(await input.store.archiveProject(id.data, body.data, requestId));
+      } catch (error) {
+        return sendProjectStoreError(error, reply);
+      }
+    },
+  );
 
   app.get<{ Params: { agentId: string } }>(
     '/internal/v1/agents/:agentId/draft-profile',

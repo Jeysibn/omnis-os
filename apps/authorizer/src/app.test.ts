@@ -41,6 +41,7 @@ const project: Project = {
   objective: 'Synthetic project fixture.',
   status: 'proposed',
   priority: 'normal',
+  revision: 1,
   createdAt: '2026-11-04T00:00:00.000Z',
   updatedAt: '2026-11-04T00:00:00.000Z',
 };
@@ -51,6 +52,7 @@ const projectSummary = {
   name: project.name,
   status: project.status,
   priority: project.priority,
+  revision: project.revision,
   createdAt: project.createdAt,
   updatedAt: project.updatedAt,
 };
@@ -104,6 +106,14 @@ function makeStore() {
       calls.push({ method: 'createProject', requestId });
       return project;
     },
+    async updateProject(_id, _input, requestId) {
+      calls.push({ method: 'updateProject', requestId });
+      return { ...project, name: 'Updated name', revision: 2 };
+    },
+    async archiveProject(_id, _input, requestId) {
+      calls.push({ method: 'archiveProject', requestId });
+      return { ...project, status: 'archived', revision: 2 };
+    },
   };
   return { store, calls };
 }
@@ -153,6 +163,25 @@ describe('independent authorizer service boundary', () => {
         calls.some((call) => call.method === 'createProject' && !!call.requestId),
         true,
       );
+      const requestId = '1208f993-29f8-40ee-9d56-c2cbe4f63100';
+      const updated = await app.inject({
+        method: 'PATCH',
+        url: `/internal/v1/projects/${project.id}`,
+        headers: { ...headers, 'idempotency-key': requestId },
+        payload: { expectedRevision: 1, name: 'Updated name' },
+      });
+      assert.equal(updated.statusCode, 200);
+      assert.equal(updated.json().revision, 2);
+      assert.equal(calls.at(-1)?.method, 'updateProject');
+      const archived = await app.inject({
+        method: 'POST',
+        url: `/internal/v1/projects/${project.id}/archive`,
+        headers: { ...headers, 'idempotency-key': '2208f993-29f8-40ee-9d56-c2cbe4f63102' },
+        payload: { expectedRevision: 1 },
+      });
+      assert.equal(archived.statusCode, 200);
+      assert.equal(archived.json().status, 'archived');
+      assert.equal(calls.at(-1)?.method, 'archiveProject');
     } finally {
       await app.close();
     }

@@ -57,7 +57,7 @@ export async function authorizerRequest<T>(
             : agentMutation
               ? 'The authorizer response was lost; the agent change may have committed. Read agent state or retry with the same idempotency key.'
               : projectMutation
-                ? 'The authorizer response was lost; the project may have been created. Retry with the same idempotency key or read the project list.'
+                ? 'The authorizer response was lost; the project change may have committed. Retry with the same idempotency key or read the project.'
                 : 'The authorizer response was lost; the decision may have committed. Retry with the same idempotency key or read the authorization state.'
           : 'The authorizer could not be reached; no decision was submitted. Retry when the service is available.',
       },
@@ -100,7 +100,7 @@ export async function authorizerRequest<T>(
             : agentMutation
               ? 'The authorizer response could not be validated; the agent change may have committed. Read agent state or retry with the same idempotency key.'
               : projectMutation
-                ? 'The authorizer response could not be validated; the project may have been created. Retry with the same idempotency key or read the project list.'
+                ? 'The authorizer response could not be validated; the project change may have committed. Retry with the same idempotency key or read the project.'
                 : 'The authorizer response could not be validated; the decision may have committed. Read the authorization state or retry with the same idempotency key.',
         },
       });

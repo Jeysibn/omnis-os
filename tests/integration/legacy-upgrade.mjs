@@ -193,6 +193,7 @@ try {
     '0013_department_management',
     '0014_agent_profile_lifecycle',
     '0015_project_management',
+    '0016_project_lifecycle',
   ]);
   assert.equal(afterUpgrade.unsafeRunStates, 3);
   assert.equal(
@@ -672,7 +673,7 @@ async function verifyPost0005ProvenanceUpgrade() {
       "SELECT id, length(checksum) AS checksum_length FROM omnis.schema_migrations WHERE id LIKE '00%' ORDER BY id",
     );
     assert.deepEqual(migrationRows.rows.at(-1), {
-      id: '0015_project_management',
+      id: '0016_project_lifecycle',
       checksum_length: 64,
     });
   } finally {
