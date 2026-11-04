@@ -81,6 +81,8 @@ try {
     ],
     [
       `OMNIS_API_AUTHORIZER_TOKEN=${apiAuthorizerToken}`,
+      `OMNIS_AGENT_IDEMPOTENCY_KEY=${randomBytes(32).toString('hex')}`,
+      'OMNIS_AGENT_IDEMPOTENCY_KEY_VERSION=1',
       `OMNIS_AUTHORIZER_DB_PASSWORD=${randomBytes(32).toString('hex')}`,
       `OMNIS_AUTHORIZER_SOCKET=${localAuthorizerSocket}`,
       'OMNIS_AUTHORIZER_SOCKET_MODE=660',

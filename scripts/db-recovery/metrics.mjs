@@ -12,12 +12,26 @@ export const metricsQuery = `SELECT json_build_object(
     FROM (SELECT event_type, count(*) AS event_count FROM omnis.run_events GROUP BY event_type) types
   ),
   'idempotencyRecords', (SELECT count(*) FROM omnis.run_idempotency),
+  'agentManagementCounts', json_build_object(
+    'departments', (SELECT count(*) FROM omnis.departments),
+    'agents', (SELECT count(*) FROM omnis.agents),
+    'publishedVersions', (SELECT count(*) FROM omnis.agent_profile_versions),
+    'draftProfiles', (SELECT count(*) FROM omnis.agent_profile_drafts),
+    'managementAudits', (SELECT count(*) FROM omnis.agent_management_audit),
+    'managementIdempotency', (SELECT count(*) FROM omnis.agent_management_idempotency)
+  ),
   'leasedRuns', (SELECT count(*) FROM omnis.runs WHERE lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL),
   'recordFingerprints', json_build_object(
     'tasks', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(t)::text), ':' ORDER BY t.id), '')) FROM omnis.tasks t),
     'runs', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(r)::text), ':' ORDER BY r.id), '')) FROM omnis.runs r),
     'events', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(e)::text), ':' ORDER BY e.run_id, e.sequence), '')) FROM omnis.run_events e),
-    'idempotency', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(i)::text), ':' ORDER BY i.idempotency_key), '')) FROM omnis.run_idempotency i)
+    'idempotency', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(i)::text), ':' ORDER BY i.idempotency_key), '')) FROM omnis.run_idempotency i),
+    'departments', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(d)::text), ':' ORDER BY d.id), '')) FROM omnis.departments d),
+    'agents', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(a)::text), ':' ORDER BY a.id), '')) FROM omnis.agents a),
+    'agentProfileVersions', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(v)::text), ':' ORDER BY v.agent_id, v.version_no), '')) FROM omnis.agent_profile_versions v),
+    'agentProfileDrafts', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(d)::text), ':' ORDER BY d.agent_id), '')) FROM omnis.agent_profile_drafts d),
+    'agentManagementAudit', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(a)::text), ':' ORDER BY a.id), '')) FROM omnis.agent_management_audit a),
+    'agentManagementIdempotency', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(i)::text), ':' ORDER BY i.request_id), '')) FROM omnis.agent_management_idempotency i)
   ),
   'syntheticOnly', (SELECT COALESCE(bool_and(synthetic IS TRUE AND runtime_kind = 'mock'), true) FROM omnis.runs),
   'sequenceInvariants', (
@@ -89,6 +103,9 @@ export function assertValidMetrics(report) {
   if (
     !Array.isArray(report.migrations) ||
     !report.migrations.includes('0001_initial') ||
+    !report.migrations.includes('0014_agent_profile_lifecycle') ||
+    !validAgentManagementCounts(report.agentManagementCounts) ||
+    !validAgentManagementFingerprints(report.recordFingerprints) ||
     report.syntheticOnly !== true ||
     report.sequenceInvariants !== true ||
     report.applicationQueryWorks !== true ||
@@ -139,7 +156,13 @@ export function metricsMatch(source, restored) {
   for (const key of ['tasks', 'runs', 'events', 'idempotencyRecords', 'leasedRuns']) {
     if (source[key] !== restored[key]) return false;
   }
-  for (const key of ['migrations', 'runStatuses', 'eventTypes', 'recordFingerprints']) {
+  for (const key of [
+    'migrations',
+    'runStatuses',
+    'eventTypes',
+    'recordFingerprints',
+    'agentManagementCounts',
+  ]) {
     if (JSON.stringify(canonical(source[key])) !== JSON.stringify(canonical(restored[key]))) {
       return false;
     }
@@ -151,6 +174,30 @@ export function metricsMatch(source, restored) {
     source.unsafeRunStates === 0 &&
     restored.unsafeRunStates === 0
   );
+}
+
+function validAgentManagementCounts(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  return [
+    'departments',
+    'agents',
+    'publishedVersions',
+    'draftProfiles',
+    'managementAudits',
+    'managementIdempotency',
+  ].every((key) => Number.isSafeInteger(value[key]) && value[key] >= 0);
+}
+
+function validAgentManagementFingerprints(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  return [
+    'departments',
+    'agents',
+    'agentProfileVersions',
+    'agentProfileDrafts',
+    'agentManagementAudit',
+    'agentManagementIdempotency',
+  ].every((key) => typeof value[key] === 'string' && /^[a-f0-9]{32}$/.test(value[key]));
 }
 
 function canonical(value) {

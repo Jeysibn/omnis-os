@@ -1,9 +1,25 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { assertBackupSafe, assertValidMetrics } from './metrics.mjs';
+import { assertBackupSafe, assertValidMetrics, metricsMatch } from './metrics.mjs';
 
 const safeSnapshot = {
-  migrations: ['0001_initial'],
+  migrations: ['0001_initial', '0014_agent_profile_lifecycle'],
+  agentManagementCounts: {
+    departments: 0,
+    agents: 0,
+    publishedVersions: 0,
+    draftProfiles: 0,
+    managementAudits: 0,
+    managementIdempotency: 0,
+  },
+  recordFingerprints: {
+    departments: 'd41d8cd98f00b204e9800998ecf8427e',
+    agents: 'd41d8cd98f00b204e9800998ecf8427e',
+    agentProfileVersions: 'd41d8cd98f00b204e9800998ecf8427e',
+    agentProfileDrafts: 'd41d8cd98f00b204e9800998ecf8427e',
+    agentManagementAudit: 'd41d8cd98f00b204e9800998ecf8427e',
+    agentManagementIdempotency: 'd41d8cd98f00b204e9800998ecf8427e',
+  },
   syntheticOnly: true,
   sequenceInvariants: true,
   applicationQueryWorks: true,
@@ -79,5 +95,37 @@ describe('database backup consistency policy', () => {
       },
     };
     assert.doesNotThrow(() => assertValidMetrics(called));
+  });
+
+  it('requires lifecycle data fingerprints in recovery snapshots', () => {
+    assert.throws(() => assertValidMetrics({ ...safeSnapshot, agentManagementCounts: undefined }));
+    assert.throws(() =>
+      assertValidMetrics({
+        ...safeSnapshot,
+        recordFingerprints: { ...safeSnapshot.recordFingerprints, agentProfileDrafts: 'bad' },
+      }),
+    );
+  });
+
+  it('detects changed agent lifecycle records after restore', () => {
+    const source = {
+      ...safeSnapshot,
+      tasks: 0,
+      runs: 0,
+      events: 0,
+      idempotencyRecords: 0,
+      leasedRuns: 0,
+      runStatuses: {},
+      eventTypes: {},
+      sequenceInvariants: true,
+      syntheticOnly: true,
+      applicationQueryWorks: true,
+      unsafeRunStates: 0,
+    };
+    const restored = {
+      ...source,
+      agentManagementCounts: { ...source.agentManagementCounts, agents: 1 },
+    };
+    assert.equal(metricsMatch(source, restored), false);
   });
 });

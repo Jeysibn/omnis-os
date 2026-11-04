@@ -19,6 +19,16 @@ if grep -Eq '^OMNIS_(AUTHORIZER_DB_PASSWORD|AUTHORIZER_DATABASE_URL|AUTHORIZER_S
   echo "The worker environment contains a control-plane or launcher secret." >&2
   exit 1
 fi
+if grep -Eq '^OMNIS_AGENT_IDEMPOTENCY_KEY(_VERSION)?=' .env .env.worker .env.sandbox-launcher; then
+  echo 'Agent idempotency signing material must remain authorizer-only.' >&2
+  exit 1
+fi
+if [[ "$(grep -Ec '^OMNIS_AGENT_IDEMPOTENCY_KEY=' .env.authorizer || true)" != 1 ]] || \
+  ! grep -Eq '^OMNIS_AGENT_IDEMPOTENCY_KEY=[0-9a-fA-F]{64}$' .env.authorizer || \
+  [[ "$(grep -Ec '^OMNIS_AGENT_IDEMPOTENCY_KEY_VERSION=[1-9][0-9]*$' .env.authorizer || true)" != 1 ]]; then
+  echo 'Authorizer agent idempotency key configuration is missing or invalid.' >&2
+  exit 1
+fi
 if grep -Eq '^OMNIS_(AUTHORIZER_DB_PASSWORD|AUTHORIZER_DATABASE_URL|LAUNCHER_DB_PASSWORD|LAUNCHER_DATABASE_URL)=' .env; then
   echo "The API environment contains a database service credential." >&2
   exit 1

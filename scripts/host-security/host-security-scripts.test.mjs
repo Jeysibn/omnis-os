@@ -117,6 +117,30 @@ test('systemd deployment preflight refuses before registering cleanup and CI can
   assert.match(result.stderr, /Refusing host provisioning/);
 });
 
+test('agent idempotency signing key is generated into the authorizer-only service environment', () => {
+  const installer = readFileSync(
+    path.join(repoRoot, 'scripts/host-security/install-service-secrets.sh'),
+    'utf8',
+  );
+  const configuration = readFileSync(path.join(repoRoot, 'scripts/configure-owner.ts'), 'utf8');
+  const template = readFileSync(path.join(repoRoot, '.env.authorizer.example'), 'utf8');
+  assert.match(
+    configuration,
+    /OMNIS_AGENT_IDEMPOTENCY_KEY=\$\{randomBytes\(32\)\.toString\('hex'\)\}/,
+  );
+  assert.match(configuration, /OMNIS_AGENT_IDEMPOTENCY_KEY_VERSION=1/);
+  assert.match(template, /OMNIS_AGENT_IDEMPOTENCY_KEY=/);
+  assert.match(installer, /OMNIS_AGENT_IDEMPOTENCY_KEY\(_VERSION\)\?=/);
+  assert.match(installer, /OMNIS_AGENT_IDEMPOTENCY_KEY=\[0-9a-fA-F\]\{64\}/);
+  const deployment = readFileSync(deploymentScript, 'utf8');
+  assert.match(deployment, /agent_idempotency_key=.*-N32/);
+  assert.match(deployment, /OMNIS_AGENT_IDEMPOTENCY_KEY=\$agent_idempotency_key/);
+  assert.doesNotMatch(
+    deployment.split('create_env_file "$repo_root/.env"')[1]?.split('EOF')[0] ?? '',
+    /OMNIS_AGENT_IDEMPOTENCY_KEY=/,
+  );
+});
+
 function pathExists(target) {
   try {
     readFileSync(target);

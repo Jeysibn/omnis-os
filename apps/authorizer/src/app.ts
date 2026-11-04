@@ -10,10 +10,17 @@ import {
   DepartmentListResponseSchema,
   DepartmentSchema,
   UpdateDepartmentSchema,
+  AgentIdSchema,
+  AgentIdempotencyKeySchema,
+  AgentMutationReceiptSchema,
+  AgentProfileDraftResponseSchema,
+  CreateAgentInputSchema,
+  PublishAgentProfileInputSchema,
+  SaveAgentProfileDraftInputSchema,
   type Authorization,
   type Department,
 } from '@omnis/contracts';
-import { DepartmentStoreError } from '@omnis/db';
+import { AgentLifecycleStoreError, DepartmentStoreError } from '@omnis/db';
 
 export type AuthorizerStore = {
   request(taskId: string, actor: 'owner', correlationId: string): Promise<Authorization>;
@@ -28,6 +35,18 @@ export type AuthorizerStore = {
     requestId: string,
   ): Promise<Department>;
   archiveDepartment(id: string, requestId: string): Promise<Department>;
+  agentLifecycle?:
+    | {
+        getDraft(agentId: string): Promise<unknown>;
+        createAgent(
+          input: { name: string; slug: string; departmentId: string | null },
+          requestId: string,
+        ): Promise<unknown>;
+        saveDraft(agentId: string, input: unknown, requestId: string): Promise<unknown>;
+        publish(agentId: string, input: unknown, requestId: string): Promise<unknown>;
+        archive(agentId: string, requestId: string): Promise<unknown>;
+      }
+    | undefined;
 };
 
 export function createAuthorizerApp(input: {
@@ -135,6 +154,106 @@ export function createAuthorizerApp(input: {
     },
   );
 
+  app.get<{ Params: { agentId: string } }>(
+    '/internal/v1/agents/:agentId/draft-profile',
+    async (request, reply) => {
+      const id = AgentIdSchema.safeParse(request.params.agentId);
+      if (!id.success)
+        return reply
+          .code(400)
+          .send({ error: { code: 'invalid_input', message: 'Agent identifier is invalid.' } });
+      try {
+        const draft = await requireAgentLifecycle(input.store).getDraft(id.data);
+        return AgentProfileDraftResponseSchema.parse(draft);
+      } catch (error) {
+        return sendAgentLifecycleError(error, reply);
+      }
+    },
+  );
+
+  app.post('/internal/v1/agents', async (request, reply) => {
+    const body = CreateAgentInputSchema.safeParse(request.body);
+    const requestId = AgentIdempotencyKeySchema.safeParse(request.headers['idempotency-key']);
+    if (!body.success || !requestId.success)
+      return reply
+        .code(400)
+        .send({ error: { code: 'invalid_input', message: 'Agent input is invalid.' } });
+    try {
+      const result = await requireAgentLifecycle(input.store).createAgent(
+        body.data,
+        requestId.data,
+      );
+      return reply.code(201).send(AgentMutationReceiptSchema.parse(result));
+    } catch (error) {
+      return sendAgentLifecycleError(error, reply);
+    }
+  });
+
+  app.put<{ Params: { agentId: string } }>(
+    '/internal/v1/agents/:agentId/draft-profile',
+    { bodyLimit: 64 * 1024 },
+    async (request, reply) => {
+      const id = AgentIdSchema.safeParse(request.params.agentId);
+      const body = SaveAgentProfileDraftInputSchema.safeParse(request.body);
+      const requestId = AgentIdempotencyKeySchema.safeParse(request.headers['idempotency-key']);
+      if (!id.success || !body.success || !requestId.success)
+        return reply
+          .code(400)
+          .send({ error: { code: 'invalid_input', message: 'Profile draft input is invalid.' } });
+      try {
+        const result = await requireAgentLifecycle(input.store).saveDraft(
+          id.data,
+          body.data,
+          requestId.data,
+        );
+        return AgentMutationReceiptSchema.parse(result);
+      } catch (error) {
+        return sendAgentLifecycleError(error, reply);
+      }
+    },
+  );
+
+  app.post<{ Params: { agentId: string } }>(
+    '/internal/v1/agents/:agentId/publish',
+    async (request, reply) => {
+      const id = AgentIdSchema.safeParse(request.params.agentId);
+      const body = PublishAgentProfileInputSchema.safeParse(request.body);
+      const requestId = AgentIdempotencyKeySchema.safeParse(request.headers['idempotency-key']);
+      if (!id.success || !body.success || !requestId.success)
+        return reply.code(400).send({
+          error: { code: 'invalid_input', message: 'Profile publication input is invalid.' },
+        });
+      try {
+        const result = await requireAgentLifecycle(input.store).publish(
+          id.data,
+          body.data,
+          requestId.data,
+        );
+        return reply.code(201).send(AgentMutationReceiptSchema.parse(result));
+      } catch (error) {
+        return sendAgentLifecycleError(error, reply);
+      }
+    },
+  );
+
+  app.post<{ Params: { agentId: string } }>(
+    '/internal/v1/agents/:agentId/archive',
+    async (request, reply) => {
+      const id = AgentIdSchema.safeParse(request.params.agentId);
+      const requestId = AgentIdempotencyKeySchema.safeParse(request.headers['idempotency-key']);
+      if (!id.success || !requestId.success)
+        return reply
+          .code(400)
+          .send({ error: { code: 'invalid_input', message: 'Agent archive input is invalid.' } });
+      try {
+        const result = await requireAgentLifecycle(input.store).archive(id.data, requestId.data);
+        return AgentMutationReceiptSchema.parse(result);
+      } catch (error) {
+        return sendAgentLifecycleError(error, reply);
+      }
+    },
+  );
+
   app.post('/internal/v1/authorizations', async (request, reply) => {
     const parsed = CreateAuthorizationSchema.safeParse(request.body);
     const requestId = request.headers['idempotency-key'];
@@ -212,22 +331,44 @@ export function createAuthorizerApp(input: {
       { errorType: error instanceof Error ? error.name : 'unknown' },
       'Authorizer request failed.',
     );
+    const statusCode =
+      error && typeof error === 'object' && 'statusCode' in error ? error.statusCode : undefined;
+    if (
+      request.url.startsWith('/internal/v1/agents') &&
+      (statusCode === 400 || statusCode === 413)
+    ) {
+      return reply.code(statusCode).send({
+        error: {
+          code: statusCode === 413 ? 'payload_too_large' : 'invalid_input',
+          message:
+            statusCode === 413
+              ? 'Agent management request exceeds the allowed size.'
+              : 'Agent management request is malformed.',
+        },
+      });
+    }
     const decisionOutcomeUnknown =
       request.method !== 'GET' && request.url.startsWith('/internal/v1/authorizations');
-    const managementOutcomeUnknown =
+    const departmentOutcomeUnknown =
       request.method !== 'GET' && request.url.startsWith('/internal/v1/departments');
+    const agentOutcomeUnknown =
+      request.method !== 'GET' && request.url.startsWith('/internal/v1/agents');
     return reply.code(503).send({
       error: {
         code: decisionOutcomeUnknown
           ? 'authorization_outcome_unknown'
-          : managementOutcomeUnknown
+          : departmentOutcomeUnknown
             ? 'department_outcome_unknown'
-            : 'authorizer_unavailable',
+            : agentOutcomeUnknown
+              ? 'management_outcome_unknown'
+              : 'authorizer_unavailable',
         message: decisionOutcomeUnknown
           ? 'The authorizer could not confirm whether the decision committed. Read the authorization state or retry with the same idempotency key.'
-          : managementOutcomeUnknown
+          : departmentOutcomeUnknown
             ? 'The authorizer could not confirm whether the department change committed. Read the department state before retrying.'
-            : 'The authorization store is unavailable.',
+            : agentOutcomeUnknown
+              ? 'The authorizer could not confirm whether the agent change committed. Read agent state or retry with the same idempotency key.'
+              : 'The authorization store is unavailable.',
       },
     });
   });
@@ -240,6 +381,16 @@ function sendDepartmentStoreError(error: unknown, reply: FastifyReply) {
   return reply.code(error.statusCode).send({
     error: { code: error.code, message: error.message },
   });
+}
+
+function requireAgentLifecycle(store: AuthorizerStore) {
+  if (!store.agentLifecycle) throw new Error('Agent lifecycle store is unavailable.');
+  return store.agentLifecycle;
+}
+
+function sendAgentLifecycleError(error: unknown, reply: FastifyReply) {
+  if (!(error instanceof AgentLifecycleStoreError)) throw error;
+  return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
 }
 
 function sendStoreError(error: unknown, reply: FastifyReply) {
