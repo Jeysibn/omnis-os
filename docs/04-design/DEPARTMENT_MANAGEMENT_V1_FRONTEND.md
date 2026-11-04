@@ -1,6 +1,6 @@
 # Department Management V1 - Frontend Specification
 
-**Status: SPECIFICATION ONLY.** This document describes a future frontend change. It adds no application code, and merging it does **not** implement Department Management, complete AO-104, or complete AO-110. Implementation starts only after this specification is reviewed and the owner decisions in section 4 are answered.
+**Status: SPECIFICATION ONLY.** This document describes a future frontend change. It adds no application code, and merging it does **not** implement Department Management, complete AO-104, or complete AO-110. This specification can be reviewed and merged on its own: **merging it approves no product decision**. Each implementation milestone starts only after the owner has explicitly approved the decisions that gate it (section 4.2); a decision that does not gate a milestone never blocks it.
 
 **Baseline:** `main` at `a3c53e2` (Read-only Agents & Profiles V1, PR #20; department backend, PR #19). Date: 2026-11-04.
 
@@ -107,20 +107,33 @@ Principles:
 4. **Plain text only.** Department names and slugs are untrusted text (section 11).
 5. **Reuse, don't redesign.** Existing panels, buttons, status patterns, the native dialog pattern, Asia/Manila time formatting and the brand tokens as shipped.
 
-## 4. Owner decisions (proposed defaults, **not yet approved**)
+## 4. Owner decisions (proposed defaults, **none approved**)
 
-These are product decisions. The defaults below are this document's proposals; none is treated as approved until the owner answers. Implementation must not start on a decision still marked Open.
+### 4.1 Decisions
 
-| ID | Decision | Proposed default | Status |
+These are product decisions. The defaults below are this document's **proposals**. A decision is approved only when the owner says so explicitly in writing; this document, a merged PR, passing CI or independent QA never approve one. Every row below is **Proposed** until then.
+
+| ID | Decision | Proposed default | Gates |
 |---|---|---|---|
-| D-1 | Where does Department Management live? | A secondary screen at `#departments`, linked from the Agents directory. **Not** a fifth primary-navigation item. | **Open - owner approval required** |
-| D-2 | Undo for archive | None. Archive is one-way and the UI says so. There is no Unarchive action because the backend provides none. | **Open - owner approval required** |
-| D-3 | Concurrent rename | Accept the backend's last-write-wins behavior. The UI does not claim to detect conflicting edits; it shows the server's result and refreshes the list. | **Open - owner approval required** |
-| D-4 | Duplicate-slug feedback | A field-specific message on the slug field on a `409` from create. For a rename `409`, the UI first re-reads the department (section 8.2) and shows the slug message only when the department is still active; otherwise it shows the archived state. No field-specific message is shown for any other error. | **Open - owner approval required** |
-| D-5 | Agents directory department filter | Keeps using the department data embedded in agent summaries. No change to the agents screens and no `GET /departments` call from them until a separate integration change is justified. | **Open - owner approval required** |
-| D-6 | Primary nav state on `#departments` | No primary nav item is marked `aria-current`; the screen shows a "← Agents" link and its own `h1`. (Marking Agents current would announce a page the user is not on.) | Proposed, low risk |
-| D-7 | Telling the two `409` causes apart on rename | Do not depend on error `code`. Re-read the department list with `includeArchived=true`: archived means the rename hit the archived rule, active means a slug conflict. If the backend later declares `conflict` / `invalid_transition` as stable public codes, the UI may use them with the re-read as fallback. | Proposed; backend input (Codex #1) welcome |
-| D-8 | Slug suggestion while typing a new name | Convenience only: until the user edits the slug field, suggest a slug derived from the name (lowercase, runs of non-alphanumerics become one hyphen, trimmed, at most 80). The server rules remain authoritative. May be dropped without affecting the contract. | Proposed |
+| D-1 | Where does Department Management live? | A secondary screen at `#departments`, linked from the Agents directory. **Not** a fifth primary-navigation item. | Milestone 2 |
+| D-2 | Undo for archive, and archive behavior | No Undo and no Unarchive: archive is one-way, the UI says so, and the backend provides no such action. The archive confirmation dialog, its wording and its outcomes (section 6.4) are the proposed archive UX. | Milestone 3 |
+| D-3 | Concurrent rename | Accept the backend's last-write-wins behavior. The UI does not claim to detect conflicting edits; it reports what the server confirmed and what the latest list shows. | Milestone 2 |
+| D-4 | Duplicate-slug feedback | A field-specific message on the slug field on a `409` from create. For a rename `409`, a slug message is shown only when a trustworthy read-back observation supports it (section 7.5). No field-specific message for any other error. | Milestone 2 |
+| D-5 | Agents directory department filter | Keeps using the department data embedded in agent summaries. No change to the agents screens and no `GET /departments` call from them until a separate integration change is justified. | Milestone 2 |
+| D-6 | Primary nav state on `#departments` | No primary nav item is marked `aria-current`; the screen shows a "← Agents" link and its own `h1`. (Marking Agents current would announce a page the user is not on.) | Milestone 2 |
+| D-7 | Telling the two `409` causes apart on rename | Do not depend on error `code`. Use a read-back of `GET /departments?includeArchived=true` and state only what it shows (section 7.5). If the backend later declares `conflict` / `invalid_transition` as stable public codes, the UI may use them with the read-back as fallback. | Milestone 2 |
+| D-8 | Slug suggestion while typing a new name | **Proposed: defer from V1.** The slug is a plain labelled field with no suggestion. The feature is optional and omitted from this specification's screens and criteria; it can be proposed again later with its own spec change. | None (see 4.2) |
+
+### 4.2 Decision gates by milestone
+
+| Milestone | Decisions that must be explicitly approved by the owner before its implementation starts |
+|---|---|
+| 1 - documentation (this PR) | **None.** D-1 to D-8 may all remain Proposed. The specification can be reviewed and merged independently of implementation approval. |
+| 2 - list, create, rename | D-1, D-3, D-4, D-5, D-6, D-7 |
+| 3 - archive | D-2, **plus** the milestone 2 decisions above (all of D-1, D-3, D-4, D-5, D-6, D-7 must already be approved, since milestone 3 builds on that navigation and mutation-safety behavior) |
+| D-8 | Not a gate for any milestone. It is deferred from V1; leaving it open does not block anything, and an omitted optional feature is never a reason to hold an implementation. If the owner later wants it, it needs an approved spec change first. |
+
+These gates are recommendations. Nothing in this document marks any decision approved.
 
 ## 5. Routes and navigation
 
@@ -180,9 +193,10 @@ Row action buttons have accessible names that include the department name ("Rena
 | State | Presentation |
 |---|---|
 | Loading | `role="status"` "Loading departments…"; no skeleton rows implying data; no actions |
-| Empty (validated `total: 0`, archived toggle off) | "No departments yet." with the "New department" button available. The text never claims archived departments do not exist. |
-| Empty with archived shown | "No departments yet." (the response is authoritative: with `includeArchived=true`, zero means none exist) |
-| Only archived exist (toggle off, zero active) | "No active departments." plus the hint "Turn on Show archived to see archived departments." This case is detectable only after the toggle is turned on; the UI does not guess. |
+| Empty, active-only request (validated `total: 0`, "Show archived" off) | The neutral message **"No active departments. Turn on Show archived to check for archived departments."** with the "New department" button available. An active-only response cannot tell "no departments exist" from "departments exist only in archived state", so this state never says "No departments yet" and never says or implies that archived departments exist or do not exist. |
+| Empty, include-archived request (validated `total: 0`, "Show archived" on, request succeeded) | "No departments yet." This is the only state that claims none exist, because the response included archived rows and was empty. |
+| Only archived departments exist | Shown **only** after a successful `includeArchived=true` response that contains archived rows and no active rows: the list shows those rows with the note "No active departments. All departments shown here are archived." It is never inferred from an active-only response. |
+| Include-archived request fails (the user turned "Show archived" on, or opened `#departments?archived=1`) | The ordinary Error state for that request ("Departments unavailable", Retry, no list). The UI does not infer, state or imply whether archived departments exist, and does not fall back to showing the earlier active-only result as if it were current. |
 | Error | `ResourceFailure` pattern: "Departments unavailable", the server message, a Retry button; no stale list, and never the empty state |
 | 401 | Existing session-expiry flow; no department data remains |
 | 403 | "You don't have access to departments." Session stays valid; navigation still works |
@@ -208,15 +222,14 @@ The UI sends exactly `{ slug, name }` with both values trimmed, and nothing else
 
 | Result | Presentation | Focus |
 |---|---|---|
-| `201` | Panel closes; the list is re-read; a status message "Created <name>." (`role="status"`); the new row is present once the re-read succeeds | The new row's heading if it is in the refreshed list, else "New department" |
+| `201` (confirmed, section 7.2) | Panel closes; a status message "The server confirmed the department was created." (`role="status"`) naming the confirmed values; the list is re-read and the new row appears only once the re-read succeeds. If the re-read fails, section 7.3 applies | The new row's heading if it is in the refreshed list, else "New department" |
 | Client validation fails | Error summary (8.3) and inline field errors; **no request** | Error summary |
 | `409` (slug taken) | Field error on Slug: "This slug is already used by another department (including an archived one). Choose a different slug." The Name value is preserved | Slug field |
 | `422` `invalid_input` | Form-level message: "The server rejected these values. Check the name and slug, and remove anything that looks like a credential or secret." The response does not identify a field, so none is flagged | Error summary |
 | `422` `limit` | "The department limit (500) has been reached. Archive is permanent, so existing departments can't be removed in this release." | Error summary |
 | `403` | "Your secure session needs refreshing." The UI calls `refreshCsrf()` and offers "Try again" (a rejected request had no effect, so a manual retry is safe). The session is not expired | Error summary |
 | `401` | Existing session-expiry flow | n/a |
-| `503` `department_outcome_unknown`, network failure, or an unverifiable response | "Omnis OS couldn't confirm whether this department was created." with a "Check departments" action that re-reads the list. The form stays open with the input intact; submit is disabled until the check completes. If the re-read shows a department with the same slug **and** name, the message becomes "A department with this slug and name now exists. It was probably created." and the form offers Close (the UI does not claim certainty). If it shows nothing matching, the message says no matching department was found and the form re-enables | Error summary |
-| Other `5xx` | Generic failure message from the server with the form re-enabled | Error summary |
+| Outcome unknown (`503` including `department_outcome_unknown`, any other `5xx`, network failure, or a `2xx` whose body does not validate or match the submitted values) | "The outcome of creating this department is unknown." The form stays open with the input intact. The recovery model in section 7 applies in full: a read-only "Check departments" recheck, no automatic retry, no success or failure claim, and submit stays disabled until a recheck succeeds (7.4, 7.5, 7.7) | Error summary |
 
 ### 6.3 Rename department
 
@@ -233,10 +246,11 @@ The UI sends exactly `{ slug, name }` with both values trimmed, and nothing else
 | Result | Presentation |
 |---|---|
 | Unchanged values (both equal the current ones after trimming) | No request. "No changes to save." and the form stays open |
-| `200` | Form closes, list re-read, status "Renamed to <name>." Focus returns to the row's Rename button (or the heading if the row moved) |
-| `409` | The UI re-reads `GET /departments?includeArchived=true` for this id (D-7). **Still active** -> slug field error "This slug is already used by another department (including an archived one). Choose a different slug." **Now archived** -> the form closes and the row shows its archived state with the status "This department was archived and can't be changed." Cannot re-read -> a neutral message "The rename was rejected. This slug may already be in use, or the department may have been archived. Reload to check." with a Reload action |
-| `404` | "This department no longer exists." The list is re-read |
-| `422` / `403` / `401` / uncertain | As in 6.2, mapped to the edit form. For an unconfirmed rename the "Check departments" re-read compares the stored `name` and `slug` with the submitted ones and reports "It appears to have been saved" only when both match exactly |
+| `200` (confirmed, section 7.2) | Form closes; status "The server confirmed the update: name <name>, slug <slug>."; the list is re-read and rows reflect it only after the re-read succeeds (7.3 if it fails). Focus returns to the row's Rename button (or the heading if the row moved) |
+| `409` (rejected) | Diagnosed only from a trustworthy read-back, never from error `code` or message (D-7, section 7.5): a slug message appears only when the read-back shows another department using the slug; an archived observation, an inconclusive observation, or a failed read-back each have their own wording |
+| `404` | "The server reports that this department doesn't exist." The list is re-read |
+| `422` / `403` / `401` | As in 6.2, mapped to the edit form |
+| Outcome unknown (same definition as 6.2) | "The outcome of this rename is unknown." The recovery model in section 7 applies in full; the row's Rename and Archive stay unavailable until a recheck succeeds. Observations are described, never claimed as caused by this request (7.6) |
 
 ### 6.4 Archive department
 
@@ -250,40 +264,118 @@ The UI sends exactly `{ slug, name }` with both values trimmed, and nothing else
 - Buttons: **Cancel** (default focus) and **Archive department** (a destructive-style secondary button; it is not styled as the primary action).
 - Esc and Cancel close it with no request and restore focus to the originating "Archive <name>" button. Clicking the backdrop does nothing special (no accidental confirm).
 
-**Submit:** while pending both buttons are disabled, the dialog shows "Archiving…" in a `role="status"` region, and Esc is ignored until the request settles. `POST /api/v1/departments/<id>/archive` carries `x-omnis-csrf`. Because the backend treats archiving an already archived department as success, a retry after an unconfirmed result is safe; the UI still re-reads first (section 7) so the outcome shown is the server's.
+**Submit:** while pending both buttons are disabled, the dialog shows "Archiving…" in a `role="status"` region, and Esc is ignored until the request settles. `POST /api/v1/departments/<id>/archive` carries `x-omnis-csrf`. The backend treats archiving an already archived department as a no-op success, so repeating an archive cannot make things worse; even so, after an unknown outcome the UI rechecks first and describes what the latest list shows (section 7.7) rather than repeating the request on its own.
 
-**No false success and no vanishing rows:** the row stays visible and unchanged during the request. Only after `200` **and** a successful re-read does the row change. With the archived toggle **off** the archived row then leaves the list, which is stated in the status message ("Archived <name>. It's hidden while Show archived is off."); with the toggle **on** it stays with its Archived badge and without actions.
+**No false success and no vanishing rows:** the row stays visible and unchanged during the request. After a confirmed `200` the row changes only when the re-read also succeeds; if the re-read fails, the confirmation is kept and the list is marked possibly out of date (section 7.3) instead of being edited locally. After a successful re-read with the archived toggle **off** the archived row leaves the list, which is stated in the status message ("The server confirmed the department is archived. It's hidden while Show archived is off."); with the toggle **on** it stays with its Archived badge and without actions.
 
 **Outcomes:**
 
 | Result | Presentation | Focus |
 |---|---|---|
-| `200` | Dialog closes; the list is re-read; the status message above | If the row remains, its heading; otherwise the result count or "New department" |
+| `200` (confirmed, section 7.2) | Dialog closes; the status message above; the list is re-read (7.3 if the re-read fails) | If the row remains, its heading; otherwise the result count or "New department" |
 | `409` (department is assigned to agents) | The dialog stays open and shows: "This department can't be archived because agents still reference it. Archived agents count too, and agents can't be moved to another department in this release." No change is made and the row stays active. The Cancel button is relabeled Close and the Archive button is removed | The Close button |
 | `404` | Dialog closes with "This department no longer exists." and the list is re-read | The list heading |
 | `403` | "Your secure session needs refreshing." `refreshCsrf()` runs; the dialog stays open with "Try again" | Dialog |
 | `401` | Existing session-expiry flow | n/a |
-| `503` `department_outcome_unknown`, network failure or unverifiable response | "Omnis OS couldn't confirm whether this department was archived." The dialog offers "Check departments", which re-reads with `includeArchived=true`. Archived -> the dialog closes with "It was archived." Still active -> the dialog says it was not archived and re-enables Archive. The UI never reports success without the re-read | Dialog |
-| Other `5xx` | Server message; dialog stays open and Archive is re-enabled | Dialog |
+| Outcome unknown (same definition as 6.2) | "The outcome of archiving this department is unknown." The dialog stays open with "Check departments". The recovery model in section 7 applies in full; the UI never reports archive success or failure on its own, and observations are described without causality (7.7) | Dialog |
 
 An archive `409` is distinguishable from a rename `409` by the endpoint that returned it: on the archive endpoint the only `409` is the "referenced by agents" rule (`invalid_transition`), because archiving an already archived department is a `200`.
 
-## 7. Mutation handling
+## 7. Mutation handling and outcome recovery
+
+### 7.1 Rules that always apply
 
 1. **One mutation in flight** across the whole screen. While any create, rename or archive is pending, all other mutation controls are disabled.
 2. **CSRF:** every mutation sends `x-omnis-csrf` from the shell's current token. A `403` is treated as "rejected with no effect" (the backend's CSRF check runs before any write): call `refreshCsrf()`, keep the form/dialog and the user's input, and offer a manual retry. A `403` never expires the session (existing behavior and test).
-3. **No idempotency key and no automatic retry.** The backend does not support department idempotency, so the UI never resends a mutation on its own, including after a network error. A resend after an unconfirmed create could report a misleading slug conflict, which is why the recovery path is a re-read.
-4. **Outcome classification** reuses `ApiRequestError.outcome`: `rejected` (a definitive `4xx`) shows the specific message; `uncertain` (network failure, `5xx`) and `invalid-response` use the "couldn't confirm" flows above. For `503` `department_outcome_unknown` the server itself instructs "Read the department state before retrying", and the UI does exactly that.
-5. **Re-read after every successful mutation.** The list is refetched with the current archived setting and is the only source for what the screen shows. The mutation response is validated against `DepartmentSchema` and used to confirm identity (id, and for create the submitted slug) but is not merged into the list.
-6. **No optimistic UI, no partial state.** Nothing is added, changed or removed locally before the server confirms.
-7. **No browser persistence:** no `localStorage`, no cached departments, no draft storage.
-8. **Aborts:** list reads abort on route change or toggle change. Mutations are not aborted by navigation; if the screen unmounts mid-request the result is discarded, and the next mount re-reads the true state.
+3. **No idempotency key and no automatic retry.** The backend does not support department idempotency, so the UI never resends a mutation on its own, including after a network error, after a failed or inconclusive recheck, or after a failed list refresh. Every resend is an explicit user action.
+4. **No optimistic UI, no partial state.** Nothing is added, changed or removed locally before the server confirms; a mutation response is validated and used for confirmation but is never merged into the displayed list.
+5. **No browser persistence:** no `localStorage`, no cached departments, no draft storage. Any unresolved-outcome state (7.4) lives only in memory; a reload discards it, and the screen then shows fresh server state with no claim about earlier requests.
+6. **Aborts:** list reads abort on route change or toggle change. Mutations are not aborted by navigation; if the screen unmounts mid-request the result is discarded, and the next mount reads the true state.
+
+### 7.2 Three evidence levels
+
+Every mutation ends in exactly one of these. The wording the UI may use is limited by the level; it never says more than the evidence establishes.
+
+| Level | When | The UI may say | The UI must not say |
+|---|---|---|---|
+| **Confirmed** | A `2xx` response whose body validates against `DepartmentSchema` **and** matches the request: create returns the submitted slug and name; rename returns the route id and the submitted slug and name; archive returns the route id with a non-null `archivedAt` | "The server confirmed ..." (created / the update / the department is archived), naming the confirmed values | That the visible list is current (that depends on the refresh, 7.3), or who else changed anything |
+| **Rejected** | A definitive `4xx` with a valid error envelope (`403`, `404`, `409`, `422`) | What the server rejected, e.g. "The server rejected this change." For `403` additionally that the change was not applied (the CSRF check precedes any write) | A cause the response does not establish; for `409` on rename, a cause not supported by a trustworthy read-back (7.5) |
+| **Unknown** | Everything else: `503` (including `department_outcome_unknown` and `authorizer_unavailable`), any other `5xx`, a network failure or timeout, and any `2xx` whose body fails validation or does not match the request | "The outcome ... is unknown." | That the change succeeded, that it failed, or that nothing happened |
+
+### 7.3 Confirmed, then the list refresh fails
+
+After a **confirmed** create, rename or archive the UI re-reads the list (with the current archived setting). If that read fails (or returns an invalid response, or `401`, which follows the session-expiry flow):
+
+- the confirmation stays visible and is not retracted: "The server confirmed <the specific result>.", naming the values from the confirmed response;
+- the screen states "The department list couldn't be refreshed, so what is shown may be out of date." The list region shows that state instead of rows (no stale rows are presented as current), with a read-only **Refresh list** button;
+- no mutation control is shown until a refresh succeeds, and the mutation is **never** repeated automatically (7.1);
+- after a successful refresh the rows replace the notice; the earlier confirmation is not announced again.
+
+### 7.4 Rechecking after an unknown outcome
+
+The **recheck** is one read-only request, `GET /departments?includeArchived=true`, so it can see active and archived rows. It is never a mutation, and the UI never sends one in response to its result. The first recheck is offered as **Check departments**; after a failed or inconclusive one the same control is labelled **Check again**.
+
+- **What a recheck establishes:** only the contents of that single response. It describes the server's state at the moment it was read. It cannot establish which request, session or time caused that state, and it cannot rule out a change that commits after it was read.
+- **Wording rule:** the UI describes observations as "currently" and "in the latest list". It never uses causal or settled words for an unknown outcome: not "was created", "succeeded", "failed", "didn't happen", "was archived" or "was not saved".
+- **A failed recheck** (network error, `5xx`, `401` follows session expiry, invalid response, duplicate ids or slugs, or a missing row set) leaves the outcome **unresolved**. The UI says so ("Omnis OS couldn't check either, so the outcome is still unknown.") and offers **Check again**. It never turns a failed recheck into a conclusion.
+- **Unresolved state:** while a recheck has not succeeded, a screen-level `role="status"` banner names the unresolved operation and its target and keeps **Check again** available, and the controls that could repeat that operation stay unavailable: for create, the form's submit button and "New department"; for rename or archive, that department's Rename and Archive. Other departments stay usable. Closing the form or dialog does not clear the unresolved banner.
+
+### 7.5 Rename `409`: diagnosis only from a trustworthy observation
+
+A rename `409` has two possible causes (another department holds the slug, or this department is archived) and the response does not say which (D-7). After a `409` the UI performs the recheck (7.4) and states only what the latest response shows:
+
+| Read-back | UI statement and controls |
+|---|---|
+| Read-back fails | Neutral: "The server rejected the rename. Omnis OS couldn't check why. The slug may already be in use, or the department may be archived." No field-specific error. **Check again** |
+| This department's id is absent | "The server rejected the rename, and this department doesn't appear in the latest list." Unresolved; no field error. **Check again** |
+| This department appears **archived** | "The server rejected the rename. The department currently appears as archived, so it can't be changed." The form closes; the row shows its archived state. The UI does not say when it was archived |
+| This department is **active** and a **different** department (another id) currently has the submitted slug | Slug field error: "Another department currently uses this slug (an archived department keeps its slug). Choose a different slug." The name stays |
+| This department is **active** and **no** other department has the submitted slug | Inconclusive: "The server rejected the rename, but the latest list doesn't show why. Something may have changed in between. Reload and try again." No field error; the form stays open with the input |
+
+A create `409` can only come from the slug rule (a create has no archived-state rule), so it uses the slug field error directly, per D-4, without a read-back.
+
+### 7.6 Recovery after an unknown outcome: create
+
+Submitted values are slug `S` and name `N`. After a successful recheck (7.4):
+
+| Observation in the latest list | UI statement | Controls |
+|---|---|---|
+| A department has slug `S` **and** name `N` (active or archived) | "The latest list includes a department with this slug and name. It may be the one you submitted or one created elsewhere; Omnis OS can't tell." Not "Created". | **Close**; no resubmit offered |
+| A department has slug `S` but a **different name or is archived** | "The latest list has a department with this slug, named "<name>"<, archived>. Choose a different slug." (an observation; it doesn't say whether your request or another one produced it) | Slug field error; form re-enabled with the input kept |
+| **No** department has slug `S` | "No department with this slug appears in the latest list. This doesn't prove the create failed: a late commit can't be ruled out. If it does commit later, trying again would report the slug as taken." | **Check again** and an explicit **Try creating again** (a user action; duplicates are impossible because slugs are unique); form re-enabled |
+| Recheck fails | Unresolved (7.4) | **Check again** only; submit stays disabled |
+
+A department created by another session with the same slug is indistinguishable from this request's result, which is why the first two rows describe state without attributing it.
+
+### 7.7 Recovery after an unknown outcome: rename and archive
+
+**Rename** (id `I`; earlier values `P`; submitted slug `S` and name `N`). After a successful recheck:
+
+| Observation in the latest list | UI statement | Controls |
+|---|---|---|
+| `I` is absent | "This department doesn't appear in the latest list, so the outcome of the rename can't be determined." (the API has no delete, so this is unexpected) | Unresolved; **Check again** |
+| `I` is active with slug `S` and name `N` | "The department currently has the name <N> and the slug <S>. This may be the result of your request or of another change; Omnis OS can't tell." No "Renamed" claim | Form closes; the row shows the current values |
+| `I` is active with its earlier values `P` | "The department currently still has its previous name and slug. This doesn't prove the request never reached the server." | Form stays open with the input; explicit **Try again** (last-write-wins applies, D-3) |
+| `I` is active with other values (matching neither `P` nor `S`/`N`, including a partial match) | "The department currently has the name <X> and the slug <Y>, which differs from your change and from its earlier values. It may have been changed elsewhere." | **Edit current values** (reloads the form from the latest list); nothing is overwritten without a user action |
+| `I` appears archived | "The department currently appears as archived, so it can't be renamed. Omnis OS can't tell whether that happened before or after your request." | Form closes; row archived |
+| Recheck fails | Unresolved (7.4) | **Check again**; that row's Rename and Archive stay unavailable |
+
+**Archive** (id `I`). After a successful recheck:
+
+| Observation in the latest list | UI statement | Controls |
+|---|---|---|
+| `I` is absent | "This department doesn't appear in the latest list, so the outcome of the archive can't be determined." | Unresolved; **Check again** |
+| `I` appears archived | "The department currently appears as archived. This may be the result of your request or of another session; Omnis OS can't tell." Not "It was archived" | Dialog closes; the row shows its archived state per the toggle |
+| `I` appears active (including with a different name or slug than before) | "The department currently appears active. This doesn't prove the archive request wasn't applied; it could still commit. Archiving again is safe: the server treats it as a no-op if the department is already archived." If the name or slug changed, the current values are shown. | Dialog stays open; **Archive department** is re-enabled as an explicit user action |
+| Recheck fails | Unresolved (7.4) | **Check again**; Archive stays unavailable |
+
+**Concurrent changes** by another session can produce any of the observations above at any time. The wording above is deliberately limited to the latest list, so the UI never attributes a state to a request, and it always offers **Check again** because an observation can be out of date the moment it is read.
 
 ## 8. Error mapping
 
 ### 8.1 Branching policy
 
-The UI branches on the **HTTP status**, on **which endpoint** returned it, and on **re-read state**, not on `code` or `message` text, with one narrow, labelled exception: a `422` with code `limit` on create selects the limit message. If that code ever changes, the UI falls back to the generic `422` rejection message, which is still truthful. `503` `department_outcome_unknown` needs no code dependence, because every non-rejected mutation failure already takes the "couldn't confirm" path. Server messages are displayed as supporting text, never used for control flow.
+The UI branches on the **HTTP status**, on **which endpoint** returned it, and on **read-back observations** (section 7), not on `code` or `message` text, with one narrow, labelled exception: a `422` with code `limit` on create selects the limit message. If that code ever changes, the UI falls back to the generic `422` rejection message, which is still truthful. `503` `department_outcome_unknown` needs no code dependence, because every non-rejected mutation failure already takes the unknown-outcome path (7.2). Server messages are displayed as supporting text, never used for control flow.
 
 ### 8.2 Status table
 
@@ -292,9 +384,9 @@ The UI branches on the **HTTP status**, on **which endpoint** returned it, and o
 | `401` | Session expiry | Session expiry | Session expiry | Session expiry |
 | `403` | "You don't have access to departments." | CSRF refresh and manual retry | CSRF refresh and manual retry | CSRF refresh and manual retry |
 | `404` | n/a (no such route) | n/a | "No longer exists" | "No longer exists" |
-| `409` | n/a | Slug field error | Re-read, then slug field error or archived state (D-7) | "Agents still belong to it" (stays open) |
+| `409` | n/a | Slug field error | Read-back diagnosis, only from a trustworthy observation (7.5, D-7) | "Agents still reference it" (stays open) |
 | `422` | Unexpected-response error (the UI sends only valid queries) | Form-level server rejection, or the limit message | Form-level server rejection | Treated as an unexpected response |
-| `503` / network / invalid response | Error with Retry | "Couldn't confirm" flow | "Couldn't confirm" flow | "Couldn't confirm" flow |
+| `503` / other `5xx` / network / invalid response | Error with Retry | Unknown-outcome recovery (7.2, 7.4, 7.6) | Unknown-outcome recovery (7.7) | Unknown-outcome recovery (7.7) |
 
 ### 8.3 Error summary
 
@@ -312,7 +404,7 @@ A form that fails validation (client-side or server-side) shows one error summar
 - **Touch targets:** buttons, checkbox rows and row actions are at least 44 x 44 CSS px at <= 820 px.
 - **Reduced motion:** no new animation; the existing global `prefers-reduced-motion` rule applies and no transition is required for any state change.
 - **Skip link:** unchanged and tested on `#departments` (PR #16 behavior: hash and history preserved, `<main>` focused).
-- **Zoom and text size:** no clipping at 200% zoom or a 16px minimum user font size; long names and slugs wrap (`overflow-wrap: anywhere`).
+- **Zoom and text size:** content must reflow at 200% browser zoom and at a 16px minimum user font size, and remain usable at the WCAG 1.4.10 reflow size (320 x 256 CSS px, equivalent to 400% zoom at 1280 px): no horizontal scrolling, no clipped or inaccessible controls, no truncated labels or messages, and long names and slugs wrap (`overflow-wrap: anywhere`). The verification method and acceptance conditions are DM-31 and section 12.8.
 
 ## 10. Responsive requirements
 
@@ -338,7 +430,7 @@ All Playwright tests use **strictly schema-validated synthetic fixtures**: respo
 |---|---|
 | DM-01 | `GET /departments` renders each department's name, slug, created and updated times (Asia/Manila), in server order; archived are hidden by default and the request carries no query. |
 | DM-02 | Toggling "Show archived" refetches with `includeArchived=true`, shows the Archived badge and no actions on archived rows, and updates the URL (`#departments?archived=1`) with `replaceState` (no history entry). Reload and Back/Forward preserve the setting. |
-| DM-03 | A validated empty response shows "No departments yet." with "New department"; a failed, loading or invalid response never shows it. |
+| DM-03 | Empty states are neutral about archived rows: (a) a validated empty **active-only** response shows exactly "No active departments. Turn on Show archived to check for archived departments." with "New department" and never "No departments yet"; (b) "No departments yet." appears only for a successful `includeArchived=true` response with zero rows; (c) "Only archived" wording ("All departments shown here are archived.") appears only after a successful include-archived response containing archived and no active rows; (d) if the include-archived request fails the ordinary error state shows (no list, Retry) and no statement about whether archived departments exist; (e) a failed, loading or invalid response never shows any empty-state text. |
 | DM-04 | An API failure shows "Departments unavailable" with Retry and no list; Retry recovers. |
 | DM-05 | `403` shows the access message and keeps the session and navigation working; `401` follows the existing session-expiry flow and leaves no department data. |
 | DM-06 | Invalid responses (schema failure, `total` mismatch, duplicate `id`, duplicate `slug`, an extra field) show the unexpected-response error, never an empty or partial list. `503` `limit` shows the too-large state with no partial list. |
@@ -353,7 +445,7 @@ All Playwright tests use **strictly schema-validated synthetic fixtures**: respo
 | DM-10 | `409` shows the slug field error and keeps the name; the slug field receives focus; no row is added. |
 | DM-11 | `422` `invalid_input` shows the form-level rejection without flagging a field; `422` `limit` shows the limit message. |
 | DM-12 | `403` refreshes the CSRF token, keeps the input and the session, and a manual retry then succeeds; the fixture proves the second request carries the refreshed token. |
-| DM-13 | `503` `department_outcome_unknown` / a network drop shows "couldn't confirm", never retries by itself (the fixture counts exactly one POST), and "Check departments" resolves to the created or not-created message from the re-read. |
+| DM-13 | Unknown create outcomes (`503 department_outcome_unknown`, other `5xx`, network drop, `2xx` with an invalid or mismatching body) show "The outcome of creating this department is unknown.", with no success or failure claim and no optimistic row. The fixture counts exactly one POST until the user explicitly clicks **Try creating again**. Recheck results follow section 7.6 and recovery rows RM-01 to RM-08: failed recheck (submit and "New department" stay disabled, **Check again** works), matching row, same slug with different details, absent slug (no "failed" claim; explicit retry allowed), and a row that another session created. Confirmed `201` followed by a failed list refresh follows 7.3 (RM-01). |
 | DM-14 | Create is not offered as an optimistic row: during the pending request the list is unchanged. |
 
 ### 12.3 Rename
@@ -361,8 +453,8 @@ All Playwright tests use **strictly schema-validated synthetic fixtures**: respo
 | ID | Criterion |
 |---|---|
 | DM-15 | Rename pre-fills name and slug, sends `PATCH` with the full pair, preserves the department `id`, and reflects the re-read values; unchanged values send no request. |
-| DM-16 | A rename `409` re-reads: still active -> slug field error; now archived -> archived state with no editing; unreadable -> the neutral message with Reload. |
-| DM-17 | `404` shows "no longer exists" and refreshes the list; unconfirmed outcomes use the re-read and claim "appears to have been saved" only on an exact match. |
+| DM-16 | A rename `409` is diagnosed only from a trustworthy read-back (section 7.5, RM-15): another department has the slug -> slug field error; this department archived -> archived observation, form closes; active and no other department has the slug -> the inconclusive message with no field error; read-back fails or this id is absent -> neutral or unresolved message, no field error. Error `code` and `message` are never used for the diagnosis. |
+| DM-17 | `404` shows that the server reports the department doesn't exist and refreshes the list. Unknown rename outcomes follow section 7.7 and RM-02 and RM-09 to RM-14: failed recheck (that row's Rename and Archive stay unavailable), id absent (unresolved), requested values present (observation only, never "Renamed"), previous values present (explicit retry), different values from a concurrent change (**Edit current values**, nothing overwritten without a user action), and archived. A confirmed `200` followed by a failed refresh follows 7.3. No automatic PATCH is ever sent after the first. |
 | DM-18 | The last-write-wins note is visible on the edit form, and a fixture-simulated concurrent change is overwritten without any conflict claim. |
 | DM-19 | Archived rows offer no Rename or Archive controls. |
 
@@ -371,9 +463,9 @@ All Playwright tests use **strictly schema-validated synthetic fixtures**: respo
 | ID | Criterion |
 |---|---|
 | DM-20 | "Archive <name>" opens the confirmation dialog with the one-way explanation, focus on Cancel; Esc and Cancel send no request and restore focus to the originating button. |
-| DM-21 | Confirming sends one POST with the CSRF header; the row is unchanged during the request; after `200` and the re-read the row is archived (toggle on) or removed with the explanatory status (toggle off); focus lands on the defined target, never `body`. |
+| DM-21 | Confirming sends one POST with the CSRF header; the row is unchanged during the request; after a confirmed `200` and a successful re-read the row is archived (toggle on) or removed with the explanatory status (toggle off); focus lands on the defined target, never `body`. If the re-read fails after the confirmed `200` the confirmation stays, the list is marked possibly out of date with a read-only **Refresh list**, the row is **not** changed or removed locally, and no second POST is sent (RM-03). |
 | DM-22 | `409` keeps the dialog open with the "agents still belong to it" message and makes no change; the row stays active. |
-| DM-23 | `404`, `403` (CSRF refresh and manual retry), `401`, and unconfirmed outcomes (re-read with `includeArchived=true`; success is never claimed without it) behave as in 6.4. |
+| DM-23 | `404`, `403` (CSRF refresh and manual retry) and `401` behave as in 6.4. Unknown archive outcomes follow section 7.7 and RM-16 to RM-20: failed recheck and absent id (unresolved, Archive unavailable), archived observation (never "It was archived"), active observation (never "it was not archived"; explicit retry sends exactly one more POST), and active with changed details. No archive success or failure is ever announced for an unknown outcome, and no POST is sent without a user action. |
 | DM-24 | There is no Unarchive, Delete or Undo control anywhere, and no archived row can be edited. |
 
 ### 12.5 Navigation, accessibility and regression
@@ -386,7 +478,7 @@ All Playwright tests use **strictly schema-validated synthetic fixtures**: respo
 | DM-28 | Error summary behavior: it takes focus on a failed submit, its items are buttons that focus the right field, fields expose `aria-invalid` and `aria-describedby`, and no fragment links are used. |
 | DM-29 | Status announcements appear in the single polite region (asserted by text), and errors are announced once. |
 | DM-30 | Axe reports no serious or critical violations on the list, empty, error, create form with errors, rename form, archive dialog (open, pending, 409) at 1440, 390 and 320 px. |
-| DM-31 | No horizontal overflow and all controls reachable at 1440, 820, 390, 360 and 320 px, with 120-character names and 80-character slugs; touch targets >= 44 px at <= 820 px. |
+| DM-31 | Responsive and zoom conditions, verified with the methods in section 12.8: (a) no horizontal overflow and all controls reachable at 1440, 820, 390, 360 and 320 px, with 120-character names and 80-character slugs, and touch targets >= 44 px at <= 820 px; (b) the same checks at **200% zoom** equivalents (1440 x 900 window as 720 x 450 CSS px at device scale 2, and 820 and 390 px windows likewise) and at the **WCAG reflow size 320 x 256 CSS px**; (c) the same checks with a **16px minimum font size**; under (b) and (c): form labels, helper text, inline errors and the error summary are fully visible and not truncated or clipped; the archive dialog scrolls internally, keeps both buttons reachable and visible after keyboard focus, and Esc, Tab and Shift+Tab work; text reflows without horizontal scrolling (`scrollWidth <= clientWidth`, so no two-dimensional scrolling is needed) and no action is unreachable; create, rename and archive complete end to end by keyboard. |
 | DM-32 | Reduced-motion emulation produces no animation-dependent state; keyboard-only operation completes create, rename and archive end to end. |
 | DM-33 | Hostile text (`<img onerror>`, `<script>`, markdown, bidi controls) in names and slugs renders inert as text and executes nothing. |
 | DM-34 | Regression: all existing tests (117 at `a3c53e2`) pass unmodified: Command Center, Tasks, Runs, SSE, approvals, the four-link nav, Agents and the F0b skip link. |
@@ -395,13 +487,54 @@ All Playwright tests use **strictly schema-validated synthetic fixtures**: respo
 
 Independent reviewers should confirm, by temporarily disabling each guard in a disposable worktree, that tests fail when: the CSRF header is omitted; the strict body check is removed; the re-read after mutation is skipped (optimistic update); the archive dialog's Cancel-first focus or focus restoration is removed; the rename-409 re-read is replaced by a guess; and the "no automatic retry" rule is broken (the fixture counts requests).
 
+Additional guards for the recovery model (section 7): sending any mutation without a user action (automatic retry after an unknown outcome, a failed recheck, or a failed refresh); turning a failed recheck into a success or failure message; using causal wording ("created", "renamed", "archived", "failed") for observations after an unknown outcome; treating an active observation as proof that an archive never happened; producing the rename slug-conflict message without a supporting observation; showing stale rows as current after a confirmed mutation whose refresh failed.
+
+### 12.7 Recovery test matrix (referenced by DM-13, DM-17, DM-21 and DM-23)
+
+Fixtures are schema-valid. "Fixture" means a scripted synthetic response; "concurrent" means the fixture changes the list between the mutation and the recheck. Every row also asserts: the mutation POST/PATCH count equals the number of explicit user submissions (never an automatic one), the status and alert texts contain no word forbidden by section 7.4 for the situation, and focus lands on a defined target rather than `body`.
+
+| ID | Scenario | Expected |
+|---|---|---|
+| RM-01 | Create `201`, then the list refresh fails | Confirmation naming the values stays; "list may be out of date" with **Refresh list**; no rows shown as current; no mutation controls; one POST; after a successful refresh the rows appear and the confirmation is not repeated |
+| RM-02 | Rename `200`, then the refresh fails | Same pattern as RM-01 for the update |
+| RM-03 | Archive `200`, then the refresh fails | Same pattern; the row is not changed or removed locally; no second POST |
+| RM-04 | Create `503 department_outcome_unknown`, recheck fails | "Outcome unknown"; "Omnis OS couldn't check either"; submit and "New department" disabled; **Check again** works; one POST |
+| RM-05 | Create unknown; recheck shows slug `S` with name `N` | "The latest list includes a department with this slug and name ... can't tell"; no "Created"; Close only |
+| RM-06 | Create unknown; recheck shows slug `S` with a different name, and again with an archived row | Observation message and slug field error; form re-enabled with input kept; no attribution |
+| RM-07 | Create unknown; recheck shows no slug `S` | "doesn't prove the create failed"; no "failed" word; **Try creating again** is a user action that sends exactly one more POST; if the fixture then answers `409`, the slug field error appears |
+| RM-08 | Create unknown; concurrent: the fixture inserts a department with slug `S` and name `N` before the recheck | Same wording as RM-05 (cannot tell whose it is); no claim that this request created it |
+| RM-09 | Rename unknown, recheck fails | Unresolved; that row's Rename and Archive unavailable; other rows usable; **Check again** works |
+| RM-10 | Rename unknown; recheck lacks the department id | "can't be determined"; unresolved; no field error |
+| RM-11 | Rename unknown; recheck shows the requested name and slug | "currently has the name ... and slug ..." observation; no "Renamed"; form closes |
+| RM-12 | Rename unknown; recheck shows the earlier values | "doesn't prove the request never reached the server"; explicit **Try again** only |
+| RM-13 | Rename unknown; concurrent: third values `X`/`Y` (and a partial match) | Current values shown; **Edit current values**; nothing overwritten without a user action |
+| RM-14 | Rename unknown; recheck shows the department archived | "currently appears as archived ... can't tell whether before or after"; form closes |
+| RM-15 | Rename `409` diagnosis: (a) another id has the slug; (b) department archived; (c) active and slug unused by others; (d) read-back fails; (e) id absent | (a) slug field error; (b) archived observation; (c) inconclusive message, no field error; (d) neutral message, no field error; (e) unresolved |
+| RM-16 | Archive unknown, recheck fails | Unresolved; Archive unavailable; **Check again** |
+| RM-17 | Archive unknown; id absent | "can't be determined"; unresolved |
+| RM-18 | Archive unknown; recheck shows archived (variants: archived by this request, archived by another session) | Same observation wording for both; never "It was archived"; dialog closes |
+| RM-19 | Archive unknown; recheck shows active | "doesn't prove the archive request wasn't applied"; no "not archived" claim; Archive re-enabled; explicit retry sends exactly one more POST |
+| RM-20 | Archive unknown; recheck shows active with a changed name or slug | RM-19 wording plus the current values |
+| RM-21 | Recheck response invalid (schema failure, duplicate ids or slugs, total mismatch) for any operation | Treated as a failed recheck (unresolved), never as an observation |
+| RM-22 | A `2xx` mutation response whose body is invalid or does not match the request | Treated as unknown outcome, not as confirmed |
+
+### 12.8 Reproducible zoom and font-size verification (method only)
+
+This section specifies how DM-31 is to be verified later. **No browser validation of this feature has been performed** (the feature does not exist yet). Playwright cannot drive the browser's zoom UI, so Playwright runs use equivalents, and a reviewer should also repeat a short manual pass.
+
+- **200% zoom equivalent:** a window of `W x H` at 200% zoom is a layout viewport of `W/2 x H/2` CSS px at device scale factor 2. In Playwright use `browser.newContext({ viewport: { width: W/2, height: H/2 }, deviceScaleFactor: 2 })` (for example 720 x 450 for a 1440 x 900 window). Verified once on 2026-11-04 with the repository's Playwright Chromium: such a context reports `innerWidth` 720, `innerHeight` 450 and `devicePixelRatio` 2.
+- **WCAG reflow size:** a 320 x 256 CSS px viewport (device scale factor 1 or 4) for 400% zoom at 1280 px. The existing 320 px width coverage is extended with this short height so the dialog and error summary are exercised in a tiny viewport.
+- **16px minimum font size:** run Chromium with `--blink-settings=minimumFontSize=16` (a dedicated Playwright project or launch option). Verified once on 2026-11-04 with the repository's Playwright Chromium that the setting takes effect: an 11px text run measured 153 CSS px wide by default and 215 CSS px with the setting. The check confirms the method only; it says nothing about this feature.
+- **Assertions:** `document.documentElement.scrollWidth <= clientWidth`; each interactive control, label, inline error, error-summary item and dialog button is fully inside the viewport horizontally and reachable by keyboard (focusing it scrolls it into view vertically); no label or message has `scrollWidth > clientWidth`; the archive dialog's content scrolls inside the dialog and its buttons stay reachable; Esc closes it and focus is restored; create, rename and archive complete by keyboard only.
+- **Manual pass (reviewer):** repeat in real Chrome or Firefox with Ctrl/Cmd + to 200%, and with the browser's minimum font size set to 16 where available; confirm text reflows and nothing is clipped.
+
 ## 13. PR boundaries and dependencies
 
 | Milestone | Content | Entry criteria |
 |---|---|---|
-| 1 - this PR | Documentation only: this specification and one-paragraph cross-references | Scope approved by independent frontend review; owner decisions D-1 to D-5 answered before milestone 2 starts |
-| 2 - list, create, rename | `departments/` module; `Page` union and `readRoute()` change; "Manage departments" link on the Agents directory; fixtures and Playwright/axe tests for DM-01 to DM-19, DM-25 to DM-34 | Milestone 1 merged; D-1, D-3, D-4, D-5, D-7 settled |
-| 3 - archive | Archive dialog, focus restoration and outcomes; DM-20 to DM-24 and their axe/responsive cases | Milestone 2 merged; D-2 settled |
+| 1 - this PR | Documentation only: this specification and one-paragraph cross-references | Scope approved by independent frontend review. No owner decision is required to merge it (section 4.2); a merge approves no decision |
+| 2 - list, create, rename | `departments/` module; `Page` union and `readRoute()` change; "Manage departments" link on the Agents directory; fixtures and Playwright/axe tests for DM-01 to DM-19 and DM-25 to DM-34 (the archive-dialog parts of DM-30 and DM-32 belong to milestone 3), including the recovery matrix rows for create and rename (section 12.7) | Milestone 1 merged; D-1, D-3, D-4, D-5, D-6 and D-7 explicitly approved by the owner |
+| 3 - archive | Archive dialog, focus restoration and outcomes; DM-20 to DM-24, the archive-dialog parts of DM-30 and DM-32, and the recovery matrix rows for archive | Milestone 2 merged; D-2 explicitly approved, with the milestone 2 decisions still approved |
 
 Each milestone is a separate Draft PR with independent frontend QA, and no PR merges without explicit owner authorization. Milestone 2 does not render the archive control; milestone 3 adds it.
 
