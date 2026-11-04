@@ -431,6 +431,28 @@ describe('post-restore PostgreSQL ACL integrity', () => {
     );
   });
 
+  it('canonicalizes task sequence owner ACLs only when the restore role owns the sequence', () => {
+    const ownerEntries = [
+      acl('sequence', 'omnis', 'task_id_seq', 'SELECT', null, 'omnis_migrator'),
+      acl('sequence', 'omnis', 'task_id_seq', 'UPDATE', null, 'omnis_migrator'),
+    ];
+    assert.equal(restoreAclSnapshotsMatch([...allowed, ...ownerEntries], allowed), true);
+    assert.equal(
+      restoreAclSnapshotsMatch(
+        [...allowed, ...ownerEntries],
+        [...allowed, { ...ownerEntries[0], grantee: 'omnis_runtime' }],
+      ),
+      false,
+    );
+    assert.equal(
+      restoreAclSnapshotsMatch(
+        [...allowed, ...ownerEntries],
+        [...allowed, { ...ownerEntries[0], privilege: 'USAGE' }],
+      ),
+      false,
+    );
+  });
+
   it('compares the effective runtime grant set for legacy baseline parity', () => {
     assert.equal(runtimeAclSnapshotsMatch(allowed, [...allowed].reverse()), true);
     assert.equal(

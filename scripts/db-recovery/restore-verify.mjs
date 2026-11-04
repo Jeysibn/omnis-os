@@ -192,6 +192,29 @@ try {
   const restoredAclSnapshot = JSON.parse(restoredAclText.trim());
   assertRestoreDatabaseClosed(restoredAclSnapshot);
   assertRuntimeAclPolicy(restoredAclSnapshot);
+  const taskSequenceOwner = await dockerOutput([
+    ...composeArgs,
+    'exec',
+    '-T',
+    'postgres',
+    'psql',
+    '-X',
+    '--no-psqlrc',
+    '--set=ON_ERROR_STOP=1',
+    '--tuples-only',
+    '--no-align',
+    '--username=omnis',
+    `--dbname=${targetDatabase}`,
+    '--command',
+    `SELECT pg_catalog.pg_get_userbyid(class.relowner)
+       FROM pg_catalog.pg_class AS class
+       JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = class.relnamespace
+      WHERE namespace.nspname = 'omnis' AND class.relname = 'task_id_seq'
+        AND class.relkind = 'S'`,
+  ]);
+  if (taskSequenceOwner.trim() !== 'omnis_migrator') {
+    throw new Error('Restored task identifier sequence is not owned by the migration role.');
+  }
   if (
     manifest.format === 'postgres-custom-acl-v1' &&
     !restoreAclSnapshotsMatch(manifest.aclSnapshot, restoredAclSnapshot)

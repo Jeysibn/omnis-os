@@ -241,6 +241,16 @@ export function restoreAclSnapshotsMatch(source, restored) {
           entry.objectType === 'database' &&
           entry.privilege === 'CONNECT' &&
           deferredDatabaseConnectGrantees.has(entry.grantee)
+        ) &&
+        // pg_restore --no-owner recreates this sequence as omnis_migrator.
+        // Its intrinsic owner privileges replace explicit owner ACL entries
+        // that pg_dump omits from the archive.
+        !(
+          entry.objectType === 'sequence' &&
+          entry.schema === 'omnis' &&
+          entry.object === 'task_id_seq' &&
+          entry.grantee === 'omnis_migrator' &&
+          ['SELECT', 'UPDATE'].includes(entry.privilege)
         ),
     );
   return (
