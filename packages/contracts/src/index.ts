@@ -51,7 +51,14 @@ export const CreateProjectSchema = z
     objective: z.string().trim().min(1).max(4000),
     priority: ProjectPrioritySchema.default('normal'),
   })
-  .strict();
+  .strict()
+  .refine(
+    (project) =>
+      !project.key.includes('\0') &&
+      !project.name.includes('\0') &&
+      !project.objective.includes('\0'),
+    'Project text cannot contain NUL characters.',
+  );
 export type CreateProjectInput = z.infer<typeof CreateProjectSchema>;
 
 export const ProjectSummarySchema = z

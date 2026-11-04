@@ -106,6 +106,10 @@ describe('project management contracts', () => {
       CreateProjectSchema.safeParse({ key: 'OK', name: 'x', objective: 'y', extra: true }).success,
       false,
     );
+    assert.equal(
+      CreateProjectSchema.safeParse({ key: 'OK', name: 'x\0y', objective: 'objective' }).success,
+      false,
+    );
   });
 
   it('requires list completeness, accurate totals, and stable unique project keys', () => {
