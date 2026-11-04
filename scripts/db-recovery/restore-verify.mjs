@@ -12,6 +12,7 @@ import {
   aclSnapshotQuery,
   assertRestoreDatabaseClosed,
   assertRuntimeAclPolicy,
+  normalizeAclSnapshot,
   restoreAclSnapshotsMatch,
 } from './acl-integrity.mjs';
 import { assertRestoreRoleSecurity, restoreRoleSecurityQuery } from './role-integrity.mjs';
@@ -195,7 +196,26 @@ try {
     manifest.format === 'postgres-custom-acl-v1' &&
     !restoreAclSnapshotsMatch(manifest.aclSnapshot, restoredAclSnapshot)
   ) {
-    throw new Error('Restored PostgreSQL ACLs do not match the source ACL snapshot.');
+    const sourceAclEntries = normalizeAclSnapshot(manifest.aclSnapshot);
+    const restoredAclEntries = normalizeAclSnapshot(restoredAclSnapshot);
+    const restoredKeys = new Set(restoredAclEntries.map((entry) => JSON.stringify(entry)));
+    const sourceKeys = new Set(sourceAclEntries.map((entry) => JSON.stringify(entry)));
+    const summarize = (entries) =>
+      entries
+        .slice(0, 20)
+        .map(
+          (entry) =>
+            `${entry.objectType}:${entry.schema || 'database'}.${entry.object} ` +
+            `${entry.privilege} for ${entry.grantee}`,
+        );
+    const missing = sourceAclEntries.filter((entry) => !restoredKeys.has(JSON.stringify(entry)));
+    const unexpected = restoredAclEntries.filter((entry) => !sourceKeys.has(JSON.stringify(entry)));
+    throw new Error(
+      `Restored PostgreSQL ACLs do not match the source ACL snapshot ` +
+        `(${missing.length} missing, ${unexpected.length} unexpected; ` +
+        `missing: ${JSON.stringify(summarize(missing))}; ` +
+        `unexpected: ${JSON.stringify(summarize(unexpected))}).`,
+    );
   }
 
   const roleSecurityText = await dockerOutput([
