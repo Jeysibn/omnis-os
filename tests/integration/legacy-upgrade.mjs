@@ -136,7 +136,24 @@ try {
     failedLegacyTask.title,
     'legacy-failure-worker',
   );
-  const beforeUpgrade = (await databaseAdminPool.query(metricsQuery)).rows[0].json_build_object;
+  const beforeUpgrade = (
+    await databaseAdminPool.query(`
+      SELECT json_build_object(
+        'tasks', (SELECT count(*) FROM omnis.tasks),
+        'runs', (SELECT count(*) FROM omnis.runs),
+        'events', (SELECT count(*) FROM omnis.run_events),
+        'idempotencyRecords', (SELECT count(*) FROM omnis.run_idempotency),
+        'unsafeRunStates', (SELECT count(*) FROM omnis.runs
+          WHERE status IN ('queued', 'running', 'stopping', 'unknown')),
+        'recordFingerprints', json_build_object(
+          'tasks', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(t)::text), ':' ORDER BY t.id), '')) FROM omnis.tasks t),
+          'runs', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(r)::text), ':' ORDER BY r.id), '')) FROM omnis.runs r),
+          'events', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(e)::text), ':' ORDER BY e.run_id, e.sequence), '')) FROM omnis.run_events e),
+          'idempotency', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(i)::text), ':' ORDER BY i.idempotency_key), '')) FROM omnis.run_idempotency i)
+        )
+      )
+    `)
+  ).rows[0].json_build_object;
   assert.equal(beforeUpgrade.tasks, 3);
   assert.equal(beforeUpgrade.runs, 3);
   assert.equal(beforeUpgrade.events, 3);
@@ -157,7 +174,9 @@ try {
   await verifyPost0005ProvenanceUpgrade();
 
   const afterUpgrade = (await databaseAdminPool.query(metricsQuery)).rows[0].json_build_object;
-  assert.deepEqual(afterUpgrade.recordFingerprints, beforeUpgrade.recordFingerprints);
+  for (const [table, fingerprint] of Object.entries(beforeUpgrade.recordFingerprints)) {
+    assert.equal(afterUpgrade.recordFingerprints[table], fingerprint);
+  }
   assert.deepEqual(afterUpgrade.migrations, [
     '0001_initial',
     '0002_runtime_grants',
@@ -172,6 +191,7 @@ try {
     '0011_authorized_mock_sandbox_launch',
     '0012_agent_profiles',
     '0013_department_management',
+    '0014_agent_profile_lifecycle',
   ]);
   assert.equal(afterUpgrade.unsafeRunStates, 3);
   assert.equal(
@@ -651,7 +671,7 @@ async function verifyPost0005ProvenanceUpgrade() {
       "SELECT id, length(checksum) AS checksum_length FROM omnis.schema_migrations WHERE id LIKE '00%' ORDER BY id",
     );
     assert.deepEqual(migrationRows.rows.at(-1), {
-      id: '0013_department_management',
+      id: '0014_agent_profile_lifecycle',
       checksum_length: 64,
     });
   } finally {
