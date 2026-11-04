@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type MouseEvent,
+} from 'react';
 import {
   Activity,
   ArrowRight,
@@ -795,7 +803,7 @@ function App() {
 
   return (
     <div className="app-shell">
-      <a className="skip-link" href="#main-content">
+      <a className="skip-link" href="#main-content" onClick={skipToMain}>
         Skip to main content
       </a>
       <header className="topbar">
@@ -830,7 +838,7 @@ function App() {
           </button>
         </div>
       </header>
-      <main id="main-content" className="main-content">
+      <main id="main-content" className="main-content" tabIndex={-1}>
         <section className="page-heading">
           <div>
             <div className="heading-row">
@@ -960,6 +968,24 @@ const pageSubtitles: Record<Page, string> = {
   tasks: 'Create and review work in your local workspace.',
   runs: 'Follow current and historical mock run activity.',
 };
+
+// The app uses hash routing, so the default `#main-content` anchor jump would replace
+// the current route. Move focus to the main landmark without touching location or history,
+// then scroll to the start of main immediately (no animation), leaving room for the focus ring
+// so its top edge is never above the viewport, even when main is taller than the viewport.
+function skipToMain(event: MouseEvent<HTMLAnchorElement>) {
+  event.preventDefault();
+  const main = document.getElementById('main-content');
+  if (!main) return;
+  main.focus({ preventScroll: true });
+  const style = window.getComputedStyle(main);
+  const ring =
+    style.outlineStyle === 'none'
+      ? 0
+      : Number.parseFloat(style.outlineWidth) + Math.max(Number.parseFloat(style.outlineOffset), 0);
+  const top = main.getBoundingClientRect().top + window.scrollY - ring - 6;
+  window.scrollTo({ top: Math.max(top, 0), behavior: 'instant' });
+}
 
 function readRoute(): { page: Page; runId?: string } {
   const [destination, encodedRunId] = window.location.hash.slice(1).split('/', 2);
