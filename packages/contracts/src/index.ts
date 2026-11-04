@@ -30,6 +30,71 @@ export const CreateTaskSchema = z.object({
 });
 export type CreateTaskInput = z.infer<typeof CreateTaskSchema>;
 
+export const ProjectIdSchema = z.string().regex(/^prj_[0-9a-f]{32}$/);
+export const ProjectStatusSchema = z.enum([
+  'proposed',
+  'active',
+  'paused',
+  'completed',
+  'archived',
+]);
+export const ProjectPrioritySchema = z.enum(['low', 'normal', 'high', 'urgent']);
+export const CreateProjectSchema = z
+  .object({
+    key: z
+      .string()
+      .trim()
+      .min(2)
+      .max(32)
+      .regex(/^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*$/),
+    name: z.string().trim().min(1).max(120),
+    objective: z.string().trim().min(1).max(4000),
+    priority: ProjectPrioritySchema.default('normal'),
+  })
+  .strict()
+  .refine(
+    (project) =>
+      !project.key.includes('\0') &&
+      !project.name.includes('\0') &&
+      !project.objective.includes('\0'),
+    'Project text cannot contain NUL characters.',
+  );
+export type CreateProjectInput = z.infer<typeof CreateProjectSchema>;
+
+export const ProjectSummarySchema = z
+  .object({
+    id: ProjectIdSchema,
+    ownerId: z.literal('owner'),
+    key: z.string().min(2).max(32),
+    name: z.string().min(1).max(120),
+    status: ProjectStatusSchema,
+    priority: ProjectPrioritySchema,
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .strict();
+export type ProjectSummary = z.infer<typeof ProjectSummarySchema>;
+
+export const ProjectSchema = ProjectSummarySchema.extend({
+  objective: z.string().min(1).max(4000),
+}).strict();
+export type Project = z.infer<typeof ProjectSchema>;
+
+export const ProjectListResponseSchema = z
+  .object({
+    projects: z.array(ProjectSummarySchema).max(500),
+    total: z.number().int().nonnegative(),
+    complete: z.literal(true),
+  })
+  .strict()
+  .refine(
+    (result) =>
+      result.total === result.projects.length &&
+      new Set(result.projects.map((project) => project.id)).size === result.projects.length &&
+      new Set(result.projects.map((project) => project.key)).size === result.projects.length,
+  );
+export type ProjectListResponse = z.infer<typeof ProjectListResponseSchema>;
+
 export const UsageSchema = z.object({
   quality: z.literal('unknown'),
   inputTokens: z.null(),

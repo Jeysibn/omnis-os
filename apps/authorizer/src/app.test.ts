@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import type { Authorization, Department } from '@omnis/contracts';
+import type { Authorization, Department, Project } from '@omnis/contracts';
 import { AgentLifecycleStoreError } from '@omnis/db';
 import { createAuthorizerApp, type AuthorizerStore } from './app.ts';
 
@@ -32,6 +32,27 @@ const department: Department = {
   archivedAt: null,
   createdAt: '2026-11-04T00:00:00.000Z',
   updatedAt: '2026-11-04T00:00:00.000Z',
+};
+const project: Project = {
+  id: 'prj_0123456789abcdef0123456789abcdef',
+  ownerId: 'owner',
+  key: 'OMNIS-OS',
+  name: 'Omnis OS',
+  objective: 'Synthetic project fixture.',
+  status: 'proposed',
+  priority: 'normal',
+  createdAt: '2026-11-04T00:00:00.000Z',
+  updatedAt: '2026-11-04T00:00:00.000Z',
+};
+const projectSummary = {
+  id: project.id,
+  ownerId: project.ownerId,
+  key: project.key,
+  name: project.name,
+  status: project.status,
+  priority: project.priority,
+  createdAt: project.createdAt,
+  updatedAt: project.updatedAt,
 };
 
 function makeStore() {
@@ -73,6 +94,16 @@ function makeStore() {
       calls.push({ method: 'archiveDepartment', requestId });
       return { ...department, archivedAt: '2026-11-04T01:00:00.000Z' };
     },
+    async listProjects() {
+      return { projects: [projectSummary], total: 1, complete: true };
+    },
+    async getProject(id) {
+      return id === project.id ? project : undefined;
+    },
+    async createProject(_input, requestId) {
+      calls.push({ method: 'createProject', requestId });
+      return project;
+    },
   };
   return { store, calls };
 }
@@ -90,6 +121,103 @@ describe('independent authorizer service boundary', () => {
       });
       assert.equal(response.statusCode, 401);
       assert.deepEqual(calls, []);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('keeps project reads and idempotent creation behind the authorizer service token', async () => {
+    const { store, calls } = makeStore();
+    const app = createAuthorizerApp({ store, serviceToken, checkDatabase: async () => undefined });
+    try {
+      const denied = await app.inject({ method: 'GET', url: '/internal/v1/projects' });
+      assert.equal(denied.statusCode, 401);
+      const headers = { 'x-omnis-authorizer-token': serviceToken };
+      const list = await app.inject({ method: 'GET', url: '/internal/v1/projects', headers });
+      assert.equal(list.statusCode, 200);
+      assert.equal(list.json().complete, true);
+      const missing = await app.inject({
+        method: 'GET',
+        url: '/internal/v1/projects/prj_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        headers,
+      });
+      assert.equal(missing.statusCode, 404);
+      const created = await app.inject({
+        method: 'POST',
+        url: '/internal/v1/projects',
+        headers: { ...headers, 'idempotency-key': '3a167582-1dc3-48a4-a69f-8b1fe0c58ee2' },
+        payload: { key: 'OMNIS-OS', name: 'Omnis OS', objective: 'Synthetic project.' },
+      });
+      assert.equal(created.statusCode, 201);
+      assert.equal(
+        calls.some((call) => call.method === 'createProject' && !!call.requestId),
+        true,
+      );
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('does not expose uncertain project write failures or rejected input details', async () => {
+    const { store } = makeStore();
+    const failingStore: AuthorizerStore = {
+      ...store,
+      async createProject() {
+        throw new Error('synthetic-private-value-must-not-leak');
+      },
+    };
+    const app = createAuthorizerApp({
+      store: failingStore,
+      serviceToken,
+      checkDatabase: async () => undefined,
+    });
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/internal/v1/projects',
+        headers: {
+          'x-omnis-authorizer-token': serviceToken,
+          'idempotency-key': '3a167582-1dc3-48a4-a69f-8b1fe0c58ee2',
+        },
+        payload: { key: 'SAFE', name: 'Safe name', objective: 'A safe description.' },
+      });
+      assert.equal(response.statusCode, 503);
+      assert.equal(response.json().error.code, 'project_outcome_unknown');
+      assert.doesNotMatch(response.body, /synthetic-private-value-must-not-leak/);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('returns definite safe 400 and 413 errors for malformed or oversized project requests', async () => {
+    const { store, calls } = makeStore();
+    const app = createAuthorizerApp({ store, serviceToken, checkDatabase: async () => undefined });
+    const headers = {
+      'x-omnis-authorizer-token': serviceToken,
+      'idempotency-key': '3a167582-1dc3-48a4-a69f-8b1fe0c58ee2',
+      'content-type': 'application/json',
+    };
+    try {
+      const malformed = await app.inject({
+        method: 'POST',
+        url: '/internal/v1/projects',
+        headers,
+        payload: '{',
+      });
+      assert.equal(malformed.statusCode, 400);
+      assert.equal(malformed.json().error.code, 'invalid_input');
+      const oversized = await app.inject({
+        method: 'POST',
+        url: '/internal/v1/projects',
+        headers,
+        payload: JSON.stringify({ key: 'SAFE', name: 'Safe', objective: 'x'.repeat(40_000) }),
+      });
+      assert.equal(oversized.statusCode, 413);
+      assert.equal(oversized.json().error.code, 'payload_too_large');
+      assert.equal(
+        calls.some((call) => call.method === 'createProject'),
+        false,
+      );
     } finally {
       await app.close();
     }

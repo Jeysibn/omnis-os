@@ -15,6 +15,8 @@ import {
   PostgresAgentLifecycleStore,
   PostgresAuthorizationStore,
   PostgresDepartmentManagementStore,
+  PostgresProjectManagementStore,
+  ProjectStoreError,
   PostgresRunStore,
   StoreError,
   type PgBossTransaction,
@@ -76,7 +78,7 @@ const postgresSuite = describe(
         'GRANT SELECT, INSERT, UPDATE, DELETE ON omnis.test_queue_outbox TO omnis_runtime',
       );
       await adminPool!.query(
-        'TRUNCATE omnis.test_queue_outbox, omnis.agent_management_idempotency, omnis.agent_management_audit, omnis.agent_profile_drafts, omnis.department_management_audit, omnis.agent_profile_versions, omnis.agents, omnis.departments, omnis.mock_sandbox_launches, omnis.legacy_unscoped_runs, omnis.authorization_audit, omnis.runtime_authorizations, omnis.run_idempotency, omnis.run_events, omnis.runs, omnis.tasks',
+        'TRUNCATE omnis.test_queue_outbox, omnis.project_management_idempotency, omnis.project_management_audit, omnis.projects, omnis.agent_management_idempotency, omnis.agent_management_audit, omnis.agent_profile_drafts, omnis.department_management_audit, omnis.agent_profile_versions, omnis.agents, omnis.departments, omnis.mock_sandbox_launches, omnis.legacy_unscoped_runs, omnis.authorization_audit, omnis.runtime_authorizations, omnis.run_idempotency, omnis.run_events, omnis.runs, omnis.tasks',
       );
       await adminPool!.query('ALTER SEQUENCE omnis.task_id_seq RESTART WITH 1');
       await adminPool!.query('ALTER SEQUENCE omnis.run_id_seq RESTART WITH 1');
@@ -92,6 +94,77 @@ const postgresSuite = describe(
         agents: [],
         page: { total: 0, complete: true, nextCursor: null },
       });
+    });
+
+    it('creates owner-scoped projects atomically, lists completely, and replays uncertain retries', async () => {
+      const projects = new PostgresProjectManagementStore(authorizerPool!, Buffer.alloc(32, 23));
+      assert.deepEqual(await projects.list(), { projects: [], total: 0, complete: true });
+      const input = {
+        key: 'AO-105',
+        name: 'Project Management',
+        objective: 'Create and inspect project records.',
+        priority: 'high' as const,
+      };
+      const requestId = randomUUID();
+      const [created, replayed] = await Promise.all([
+        projects.create(input, requestId),
+        projects.create(input, requestId),
+      ]);
+      assert.equal(created.id, replayed.id);
+      assert.equal(created.status, 'proposed');
+      assert.equal(created.ownerId, 'owner');
+      assert.equal((await projects.get(created.id))?.key, 'AO-105');
+      assert.deepEqual(
+        (await projects.list()).projects.map((entry) => entry.id),
+        [created.id],
+      );
+      await assert.rejects(
+        projects.create({ ...input, name: 'Changed body' }, requestId),
+        (error: unknown) => error instanceof ProjectStoreError && error.code === 'conflict',
+      );
+      await assert.rejects(
+        projects.create(input, randomUUID()),
+        (error: unknown) => error instanceof ProjectStoreError && error.code === 'conflict',
+      );
+      await assert.rejects(
+        projects.create({ ...input, objective: 'password: "example-secret-123456"' }, randomUUID()),
+        (error: unknown) => error instanceof ProjectStoreError && error.statusCode === 422,
+      );
+      const audit = await adminPool!.query<{
+        action: string;
+        actor_id: string;
+        request_id: string;
+      }>(
+        'SELECT action, actor_id, request_id FROM omnis.project_management_audit WHERE project_id=$1',
+        [created.id],
+      );
+      assert.deepEqual(audit.rows[0], {
+        action: 'created',
+        actor_id: 'owner',
+        request_id: requestId,
+      });
+      const roleAccess = await adminPool!.query<{
+        runtime_project_select: boolean;
+        authorizer_project_select: boolean;
+        runtime_create_function: boolean;
+        authorizer_create_function: boolean;
+      }>(`
+        SELECT has_table_privilege('omnis_runtime', 'omnis.projects', 'SELECT') AS runtime_project_select,
+               has_table_privilege('omnis_authorizer', 'omnis.projects', 'SELECT') AS authorizer_project_select,
+               has_function_privilege('omnis_runtime', 'omnis.create_project(text,text,text,text,text,uuid,integer,bytea)', 'EXECUTE') AS runtime_create_function,
+               has_function_privilege('omnis_authorizer', 'omnis.create_project(text,text,text,text,text,uuid,integer,bytea)', 'EXECUTE') AS authorizer_create_function
+      `);
+      assert.deepEqual(roleAccess.rows[0], {
+        runtime_project_select: false,
+        authorizer_project_select: false,
+        runtime_create_function: false,
+        authorizer_create_function: true,
+      });
+      await assert.rejects(
+        authorizerPool!.query('SELECT * FROM omnis.projects'),
+        /permission denied/,
+      );
+      await assert.rejects(pool!.query('SELECT * FROM omnis.projects'), /permission denied/);
     });
 
     it('fails closed instead of silently truncating a directory above the response bound', async () => {
