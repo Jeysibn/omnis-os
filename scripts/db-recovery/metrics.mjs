@@ -113,6 +113,7 @@ export function assertValidMetrics(report) {
     !report.migrations.includes('0001_initial') ||
     !report.migrations.includes('0014_agent_profile_lifecycle') ||
     !report.migrations.includes('0015_project_management') ||
+    !report.migrations.includes('0016_project_lifecycle') ||
     !validAgentManagementCounts(report.agentManagementCounts) ||
     !validProjectManagementCounts(report.projectManagementCounts) ||
     !validManagementFingerprints(report.recordFingerprints) ||

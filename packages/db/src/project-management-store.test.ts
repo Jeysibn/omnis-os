@@ -12,6 +12,7 @@ const project = {
   objective: 'A synthetic objective.',
   status: 'proposed',
   priority: 'normal',
+  revision: 1,
   createdAt: '2026-11-04T00:00:00.000Z',
   updatedAt: '2026-11-04T00:00:00.000Z',
 };
@@ -67,5 +68,109 @@ describe('project management store boundary', () => {
       },
     );
     assert.equal(called, false);
+  });
+
+  it('updates metadata through the scoped function with a normalized fingerprint', async () => {
+    const calls: Array<{ sql: string; values: unknown[] }> = [];
+    const pool = {
+      async query(sql: string, values: unknown[] = []) {
+        calls.push({ sql, values });
+        return { rows: [{ result: { ...project, name: 'Updated name', revision: 2 } }] };
+      },
+    } as unknown as Pool;
+    const key = Buffer.alloc(32, 23);
+    const store = new PostgresProjectManagementStore(pool, key, 4);
+    const input = { expectedRevision: 1, name: ' Updated name ' };
+    const updated = await store.update(project.id, input, '1208f993-29f8-40ee-9d56-c2cbe4f63100');
+    assert.equal(updated.revision, 2);
+    assert.match(calls[0]!.sql, /SELECT omnis\.update_project/);
+    assert.doesNotMatch(calls[0]!.sql, /UPDATE omnis\.projects/);
+    assert.equal(calls[0]!.values[1], 1);
+    assert.deepEqual(
+      calls[0]!.values[7],
+      createHmac('sha256', key)
+        .update('omnis-project-management-idempotency:v1\0')
+        .update(
+          JSON.stringify({
+            operation: 'project.updated',
+            input: {
+              projectId: project.id,
+              input: { expectedRevision: 1, name: 'Updated name' },
+            },
+          }),
+        )
+        .digest(),
+    );
+  });
+
+  it('archives through the scoped function and rejects unsafe text before database access', async () => {
+    const calls: Array<{ sql: string; values: unknown[] }> = [];
+    const pool = {
+      async query(sql: string, values: unknown[] = []) {
+        calls.push({ sql, values });
+        return { rows: [{ result: { ...project, status: 'archived', revision: 2 } }] };
+      },
+    } as unknown as Pool;
+    const store = new PostgresProjectManagementStore(pool, Buffer.alloc(32, 23));
+    const archived = await store.archive(
+      project.id,
+      { expectedRevision: 1 },
+      '1208f993-29f8-40ee-9d56-c2cbe4f63101',
+    );
+    assert.equal(archived.status, 'archived');
+    assert.match(calls[0]!.sql, /SELECT omnis\.archive_project/);
+    assert.doesNotMatch(calls[0]!.sql, /UPDATE omnis\.projects/);
+
+    calls.length = 0;
+    await assert.rejects(
+      store.update(
+        project.id,
+        { expectedRevision: 1, objective: 'password: "synthetic-secret-value-123456"' },
+        '1208f993-29f8-40ee-9d56-c2cbe4f63102',
+      ),
+      (error: unknown) =>
+        error instanceof ProjectStoreError &&
+        error.statusCode === 422 &&
+        !error.message.includes('synthetic-secret-value'),
+    );
+    assert.deepEqual(calls, []);
+  });
+
+  it('maps stale revisions and invalid lifecycle transitions to safe conflicts', async () => {
+    const pool = {
+      async query() {
+        throw { code: '40001' };
+      },
+    } as unknown as Pool;
+    const store = new PostgresProjectManagementStore(pool, Buffer.alloc(32, 23));
+    await assert.rejects(
+      store.update(
+        project.id,
+        { expectedRevision: 1, priority: 'high' },
+        '1208f993-29f8-40ee-9d56-c2cbe4f63103',
+      ),
+      (error: unknown) =>
+        error instanceof ProjectStoreError && error.statusCode === 409 && error.code === 'conflict',
+    );
+    const transitionPool = {
+      async query() {
+        throw { code: 'P0001' };
+      },
+    } as unknown as Pool;
+    const transitionStore = new PostgresProjectManagementStore(
+      transitionPool,
+      Buffer.alloc(32, 23),
+    );
+    await assert.rejects(
+      transitionStore.archive(
+        project.id,
+        { expectedRevision: 1 },
+        '1208f993-29f8-40ee-9d56-c2cbe4f63104',
+      ),
+      (error: unknown) =>
+        error instanceof ProjectStoreError &&
+        error.statusCode === 409 &&
+        error.code === 'invalid_transition',
+    );
   });
 });

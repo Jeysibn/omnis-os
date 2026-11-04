@@ -19,6 +19,7 @@ const project = {
   objective: 'Deliver the project foundation.',
   status: 'proposed',
   priority: 'normal',
+  revision: 1,
   createdAt: at,
   updatedAt: at,
 };
@@ -29,13 +30,14 @@ const projectSummary = {
   name: project.name,
   status: project.status,
   priority: project.priority,
+  revision: project.revision,
   createdAt: project.createdAt,
   updatedAt: project.updatedAt,
 };
 
 function testApp(
   owner: boolean,
-  calls: Array<{ path: string; method: string; headers?: HeadersInit }>,
+  calls: Array<{ path: string; method: string; headers?: HeadersInit; body?: string }>,
 ) {
   const app = Fastify();
   app.decorateRequest('omnisSession', undefined);
@@ -55,6 +57,7 @@ function testApp(
         path,
         method: init?.method ?? 'GET',
         ...(init?.headers === undefined ? {} : { headers: init.headers }),
+        ...(typeof init?.body === 'string' ? { body: init.body } : {}),
       });
       if (path === '/internal/v1/projects') {
         return parse(
@@ -63,6 +66,8 @@ function testApp(
             : { projects: [projectSummary], total: 1, complete: true },
         );
       }
+      if (init?.method === 'PATCH') return parse({ ...project, name: 'Updated name', revision: 2 });
+      if (path.endsWith('/archive')) return parse({ ...project, status: 'archived', revision: 2 });
       return parse(project);
     },
   );
@@ -71,7 +76,7 @@ function testApp(
 
 describe('owner project routes', () => {
   it('requires owner authentication and session-bound CSRF before creation', async () => {
-    const calls: Array<{ path: string; method: string; headers?: HeadersInit }> = [];
+    const calls: Array<{ path: string; method: string; headers?: HeadersInit; body?: string }> = [];
     const anonymous = testApp(false, calls);
     const owner = testApp(true, calls);
     const body = {
@@ -114,7 +119,7 @@ describe('owner project routes', () => {
   });
 
   it('returns complete lists, creates with idempotency, and validates project identity', async () => {
-    const calls: Array<{ path: string; method: string; headers?: HeadersInit }> = [];
+    const calls: Array<{ path: string; method: string; headers?: HeadersInit; body?: string }> = [];
     const app = testApp(true, calls);
     const headers = {
       origin: 'http://127.0.0.1:5173',
@@ -153,7 +158,7 @@ describe('owner project routes', () => {
   });
 
   it('returns definite generic errors for malformed or oversized project JSON before forwarding', async () => {
-    const calls: Array<{ path: string; method: string; headers?: HeadersInit }> = [];
+    const calls: Array<{ path: string; method: string; headers?: HeadersInit; body?: string }> = [];
     const app = testApp(true, calls);
     const headers = {
       origin: 'http://127.0.0.1:5173',
@@ -179,6 +184,93 @@ describe('owner project routes', () => {
       assert.equal(oversized.statusCode, 413);
       assert.equal(oversized.json().error.code, 'payload_too_large');
       assert.deepEqual(calls, []);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('updates permitted project metadata with session protection, revision, and idempotency', async () => {
+    const calls: Array<{ path: string; method: string; headers?: HeadersInit; body?: string }> = [];
+    const anonymous = testApp(false, calls);
+    const owner = testApp(true, calls);
+    const headers = {
+      origin: 'http://127.0.0.1:5173',
+      'x-omnis-csrf': 'csrf-token-123456',
+      'idempotency-key': 'b9d5fd0e-4681-4a41-90c0-50b120843aa5',
+    };
+    try {
+      const anonymousPatch = await anonymous.inject({
+        method: 'PATCH',
+        url: `/api/v1/projects/${project.id}`,
+        headers,
+        payload: { expectedRevision: 1, name: 'Updated name' },
+      });
+      assert.equal(anonymousPatch.statusCode, 401);
+      const csrfRejected = await owner.inject({
+        method: 'PATCH',
+        url: `/api/v1/projects/${project.id}`,
+        headers: { ...headers, 'x-omnis-csrf': 'wrong-token' },
+        payload: { expectedRevision: 1, name: 'Updated name' },
+      });
+      assert.equal(csrfRejected.statusCode, 403);
+      const emptyPatch = await owner.inject({
+        method: 'PATCH',
+        url: `/api/v1/projects/${project.id}`,
+        headers,
+        payload: { expectedRevision: 1 },
+      });
+      assert.equal(emptyPatch.statusCode, 422);
+      const updated = await owner.inject({
+        method: 'PATCH',
+        url: `/api/v1/projects/${project.id}`,
+        headers,
+        payload: { expectedRevision: 1, name: 'Updated name' },
+      });
+      assert.equal(updated.statusCode, 200);
+      assert.equal(updated.json().revision, 2);
+      assert.deepEqual(calls.at(-1), {
+        path: `/internal/v1/projects/${project.id}`,
+        method: 'PATCH',
+        headers: { 'idempotency-key': headers['idempotency-key'] },
+        body: JSON.stringify({ expectedRevision: 1, name: 'Updated name' }),
+      });
+    } finally {
+      await Promise.all([anonymous.close(), owner.close()]);
+    }
+  });
+
+  it('archives through the constrained route and rejects malformed project IDs', async () => {
+    const calls: Array<{ path: string; method: string; headers?: HeadersInit; body?: string }> = [];
+    const app = testApp(true, calls);
+    const headers = {
+      origin: 'http://127.0.0.1:5173',
+      'x-omnis-csrf': 'csrf-token-123456',
+      'idempotency-key': 'b9d5fd0e-4681-4a41-90c0-50b120843aa5',
+    };
+    try {
+      const archived = await app.inject({
+        method: 'POST',
+        url: `/api/v1/projects/${project.id}/archive`,
+        headers,
+        payload: { expectedRevision: 1 },
+      });
+      assert.equal(archived.statusCode, 200);
+      assert.equal(archived.json().status, 'archived');
+      const invalidId = await app.inject({
+        method: 'POST',
+        url: '/api/v1/projects/not-a-project/archive',
+        headers,
+        payload: { expectedRevision: 1 },
+      });
+      assert.equal(invalidId.statusCode, 422);
+      assert.deepEqual(calls, [
+        {
+          path: `/internal/v1/projects/${project.id}/archive`,
+          method: 'POST',
+          headers: { 'idempotency-key': headers['idempotency-key'] },
+          body: JSON.stringify({ expectedRevision: 1 }),
+        },
+      ]);
     } finally {
       await app.close();
     }

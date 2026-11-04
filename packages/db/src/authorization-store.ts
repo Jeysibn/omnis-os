@@ -106,6 +106,14 @@ export class PostgresAuthorizationStore {
     return this.requireProjectManagement().create(input, requestId);
   }
 
+  updateProject(id: string, input: unknown, requestId: string): Promise<Project> {
+    return this.requireProjectManagement().update(id, input, requestId);
+  }
+
+  archiveProject(id: string, input: unknown, requestId: string): Promise<Project> {
+    return this.requireProjectManagement().archive(id, input, requestId);
+  }
+
   private requireProjectManagement(): PostgresProjectManagementStore {
     if (!this.projectManagement) throw new Error('Project management store is unavailable.');
     return this.projectManagement;

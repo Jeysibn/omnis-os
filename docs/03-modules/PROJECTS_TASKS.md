@@ -52,4 +52,4 @@ Worker claims job, starts allowed adapter, streams sanitized status, tool events
 - Two concurrent `POST .../runs` requests using same idempotency key create one canonical run.
 - Cyclic task dependency is rejected.
 - A reviewed write action cannot be changed after authorization by editing arguments.
-- Archiving a project preserves its audit history and prevents new runs unless reopened.
+- Archiving a project preserves its audit history and is intended to prevent new runs unless reopened. Project Lifecycle V1 marks projects archived, keeps them visible in reads, and does not add restore or cascade behavior. Current tasks have no project association, so run-admission enforcement for archived projects is deferred until that association receives separate security review.

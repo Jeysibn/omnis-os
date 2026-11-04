@@ -3,7 +3,12 @@ import { describe, it } from 'node:test';
 import { assertBackupSafe, assertValidMetrics, metricsMatch } from './metrics.mjs';
 
 const safeSnapshot = {
-  migrations: ['0001_initial', '0014_agent_profile_lifecycle', '0015_project_management'],
+  migrations: [
+    '0001_initial',
+    '0014_agent_profile_lifecycle',
+    '0015_project_management',
+    '0016_project_lifecycle',
+  ],
   agentManagementCounts: {
     departments: 0,
     agents: 0,

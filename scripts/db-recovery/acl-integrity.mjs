@@ -298,6 +298,8 @@ export function assertRuntimeAclPolicy(snapshot) {
           'create_project(p_id text, p_key text, p_name text, p_objective text, p_priority text, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
           'list_projects()',
           'get_project(p_id text)',
+          'update_project(p_id text, p_expected_revision integer, p_name text, p_objective text, p_priority text, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
+          'archive_project(p_id text, p_expected_revision integer, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
         ].includes(entry.object) &&
         entry.privilege === 'EXECUTE' &&
         entry.securityDefiner === true
