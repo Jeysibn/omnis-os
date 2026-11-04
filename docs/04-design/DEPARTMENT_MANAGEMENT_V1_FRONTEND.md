@@ -107,22 +107,22 @@ Principles:
 4. **Plain text only.** Department names and slugs are untrusted text (section 11).
 5. **Reuse, don't redesign.** Existing panels, buttons, status patterns, the native dialog pattern, Asia/Manila time formatting and the brand tokens as shipped.
 
-## 4. Owner decisions (proposed defaults, **none approved**)
+## 4. Owner decisions (approved by the owner on 2026-11-04)
 
 ### 4.1 Decisions
 
-These are product decisions. The defaults below are this document's **proposals**. A decision is approved only when the owner says so explicitly in writing; this document, a merged PR, passing CI or independent QA never approve one. Every row below is **Proposed** until then.
+**Status update, 2026-11-04.** The owner explicitly approved all eight decisions below, D-1 to D-8, on 2026-11-04, and authorized **milestone 2 implementation and a Draft PR only**. D-2 (archive) applies to the later milestone 3: the archive UI is not part of milestone 2. D-8 is approved **for deferral**: slug suggestions are not implemented in V1 and the user types the slug. Approval of the decisions does not authorize merging or deploying anything; every PR merge needs its own explicit owner decision. The wording below is otherwise unchanged from the reviewed specification, and "Proposed default" now reads as the approved default.
 
-| ID | Decision | Proposed default | Gates |
-|---|---|---|---|
-| D-1 | Where does Department Management live? | A secondary screen at `#departments`, linked from the Agents directory. **Not** a fifth primary-navigation item. | Milestone 2 |
-| D-2 | Undo for archive, and archive behavior | No Undo and no Unarchive: archive is one-way, the UI says so, and the backend provides no such action. The archive confirmation dialog, its wording and its outcomes (section 6.4) are the proposed archive UX. | Milestone 3 |
-| D-3 | Concurrent rename | Accept the backend's last-write-wins behavior. The UI does not claim to detect conflicting edits; it reports what the server confirmed and what the latest list shows. | Milestone 2 |
-| D-4 | Duplicate-slug feedback | A field-specific message on the slug field on a `409` from create. For a rename `409`, a slug message is shown only when a trustworthy read-back observation supports it (section 7.5). No field-specific message for any other error. | Milestone 2 |
-| D-5 | Agents directory department filter | Keeps using the department data embedded in agent summaries. No change to the agents screens and no `GET /departments` call from them until a separate integration change is justified. | Milestone 2 |
-| D-6 | Primary nav state on `#departments` | No primary nav item is marked `aria-current`; the screen shows a "← Agents" link and its own `h1`. (Marking Agents current would announce a page the user is not on.) | Milestone 2 |
-| D-7 | Telling the two `409` causes apart on rename | Do not depend on error `code`. Use a read-back of `GET /departments?includeArchived=true` and state only what it shows (section 7.5). If the backend later declares `conflict` / `invalid_transition` as stable public codes, the UI may use them with the read-back as fallback. | Milestone 2 |
-| D-8 | Slug suggestion while typing a new name | **Proposed: defer from V1.** The slug is a plain labelled field with no suggestion. The feature is optional and omitted from this specification's screens and criteria; it can be proposed again later with its own spec change. | None (see 4.2) |
+| ID | Decision | Approved default | Gates | Status |
+|---|---|---|---|---|
+| D-1 | Where does Department Management live? | A secondary screen at `#departments`, linked from the Agents directory. **Not** a fifth primary-navigation item. | Milestone 2 | Approved 2026-11-04 |
+| D-2 | Undo for archive, and archive behavior | No Undo and no Unarchive: archive is one-way, the UI says so, and the backend provides no such action. The archive confirmation dialog, its wording and its outcomes (section 6.4) are the proposed archive UX. | Milestone 3 | Approved 2026-11-04 (applies to milestone 3 only) |
+| D-3 | Concurrent rename | Accept the backend's last-write-wins behavior. The UI does not claim to detect conflicting edits; it reports what the server confirmed and what the latest list shows. | Milestone 2 | Approved 2026-11-04 |
+| D-4 | Duplicate-slug feedback | A field-specific message on the slug field on a `409` from create. For a rename `409`, a slug message is shown only when a trustworthy read-back observation supports it (section 7.5). No field-specific message for any other error. | Milestone 2 | Approved 2026-11-04 |
+| D-5 | Agents directory department filter | Keeps using the department data embedded in agent summaries. No change to the agents screens and no `GET /departments` call from them until a separate integration change is justified. | Milestone 2 | Approved 2026-11-04 |
+| D-6 | Primary nav state on `#departments` | No primary nav item is marked `aria-current`; the screen shows a "← Agents" link and its own `h1`. (Marking Agents current would announce a page the user is not on.) | Milestone 2 | Approved 2026-11-04 |
+| D-7 | Telling the two `409` causes apart on rename | Do not depend on error `code`. Use a read-back of `GET /departments?includeArchived=true` and state only what it shows (section 7.5). If the backend later declares `conflict` / `invalid_transition` as stable public codes, the UI may use them with the read-back as fallback. | Milestone 2 | Approved 2026-11-04 |
+| D-8 | Slug suggestion while typing a new name | **Deferred from V1 (approved).** The slug is a plain labelled field with no suggestion. The feature is optional and omitted from this specification's screens and criteria; it can be proposed again later with its own spec change. | None (see 4.2) | Approved 2026-11-04 for deferral |
 
 ### 4.2 Decision gates by milestone
 
@@ -133,7 +133,7 @@ These are product decisions. The defaults below are this document's **proposals*
 | 3 - archive | D-2, **plus** the milestone 2 decisions above (all of D-1, D-3, D-4, D-5, D-6, D-7 must already be approved, since milestone 3 builds on that navigation and mutation-safety behavior) |
 | D-8 | Not a gate for any milestone. It is deferred from V1; leaving it open does not block anything, and an omitted optional feature is never a reason to hold an implementation. If the owner later wants it, it needs an approved spec change first. |
 
-These gates are recommendations. Nothing in this document marks any decision approved.
+The gates above were satisfied for milestone 2 by the owner's approval of D-1 to D-8 on 2026-11-04. Milestone 3 still needs its own Draft PR and independent review, and no PR merges without explicit owner authorization.
 
 ## 5. Routes and navigation
 
