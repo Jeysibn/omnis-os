@@ -180,6 +180,29 @@ BEGIN
   END IF;
 END
 $agent_lifecycle_acl$;
+
+DO $project_management_acl$
+BEGIN
+  IF pg_catalog.to_regclass('omnis.projects') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON omnis.projects, omnis.project_management_audit, omnis.project_management_idempotency FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.create_project(text,text,text,text,text,uuid,integer,bytea)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.create_project(text,text,text,text,text,uuid,integer,bytea) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.create_project(text,text,text,text,text,uuid,integer,bytea) TO omnis_authorizer';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.list_projects()') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.list_projects() FROM PUBLIC, omnis_runtime, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.list_projects() TO omnis_authorizer';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.get_project(text)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.get_project(text) FROM PUBLIC, omnis_runtime, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.get_project(text) TO omnis_authorizer';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.reject_project_audit_mutation()') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.reject_project_audit_mutation() FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+END
+$project_management_acl$;
 GRANT USAGE, SELECT ON SEQUENCE omnis.task_id_seq, omnis.run_id_seq TO omnis_runtime;
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA pgboss TO omnis_runtime;

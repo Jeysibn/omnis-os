@@ -21,6 +21,7 @@ import { AuthThrottle } from './auth-throttle.ts';
 import { registerAgentReadRoutes } from './agent-routes.ts';
 import { registerAgentManagementRoutes } from './agent-management-routes.ts';
 import { registerDepartmentRoutes } from './department-routes.ts';
+import { registerProjectRoutes } from './project-routes.ts';
 import {
   parseRun,
   parseRunList,
@@ -200,6 +201,7 @@ app.get('/api/v1/me', { preHandler: requireOwner }, async () => ({
 registerAgentReadRoutes(app);
 registerAgentManagementRoutes(app);
 registerDepartmentRoutes(app);
+registerProjectRoutes(app);
 
 app.get('/api/v1/tasks', { preHandler: requireOwner }, async () =>
   workerRequest('/internal/v1/tasks', {}, parseTaskList),

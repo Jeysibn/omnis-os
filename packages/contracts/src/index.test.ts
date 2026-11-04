@@ -14,6 +14,8 @@ import {
   PublishAgentProfileInputSchema,
   CreateDepartmentSchema,
   DepartmentListResponseSchema,
+  CreateProjectSchema,
+  ProjectListResponseSchema,
   RunEventSchema,
   RunSchema,
   RunStatusSchema,
@@ -70,6 +72,58 @@ describe('run contracts', () => {
     });
     assert.equal(event.type, 'run.interrupted');
     assert.equal(RunStatusSchema.parse('interrupted'), 'interrupted');
+  });
+});
+
+describe('project management contracts', () => {
+  const project = {
+    id: 'prj_0123456789abcdef0123456789abcdef',
+    ownerId: 'owner',
+    key: 'OMNIS-OS',
+    name: 'Omnis OS',
+    objective: 'A synthetic project objective.',
+    status: 'proposed',
+    priority: 'normal',
+    createdAt: '2026-11-04T00:00:00.000Z',
+    updatedAt: '2026-11-04T00:00:00.000Z',
+  };
+
+  it('validates bounded owner-created project input and defaults priority', () => {
+    assert.deepEqual(
+      CreateProjectSchema.parse({ key: 'OMNIS-OS', name: ' Omnis OS ', objective: ' Objective ' }),
+      { key: 'OMNIS-OS', name: 'Omnis OS', objective: 'Objective', priority: 'normal' },
+    );
+    assert.equal(
+      CreateProjectSchema.safeParse({ key: 'bad key', name: 'x', objective: 'y' }).success,
+      false,
+    );
+    assert.equal(
+      CreateProjectSchema.safeParse({ key: 'OK', name: 'x', objective: 'y', status: 'active' })
+        .success,
+      false,
+    );
+    assert.equal(
+      CreateProjectSchema.safeParse({ key: 'OK', name: 'x', objective: 'y', extra: true }).success,
+      false,
+    );
+  });
+
+  it('requires list completeness, accurate totals, and stable unique project keys', () => {
+    assert.equal(
+      ProjectListResponseSchema.safeParse({ projects: [project], total: 1, complete: true })
+        .success,
+      true,
+    );
+    assert.equal(
+      ProjectListResponseSchema.safeParse({ projects: [project], total: 2, complete: true })
+        .success,
+      false,
+    );
+    assert.equal(
+      ProjectListResponseSchema.safeParse({ projects: [project], total: 1, complete: false })
+        .success,
+      false,
+    );
   });
 });
 

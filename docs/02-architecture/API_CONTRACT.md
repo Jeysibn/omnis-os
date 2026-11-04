@@ -1,6 +1,6 @@
 # Control Plane Application Interface (Proposed)
 
-**Status:** Design contract, not an existing live API. Implement endpoints incrementally. Version as `/api/v1`. No direct passthrough of native privileged runtime APIs to browsers.
+**Status:** Design baseline with incrementally implemented endpoints. Canonical executable request/response schemas are in `packages/contracts`. Version as `/api/v1`. No direct passthrough of native privileged runtime APIs to browsers.
 
 ## Conventions
 
@@ -23,6 +23,7 @@
 | GET | `/api/v1/runtime-connections` | Display configured runtime status/capabilities |
 | POST | `/api/v1/runtime-connections/{id}/probe` | Re-check capability under privileged backend policy |
 | GET/POST | `/api/v1/projects` | List/create project |
+| GET | `/api/v1/projects/{id}` | Read project details |
 | GET/POST | `/api/v1/projects/{id}/tasks` | List/create task |
 | GET | `/api/v1/tasks/{id}` | Task, acceptance criteria, verification status |
 | POST | `/api/v1/tasks/{id}/runs` | Admit execution attempt (Idempotency-Key required) |
@@ -31,6 +32,12 @@
 | POST | `/api/v1/runs/{id}/cancel` | Request stop, not guaranteed immediate |
 | POST | `/api/v1/runs/{id}/accept` | Explicitly accept verified task result |
 | GET | `/api/v1/runs/{id}/usage` | Measured token telemetry or unknown |
+
+### Implemented Project Foundation
+
+The owner-authenticated project foundation implements `GET` and `POST /api/v1/projects` and `GET /api/v1/projects/{projectId}`. `POST` accepts a unique uppercase project `key`, `name`, `objective`, and optional `priority` (`low`, `normal`, `high`, `urgent`; defaults to `normal`). Creation always starts in `proposed` status and requires a UUID `Idempotency-Key`. A repeated key with the same validated request replays the original project; reuse with a different request or a duplicate project key returns `409`.
+
+Project responses use `id`, `ownerId`, `key`, `name`, `objective`, `status`, `priority`, `createdAt`, and `updatedAt`. The list is ordered by creation time and stable ID, is complete up to 500 projects, and fails closed with `503` if the bound is exceeded. Unknown project IDs return `404`. Project editing, archival, task association, and project-scoped task routes are deferred; the existing task and run endpoints retain their current behavior and grants. In particular, this foundation does not add project data access to `omnis_runtime`.
 
 The implemented department endpoints (`GET`/`POST /departments`, `PATCH /departments/{id}`, `POST /departments/{id}/archive`) and their error behavior are defined by `packages/contracts` and the [AO-104 department evidence](../07-governance/evidence/AO_104_DEPARTMENT_MANAGEMENT.md); the planned web screens are in the [Department Management V1 frontend specification](../04-design/DEPARTMENT_MANAGEMENT_V1_FRONTEND.md). That specification is documentation only and changes no contract.
 

@@ -295,6 +295,9 @@ export function assertRuntimeAclPolicy(snapshot) {
           'save_agent_profile_draft(p_agent_id text, p_expected_revision bigint, p_base_version_no integer, p_profile jsonb, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
           'publish_agent_profile(p_agent_id text, p_expected_version_no integer, p_expected_revision bigint, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
           'archive_agent(p_agent_id text, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
+          'create_project(p_id text, p_key text, p_name text, p_objective text, p_priority text, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
+          'list_projects()',
+          'get_project(p_id text)',
         ].includes(entry.object) &&
         entry.privilege === 'EXECUTE' &&
         entry.securityDefiner === true

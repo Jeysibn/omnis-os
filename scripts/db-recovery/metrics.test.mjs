@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 import { assertBackupSafe, assertValidMetrics, metricsMatch } from './metrics.mjs';
 
 const safeSnapshot = {
-  migrations: ['0001_initial', '0014_agent_profile_lifecycle'],
+  migrations: ['0001_initial', '0014_agent_profile_lifecycle', '0015_project_management'],
   agentManagementCounts: {
     departments: 0,
     agents: 0,
@@ -12,6 +12,7 @@ const safeSnapshot = {
     managementAudits: 0,
     managementIdempotency: 0,
   },
+  projectManagementCounts: { projects: 0, managementAudits: 0, managementIdempotency: 0 },
   recordFingerprints: {
     departments: 'd41d8cd98f00b204e9800998ecf8427e',
     agents: 'd41d8cd98f00b204e9800998ecf8427e',
@@ -19,6 +20,9 @@ const safeSnapshot = {
     agentProfileDrafts: 'd41d8cd98f00b204e9800998ecf8427e',
     agentManagementAudit: 'd41d8cd98f00b204e9800998ecf8427e',
     agentManagementIdempotency: 'd41d8cd98f00b204e9800998ecf8427e',
+    projects: 'd41d8cd98f00b204e9800998ecf8427e',
+    projectManagementAudit: 'd41d8cd98f00b204e9800998ecf8427e',
+    projectManagementIdempotency: 'd41d8cd98f00b204e9800998ecf8427e',
   },
   syntheticOnly: true,
   sequenceInvariants: true,

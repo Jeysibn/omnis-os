@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import type { Pool, PoolClient, QueryResultRow } from 'pg';
-import type { Department } from '@omnis/contracts';
+import type { Department, Project, ProjectListResponse } from '@omnis/contracts';
 import { inTransaction } from './database.ts';
 import { PostgresDepartmentManagementStore } from './department-management-store.ts';
 import type { PostgresAgentLifecycleStore } from './agent-lifecycle-store.ts';
+import type { PostgresProjectManagementStore } from './project-management-store.ts';
 
 export type AuthorizationStatus = 'pending' | 'authorized' | 'denied' | 'revoked' | 'expired';
 export type RuntimeAuthorizationRecord = {
@@ -76,16 +77,38 @@ export class PostgresAuthorizationStore {
   private readonly authorizer: Pool;
   private readonly departmentManagement: PostgresDepartmentManagementStore;
   readonly agentLifecycle: PostgresAgentLifecycleStore | undefined;
+  readonly projectManagement: PostgresProjectManagementStore | undefined;
 
   constructor(
     runtime: Pool,
     authorizer: Pool,
-    options: { agentLifecycle?: PostgresAgentLifecycleStore } = {},
+    options: {
+      agentLifecycle?: PostgresAgentLifecycleStore;
+      projectManagement?: PostgresProjectManagementStore;
+    } = {},
   ) {
     this.runtime = runtime;
     this.authorizer = authorizer;
     this.departmentManagement = new PostgresDepartmentManagementStore(authorizer);
     this.agentLifecycle = options.agentLifecycle;
+    this.projectManagement = options.projectManagement;
+  }
+
+  listProjects(): Promise<ProjectListResponse> {
+    return this.requireProjectManagement().list();
+  }
+
+  getProject(id: string): Promise<Project | undefined> {
+    return this.requireProjectManagement().get(id);
+  }
+
+  createProject(input: unknown, requestId: string): Promise<Project> {
+    return this.requireProjectManagement().create(input, requestId);
+  }
+
+  private requireProjectManagement(): PostgresProjectManagementStore {
+    if (!this.projectManagement) throw new Error('Project management store is unavailable.');
+    return this.projectManagement;
   }
 
   listDepartments(includeArchived = false): Promise<{ departments: Department[]; total: number }> {

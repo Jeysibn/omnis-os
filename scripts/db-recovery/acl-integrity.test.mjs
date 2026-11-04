@@ -52,6 +52,17 @@ const allowed = [
   acl(
     'routine',
     'omnis',
+    'create_project(p_id text, p_key text, p_name text, p_objective text, p_priority text, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
+    'EXECUTE',
+    null,
+    'omnis_authorizer',
+    true,
+  ),
+  acl('routine', 'omnis', 'list_projects()', 'EXECUTE', null, 'omnis_authorizer', true),
+  acl('routine', 'omnis', 'get_project(p_id text)', 'EXECUTE', null, 'omnis_authorizer', true),
+  acl(
+    'routine',
+    'omnis',
     'create_agent(p_id text, p_name text, p_slug text, p_department_id text, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
     'EXECUTE',
     null,
