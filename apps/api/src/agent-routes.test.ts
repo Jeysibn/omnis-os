@@ -104,6 +104,14 @@ describe('owner-authenticated agent read routes', () => {
             error: { code: 'not_found', message: 'Agent or profile version was not found.' },
           });
         }
+        if (path.endsWith('/versions/98')) {
+          throw new WorkerRequestError(422, {
+            error: {
+              code: 'disallowed_credential_material',
+              message: 'Agent profile contains disallowed credential material.',
+            },
+          });
+        }
         if (path.includes('/versions?')) return parse(history);
         return parse(path === '/internal/v1/agents' ? directory : profile);
       },
@@ -135,11 +143,24 @@ describe('owner-authenticated agent read routes', () => {
       assert.deepEqual(missing.json(), {
         error: { code: 'not_found', message: 'Agent or profile version was not found.' },
       });
+      const rejectedCredential = await app.inject({
+        method: 'GET',
+        url: '/api/v1/agents/agt_atlas/versions/98',
+      });
+      assert.equal(rejectedCredential.statusCode, 422);
+      assert.deepEqual(rejectedCredential.json(), {
+        error: {
+          code: 'disallowed_credential_material',
+          message: 'Agent profile contains disallowed credential material.',
+        },
+      });
+      assert.doesNotMatch(rejectedCredential.body, /synthetic-secret/);
       assert.deepEqual(calls, [
         '/internal/v1/agents',
         '/internal/v1/agents/agt_atlas',
         '/internal/v1/agents/agt_atlas/versions?cursor=a%2Bb%2Fc%3D&limit=2',
         '/internal/v1/agents/agt_atlas/versions/99',
+        '/internal/v1/agents/agt_atlas/versions/98',
       ]);
     } finally {
       await app.close();
