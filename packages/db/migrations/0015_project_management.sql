@@ -104,7 +104,7 @@ BEGIN
   WITH project_rows AS MATERIALIZED (
     SELECT p.id, p.created_at, jsonb_build_object(
       'id', p.id, 'ownerId', p.owner_id, 'key', p.project_key, 'name', p.name,
-      'objective', p.objective_md, 'status', p.status, 'priority', p.priority,
+      'status', p.status, 'priority', p.priority,
       'createdAt', to_char(p.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
       'updatedAt', to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
     ) AS project

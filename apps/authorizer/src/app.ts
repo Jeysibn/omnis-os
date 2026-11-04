@@ -391,7 +391,8 @@ export function createAuthorizerApp(input: {
     const statusCode =
       error && typeof error === 'object' && 'statusCode' in error ? error.statusCode : undefined;
     if (
-      request.url.startsWith('/internal/v1/agents') &&
+      (request.url.startsWith('/internal/v1/agents') ||
+        request.url.startsWith('/internal/v1/projects')) &&
       (statusCode === 400 || statusCode === 413)
     ) {
       return reply.code(statusCode).send({
@@ -399,8 +400,8 @@ export function createAuthorizerApp(input: {
           code: statusCode === 413 ? 'payload_too_large' : 'invalid_input',
           message:
             statusCode === 413
-              ? 'Agent management request exceeds the allowed size.'
-              : 'Agent management request is malformed.',
+              ? 'Management request exceeds the allowed size.'
+              : 'Management request is malformed.',
         },
       });
     }

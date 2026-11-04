@@ -54,24 +54,28 @@ export const CreateProjectSchema = z
   .strict();
 export type CreateProjectInput = z.infer<typeof CreateProjectSchema>;
 
-export const ProjectSchema = z
+export const ProjectSummarySchema = z
   .object({
     id: ProjectIdSchema,
     ownerId: z.literal('owner'),
     key: z.string().min(2).max(32),
     name: z.string().min(1).max(120),
-    objective: z.string().min(1).max(4000),
     status: ProjectStatusSchema,
     priority: ProjectPrioritySchema,
     createdAt: z.string().datetime(),
     updatedAt: z.string().datetime(),
   })
   .strict();
+export type ProjectSummary = z.infer<typeof ProjectSummarySchema>;
+
+export const ProjectSchema = ProjectSummarySchema.extend({
+  objective: z.string().min(1).max(4000),
+}).strict();
 export type Project = z.infer<typeof ProjectSchema>;
 
 export const ProjectListResponseSchema = z
   .object({
-    projects: z.array(ProjectSchema).max(500),
+    projects: z.array(ProjectSummarySchema).max(500),
     total: z.number().int().nonnegative(),
     complete: z.literal(true),
   })

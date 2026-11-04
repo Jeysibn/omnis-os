@@ -22,6 +22,16 @@ const project = {
   createdAt: at,
   updatedAt: at,
 };
+const projectSummary = {
+  id: project.id,
+  ownerId: project.ownerId,
+  key: project.key,
+  name: project.name,
+  status: project.status,
+  priority: project.priority,
+  createdAt: project.createdAt,
+  updatedAt: project.updatedAt,
+};
 
 function testApp(
   owner: boolean,
@@ -48,7 +58,9 @@ function testApp(
       });
       if (path === '/internal/v1/projects') {
         return parse(
-          init?.method === 'POST' ? project : { projects: [project], total: 1, complete: true },
+          init?.method === 'POST'
+            ? project
+            : { projects: [projectSummary], total: 1, complete: true },
         );
       }
       return parse(project);
@@ -112,7 +124,7 @@ describe('owner project routes', () => {
     try {
       const list = await app.inject({ method: 'GET', url: '/api/v1/projects' });
       assert.equal(list.statusCode, 200);
-      assert.deepEqual(list.json(), { projects: [project], total: 1, complete: true });
+      assert.deepEqual(list.json(), { projects: [projectSummary], total: 1, complete: true });
       const created = await app.inject({
         method: 'POST',
         url: '/api/v1/projects',
@@ -135,6 +147,38 @@ describe('owner project routes', () => {
       assert.equal(detail.statusCode, 200);
       const malformed = await app.inject({ method: 'GET', url: '/api/v1/projects/not-a-project' });
       assert.equal(malformed.statusCode, 422);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('returns definite generic errors for malformed or oversized project JSON before forwarding', async () => {
+    const calls: Array<{ path: string; method: string; headers?: HeadersInit }> = [];
+    const app = testApp(true, calls);
+    const headers = {
+      origin: 'http://127.0.0.1:5173',
+      'x-omnis-csrf': 'csrf-token-123456',
+      'idempotency-key': 'b9d5fd0e-4681-4a41-90c0-50b120843aa5',
+      'content-type': 'application/json',
+    };
+    try {
+      const malformed = await app.inject({
+        method: 'POST',
+        url: '/api/v1/projects',
+        headers,
+        payload: '{',
+      });
+      assert.equal(malformed.statusCode, 400);
+      assert.equal(malformed.json().error.code, 'invalid_input');
+      const oversized = await app.inject({
+        method: 'POST',
+        url: '/api/v1/projects',
+        headers,
+        payload: JSON.stringify({ key: 'SAFE', name: 'Safe', objective: 'x'.repeat(40_000) }),
+      });
+      assert.equal(oversized.statusCode, 413);
+      assert.equal(oversized.json().error.code, 'payload_too_large');
+      assert.deepEqual(calls, []);
     } finally {
       await app.close();
     }

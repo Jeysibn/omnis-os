@@ -6,7 +6,7 @@ import {
   ProjectSchema,
 } from '@omnis/contracts';
 import { requireMutationProtection, requireOwner } from './auth.ts';
-import { authorizerRequest } from './authorizer-client.ts';
+import { authorizerRequest, AuthorizerRequestError } from './authorizer-client.ts';
 
 type AuthorizerRequest = typeof authorizerRequest;
 
@@ -20,7 +20,40 @@ export function registerProjectRoutes(
 
   app.post(
     '/api/v1/projects',
-    { preHandler: [requireOwner, requireMutationProtection], bodyLimit: 32 * 1024 },
+    {
+      preHandler: [requireOwner, requireMutationProtection],
+      bodyLimit: 32 * 1024,
+      errorHandler(error, request, reply) {
+        if (error instanceof AuthorizerRequestError)
+          return reply.code(error.statusCode).send(error.body);
+        const statusCode =
+          error && typeof error === 'object' && 'statusCode' in error
+            ? error.statusCode
+            : undefined;
+        if (statusCode === 400 || statusCode === 413) {
+          return reply.code(statusCode).send({
+            error: {
+              code: statusCode === 413 ? 'payload_too_large' : 'invalid_input',
+              message:
+                statusCode === 413
+                  ? 'Project request exceeds the allowed size.'
+                  : 'Project request is malformed.',
+            },
+          });
+        }
+        app.log.error(
+          { errorType: error instanceof Error ? error.name : 'unknown', requestId: request.id },
+          'Project management request failed.',
+        );
+        return reply.code(500).send({
+          error: {
+            code: 'internal_error',
+            message: 'The project request could not be completed.',
+            requestId: request.id,
+          },
+        });
+      },
+    },
     async (httpRequest, reply) => {
       const body = CreateProjectSchema.safeParse(httpRequest.body);
       const requestId = httpRequest.headers['idempotency-key'];

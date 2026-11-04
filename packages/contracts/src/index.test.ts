@@ -109,10 +109,25 @@ describe('project management contracts', () => {
   });
 
   it('requires list completeness, accurate totals, and stable unique project keys', () => {
+    const summary = {
+      id: project.id,
+      ownerId: project.ownerId,
+      key: project.key,
+      name: project.name,
+      status: project.status,
+      priority: project.priority,
+      createdAt: project.createdAt,
+      updatedAt: project.updatedAt,
+    };
+    assert.equal(
+      ProjectListResponseSchema.safeParse({ projects: [summary], total: 1, complete: true })
+        .success,
+      true,
+    );
     assert.equal(
       ProjectListResponseSchema.safeParse({ projects: [project], total: 1, complete: true })
         .success,
-      true,
+      false,
     );
     assert.equal(
       ProjectListResponseSchema.safeParse({ projects: [project], total: 2, complete: true })

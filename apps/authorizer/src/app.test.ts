@@ -44,6 +44,16 @@ const project: Project = {
   createdAt: '2026-11-04T00:00:00.000Z',
   updatedAt: '2026-11-04T00:00:00.000Z',
 };
+const projectSummary = {
+  id: project.id,
+  ownerId: project.ownerId,
+  key: project.key,
+  name: project.name,
+  status: project.status,
+  priority: project.priority,
+  createdAt: project.createdAt,
+  updatedAt: project.updatedAt,
+};
 
 function makeStore() {
   const calls: Array<{
@@ -85,7 +95,7 @@ function makeStore() {
       return { ...department, archivedAt: '2026-11-04T01:00:00.000Z' };
     },
     async listProjects() {
-      return { projects: [project], total: 1, complete: true };
+      return { projects: [projectSummary], total: 1, complete: true };
     },
     async getProject(id) {
       return id === project.id ? project : undefined;
@@ -174,6 +184,40 @@ describe('independent authorizer service boundary', () => {
       assert.equal(response.statusCode, 503);
       assert.equal(response.json().error.code, 'project_outcome_unknown');
       assert.doesNotMatch(response.body, /synthetic-private-value-must-not-leak/);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('returns definite safe 400 and 413 errors for malformed or oversized project requests', async () => {
+    const { store, calls } = makeStore();
+    const app = createAuthorizerApp({ store, serviceToken, checkDatabase: async () => undefined });
+    const headers = {
+      'x-omnis-authorizer-token': serviceToken,
+      'idempotency-key': '3a167582-1dc3-48a4-a69f-8b1fe0c58ee2',
+      'content-type': 'application/json',
+    };
+    try {
+      const malformed = await app.inject({
+        method: 'POST',
+        url: '/internal/v1/projects',
+        headers,
+        payload: '{',
+      });
+      assert.equal(malformed.statusCode, 400);
+      assert.equal(malformed.json().error.code, 'invalid_input');
+      const oversized = await app.inject({
+        method: 'POST',
+        url: '/internal/v1/projects',
+        headers,
+        payload: JSON.stringify({ key: 'SAFE', name: 'Safe', objective: 'x'.repeat(40_000) }),
+      });
+      assert.equal(oversized.statusCode, 413);
+      assert.equal(oversized.json().error.code, 'payload_too_large');
+      assert.equal(
+        calls.some((call) => call.method === 'createProject'),
+        false,
+      );
     } finally {
       await app.close();
     }
