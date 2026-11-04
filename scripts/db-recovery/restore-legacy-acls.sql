@@ -109,6 +109,34 @@ GRANT UPDATE (status, decided_at, decided_by, revoked_at, revoked_by)
 GRANT SELECT ON omnis.tasks TO omnis_authorizer;
 GRANT UPDATE (status, decided_at, decided_by, revoked_at, revoked_by)
   ON omnis.runtime_authorizations TO omnis_authorizer;
+
+DO $department_management_acl$
+BEGIN
+  IF pg_catalog.to_regclass('omnis.departments') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON omnis.departments FROM omnis_authorizer';
+    EXECUTE 'GRANT SELECT ON omnis.departments TO omnis_authorizer';
+    EXECUTE 'GRANT INSERT (id, slug, name) ON omnis.departments TO omnis_authorizer';
+    EXECUTE 'GRANT UPDATE (slug, name, updated_at) ON omnis.departments TO omnis_authorizer';
+  END IF;
+  IF pg_catalog.to_regclass('omnis.department_management_audit') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON omnis.department_management_audit FROM omnis_authorizer';
+    EXECUTE 'GRANT INSERT (id, department_id, actor_id, action, request_id) ON omnis.department_management_audit TO omnis_authorizer';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.archive_department(text,text)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.archive_department(text, text) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.archive_department(text, text) TO omnis_authorizer';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.reject_department_management_audit_mutation()') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.reject_department_management_audit_mutation() FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.assert_agent_department_active()') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.assert_agent_department_active() FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.guard_department_lifecycle()') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.guard_department_lifecycle() FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+END
+$department_management_acl$;
 GRANT USAGE, SELECT ON SEQUENCE omnis.task_id_seq, omnis.run_id_seq TO omnis_runtime;
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA pgboss TO omnis_runtime;

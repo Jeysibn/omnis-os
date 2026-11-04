@@ -34,11 +34,19 @@ export async function authorizerRequest<T>(
     );
   } catch (error) {
     const outcomeUnknown = error instanceof AuthorizerTransportError && error.mayHaveCommitted;
+    const departmentMutation =
+      (init.method ?? 'GET') !== 'GET' && path.startsWith('/internal/v1/departments');
     throw new AuthorizerRequestError(503, {
       error: {
-        code: outcomeUnknown ? 'authorization_outcome_unknown' : 'authorizer_unavailable',
+        code: outcomeUnknown
+          ? departmentMutation
+            ? 'department_outcome_unknown'
+            : 'authorization_outcome_unknown'
+          : 'authorizer_unavailable',
         message: outcomeUnknown
-          ? 'The authorizer response was lost; the decision may have committed. Retry with the same idempotency key or read the authorization state.'
+          ? departmentMutation
+            ? 'The authorizer response was lost; the department change may have committed. Read the department state before retrying.'
+            : 'The authorizer response was lost; the decision may have committed. Retry with the same idempotency key or read the authorization state.'
           : 'The authorizer could not be reached; no decision was submitted. Retry when the service is available.',
       },
     });
@@ -63,11 +71,13 @@ export async function authorizerRequest<T>(
     return parse(value);
   } catch {
     if ((init.method ?? 'GET') !== 'GET') {
+      const departmentMutation = path.startsWith('/internal/v1/departments');
       throw new AuthorizerRequestError(503, {
         error: {
-          code: 'authorization_outcome_unknown',
-          message:
-            'The authorizer response could not be validated; the decision may have committed. Read the authorization state or retry with the same idempotency key.',
+          code: departmentMutation ? 'department_outcome_unknown' : 'authorization_outcome_unknown',
+          message: departmentMutation
+            ? 'The authorizer response could not be validated; the department change may have committed. Read the department state before retrying.'
+            : 'The authorizer response could not be validated; the decision may have committed. Read the authorization state or retry with the same idempotency key.',
         },
       });
     }

@@ -212,6 +212,67 @@ export const AgentProfileVersionSchema = z.object({
 });
 export type AgentProfileVersion = z.infer<typeof AgentProfileVersionSchema>;
 
+export const AgentProfileWriteInputSchema = z
+  .object({
+    profession: z.string().trim().min(1).max(160),
+    seniority: z.string().max(80).nullable(),
+    specialties: z.array(z.string().min(1).max(100)).max(32),
+    personality: z
+      .object({
+        traits: z.array(z.string().min(1).max(100)).max(32),
+        tone: z.string().max(120).nullable(),
+        principles: z.array(z.string().min(1).max(240)).max(32),
+      })
+      .strict(),
+    behavior: z
+      .object({
+        autonomy: z.string().max(500).nullable(),
+        escalation: z.string().max(1000).nullable(),
+      })
+      .strict(),
+    instructions: z.string().max(16_384),
+  })
+  .strict();
+export type AgentProfileWriteInput = z.infer<typeof AgentProfileWriteInputSchema>;
+
+export const DepartmentIdSchema = OpaqueIdSchema;
+export const DepartmentSchema = z
+  .object({
+    id: DepartmentIdSchema,
+    slug: z
+      .string()
+      .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/)
+      .max(80),
+    name: z.string().trim().min(1).max(120),
+    archivedAt: AgentTimestampSchema.nullable(),
+    createdAt: AgentTimestampSchema,
+    updatedAt: AgentTimestampSchema,
+  })
+  .strict();
+export type Department = z.infer<typeof DepartmentSchema>;
+
+export const DepartmentListQuerySchema = z
+  .object({ includeArchived: z.enum(['true', 'false']).optional() })
+  .strict();
+export const DepartmentListResponseSchema = z
+  .object({ departments: z.array(DepartmentSchema).max(500), total: z.number().int().min(0) })
+  .strict()
+  .refine((result) => result.departments.length === result.total);
+export type DepartmentListResponse = z.infer<typeof DepartmentListResponseSchema>;
+
+export const CreateDepartmentSchema = z
+  .object({
+    slug: z
+      .string()
+      .trim()
+      .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/)
+      .max(80),
+    name: z.string().trim().min(1).max(120),
+  })
+  .strict();
+export type CreateDepartmentInput = z.infer<typeof CreateDepartmentSchema>;
+export const UpdateDepartmentSchema = CreateDepartmentSchema;
+
 export const AgentProfileResponseSchema = z
   .object({
     agent: AgentSummarySchema,

@@ -171,6 +171,7 @@ try {
     '0010_runtime_admission_identity',
     '0011_authorized_mock_sandbox_launch',
     '0012_agent_profiles',
+    '0013_department_management',
   ]);
   assert.equal(afterUpgrade.unsafeRunStates, 3);
   assert.equal(
@@ -650,7 +651,7 @@ async function verifyPost0005ProvenanceUpgrade() {
       "SELECT id, length(checksum) AS checksum_length FROM omnis.schema_migrations WHERE id LIKE '00%' ORDER BY id",
     );
     assert.deepEqual(migrationRows.rows.at(-1), {
-      id: '0012_agent_profiles',
+      id: '0013_department_management',
       checksum_length: 64,
     });
   } finally {

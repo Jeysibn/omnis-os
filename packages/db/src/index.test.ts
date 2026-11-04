@@ -8,9 +8,11 @@ import { setTimeout as delay } from 'node:timers/promises';
 import type { Pool } from 'pg';
 import {
   createPool,
+  DepartmentStoreError,
   migrate,
   PostgresAgentProfileStore,
   PostgresAuthorizationStore,
+  PostgresDepartmentManagementStore,
   PostgresRunStore,
   StoreError,
   type PgBossTransaction,
@@ -72,7 +74,7 @@ const postgresSuite = describe(
         'GRANT SELECT, INSERT, UPDATE, DELETE ON omnis.test_queue_outbox TO omnis_runtime',
       );
       await adminPool!.query(
-        'TRUNCATE omnis.test_queue_outbox, omnis.agent_profile_versions, omnis.agents, omnis.departments, omnis.mock_sandbox_launches, omnis.legacy_unscoped_runs, omnis.authorization_audit, omnis.runtime_authorizations, omnis.run_idempotency, omnis.run_events, omnis.runs, omnis.tasks',
+        'TRUNCATE omnis.test_queue_outbox, omnis.department_management_audit, omnis.agent_profile_versions, omnis.agents, omnis.departments, omnis.mock_sandbox_launches, omnis.legacy_unscoped_runs, omnis.authorization_audit, omnis.runtime_authorizations, omnis.run_idempotency, omnis.run_events, omnis.runs, omnis.tasks',
       );
       await adminPool!.query('ALTER SEQUENCE omnis.task_id_seq RESTART WITH 1');
       await adminPool!.query('ALTER SEQUENCE omnis.run_id_seq RESTART WITH 1');
@@ -278,6 +280,53 @@ const postgresSuite = describe(
         { table_name: 'agents', privilege_type: 'SELECT' },
         { table_name: 'departments', privilege_type: 'SELECT' },
       ]);
+      const managementPrivileges = await adminPool!.query<{
+        runtime_department_insert: boolean;
+        authorizer_department_select: boolean;
+        authorizer_department_table_insert: boolean;
+        authorizer_department_insert_id: boolean;
+        authorizer_department_update_name: boolean;
+        authorizer_department_update_archive: boolean;
+        authorizer_agent_select: boolean;
+        authorizer_agent_insert: boolean;
+        authorizer_profile_select: boolean;
+        authorizer_profile_insert: boolean;
+        authorizer_audit_insert: boolean;
+        authorizer_audit_select: boolean;
+        runtime_audit_select: boolean;
+        authorizer_archive_function: boolean;
+      }>(`
+        SELECT has_table_privilege('omnis_runtime', 'omnis.departments', 'INSERT') AS runtime_department_insert,
+               has_table_privilege('omnis_authorizer', 'omnis.departments', 'SELECT') AS authorizer_department_select,
+               has_table_privilege('omnis_authorizer', 'omnis.departments', 'INSERT') AS authorizer_department_table_insert,
+               has_column_privilege('omnis_authorizer', 'omnis.departments', 'id', 'INSERT') AS authorizer_department_insert_id,
+               has_column_privilege('omnis_authorizer', 'omnis.departments', 'name', 'UPDATE') AS authorizer_department_update_name,
+               has_column_privilege('omnis_authorizer', 'omnis.departments', 'archived_at', 'UPDATE') AS authorizer_department_update_archive,
+               has_table_privilege('omnis_authorizer', 'omnis.agents', 'SELECT') AS authorizer_agent_select,
+               has_table_privilege('omnis_authorizer', 'omnis.agents', 'INSERT') AS authorizer_agent_insert,
+               has_table_privilege('omnis_authorizer', 'omnis.agent_profile_versions', 'SELECT') AS authorizer_profile_select,
+               has_table_privilege('omnis_authorizer', 'omnis.agent_profile_versions', 'INSERT') AS authorizer_profile_insert,
+               has_column_privilege('omnis_authorizer', 'omnis.department_management_audit', 'request_id', 'INSERT') AS authorizer_audit_insert,
+               has_table_privilege('omnis_authorizer', 'omnis.department_management_audit', 'SELECT') AS authorizer_audit_select,
+               has_table_privilege('omnis_runtime', 'omnis.department_management_audit', 'SELECT') AS runtime_audit_select,
+               has_function_privilege('omnis_authorizer', 'omnis.archive_department(text,text)', 'EXECUTE') AS authorizer_archive_function
+      `);
+      assert.deepEqual(managementPrivileges.rows[0], {
+        runtime_department_insert: false,
+        authorizer_department_select: true,
+        authorizer_department_table_insert: false,
+        authorizer_department_insert_id: true,
+        authorizer_department_update_name: true,
+        authorizer_department_update_archive: false,
+        authorizer_agent_select: false,
+        authorizer_agent_insert: false,
+        authorizer_profile_select: false,
+        authorizer_profile_insert: false,
+        authorizer_audit_insert: true,
+        authorizer_audit_select: false,
+        runtime_audit_select: false,
+        authorizer_archive_function: true,
+      });
       const functionPrivilege = await adminPool!.query<{ executable: boolean }>(
         `SELECT has_function_privilege('omnis_runtime',
            'omnis.is_bounded_string_array(jsonb,integer,integer)', 'EXECUTE') AS executable`,
@@ -297,6 +346,117 @@ const postgresSuite = describe(
         `SELECT omnis.is_bounded_string_array(jsonb_build_array(repeat('x', 101)), 32, 100) AS accepted`,
       );
       assert.equal(bounded.rows[0]?.accepted, false);
+    });
+
+    it('creates, renames, and archives departments with atomic metadata-only audit records', async () => {
+      const departments = new PostgresDepartmentManagementStore(authorizerPool!);
+      const created = await departments.create(
+        { slug: 'engineering', name: 'Engineering' },
+        'authorizer-request-1',
+      );
+      assert.equal(created.slug, 'engineering');
+      assert.equal(created.archivedAt, null);
+      const updated = await departments.update(
+        created.id,
+        { slug: 'platform', name: 'Platform Engineering' },
+        'authorizer-request-2',
+      );
+      assert.equal(updated.slug, 'platform');
+      await assert.rejects(
+        departments.create(
+          { slug: 'platform', name: 'Duplicate Platform' },
+          'authorizer-request-duplicate',
+        ),
+        (error: unknown) => error instanceof DepartmentStoreError && error.code === 'conflict',
+      );
+      const active = await departments.list();
+      assert.deepEqual(
+        active.departments.map((entry) => entry.id),
+        [created.id],
+      );
+      const archived = await departments.archive(created.id, 'authorizer-request-3');
+      assert.ok(archived.archivedAt);
+      assert.deepEqual(await departments.list(), { departments: [], total: 0 });
+      const all = await departments.list(true);
+      assert.equal(all.total, 1);
+      assert.equal(all.departments[0]?.archivedAt, archived.archivedAt);
+      await assert.rejects(
+        departments.update(created.id, { slug: 'later', name: 'Later' }, 'authorizer-request-4'),
+        (error: unknown) =>
+          error instanceof DepartmentStoreError && error.code === 'invalid_transition',
+      );
+
+      const audit = await adminPool!.query<{
+        action: string;
+        actor_id: string;
+        request_id: string;
+      }>(
+        `SELECT action, actor_id, request_id FROM omnis.department_management_audit
+          WHERE department_id = $1 ORDER BY occurred_at, id`,
+        [created.id],
+      );
+      assert.deepEqual(audit.rows, [
+        { action: 'created', actor_id: 'owner', request_id: 'authorizer-request-1' },
+        { action: 'updated', actor_id: 'owner', request_id: 'authorizer-request-2' },
+        { action: 'archived', actor_id: 'owner', request_id: 'authorizer-request-3' },
+      ]);
+      const createdAuditId = await adminPool!.query<{ id: string }>(
+        `SELECT id FROM omnis.department_management_audit
+          WHERE department_id = $1 AND action = 'created'`,
+        [created.id],
+      );
+      await assert.rejects(
+        authorizerPool!.query(
+          `UPDATE omnis.department_management_audit SET action = 'archived' WHERE id = $1`,
+          [createdAuditId.rows[0]!.id],
+        ),
+        /permission denied/,
+      );
+      await assert.rejects(
+        adminPool!.query(
+          `UPDATE omnis.department_management_audit SET action = 'archived' WHERE id = $1`,
+          [createdAuditId.rows[0]!.id],
+        ),
+        /department management audit records are immutable/,
+      );
+    });
+
+    it('refuses to archive referenced departments and rejects assignments to archived departments in PostgreSQL', async () => {
+      const departments = new PostgresDepartmentManagementStore(authorizerPool!);
+      const referenced = await departments.create(
+        { slug: 'research', name: 'Research' },
+        'authorizer-request-5',
+      );
+      await adminPool!.query(
+        `INSERT INTO omnis.agents (id, department_id, name, slug, lifecycle, provenance)
+         VALUES ('agt_department_guard', $1, 'Research Agent', 'research-agent', 'draft', 'owner_created')`,
+        [referenced.id],
+      );
+      await assert.rejects(
+        departments.archive(referenced.id, 'authorizer-request-6'),
+        (error: unknown) =>
+          error instanceof DepartmentStoreError && error.code === 'invalid_transition',
+      );
+      const unreferenced = await departments.create(
+        { slug: 'archive-candidate', name: 'Archive Candidate' },
+        'authorizer-request-7',
+      );
+      const archived = await departments.archive(unreferenced.id, 'authorizer-request-8');
+      await assert.rejects(
+        adminPool!.query(
+          `INSERT INTO omnis.agents (id, department_id, name, slug, lifecycle, provenance)
+           VALUES ('agt_archived_department', $1, 'Archived Agent', 'archived-agent', 'draft', 'owner_created')`,
+          [unreferenced.id],
+        ),
+        /archived departments cannot be assigned/,
+      );
+      assert.ok(archived.archivedAt);
+      await assert.rejects(
+        authorizerPool!.query(`UPDATE omnis.departments SET slug = 'changed' WHERE id = $1`, [
+          unreferenced.id,
+        ]),
+        /archived departments are immutable/,
+      );
     });
 
     it('commits task, run, initial event, idempotency, and queue outbox atomically', async () => {
@@ -2849,7 +3009,8 @@ const postgresSuite = describe(
       if (pool && databaseUrl) {
         assertTestDatabase(databaseUrl);
         await adminPool!.query(`
-        TRUNCATE omnis.test_queue_outbox, omnis.agent_profile_versions, omnis.agents, omnis.departments,
+        TRUNCATE omnis.test_queue_outbox, omnis.department_management_audit,
+          omnis.agent_profile_versions, omnis.agents, omnis.departments,
           omnis.mock_sandbox_launches, omnis.legacy_unscoped_runs, omnis.authorization_audit,
           omnis.runtime_authorizations, omnis.run_idempotency,
           omnis.run_events, omnis.runs, omnis.tasks

@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import { describe, it } from 'node:test';
-import { AgentProfileStoreError, PostgresAgentProfileStore } from './agent-profile-store.ts';
+import {
+  AgentProfileStoreError,
+  PostgresAgentProfileStore,
+  validateAgentProfileWriteInput,
+} from './agent-profile-store.ts';
 
 const internalToken = 'synthetic-worker-internal-token-value-0123456789abcdef';
 const createdAt = new Date('2026-11-04T00:00:00.000Z');
@@ -94,6 +98,69 @@ function store(pool: ReturnType<typeof mockPool>) {
 }
 
 describe('agent profile credential scanning', () => {
+  it('validates profile writes before scanning and enforces the 16 KiB instructions bound', () => {
+    const valid = {
+      profession: 'Systems Analyst',
+      seniority: 'senior',
+      specialties: ['analysis'],
+      personality: { traits: ['methodical'], tone: null, principles: [] },
+      behavior: { autonomy: null, escalation: null },
+      instructions: 'x'.repeat(16_384),
+    };
+    assert.equal(validateAgentProfileWriteInput(valid).instructions.length, 16_384);
+    assert.throws(
+      () => validateAgentProfileWriteInput({ ...valid, instructions: 'x'.repeat(16_385) }),
+      (error: unknown) => {
+        assert.ok(error instanceof AgentProfileStoreError);
+        assert.equal(error.code, 'invalid_profile_input');
+        assert.equal(error.statusCode, 422);
+        assert.doesNotMatch(error.message, /x{10}/);
+        return true;
+      },
+    );
+  });
+
+  it('keeps backslash-heavy normalization input bounded by the profile text limit', () => {
+    const instructions = String.raw`ordinary\\`.repeat(1_300);
+    assert.ok(instructions.length <= 16_384);
+    const started = performance.now();
+    const accepted = validateAgentProfileWriteInput({
+      profession: 'Systems Analyst',
+      seniority: null,
+      specialties: [],
+      personality: { traits: [], tone: null, principles: [] },
+      behavior: { autonomy: null, escalation: null },
+      instructions,
+    });
+    assert.equal(accepted.instructions, instructions);
+    assert.ok(performance.now() - started < 1_000, 'bounded scanner should complete promptly');
+  });
+
+  it('rejects nested credential-like profile fields without including values in the error', () => {
+    assert.throws(
+      () =>
+        validateAgentProfileWriteInput({
+          profession: 'Systems Analyst',
+          seniority: null,
+          specialties: [],
+          personality: {
+            traits: [],
+            tone: null,
+            principles: ['password: "synthetic-secret-value-123456"'],
+          },
+          behavior: { autonomy: null, escalation: null },
+          instructions: 'No secrets.',
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof AgentProfileStoreError);
+        assert.equal(error.code, 'disallowed_credential_material');
+        assert.equal(error.statusCode, 422);
+        assert.doesNotMatch(error.message, /synthetic-secret-value-123456/);
+        return true;
+      },
+    );
+  });
+
   it('rejects balanced and unterminated quoted, escaped, and nested credential-like strings safely', async () => {
     const samples = [
       'password: "quoted synthetic-secret-value-123456"',

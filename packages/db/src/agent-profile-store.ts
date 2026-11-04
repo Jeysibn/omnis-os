@@ -1,6 +1,8 @@
 import { createHmac, hkdfSync, timingSafeEqual } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
+import { AgentProfileWriteInputSchema } from '@omnis/contracts';
 import type {
+  AgentProfileWriteInput,
   AgentDirectoryResponse,
   AgentProfileResponse,
   AgentProfileVersionResponse,
@@ -76,7 +78,7 @@ function hasCredentialValue(value: unknown): boolean {
   return true;
 }
 
-function assertNoCredentialMaterial(value: unknown): void {
+export function assertNoCredentialMaterial(value: unknown): void {
   if (typeof value === 'string') {
     const normalized = normalizeEscapedCredentialText(value);
     if (credentialPatterns.some((pattern) => pattern.test(normalized))) {
@@ -108,7 +110,11 @@ function assertNoCredentialMaterial(value: unknown): void {
 
 export class AgentProfileStoreError extends Error {
   readonly code:
-    'not_found' | 'invalid_cursor' | 'directory_limit_exceeded' | 'disallowed_credential_material';
+    | 'not_found'
+    | 'invalid_cursor'
+    | 'directory_limit_exceeded'
+    | 'disallowed_credential_material'
+    | 'invalid_profile_input';
   readonly statusCode: 404 | 422 | 503;
 
   constructor(
@@ -116,7 +122,8 @@ export class AgentProfileStoreError extends Error {
       | 'not_found'
       | 'invalid_cursor'
       | 'directory_limit_exceeded'
-      | 'disallowed_credential_material',
+      | 'disallowed_credential_material'
+      | 'invalid_profile_input',
     message: string,
     statusCode: 404 | 422 | 503,
   ) {
@@ -125,6 +132,20 @@ export class AgentProfileStoreError extends Error {
     this.code = code;
     this.statusCode = statusCode;
   }
+}
+
+/** Validate future profile writes before running the escape normalizer or scanner. */
+export function validateAgentProfileWriteInput(value: unknown): AgentProfileWriteInput {
+  const parsed = AgentProfileWriteInputSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new AgentProfileStoreError(
+      'invalid_profile_input',
+      'Agent profile input is invalid.',
+      422,
+    );
+  }
+  assertNoCredentialMaterial(parsed.data);
+  return parsed.data;
 }
 
 const agentSelection = `

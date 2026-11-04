@@ -8,7 +8,7 @@
   "scripts": {
     "build": "pnpm typecheck",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --experimental-strip-types --test src/index.test.ts src/agent-profile-store.test.ts"
+    "test": "node --experimental-strip-types --test src/index.test.ts src/agent-profile-store.test.ts src/department-management-store.test.ts"
   },
   "dependencies": {
     "@omnis/contracts": "workspace:*",

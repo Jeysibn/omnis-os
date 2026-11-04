@@ -4,14 +4,30 @@ import {
   AuthorizationDecisionSchema,
   AuthorizationSchema,
   CreateAuthorizationSchema,
+  CreateDepartmentSchema,
+  DepartmentIdSchema,
+  DepartmentListQuerySchema,
+  DepartmentListResponseSchema,
+  DepartmentSchema,
+  UpdateDepartmentSchema,
   type Authorization,
+  type Department,
 } from '@omnis/contracts';
+import { DepartmentStoreError } from '@omnis/db';
 
 export type AuthorizerStore = {
   request(taskId: string, actor: 'owner', correlationId: string): Promise<Authorization>;
   decide(id: string, actor: 'owner', decision: 'approve' | 'deny'): Promise<Authorization>;
   revoke(id: string, actor: 'owner'): Promise<Authorization>;
   get(id: string): Promise<Authorization | undefined>;
+  listDepartments(includeArchived?: boolean): Promise<{ departments: Department[]; total: number }>;
+  createDepartment(input: { slug: string; name: string }, requestId: string): Promise<Department>;
+  updateDepartment(
+    id: string,
+    input: { slug: string; name: string },
+    requestId: string,
+  ): Promise<Department>;
+  archiveDepartment(id: string, requestId: string): Promise<Department>;
 };
 
 export function createAuthorizerApp(input: {
@@ -49,6 +65,75 @@ export function createAuthorizerApp(input: {
       });
     }
   });
+
+  app.get('/internal/v1/departments', async (request, reply) => {
+    const parsed = DepartmentListQuerySchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.code(400).send({
+        error: { code: 'invalid_input', message: 'Department query is invalid.' },
+      });
+    }
+    try {
+      return DepartmentListResponseSchema.parse(
+        await input.store.listDepartments(parsed.data.includeArchived === 'true'),
+      );
+    } catch (error) {
+      return sendDepartmentStoreError(error, reply);
+    }
+  });
+
+  app.post('/internal/v1/departments', async (request, reply) => {
+    const parsed = CreateDepartmentSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({
+        error: { code: 'invalid_input', message: 'Department input is invalid.' },
+      });
+    }
+    try {
+      return reply
+        .code(201)
+        .send(DepartmentSchema.parse(await input.store.createDepartment(parsed.data, request.id)));
+    } catch (error) {
+      return sendDepartmentStoreError(error, reply);
+    }
+  });
+
+  app.patch<{ Params: { departmentId: string } }>(
+    '/internal/v1/departments/:departmentId',
+    async (request, reply) => {
+      const id = DepartmentIdSchema.safeParse(request.params.departmentId);
+      const parsed = UpdateDepartmentSchema.safeParse(request.body);
+      if (!id.success || !parsed.success) {
+        return reply.code(400).send({
+          error: { code: 'invalid_input', message: 'Department update is invalid.' },
+        });
+      }
+      try {
+        return DepartmentSchema.parse(
+          await input.store.updateDepartment(id.data, parsed.data, request.id),
+        );
+      } catch (error) {
+        return sendDepartmentStoreError(error, reply);
+      }
+    },
+  );
+
+  app.post<{ Params: { departmentId: string } }>(
+    '/internal/v1/departments/:departmentId/archive',
+    async (request, reply) => {
+      const id = DepartmentIdSchema.safeParse(request.params.departmentId);
+      if (!id.success) {
+        return reply.code(400).send({
+          error: { code: 'invalid_input', message: 'Department identifier is invalid.' },
+        });
+      }
+      try {
+        return DepartmentSchema.parse(await input.store.archiveDepartment(id.data, request.id));
+      } catch (error) {
+        return sendDepartmentStoreError(error, reply);
+      }
+    },
+  );
 
   app.post('/internal/v1/authorizations', async (request, reply) => {
     const parsed = CreateAuthorizationSchema.safeParse(request.body);
@@ -129,17 +214,32 @@ export function createAuthorizerApp(input: {
     );
     const decisionOutcomeUnknown =
       request.method !== 'GET' && request.url.startsWith('/internal/v1/authorizations');
+    const managementOutcomeUnknown =
+      request.method !== 'GET' && request.url.startsWith('/internal/v1/departments');
     return reply.code(503).send({
       error: {
-        code: decisionOutcomeUnknown ? 'authorization_outcome_unknown' : 'authorizer_unavailable',
+        code: decisionOutcomeUnknown
+          ? 'authorization_outcome_unknown'
+          : managementOutcomeUnknown
+            ? 'department_outcome_unknown'
+            : 'authorizer_unavailable',
         message: decisionOutcomeUnknown
           ? 'The authorizer could not confirm whether the decision committed. Read the authorization state or retry with the same idempotency key.'
-          : 'The authorization store is unavailable.',
+          : managementOutcomeUnknown
+            ? 'The authorizer could not confirm whether the department change committed. Read the department state before retrying.'
+            : 'The authorization store is unavailable.',
       },
     });
   });
 
   return app;
+}
+
+function sendDepartmentStoreError(error: unknown, reply: FastifyReply) {
+  if (!(error instanceof DepartmentStoreError)) throw error;
+  return reply.code(error.statusCode).send({
+    error: { code: error.code, message: error.message },
+  });
 }
 
 function sendStoreError(error: unknown, reply: FastifyReply) {
