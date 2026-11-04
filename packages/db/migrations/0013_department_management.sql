@@ -101,7 +101,7 @@ BEGIN
     RAISE EXCEPTION 'department was not found' USING ERRCODE = 'P0002';
   END IF;
   IF v_department.archived_at IS NOT NULL THEN
-    RETURN QUERY SELECT v_department.id, v_department.slug, v_department.name,
+    RETURN QUERY SELECT v_department.id, v_department.slug::text, v_department.name::text,
                         v_department.archived_at, v_department.created_at, v_department.updated_at;
     RETURN;
   END IF;
@@ -117,7 +117,7 @@ BEGIN
     (id, department_id, actor_id, action, request_id)
   VALUES ('dpa_' || replace(gen_random_uuid()::text, '-', ''),
           v_department.id, 'owner', 'archived', p_request_id);
-  RETURN QUERY SELECT v_department.id, v_department.slug, v_department.name,
+  RETURN QUERY SELECT v_department.id, v_department.slug::text, v_department.name::text,
                       v_department.archived_at, v_department.created_at, v_department.updated_at;
 END
 $function$;

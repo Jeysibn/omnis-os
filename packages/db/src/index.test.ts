@@ -3009,7 +3009,8 @@ const postgresSuite = describe(
       if (pool && databaseUrl) {
         assertTestDatabase(databaseUrl);
         await adminPool!.query(`
-        TRUNCATE omnis.test_queue_outbox, omnis.agent_profile_versions, omnis.agents, omnis.departments,
+        TRUNCATE omnis.test_queue_outbox, omnis.department_management_audit,
+          omnis.agent_profile_versions, omnis.agents, omnis.departments,
           omnis.mock_sandbox_launches, omnis.legacy_unscoped_runs, omnis.authorization_audit,
           omnis.runtime_authorizations, omnis.run_idempotency,
           omnis.run_events, omnis.runs, omnis.tasks
