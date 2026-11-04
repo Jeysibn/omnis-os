@@ -287,7 +287,10 @@ export function assertRuntimeAclPolicy(snapshot) {
       if (
         entry.objectType === 'routine' &&
         entry.schema === 'omnis' &&
-        entry.object === 'revoke_run_authorization(p_authorization_id text, p_actor_id text)' &&
+        [
+          'revoke_run_authorization(p_authorization_id text, p_actor_id text)',
+          'archive_department(p_department_id text, p_request_id text)',
+        ].includes(entry.object) &&
         entry.privilege === 'EXECUTE' &&
         entry.securityDefiner === true
       )
@@ -299,7 +302,32 @@ export function assertRuntimeAclPolicy(snapshot) {
         entry.schema === 'omnis' &&
         ((entry.object === 'authorization_audit' &&
           ['SELECT', 'INSERT'].includes(entry.privilege)) ||
-          (entry.object === 'runtime_authorizations' && entry.privilege === 'SELECT'))
+          (entry.object === 'runtime_authorizations' && entry.privilege === 'SELECT') ||
+          (entry.object === 'departments' && entry.privilege === 'SELECT'))
+      )
+        continue;
+      if (
+        entry.objectType === 'column' &&
+        entry.schema === 'omnis' &&
+        entry.object === 'departments' &&
+        entry.privilege === 'INSERT' &&
+        ['id', 'slug', 'name'].includes(entry.column)
+      )
+        continue;
+      if (
+        entry.objectType === 'column' &&
+        entry.schema === 'omnis' &&
+        entry.object === 'departments' &&
+        entry.privilege === 'UPDATE' &&
+        ['slug', 'name', 'updated_at'].includes(entry.column)
+      )
+        continue;
+      if (
+        entry.objectType === 'column' &&
+        entry.schema === 'omnis' &&
+        entry.object === 'department_management_audit' &&
+        entry.privilege === 'INSERT' &&
+        ['id', 'department_id', 'actor_id', 'action', 'request_id'].includes(entry.column)
       )
         continue;
       if (

@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import type { Pool, PoolClient, QueryResultRow } from 'pg';
+import type { Department } from '@omnis/contracts';
 import { inTransaction } from './database.ts';
+import { PostgresDepartmentManagementStore } from './department-management-store.ts';
 
 export type AuthorizationStatus = 'pending' | 'authorized' | 'denied' | 'revoked' | 'expired';
 export type RuntimeAuthorizationRecord = {
@@ -71,10 +73,32 @@ const selectAuthorization = `
 export class PostgresAuthorizationStore {
   private readonly runtime: Pool;
   private readonly authorizer: Pool;
+  private readonly departmentManagement: PostgresDepartmentManagementStore;
 
   constructor(runtime: Pool, authorizer: Pool) {
     this.runtime = runtime;
     this.authorizer = authorizer;
+    this.departmentManagement = new PostgresDepartmentManagementStore(authorizer);
+  }
+
+  listDepartments(includeArchived = false): Promise<{ departments: Department[]; total: number }> {
+    return this.departmentManagement.list(includeArchived);
+  }
+
+  createDepartment(input: { slug: string; name: string }, requestId: string): Promise<Department> {
+    return this.departmentManagement.create(input, requestId);
+  }
+
+  updateDepartment(
+    id: string,
+    input: { slug: string; name: string },
+    requestId: string,
+  ): Promise<Department> {
+    return this.departmentManagement.update(id, input, requestId);
+  }
+
+  archiveDepartment(id: string, requestId: string): Promise<Department> {
+    return this.departmentManagement.archive(id, requestId);
   }
 
   async request(

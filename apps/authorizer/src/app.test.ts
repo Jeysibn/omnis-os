@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import type { Authorization } from '@omnis/contracts';
+import type { Authorization, Department } from '@omnis/contracts';
 import { createAuthorizerApp, type AuthorizerStore } from './app.ts';
 
 const serviceToken = 'synthetic-authorizer-service-token-'.padEnd(64, 'x');
@@ -24,9 +24,22 @@ const authorization: Authorization = {
   consumedAt: null,
   consumedRunId: null,
 };
+const department: Department = {
+  id: 'dep_engineering',
+  slug: 'engineering',
+  name: 'Engineering',
+  archivedAt: null,
+  createdAt: '2026-11-04T00:00:00.000Z',
+  updatedAt: '2026-11-04T00:00:00.000Z',
+};
 
 function makeStore() {
-  const calls: Array<{ method: string; actor?: string; correlationId?: string }> = [];
+  const calls: Array<{
+    method: string;
+    actor?: string;
+    correlationId?: string;
+    requestId?: string;
+  }> = [];
   const store: AuthorizerStore = {
     async request(taskId, actor, correlationId) {
       calls.push({ method: 'request', actor, correlationId });
@@ -42,6 +55,22 @@ function makeStore() {
     },
     async get() {
       return authorization;
+    },
+    async listDepartments() {
+      calls.push({ method: 'listDepartments' });
+      return { departments: [department], total: 1 };
+    },
+    async createDepartment(_input, requestId) {
+      calls.push({ method: 'createDepartment', requestId });
+      return department;
+    },
+    async updateDepartment(_id, _input, requestId) {
+      calls.push({ method: 'updateDepartment', requestId });
+      return department;
+    },
+    async archiveDepartment(_id, requestId) {
+      calls.push({ method: 'archiveDepartment', requestId });
+      return { ...department, archivedAt: '2026-11-04T01:00:00.000Z' };
     },
   };
   return { store, calls };
@@ -145,6 +174,90 @@ describe('independent authorizer service boundary', () => {
       assert.equal(response.statusCode, 503);
       assert.equal(response.json().error.code, 'authorization_outcome_unknown');
       assert.match(response.json().error.message, /same idempotency key/i);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+describe('authorizer department management boundary', () => {
+  it('requires the internal service token and validates department bodies', async () => {
+    const { store, calls } = makeStore();
+    const app = createAuthorizerApp({ store, serviceToken, checkDatabase: async () => undefined });
+    try {
+      const unauthenticated = await app.inject({ method: 'GET', url: '/internal/v1/departments' });
+      assert.equal(unauthenticated.statusCode, 401);
+      const invalid = await app.inject({
+        method: 'POST',
+        url: '/internal/v1/departments',
+        headers: { 'x-omnis-authorizer-token': serviceToken },
+        payload: { slug: 'Engineering', name: 'Engineering', ownerId: 'attacker' },
+      });
+      assert.equal(invalid.statusCode, 400);
+      assert.deepEqual(calls, []);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('serves exact directory data and derives owner operations internally', async () => {
+    const { store, calls } = makeStore();
+    const app = createAuthorizerApp({ store, serviceToken, checkDatabase: async () => undefined });
+    const headers = { 'x-omnis-authorizer-token': serviceToken };
+    try {
+      const listed = await app.inject({ method: 'GET', url: '/internal/v1/departments', headers });
+      assert.equal(listed.statusCode, 200);
+      assert.deepEqual(listed.json(), { departments: [department], total: 1 });
+      const created = await app.inject({
+        method: 'POST',
+        url: '/internal/v1/departments',
+        headers,
+        payload: { slug: 'engineering', name: 'Engineering' },
+      });
+      assert.equal(created.statusCode, 201);
+      const archived = await app.inject({
+        method: 'POST',
+        url: '/internal/v1/departments/dep_engineering/archive',
+        headers,
+      });
+      assert.equal(archived.statusCode, 200);
+      assert.equal(archived.json().archivedAt, '2026-11-04T01:00:00.000Z');
+      assert.equal(
+        calls.some((call) => call.method === 'createDepartment' && !!call.requestId),
+        true,
+      );
+      assert.equal(
+        calls.some((call) => call.method === 'archiveDepartment' && !!call.requestId),
+        true,
+      );
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('returns a generic uncertain-outcome response without error details on mutation failure', async () => {
+    const { store } = makeStore();
+    const failingStore: AuthorizerStore = {
+      ...store,
+      async createDepartment() {
+        throw new Error('synthetic-secret-value-must-not-leak');
+      },
+    };
+    const app = createAuthorizerApp({
+      store: failingStore,
+      serviceToken,
+      checkDatabase: async () => undefined,
+    });
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/internal/v1/departments',
+        headers: { 'x-omnis-authorizer-token': serviceToken },
+        payload: { slug: 'engineering', name: 'Engineering' },
+      });
+      assert.equal(response.statusCode, 503);
+      assert.equal(response.json().error.code, 'department_outcome_unknown');
+      assert.doesNotMatch(response.body, /synthetic-secret-value-must-not-leak/);
     } finally {
       await app.close();
     }

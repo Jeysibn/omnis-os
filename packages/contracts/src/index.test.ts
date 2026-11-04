@@ -2,10 +2,13 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
   AgentDirectoryResponseSchema,
+  AgentProfileWriteInputSchema,
   AgentProfileResponseSchema,
   AgentProfileVersionResponseSchema,
   AgentProfileVersionsResponseSchema,
   AgentVersionQuerySchema,
+  CreateDepartmentSchema,
+  DepartmentListResponseSchema,
   RunEventSchema,
   RunSchema,
   RunStatusSchema,
@@ -233,5 +236,47 @@ describe('agent profile read contracts', () => {
     for (const query of [{ limit: '0' }, { limit: '01' }, { limit: '101' }, { other: 'x' }]) {
       assert.equal(AgentVersionQuerySchema.safeParse(query).success, false);
     }
+  });
+});
+
+describe('AO-104 management input contracts', () => {
+  it('bounds every profile field and retains the existing 16 KiB instruction limit', () => {
+    const profile = {
+      profession: 'Systems Analyst',
+      seniority: null,
+      specialties: [],
+      personality: { traits: [], tone: null, principles: [] },
+      behavior: { autonomy: null, escalation: null },
+      instructions: 'x'.repeat(16_384),
+    };
+    assert.equal(AgentProfileWriteInputSchema.safeParse(profile).success, true);
+    assert.equal(
+      AgentProfileWriteInputSchema.safeParse({ ...profile, instructions: 'x'.repeat(16_385) })
+        .success,
+      false,
+    );
+    assert.equal(
+      AgentProfileWriteInputSchema.safeParse({ ...profile, extra: 'ignored?' }).success,
+      false,
+    );
+  });
+
+  it('rejects malformed department input and requires complete directory metadata', () => {
+    assert.equal(
+      CreateDepartmentSchema.safeParse({ slug: 'Engineering', name: 'Engineering' }).success,
+      false,
+    );
+    assert.equal(
+      CreateDepartmentSchema.safeParse({ slug: 'engineering', name: ' Engineering ' }).success,
+      true,
+    );
+    assert.equal(
+      DepartmentListResponseSchema.safeParse({ departments: [], total: 0 }).success,
+      true,
+    );
+    assert.equal(
+      DepartmentListResponseSchema.safeParse({ departments: [], total: 1 }).success,
+      false,
+    );
   });
 });

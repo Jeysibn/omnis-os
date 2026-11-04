@@ -43,6 +43,15 @@ const allowed = [
   acl(
     'routine',
     'omnis',
+    'archive_department(p_department_id text, p_request_id text)',
+    'EXECUTE',
+    null,
+    'omnis_authorizer',
+    true,
+  ),
+  acl(
+    'routine',
+    'omnis',
     'lock_active_run_authorization(p_run_id text)',
     'EXECUTE',
     null,
@@ -97,6 +106,19 @@ describe('post-restore PostgreSQL ACL integrity', () => {
       acl('table', 'omnis', 'runtime_authorizations', 'SELECT', null, 'omnis_authorizer'),
       acl('table', 'omnis', 'authorization_audit', 'SELECT', null, 'omnis_authorizer'),
       acl('table', 'omnis', 'authorization_audit', 'INSERT', null, 'omnis_authorizer'),
+      acl('table', 'omnis', 'departments', 'SELECT', null, 'omnis_authorizer'),
+      acl('column', 'omnis', 'departments', 'INSERT', 'id', 'omnis_authorizer'),
+      acl('column', 'omnis', 'departments', 'INSERT', 'slug', 'omnis_authorizer'),
+      acl('column', 'omnis', 'departments', 'INSERT', 'name', 'omnis_authorizer'),
+      acl('column', 'omnis', 'departments', 'UPDATE', 'name', 'omnis_authorizer'),
+      acl(
+        'column',
+        'omnis',
+        'department_management_audit',
+        'INSERT',
+        'request_id',
+        'omnis_authorizer',
+      ),
       acl('column', 'omnis', 'runtime_authorizations', 'INSERT', 'id', 'omnis_authorizer'),
       acl('column', 'omnis', 'runtime_authorizations', 'UPDATE', 'status', 'omnis_authorizer'),
       acl('schema', 'omnis', 'omnis', 'USAGE', null, 'omnis_launcher'),
@@ -167,6 +189,30 @@ describe('post-restore PostgreSQL ACL integrity', () => {
           acl('table', 'omnis', 'runs', 'DELETE', null, 'omnis_authorizer'),
         ]),
       /Authorizer ACL DELETE is prohibited/,
+    );
+    assert.throws(
+      () =>
+        assertRuntimeAclPolicy([
+          ...allowed,
+          acl('table', 'omnis', 'departments', 'DELETE', null, 'omnis_authorizer'),
+        ]),
+      /Authorizer ACL DELETE is prohibited/,
+    );
+    assert.throws(
+      () =>
+        assertRuntimeAclPolicy([
+          ...allowed,
+          acl('column', 'omnis', 'agents', 'INSERT', 'id', 'omnis_authorizer'),
+        ]),
+      /Authorizer ACL INSERT is prohibited/,
+    );
+    assert.throws(
+      () =>
+        assertRuntimeAclPolicy([
+          ...allowed,
+          acl('column', 'omnis', 'departments', 'UPDATE', 'archived_at', 'omnis_authorizer'),
+        ]),
+      /Authorizer ACL UPDATE is prohibited/,
     );
   });
 
