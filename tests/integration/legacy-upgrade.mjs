@@ -822,6 +822,8 @@ async function startRestrictedAuthorizer() {
     'OMNIS_LAUNCHER_DB_PASSWORD',
     'OMNIS_LAUNCHER_DATABASE_URL',
     'OMNIS_API_AUTHORIZER_TOKEN',
+    'OMNIS_AGENT_IDEMPOTENCY_KEY',
+    'OMNIS_AGENT_IDEMPOTENCY_KEY_VERSION',
     'OMNIS_OWNER_PASSWORD_HASH',
     'OMNIS_SESSION_SECRET',
     'OMNIS_INTERNAL_TOKEN',
@@ -833,6 +835,8 @@ async function startRestrictedAuthorizer() {
   childEnvironment.OMNIS_AUTHORIZER_SOCKET = authorizerSocket;
   childEnvironment.OMNIS_AUTHORIZER_SOCKET_MODE = '600';
   childEnvironment.OMNIS_API_AUTHORIZER_TOKEN = token;
+  childEnvironment.OMNIS_AGENT_IDEMPOTENCY_KEY = randomBytes(32).toString('hex');
+  childEnvironment.OMNIS_AGENT_IDEMPOTENCY_KEY_VERSION = '1';
   const child = spawn(process.execPath, ['--experimental-strip-types', 'src/server.ts'], {
     cwd: join(repositoryRoot, 'apps/authorizer'),
     env: childEnvironment,
