@@ -19,6 +19,7 @@ import { env } from './env.ts';
 import { LocalSessionStore } from './session-store.ts';
 import { AuthThrottle } from './auth-throttle.ts';
 import { registerAgentReadRoutes } from './agent-routes.ts';
+import { registerAgentManagementRoutes } from './agent-management-routes.ts';
 import { registerDepartmentRoutes } from './department-routes.ts';
 import {
   parseRun,
@@ -197,6 +198,7 @@ app.get('/api/v1/me', { preHandler: requireOwner }, async () => ({
   authMode: 'local-owner-session',
 }));
 registerAgentReadRoutes(app);
+registerAgentManagementRoutes(app);
 registerDepartmentRoutes(app);
 
 app.get('/api/v1/tasks', { preHandler: requireOwner }, async () =>
@@ -341,7 +343,27 @@ app.get<{ Params: { runId: string } }>(
 app.setErrorHandler((error, request, reply) => {
   if (error instanceof AuthorizerRequestError) return reply.code(error.statusCode).send(error.body);
   if (error instanceof WorkerRequestError) return reply.code(error.statusCode).send(error.body);
-  app.log.error({ err: error, requestId: request.id }, 'API request failed');
+  const statusCode =
+    error && typeof error === 'object' && 'statusCode' in error ? error.statusCode : undefined;
+  if (request.url.startsWith('/api/v1/agents')) {
+    app.log.error(
+      { errorType: error instanceof Error ? error.name : 'unknown', requestId: request.id },
+      'Agent management request failed.',
+    );
+    if (statusCode === 413 || statusCode === 400) {
+      return reply.code(statusCode).send({
+        error: {
+          code: statusCode === 413 ? 'payload_too_large' : 'invalid_input',
+          message:
+            statusCode === 413
+              ? 'Agent management request exceeds the allowed size.'
+              : 'Agent management request is malformed.',
+        },
+      });
+    }
+  } else {
+    app.log.error({ err: error, requestId: request.id }, 'API request failed');
+  }
   return reply.code(500).send({
     error: {
       code: 'internal_error',

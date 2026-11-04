@@ -189,6 +189,7 @@ owner_hash="$(node --input-type=module -e 'import { randomBytes, scryptSync } fr
 session_secret="$(od -An -N48 -tx1 /dev/urandom | tr -d ' \n')"
 worker_token="$(od -An -N48 -tx1 /dev/urandom | tr -d ' \n')"
 authorizer_token="$(od -An -N48 -tx1 /dev/urandom | tr -d ' \n')"
+agent_idempotency_key="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
 
 create_env_file() {
   local path="$1"
@@ -220,6 +221,8 @@ EOF
 create_env_file "$repo_root/.env.authorizer"
 cat > "$repo_root/.env.authorizer" <<EOF
 OMNIS_API_AUTHORIZER_TOKEN=$authorizer_token
+OMNIS_AGENT_IDEMPOTENCY_KEY=$agent_idempotency_key
+OMNIS_AGENT_IDEMPOTENCY_KEY_VERSION=1
 OMNIS_AUTHORIZER_DB_PASSWORD=$OMNIS_AUTHORIZER_DB_PASSWORD
 OMNIS_AUTHORIZER_DATABASE_URL=$OMNIS_TEST_AUTHORIZER_DATABASE_URL
 OMNIS_AUTHORIZER_SOCKET=/run/omnis-authorizer/authorizer.sock

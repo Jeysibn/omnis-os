@@ -3,13 +3,20 @@ import { chmod, lstat, mkdir, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { createAuthorizerApp } from './app.ts';
 import { env } from './env.ts';
+import { PostgresAgentLifecycleStore } from '@omnis/db';
 
 const pool = createPool({
   connectionString: env.databaseUrl,
   max: 4,
   application_name: 'omnis-authorizer-service',
 });
-const store = new PostgresAuthorizationStore(pool, pool);
+const store = new PostgresAuthorizationStore(pool, pool, {
+  agentLifecycle: new PostgresAgentLifecycleStore(
+    pool,
+    env.agentIdempotencyKey,
+    env.agentIdempotencyKeyVersion,
+  ),
+});
 await store.recordExpiredAuthorizations();
 
 const app = createAuthorizerApp({

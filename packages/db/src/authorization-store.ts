@@ -3,6 +3,7 @@ import type { Pool, PoolClient, QueryResultRow } from 'pg';
 import type { Department } from '@omnis/contracts';
 import { inTransaction } from './database.ts';
 import { PostgresDepartmentManagementStore } from './department-management-store.ts';
+import type { PostgresAgentLifecycleStore } from './agent-lifecycle-store.ts';
 
 export type AuthorizationStatus = 'pending' | 'authorized' | 'denied' | 'revoked' | 'expired';
 export type RuntimeAuthorizationRecord = {
@@ -74,11 +75,17 @@ export class PostgresAuthorizationStore {
   private readonly runtime: Pool;
   private readonly authorizer: Pool;
   private readonly departmentManagement: PostgresDepartmentManagementStore;
+  readonly agentLifecycle: PostgresAgentLifecycleStore | undefined;
 
-  constructor(runtime: Pool, authorizer: Pool) {
+  constructor(
+    runtime: Pool,
+    authorizer: Pool,
+    options: { agentLifecycle?: PostgresAgentLifecycleStore } = {},
+  ) {
     this.runtime = runtime;
     this.authorizer = authorizer;
     this.departmentManagement = new PostgresDepartmentManagementStore(authorizer);
+    this.agentLifecycle = options.agentLifecycle;
   }
 
   listDepartments(includeArchived = false): Promise<{ departments: Department[]; total: number }> {

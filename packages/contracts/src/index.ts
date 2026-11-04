@@ -235,6 +235,81 @@ export const AgentProfileWriteInputSchema = z
   .strict();
 export type AgentProfileWriteInput = z.infer<typeof AgentProfileWriteInputSchema>;
 
+export const AgentIdempotencyKeySchema = z.string().uuid();
+export const CreateAgentInputSchema = z
+  .object({
+    name: z.string().trim().min(1).max(120),
+    slug: z
+      .string()
+      .trim()
+      .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/)
+      .max(80),
+    departmentId: OpaqueIdSchema.nullable(),
+  })
+  .strict();
+export type CreateAgentInput = z.infer<typeof CreateAgentInputSchema>;
+
+export const SaveAgentProfileDraftInputSchema = z
+  .object({
+    expectedDraftRevision: z
+      .number()
+      .int()
+      .min(0)
+      .max(Number.MAX_SAFE_INTEGER - 1),
+    baseVersionNo: z.number().int().positive().max(2_147_483_647).nullable(),
+    profile: AgentProfileWriteInputSchema,
+  })
+  .strict();
+export type SaveAgentProfileDraftInput = z.infer<typeof SaveAgentProfileDraftInputSchema>;
+
+export const PublishAgentProfileInputSchema = z
+  .object({
+    expectedVersionNo: z.number().int().positive().max(2_147_483_647).nullable(),
+    expectedDraftRevision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  })
+  .strict();
+export type PublishAgentProfileInput = z.infer<typeof PublishAgentProfileInputSchema>;
+
+export const AgentProfileDraftResponseSchema = z
+  .object({
+    agentId: OpaqueIdSchema,
+    draftRevision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+    baseVersionNo: z.number().int().positive().max(2_147_483_647).nullable(),
+    profile: AgentProfileWriteInputSchema.nullable(),
+    updatedAt: AgentTimestampSchema.nullable(),
+  })
+  .strict()
+  .refine((draft) =>
+    draft.profile === null
+      ? draft.baseVersionNo === null && draft.updatedAt === null
+      : draft.draftRevision > 0 && draft.updatedAt !== null,
+  );
+export type AgentProfileDraftResponse = z.infer<typeof AgentProfileDraftResponseSchema>;
+
+export const AgentMutationReceiptSchema = z
+  .object({
+    requestId: AgentIdempotencyKeySchema,
+    operation: z.enum([
+      'agent.created',
+      'profile.draft_saved',
+      'profile.published',
+      'agent.archived',
+    ]),
+    agentId: OpaqueIdSchema,
+    lifecycle: AgentLifecycleSchema,
+    versionId: OpaqueIdSchema.nullable(),
+    versionNo: z.number().int().positive().max(2_147_483_647).nullable(),
+    draftRevision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+    occurredAt: AgentTimestampSchema,
+  })
+  .strict()
+  .refine(
+    (receipt) =>
+      (receipt.versionId === null) === (receipt.versionNo === null) &&
+      (receipt.operation === 'profile.published') === (receipt.versionId !== null),
+  );
+export type AgentMutationReceipt = z.infer<typeof AgentMutationReceiptSchema>;
+
 export const DepartmentIdSchema = OpaqueIdSchema;
 export const DepartmentSchema = z
   .object({

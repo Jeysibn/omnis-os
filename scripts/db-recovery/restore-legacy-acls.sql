@@ -137,6 +137,49 @@ BEGIN
   END IF;
 END
 $department_management_acl$;
+
+DO $agent_lifecycle_acl$
+BEGIN
+  IF pg_catalog.to_regclass('omnis.agents') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON omnis.agents, omnis.agent_profile_versions FROM omnis_authorizer';
+  END IF;
+  IF pg_catalog.to_regclass('omnis.agent_profile_drafts') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON omnis.agent_profile_drafts, omnis.agent_management_audit, omnis.agent_management_idempotency FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.create_agent(text,text,text,text,uuid,integer,bytea)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.create_agent(text,text,text,text,uuid,integer,bytea) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.create_agent(text,text,text,text,uuid,integer,bytea) TO omnis_authorizer';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.get_agent_profile_draft(text)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.get_agent_profile_draft(text) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.get_agent_profile_draft(text) TO omnis_authorizer';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.save_agent_profile_draft(text,bigint,integer,jsonb,uuid,integer,bytea)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.save_agent_profile_draft(text,bigint,integer,jsonb,uuid,integer,bytea) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.save_agent_profile_draft(text,bigint,integer,jsonb,uuid,integer,bytea) TO omnis_authorizer';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.publish_agent_profile(text,integer,bigint,uuid,integer,bytea)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.publish_agent_profile(text,integer,bigint,uuid,integer,bytea) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.publish_agent_profile(text,integer,bigint,uuid,integer,bytea) TO omnis_authorizer';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.archive_agent(text,uuid,integer,bytea)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.archive_agent(text,uuid,integer,bytea) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.archive_agent(text,uuid,integer,bytea) TO omnis_authorizer';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.reject_agent_management_audit_mutation()') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.reject_agent_management_audit_mutation() FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.guard_agent_profile_draft()') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.guard_agent_profile_draft() FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.agent_management_replay(uuid,text,text,integer,bytea)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.agent_management_replay(uuid,text,text,integer,bytea) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.agent_management_remember(uuid,text,text,integer,bytea,jsonb)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.agent_management_remember(uuid,text,text,integer,bytea,jsonb) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+END
+$agent_lifecycle_acl$;
 GRANT USAGE, SELECT ON SEQUENCE omnis.task_id_seq, omnis.run_id_seq TO omnis_runtime;
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA pgboss TO omnis_runtime;

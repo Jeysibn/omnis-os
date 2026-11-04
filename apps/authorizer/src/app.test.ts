@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { Authorization, Department } from '@omnis/contracts';
+import { AgentLifecycleStoreError } from '@omnis/db';
 import { createAuthorizerApp, type AuthorizerStore } from './app.ts';
 
 const serviceToken = 'synthetic-authorizer-service-token-'.padEnd(64, 'x');
@@ -89,6 +90,95 @@ describe('independent authorizer service boundary', () => {
       });
       assert.equal(response.statusCode, 401);
       assert.deepEqual(calls, []);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('validates and dispatches owner agent lifecycle operations behind the internal token', async () => {
+    const { store, calls } = makeStore();
+    let createdInput: unknown;
+    store.agentLifecycle = {
+      async getDraft(agentId) {
+        return { agentId, draftRevision: 0, baseVersionNo: null, profile: null, updatedAt: null };
+      },
+      async createAgent(input, requestId) {
+        createdInput = input;
+        calls.push({ method: 'createAgent', requestId });
+        return {
+          requestId,
+          operation: 'agent.created',
+          agentId: 'agt_created',
+          lifecycle: 'draft',
+          versionId: null,
+          versionNo: null,
+          draftRevision: 0,
+          occurredAt: '2026-11-04T00:00:00.000Z',
+        };
+      },
+      async saveDraft() {
+        throw new AgentLifecycleStoreError('disallowed_credential_material', 422);
+      },
+      async publish() {
+        throw new Error('not used');
+      },
+      async archive() {
+        throw new Error('not used');
+      },
+    };
+    const app = createAuthorizerApp({ store, serviceToken, checkDatabase: async () => undefined });
+    const headers = {
+      'x-omnis-authorizer-token': serviceToken,
+      'idempotency-key': '123e4567-e89b-42d3-a456-426614174000',
+    };
+    try {
+      const denied = await app.inject({
+        method: 'POST',
+        url: '/internal/v1/agents',
+        headers: { 'idempotency-key': headers['idempotency-key'] },
+        payload: { name: 'Atlas', slug: 'atlas', departmentId: null },
+      });
+      assert.equal(denied.statusCode, 401);
+      const invalid = await app.inject({
+        method: 'POST',
+        url: '/internal/v1/agents',
+        headers,
+        payload: { name: 'Atlas', slug: 'Atlas', departmentId: null },
+      });
+      assert.equal(invalid.statusCode, 400);
+      const created = await app.inject({
+        method: 'POST',
+        url: '/internal/v1/agents',
+        headers,
+        payload: { name: 'Atlas', slug: 'atlas', departmentId: null },
+      });
+      assert.equal(created.statusCode, 201);
+      assert.equal(created.json().agentId, 'agt_created');
+      assert.deepEqual(createdInput, { name: 'Atlas', slug: 'atlas', departmentId: null });
+      assert.deepEqual(
+        calls.filter((call) => call.method === 'createAgent'),
+        [{ method: 'createAgent', requestId: headers['idempotency-key'] }],
+      );
+      const rejectedText = 'password: "synthetic-secret-value-123"';
+      const rejected = await app.inject({
+        method: 'PUT',
+        url: '/internal/v1/agents/agt_created/draft-profile',
+        headers,
+        payload: {
+          expectedDraftRevision: 0,
+          baseVersionNo: null,
+          profile: {
+            profession: 'Analyst',
+            seniority: null,
+            specialties: [],
+            personality: { traits: [], tone: null, principles: [] },
+            behavior: { autonomy: null, escalation: null },
+            instructions: rejectedText,
+          },
+        },
+      });
+      assert.equal(rejected.statusCode, 422);
+      assert.doesNotMatch(rejected.body, /synthetic-secret-value-123/);
     } finally {
       await app.close();
     }

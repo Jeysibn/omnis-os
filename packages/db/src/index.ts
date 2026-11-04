@@ -5,6 +5,8 @@ export {
   PostgresAgentProfileStore,
   validateAgentProfileWriteInput,
 } from './agent-profile-store.ts';
+export { AgentLifecycleStoreError, PostgresAgentLifecycleStore } from './agent-lifecycle-store.ts';
+export type { AgentLifecycleStoreErrorCode } from './agent-lifecycle-store.ts';
 export {
   DepartmentStoreError,
   PostgresDepartmentManagementStore,

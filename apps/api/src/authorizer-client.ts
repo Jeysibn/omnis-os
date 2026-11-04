@@ -36,17 +36,23 @@ export async function authorizerRequest<T>(
     const outcomeUnknown = error instanceof AuthorizerTransportError && error.mayHaveCommitted;
     const departmentMutation =
       (init.method ?? 'GET') !== 'GET' && path.startsWith('/internal/v1/departments');
+    const agentMutation =
+      (init.method ?? 'GET') !== 'GET' && path.startsWith('/internal/v1/agents');
     throw new AuthorizerRequestError(503, {
       error: {
         code: outcomeUnknown
           ? departmentMutation
             ? 'department_outcome_unknown'
-            : 'authorization_outcome_unknown'
+            : agentMutation
+              ? 'management_outcome_unknown'
+              : 'authorization_outcome_unknown'
           : 'authorizer_unavailable',
         message: outcomeUnknown
           ? departmentMutation
             ? 'The authorizer response was lost; the department change may have committed. Read the department state before retrying.'
-            : 'The authorizer response was lost; the decision may have committed. Retry with the same idempotency key or read the authorization state.'
+            : agentMutation
+              ? 'The authorizer response was lost; the agent change may have committed. Read agent state or retry with the same idempotency key.'
+              : 'The authorizer response was lost; the decision may have committed. Retry with the same idempotency key or read the authorization state.'
           : 'The authorizer could not be reached; no decision was submitted. Retry when the service is available.',
       },
     });
@@ -72,12 +78,19 @@ export async function authorizerRequest<T>(
   } catch {
     if ((init.method ?? 'GET') !== 'GET') {
       const departmentMutation = path.startsWith('/internal/v1/departments');
+      const agentMutation = path.startsWith('/internal/v1/agents');
       throw new AuthorizerRequestError(503, {
         error: {
-          code: departmentMutation ? 'department_outcome_unknown' : 'authorization_outcome_unknown',
+          code: departmentMutation
+            ? 'department_outcome_unknown'
+            : agentMutation
+              ? 'management_outcome_unknown'
+              : 'authorization_outcome_unknown',
           message: departmentMutation
             ? 'The authorizer response could not be validated; the department change may have committed. Read the department state before retrying.'
-            : 'The authorizer response could not be validated; the decision may have committed. Read the authorization state or retry with the same idempotency key.',
+            : agentMutation
+              ? 'The authorizer response could not be validated; the agent change may have committed. Read agent state or retry with the same idempotency key.'
+              : 'The authorizer response could not be validated; the decision may have committed. Read the authorization state or retry with the same idempotency key.',
         },
       });
     }

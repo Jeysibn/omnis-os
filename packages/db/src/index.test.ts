@@ -8,9 +8,11 @@ import { setTimeout as delay } from 'node:timers/promises';
 import type { Pool } from 'pg';
 import {
   createPool,
+  AgentLifecycleStoreError,
   DepartmentStoreError,
   migrate,
   PostgresAgentProfileStore,
+  PostgresAgentLifecycleStore,
   PostgresAuthorizationStore,
   PostgresDepartmentManagementStore,
   PostgresRunStore,
@@ -74,7 +76,7 @@ const postgresSuite = describe(
         'GRANT SELECT, INSERT, UPDATE, DELETE ON omnis.test_queue_outbox TO omnis_runtime',
       );
       await adminPool!.query(
-        'TRUNCATE omnis.test_queue_outbox, omnis.department_management_audit, omnis.agent_profile_versions, omnis.agents, omnis.departments, omnis.mock_sandbox_launches, omnis.legacy_unscoped_runs, omnis.authorization_audit, omnis.runtime_authorizations, omnis.run_idempotency, omnis.run_events, omnis.runs, omnis.tasks',
+        'TRUNCATE omnis.test_queue_outbox, omnis.agent_management_idempotency, omnis.agent_management_audit, omnis.agent_profile_drafts, omnis.department_management_audit, omnis.agent_profile_versions, omnis.agents, omnis.departments, omnis.mock_sandbox_launches, omnis.legacy_unscoped_runs, omnis.authorization_audit, omnis.runtime_authorizations, omnis.run_idempotency, omnis.run_events, omnis.runs, omnis.tasks',
       );
       await adminPool!.query('ALTER SEQUENCE omnis.task_id_seq RESTART WITH 1');
       await adminPool!.query('ALTER SEQUENCE omnis.run_id_seq RESTART WITH 1');
@@ -295,6 +297,12 @@ const postgresSuite = describe(
         authorizer_audit_select: boolean;
         runtime_audit_select: boolean;
         authorizer_archive_function: boolean;
+        runtime_agent_insert: boolean;
+        runtime_draft_select: boolean;
+        authorizer_draft_select: boolean;
+        authorizer_idempotency_insert: boolean;
+        authorizer_create_agent_function: boolean;
+        runtime_create_agent_function: boolean;
       }>(`
         SELECT has_table_privilege('omnis_runtime', 'omnis.departments', 'INSERT') AS runtime_department_insert,
                has_table_privilege('omnis_authorizer', 'omnis.departments', 'SELECT') AS authorizer_department_select,
@@ -309,7 +317,13 @@ const postgresSuite = describe(
                has_column_privilege('omnis_authorizer', 'omnis.department_management_audit', 'request_id', 'INSERT') AS authorizer_audit_insert,
                has_table_privilege('omnis_authorizer', 'omnis.department_management_audit', 'SELECT') AS authorizer_audit_select,
                has_table_privilege('omnis_runtime', 'omnis.department_management_audit', 'SELECT') AS runtime_audit_select,
-               has_function_privilege('omnis_authorizer', 'omnis.archive_department(text,text)', 'EXECUTE') AS authorizer_archive_function
+               has_function_privilege('omnis_authorizer', 'omnis.archive_department(text,text)', 'EXECUTE') AS authorizer_archive_function,
+               has_table_privilege('omnis_runtime', 'omnis.agents', 'INSERT') AS runtime_agent_insert,
+               has_table_privilege('omnis_runtime', 'omnis.agent_profile_drafts', 'SELECT') AS runtime_draft_select,
+               has_table_privilege('omnis_authorizer', 'omnis.agent_profile_drafts', 'SELECT') AS authorizer_draft_select,
+               has_table_privilege('omnis_authorizer', 'omnis.agent_management_idempotency', 'INSERT') AS authorizer_idempotency_insert,
+               has_function_privilege('omnis_authorizer', 'omnis.create_agent(text,text,text,text,uuid,integer,bytea)', 'EXECUTE') AS authorizer_create_agent_function,
+               has_function_privilege('omnis_runtime', 'omnis.create_agent(text,text,text,text,uuid,integer,bytea)', 'EXECUTE') AS runtime_create_agent_function
       `);
       assert.deepEqual(managementPrivileges.rows[0], {
         runtime_department_insert: false,
@@ -326,6 +340,12 @@ const postgresSuite = describe(
         authorizer_audit_select: false,
         runtime_audit_select: false,
         authorizer_archive_function: true,
+        runtime_agent_insert: false,
+        runtime_draft_select: false,
+        authorizer_draft_select: false,
+        authorizer_idempotency_insert: false,
+        authorizer_create_agent_function: true,
+        runtime_create_agent_function: false,
       });
       const functionPrivilege = await adminPool!.query<{ executable: boolean }>(
         `SELECT has_function_privilege('omnis_runtime',
@@ -346,6 +366,55 @@ const postgresSuite = describe(
         `SELECT omnis.is_bounded_string_array(jsonb_build_array(repeat('x', 101)), 32, 100) AS accepted`,
       );
       assert.equal(bounded.rows[0]?.accepted, false);
+    });
+
+    it('keeps lifecycle trigger reads behind migration-owned definer functions', async () => {
+      const functions = await adminPool!.query<{
+        function_name: string;
+        security_definer: boolean;
+        owner: string;
+        search_path: string[];
+        public_execute: boolean;
+        authorizer_execute: boolean;
+        runtime_execute: boolean;
+      }>(`
+        SELECT p.proname AS function_name,
+               p.prosecdef AS security_definer,
+               owner.rolname AS owner,
+               p.proconfig AS search_path,
+               EXISTS (
+                 SELECT 1 FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) acl
+                  WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
+               ) AS public_execute,
+               has_function_privilege('omnis_authorizer', p.oid, 'EXECUTE') AS authorizer_execute,
+               has_function_privilege('omnis_runtime', p.oid, 'EXECUTE') AS runtime_execute
+          FROM pg_proc p JOIN pg_roles owner ON owner.oid = p.proowner
+         WHERE p.oid IN (
+           'omnis.guard_agent_profile_draft()'::regprocedure,
+           'omnis.assert_agent_profile_version_head()'::regprocedure
+         )
+         ORDER BY p.proname
+      `);
+      assert.deepEqual(functions.rows, [
+        {
+          function_name: 'assert_agent_profile_version_head',
+          security_definer: true,
+          owner: 'omnis_migrator',
+          search_path: ['search_path=pg_catalog, omnis'],
+          public_execute: false,
+          authorizer_execute: false,
+          runtime_execute: false,
+        },
+        {
+          function_name: 'guard_agent_profile_draft',
+          security_definer: true,
+          owner: 'omnis_migrator',
+          search_path: ['search_path=pg_catalog, omnis'],
+          public_execute: false,
+          authorizer_execute: false,
+          runtime_execute: false,
+        },
+      ]);
     });
 
     it('creates, renames, and archives departments with atomic metadata-only audit records', async () => {
@@ -456,6 +525,246 @@ const postgresSuite = describe(
           unreferenced.id,
         ]),
         /archived departments are immutable/,
+      );
+    });
+
+    it('creates drafts, publishes immutable sequential snapshots, and archives without losing history', async () => {
+      const lifecycle = new PostgresAgentLifecycleStore(authorizerPool!, Buffer.alloc(32, 17));
+      const profiles = new PostgresAgentProfileStore(
+        pool!,
+        'lifecycle-test-cursor-key-at-least-32-bytes',
+      );
+      const requestId = randomUUID();
+      const input = {
+        name: 'Atlas',
+        slug: `atlas-${randomUUID().slice(0, 8)}`,
+        departmentId: null,
+      };
+      const created = await lifecycle.createAgent(input, requestId);
+      const replayed = await lifecycle.createAgent(input, requestId);
+      assert.equal(replayed.agentId, created.agentId);
+      assert.equal(created.lifecycle, 'draft');
+      assert.equal(created.versionId, null);
+      await assert.rejects(
+        lifecycle.createAgent({ ...input, name: 'Different Atlas' }, requestId),
+        (error: unknown) => error instanceof AgentLifecycleStoreError && error.code === 'conflict',
+      );
+      assert.deepEqual(await lifecycle.getDraft(created.agentId), {
+        agentId: created.agentId,
+        draftRevision: 0,
+        baseVersionNo: null,
+        profile: null,
+        updatedAt: null,
+      });
+
+      const firstProfile = {
+        profession: 'Systems Analyst',
+        seniority: null,
+        specialties: ['systems'],
+        personality: { traits: ['careful'], tone: null, principles: ['verify'] },
+        behavior: { autonomy: null, escalation: null },
+        instructions: 'Use verified evidence.',
+      };
+      const draft1 = await lifecycle.saveDraft(
+        created.agentId,
+        { expectedDraftRevision: 0, baseVersionNo: null, profile: firstProfile },
+        randomUUID(),
+      );
+      assert.equal(draft1.draftRevision, 1);
+      const published1 = await lifecycle.publish(
+        created.agentId,
+        { expectedVersionNo: null, expectedDraftRevision: 1 },
+        randomUUID(),
+      );
+      assert.equal(published1.versionNo, 1);
+      assert.equal(published1.lifecycle, 'available');
+
+      const secondProfile = { ...firstProfile, instructions: 'Preserve prior snapshots.' };
+      await lifecycle.saveDraft(
+        created.agentId,
+        { expectedDraftRevision: 1, baseVersionNo: 1, profile: secondProfile },
+        randomUUID(),
+      );
+      const published2 = await lifecycle.publish(
+        created.agentId,
+        { expectedVersionNo: 1, expectedDraftRevision: 2 },
+        randomUUID(),
+      );
+      assert.equal(published2.versionNo, 2);
+      const history = await profiles.listVersions(created.agentId, { limit: 10 });
+      assert.ok(history);
+      assert.deepEqual(
+        history.versions.map((version) => version.versionNo),
+        [2, 1],
+      );
+      const historical = await profiles.getVersion(created.agentId, 1);
+      assert.ok(historical);
+      assert.equal(historical.version.instructions, firstProfile.instructions);
+
+      const archived = await lifecycle.archive(created.agentId, randomUUID());
+      assert.equal(archived.lifecycle, 'archived');
+      const audit = await adminPool!.query<{ action: string; actor_id: string }>(
+        `SELECT action, actor_id FROM omnis.agent_management_audit
+          WHERE agent_id=$1 ORDER BY occurred_at, id`,
+        [created.agentId],
+      );
+      assert.equal(audit.rows.filter((row) => row.action === 'created').length, 1);
+      assert.equal(audit.rows.filter((row) => row.action === 'draft_saved').length, 2);
+      assert.equal(audit.rows.filter((row) => row.action === 'profile_published').length, 2);
+      assert.equal(audit.rows.filter((row) => row.action === 'archived').length, 1);
+      assert.ok(audit.rows.every((row) => row.actor_id === 'owner'));
+      await assert.rejects(
+        lifecycle.saveDraft(
+          created.agentId,
+          { expectedDraftRevision: 2, baseVersionNo: 2, profile: secondProfile },
+          randomUUID(),
+        ),
+        (error: unknown) =>
+          error instanceof AgentLifecycleStoreError && error.code === 'invalid_transition',
+      );
+      const preserved = await profiles.getVersion(created.agentId, 1);
+      assert.ok(preserved);
+      assert.equal(preserved.version.instructions, firstProfile.instructions);
+    });
+
+    it('requires an active department and rejects archiving an unpublished draft', async () => {
+      const lifecycle = new PostgresAgentLifecycleStore(authorizerPool!, Buffer.alloc(32, 29));
+      const departments = new PostgresDepartmentManagementStore(authorizerPool!);
+      const active = await departments.create(
+        { slug: `active-${randomUUID().slice(0, 8)}`, name: 'Active Department' },
+        randomUUID(),
+      );
+      const assigned = await lifecycle.createAgent(
+        { name: 'Assigned', slug: `assigned-${randomUUID().slice(0, 8)}`, departmentId: active.id },
+        randomUUID(),
+      );
+      const listed = await new PostgresAgentProfileStore(
+        pool!,
+        'lifecycle-test-cursor-key-at-least-32-bytes',
+      ).listAgents();
+      assert.equal(
+        listed.agents.find((agent) => agent.id === assigned.agentId)?.department?.id,
+        active.id,
+      );
+
+      const archivedDepartment = await departments.create(
+        { slug: `archived-${randomUUID().slice(0, 8)}`, name: 'Archived Department' },
+        randomUUID(),
+      );
+      await departments.archive(archivedDepartment.id, randomUUID());
+      await assert.rejects(
+        lifecycle.createAgent(
+          {
+            name: 'Wrong Department',
+            slug: `wrong-department-${randomUUID().slice(0, 8)}`,
+            departmentId: archivedDepartment.id,
+          },
+          randomUUID(),
+        ),
+        (error: unknown) => error instanceof AgentLifecycleStoreError && error.code === 'conflict',
+      );
+      await assert.rejects(
+        lifecycle.archive(assigned.agentId, randomUUID()),
+        (error: unknown) =>
+          error instanceof AgentLifecycleStoreError && error.code === 'invalid_transition',
+      );
+    });
+
+    it('enforces optimistic draft concurrency and rejects unsafe profile text without leaking it', async () => {
+      const lifecycle = new PostgresAgentLifecycleStore(authorizerPool!, Buffer.alloc(32, 23));
+      const created = await lifecycle.createAgent(
+        {
+          name: 'Concurrency',
+          slug: `concurrency-${randomUUID().slice(0, 8)}`,
+          departmentId: null,
+        },
+        randomUUID(),
+      );
+      const profile = {
+        profession: 'Researcher',
+        seniority: null,
+        specialties: [],
+        personality: { traits: [], tone: null, principles: [] },
+        behavior: { autonomy: null, escalation: null },
+        instructions: 'Safe text.',
+      };
+      const attempts = await Promise.allSettled([
+        lifecycle.saveDraft(
+          created.agentId,
+          { expectedDraftRevision: 0, baseVersionNo: null, profile },
+          randomUUID(),
+        ),
+        lifecycle.saveDraft(
+          created.agentId,
+          { expectedDraftRevision: 0, baseVersionNo: null, profile },
+          randomUUID(),
+        ),
+      ]);
+      assert.equal(attempts.filter((attempt) => attempt.status === 'fulfilled').length, 1);
+      const rejected = attempts.find((attempt) => attempt.status === 'rejected');
+      assert.equal(rejected?.status, 'rejected');
+      if (rejected?.status === 'rejected') {
+        assert.ok(rejected.reason instanceof AgentLifecycleStoreError);
+        assert.equal(rejected.reason.code, 'conflict');
+      }
+
+      const publications = await Promise.allSettled([
+        lifecycle.publish(
+          created.agentId,
+          { expectedVersionNo: null, expectedDraftRevision: 1 },
+          randomUUID(),
+        ),
+        lifecycle.publish(
+          created.agentId,
+          { expectedVersionNo: null, expectedDraftRevision: 1 },
+          randomUUID(),
+        ),
+      ]);
+      assert.equal(publications.filter((attempt) => attempt.status === 'fulfilled').length, 1);
+      const publicationConflict = publications.find((attempt) => attempt.status === 'rejected');
+      assert.equal(publicationConflict?.status, 'rejected');
+      if (publicationConflict?.status === 'rejected') {
+        assert.ok(publicationConflict.reason instanceof AgentLifecycleStoreError);
+        assert.equal(publicationConflict.reason.code, 'conflict');
+      }
+
+      const secret = 'password: "synthetic-secret-value-123';
+      const auditsBeforeRejectedInput = await adminPool!.query<{ count: string }>(
+        'SELECT count(*)::text AS count FROM omnis.agent_management_audit WHERE agent_id=$1',
+        [created.agentId],
+      );
+      await assert.rejects(
+        lifecycle.saveDraft(
+          created.agentId,
+          {
+            expectedDraftRevision: 1,
+            baseVersionNo: null,
+            profile: { ...profile, instructions: secret },
+          },
+          randomUUID(),
+        ),
+        (error: unknown) => {
+          assert.ok(error instanceof AgentLifecycleStoreError);
+          assert.equal(error.code, 'disallowed_credential_material');
+          assert.equal(error.message.includes(secret), false);
+          return true;
+        },
+      );
+      const auditsAfterRejectedInput = await adminPool!.query<{ count: string }>(
+        'SELECT count(*)::text AS count FROM omnis.agent_management_audit WHERE agent_id=$1',
+        [created.agentId],
+      );
+      assert.equal(
+        auditsAfterRejectedInput.rows[0]?.count,
+        auditsBeforeRejectedInput.rows[0]?.count,
+      );
+      await assert.rejects(
+        authorizerPool!.query('SELECT * FROM omnis.agent_profile_drafts LIMIT 1'),
+        /permission denied/,
+      );
+      await assert.rejects(
+        pool!.query("UPDATE omnis.agents SET lifecycle='archived' WHERE id=$1", [created.agentId]),
+        /permission denied/,
       );
     });
 
@@ -3009,7 +3318,8 @@ const postgresSuite = describe(
       if (pool && databaseUrl) {
         assertTestDatabase(databaseUrl);
         await adminPool!.query(`
-        TRUNCATE omnis.test_queue_outbox, omnis.department_management_audit,
+        TRUNCATE omnis.test_queue_outbox, omnis.agent_management_idempotency,
+          omnis.agent_management_audit, omnis.agent_profile_drafts, omnis.department_management_audit,
           omnis.agent_profile_versions, omnis.agents, omnis.departments,
           omnis.mock_sandbox_launches, omnis.legacy_unscoped_runs, omnis.authorization_audit,
           omnis.runtime_authorizations, omnis.run_idempotency,

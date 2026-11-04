@@ -290,6 +290,11 @@ export function assertRuntimeAclPolicy(snapshot) {
         [
           'revoke_run_authorization(p_authorization_id text, p_actor_id text)',
           'archive_department(p_department_id text, p_request_id text)',
+          'create_agent(p_id text, p_name text, p_slug text, p_department_id text, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
+          'get_agent_profile_draft(p_agent_id text)',
+          'save_agent_profile_draft(p_agent_id text, p_expected_revision bigint, p_base_version_no integer, p_profile jsonb, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
+          'publish_agent_profile(p_agent_id text, p_expected_version_no integer, p_expected_revision bigint, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
+          'archive_agent(p_agent_id text, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
         ].includes(entry.object) &&
         entry.privilege === 'EXECUTE' &&
         entry.securityDefiner === true
