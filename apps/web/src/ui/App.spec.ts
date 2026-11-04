@@ -669,6 +669,86 @@ for (const route of skipLinkRoutes) {
   }
 }
 
+async function waitForScrollToSettle(page: Page) {
+  // Resolve once scrollY has not changed for 10 consecutive animation frames.
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        let last = window.scrollY;
+        let stable = 0;
+        const tick = () => {
+          if (window.scrollY === last) stable += 1;
+          else {
+            stable = 0;
+            last = window.scrollY;
+          }
+          if (stable >= 10) resolve();
+          else requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      }),
+  );
+}
+
+const scrolledSkipViewports = [
+  { name: 'desktop', width: 1440, height: 500 },
+  { name: '390px', width: 390, height: 600 },
+  { name: '320px', width: 320, height: 568 },
+];
+
+for (const motion of ['no-preference', 'reduce'] as const) {
+  for (const route of ['#tasks', '#runs/run-old']) {
+    for (const viewport of scrolledSkipViewports) {
+      test(`skip link from a scrolled page reveals main and its ring: ${route} ${viewport.name} motion ${motion}`, async ({
+        page,
+        api,
+      }) => {
+        api.configure();
+        await page.emulateMedia({ reducedMotion: motion });
+        await page.setViewportSize({ width: viewport.width, height: viewport.height });
+        await openWorkspace(page, route);
+        const heading = await page.getByRole('heading', { level: 1 }).innerText();
+        const skip = page.getByRole('link', { name: 'Skip to main content' });
+        const historyBefore = await page.evaluate(() => window.history.length);
+
+        await page.keyboard.press('Tab');
+        await expect(skip).toBeFocused();
+        // Scroll while the skip link keeps keyboard focus (it is fixed, so it stays visible).
+        await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+        await waitForScrollToSettle(page);
+        await expect(skip).toBeFocused();
+        const before = await page.evaluate(() => ({
+          scrollY: window.scrollY,
+          mainTop: document.getElementById('main-content')!.getBoundingClientRect().top,
+        }));
+        // Precondition: genuinely scrolled with the top of main (and its ring) above the viewport.
+        expect(before.scrollY).toBeGreaterThan(100);
+        expect(before.mainTop).toBeLessThan(-50);
+
+        await page.keyboard.press('Enter');
+        await expect(page.locator('#main-content')).toBeFocused();
+        // The ring must already be revealed the moment focus lands (no animated catch-up),
+        // and must stay revealed once scrolling settles.
+        await expectVisibleFocusIndicator(page, viewport.width);
+        await waitForScrollToSettle(page);
+        await expectVisibleFocusIndicator(page, viewport.width);
+        const after = await page.evaluate(() => ({
+          scrollY: window.scrollY,
+          mainTop: document.getElementById('main-content')!.getBoundingClientRect().top,
+        }));
+        expect(after.scrollY).toBeLessThan(before.scrollY);
+        expect(after.mainTop).toBeGreaterThanOrEqual(6);
+        expect(new URL(page.url()).hash).toBe(route);
+        await expect(page.getByRole('heading', { level: 1 })).toHaveText(heading);
+        expect(await page.evaluate(() => window.history.length)).toBe(historyBefore);
+        await page.keyboard.press('Tab');
+        await expect(skip).not.toBeFocused();
+        await expect(page.locator('body')).not.toBeFocused();
+      });
+    }
+  }
+}
+
 test('skip link does not add a history entry or break back and forward', async ({ page, api }) => {
   api.configure();
   await openWorkspace(page);

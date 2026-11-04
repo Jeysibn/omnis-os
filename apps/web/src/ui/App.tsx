@@ -970,16 +970,21 @@ const pageSubtitles: Record<Page, string> = {
 };
 
 // The app uses hash routing, so the default `#main-content` anchor jump would replace
-// the current route. Move focus to the main landmark without touching location or history.
+// the current route. Move focus to the main landmark without touching location or history,
+// then scroll to the start of main immediately (no animation), leaving room for the focus ring
+// so its top edge is never above the viewport, even when main is taller than the viewport.
 function skipToMain(event: MouseEvent<HTMLAnchorElement>) {
   event.preventDefault();
   const main = document.getElementById('main-content');
   if (!main) return;
   main.focus({ preventScroll: true });
-  main.scrollIntoView({
-    block: 'start',
-    behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
-  });
+  const style = window.getComputedStyle(main);
+  const ring =
+    style.outlineStyle === 'none'
+      ? 0
+      : Number.parseFloat(style.outlineWidth) + Math.max(Number.parseFloat(style.outlineOffset), 0);
+  const top = main.getBoundingClientRect().top + window.scrollY - ring - 6;
+  window.scrollTo({ top: Math.max(top, 0), behavior: 'instant' });
 }
 
 function readRoute(): { page: Page; runId?: string } {
