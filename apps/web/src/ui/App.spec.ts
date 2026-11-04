@@ -591,6 +591,81 @@ test('navigation and skip link support keyboard operation', async ({ page, api }
   await expect(page.getByRole('link', { name: 'Tasks' })).toHaveAttribute('aria-current', 'page');
 });
 
+const skipLinkRoutes = [
+  { hash: '#command-center', heading: 'Command Center' },
+  { hash: '#tasks', heading: 'Tasks' },
+  { hash: '#runs', heading: 'Runs' },
+  { hash: '#runs/run-old', heading: 'Runs' },
+];
+const skipLinkViewports = [
+  { name: 'desktop', width: 1440, height: 900 },
+  { name: '390px', width: 390, height: 844 },
+  { name: '360px', width: 360, height: 740 },
+  { name: '320px', width: 320, height: 640 },
+];
+
+for (const route of skipLinkRoutes) {
+  for (const viewport of skipLinkViewports) {
+    test(`skip link keeps ${route.hash} route and history at ${viewport.name}`, async ({
+      page,
+      api,
+    }) => {
+      api.configure();
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      await openWorkspace(page, route.hash);
+      await expect(page.getByRole('heading', { level: 1, name: route.heading })).toBeVisible();
+      const skip = page.getByRole('link', { name: 'Skip to main content' });
+      const historyBefore = await page.evaluate(() => window.history.length);
+
+      await page.keyboard.press('Tab');
+      await expect(skip).toBeFocused();
+      await expect(skip).toBeInViewport({ ratio: 1 });
+
+      await page.keyboard.press('Enter');
+      await expect(page.locator('#main-content')).toBeFocused();
+      expect(new URL(page.url()).hash).toBe(route.hash);
+      await expect(page.getByRole('heading', { level: 1, name: route.heading })).toBeVisible();
+      expect(await page.evaluate(() => window.history.length)).toBe(historyBefore);
+      await expect(page.getByRole('main')).toHaveCount(1);
+
+      // No focus trap: the next Tab leaves main and does not return to the skip link or body.
+      await page.keyboard.press('Tab');
+      await expect(skip).not.toBeFocused();
+      await expect(page.locator('body')).not.toBeFocused();
+    });
+  }
+}
+
+test('skip link does not add a history entry or break back and forward', async ({ page, api }) => {
+  api.configure();
+  await openWorkspace(page);
+  await page.getByRole('link', { name: 'Tasks' }).click();
+  await expect(page).toHaveURL(/#tasks$/);
+  await page.getByRole('link', { name: 'Skip to main content' }).focus();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#main-content')).toBeFocused();
+  await expect(page).toHaveURL(/#tasks$/);
+  await page.goBack();
+  await expect(page).toHaveURL(/#command-center$/);
+  await expect(page.getByRole('heading', { level: 1, name: 'Command Center' })).toBeVisible();
+  await page.goForward();
+  await expect(page).toHaveURL(/#tasks$/);
+  await expect(page.getByRole('heading', { level: 1, name: 'Tasks' })).toBeVisible();
+  await page.reload();
+  await expect(page).toHaveURL(/#tasks$/);
+  await expect(page.getByRole('heading', { level: 1, name: 'Tasks' })).toBeVisible();
+  await assertNoSeriousAxeViolations(page);
+});
+
+test('skip link works with mouse click and keeps the route', async ({ page, api }) => {
+  api.configure();
+  await openWorkspace(page, '#runs/run-old');
+  await page.getByRole('link', { name: 'Skip to main content' }).focus();
+  await page.getByRole('link', { name: 'Skip to main content' }).click();
+  await expect(page.locator('#main-content')).toBeFocused();
+  await expect(page).toHaveURL(/#runs\/run-old$/);
+});
+
 test('loads tasks and runs independently and retries without false empty states', async ({
   page,
   api,

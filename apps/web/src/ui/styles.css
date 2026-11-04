@@ -82,6 +82,9 @@ textarea {
 .skip-link:focus {
   transform: translateY(0);
 }
+.main-content:focus {
+  outline: none;
+}
 .topbar {
   min-height: 68px;
   padding: 0 clamp(18px, 5vw, 72px);
