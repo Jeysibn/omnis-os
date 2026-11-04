@@ -23,7 +23,7 @@ export function registerDepartmentRoutes(
         error: { code: 'invalid_input', message: 'Department query parameters are invalid.' },
       });
     }
-    const suffix = query.data.includeArchived === undefined ? '' : '?includeArchived=true';
+    const suffix = query.data.includeArchived === 'true' ? '?includeArchived=true' : '';
     return request(`/internal/v1/departments${suffix}`, {}, (value) =>
       DepartmentListResponseSchema.parse(value),
     );

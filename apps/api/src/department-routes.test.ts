@@ -42,7 +42,7 @@ function testApp(owner: boolean, calls: Array<{ path: string; method: string; bo
     async <T>(path: string, init: RequestInit | undefined, parse: (value: unknown) => T) => {
       const body = init?.body?.toString();
       calls.push({ path, method: init?.method ?? 'GET', ...(body === undefined ? {} : { body }) });
-      if (path.includes('?')) return parse({ departments: [department], total: 1 });
+      if ((init?.method ?? 'GET') === 'GET') return parse({ departments: [department], total: 1 });
       return parse(department);
     },
   );
@@ -99,6 +99,12 @@ describe('owner department management routes', () => {
       });
       assert.equal(list.statusCode, 200);
       assert.deepEqual(list.json(), { departments: [department], total: 1 });
+      const activeOnly = await app.inject({
+        method: 'GET',
+        url: '/api/v1/departments?includeArchived=false',
+      });
+      assert.equal(activeOnly.statusCode, 200);
+      assert.deepEqual(activeOnly.json(), { departments: [department], total: 1 });
       const created = await app.inject({
         method: 'POST',
         url: '/api/v1/departments',
@@ -123,6 +129,7 @@ describe('owner department management routes', () => {
         calls.map(({ path, method }) => [path, method]),
         [
           ['/internal/v1/departments?includeArchived=true', 'GET'],
+          ['/internal/v1/departments', 'GET'],
           ['/internal/v1/departments', 'POST'],
           ['/internal/v1/departments/dep_engineering', 'PATCH'],
           ['/internal/v1/departments/dep_engineering/archive', 'POST'],
