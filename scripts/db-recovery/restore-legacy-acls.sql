@@ -221,6 +221,12 @@ BEGIN
     EXECUTE 'REVOKE ALL ON FUNCTION omnis.set_task_project(text, integer, text, uuid, bytea) FROM PUBLIC, omnis_authorizer, omnis_launcher';
     EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.set_task_project(text, integer, text, uuid, bytea) TO omnis_runtime';
   END IF;
+  IF pg_catalog.to_regprocedure('omnis.enforce_task_project_run_admission()') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.enforce_task_project_run_admission() FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.reject_task_project_audit_mutation()') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.reject_task_project_audit_mutation() FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
 END
 $task_project_acl$;
 REVOKE ALL ON TABLE omnis.task_project_management_audit,
