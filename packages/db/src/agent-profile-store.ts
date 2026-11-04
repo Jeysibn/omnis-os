@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHmac, hkdfSync, timingSafeEqual } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import type {
   AgentDirectoryResponse,
@@ -51,22 +51,70 @@ type Cursor = {
 
 const credentialPatterns = [
   /-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/i,
-  /\b(?:password|passwd|api[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|service[_-]?token|credential)\s*[:=]\s*["']?[^,;\s"']{8,}/i,
+  /\b(?:password|passwd|api[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|service[_-]?token|credential)\s*[:=]\s*(?:"(?:\\.|[^"\\]){8,}"|'(?:\\.|[^'\\]){8,}'|[^\s,;'"`]{8,})/i,
   /\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[A-Z0-9]{16}|sk-[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{20,})\b/,
 ];
 
-function assertNoCredentialMaterial(value: string): void {
-  if (credentialPatterns.some((pattern) => pattern.test(value))) {
-    throw new Error('Agent profile contains disallowed credential material.');
+const credentialPropertyPattern =
+  /^(?:password|passwd|api[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|service[_-]?token|credential|credentials|secret|private[_-]?key)$/i;
+
+function normalizeEscapedCredentialText(value: string): string {
+  return value
+    .replace(/\\+(?:(["']))/g, '$1')
+    .replace(/\\u003d/gi, '=')
+    .replace(/\\u003a/gi, ':')
+    .replace(/\\x3d/gi, '=')
+    .replace(/\\x3a/gi, ':');
+}
+
+function hasCredentialValue(value: unknown): boolean {
+  if (value === null || value === undefined || value === '') return false;
+  if (Array.isArray(value)) return value.some(hasCredentialValue);
+  if (typeof value === 'object') return Object.keys(value).length > 0;
+  return true;
+}
+
+function assertNoCredentialMaterial(value: unknown): void {
+  if (typeof value === 'string') {
+    const normalized = normalizeEscapedCredentialText(value);
+    if (credentialPatterns.some((pattern) => pattern.test(normalized))) {
+      throw new AgentProfileStoreError(
+        'disallowed_credential_material',
+        'Agent profile contains disallowed credential material.',
+        422,
+      );
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) assertNoCredentialMaterial(entry);
+    return;
+  }
+  if (value && typeof value === 'object') {
+    for (const [key, entry] of Object.entries(value)) {
+      if (credentialPropertyPattern.test(key) && hasCredentialValue(entry)) {
+        throw new AgentProfileStoreError(
+          'disallowed_credential_material',
+          'Agent profile contains disallowed credential material.',
+          422,
+        );
+      }
+      assertNoCredentialMaterial(entry);
+    }
   }
 }
 
 export class AgentProfileStoreError extends Error {
-  readonly code: 'not_found' | 'invalid_cursor' | 'directory_limit_exceeded';
+  readonly code:
+    'not_found' | 'invalid_cursor' | 'directory_limit_exceeded' | 'disallowed_credential_material';
   readonly statusCode: 404 | 422 | 503;
 
   constructor(
-    code: 'not_found' | 'invalid_cursor' | 'directory_limit_exceeded',
+    code:
+      | 'not_found'
+      | 'invalid_cursor'
+      | 'directory_limit_exceeded'
+      | 'disallowed_credential_material',
     message: string,
     statusCode: 404 | 422 | 503,
   ) {
@@ -115,7 +163,7 @@ function mapAgent(row: AgentRow): AgentSummary {
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
   };
-  assertNoCredentialMaterial(JSON.stringify(agent));
+  assertNoCredentialMaterial(agent);
   return agent;
 }
 
@@ -133,7 +181,7 @@ function mapVersion(row: VersionRow) {
     createdBy: { id: row.created_by_id, displayName: row.created_by_display_name },
     createdAt: row.created_at.toISOString(),
   };
-  assertNoCredentialMaterial(JSON.stringify(version));
+  assertNoCredentialMaterial(version);
   return version;
 }
 
@@ -155,19 +203,31 @@ async function readTransaction<T>(
   }
 }
 
-function cursorSignature(payload: string, secret: string): Buffer {
-  return createHmac('sha256', secret)
+function deriveCursorSigningKey(internalToken: string): Buffer {
+  return Buffer.from(
+    hkdfSync(
+      'sha256',
+      Buffer.from(internalToken, 'utf8'),
+      Buffer.from('omnis-os/ao-104/cursor-signing/v1', 'utf8'),
+      Buffer.from('agent-profile-history-cursor-signature', 'utf8'),
+      32,
+    ),
+  );
+}
+
+function cursorSignature(payload: string, key: Buffer): Buffer {
+  return createHmac('sha256', key)
     .update('omnis-agent-history-cursor-v1:')
     .update(payload)
     .digest();
 }
 
-function decodeCursor(encoded: string, agentId: string, secret: string): Cursor {
+function decodeCursor(encoded: string, agentId: string, key: Buffer): Cursor {
   try {
     const [payload, suppliedSignature, extra] = encoded.split('.');
     if (!payload || !suppliedSignature || extra !== undefined) throw new Error('Invalid cursor');
     const supplied = Buffer.from(suppliedSignature, 'base64url');
-    const expected = cursorSignature(payload, secret);
+    const expected = cursorSignature(payload, key);
     if (
       supplied.length !== expected.length ||
       !timingSafeEqual(supplied, expected) ||
@@ -205,19 +265,19 @@ function decodeCursor(encoded: string, agentId: string, secret: string): Cursor 
   }
 }
 
-function encodeCursor(cursor: Cursor, secret: string): string {
+function encodeCursor(cursor: Cursor, key: Buffer): string {
   const payload = Buffer.from(JSON.stringify(cursor)).toString('base64url');
-  return `${payload}.${cursorSignature(payload, secret).toString('base64url')}`;
+  return `${payload}.${cursorSignature(payload, key).toString('base64url')}`;
 }
 
 export class PostgresAgentProfileStore {
   private readonly pool: Pool;
-  private readonly cursorSecret: string;
+  private readonly cursorSigningKey: Buffer;
 
-  constructor(pool: Pool, cursorSecret: string) {
-    if (cursorSecret.length < 32) throw new Error('Agent history cursor key is invalid.');
+  constructor(pool: Pool, internalToken: string) {
+    if (internalToken.length < 32) throw new Error('Worker internal token is invalid.');
     this.pool = pool;
-    this.cursorSecret = cursorSecret;
+    this.cursorSigningKey = deriveCursorSigningKey(internalToken);
   }
 
   async listAgents(): Promise<AgentDirectoryResponse> {
@@ -284,7 +344,7 @@ export class PostgresAgentProfileStore {
   ): Promise<AgentProfileVersionsResponse | null> {
     const limit = options.limit ?? 50;
     const suppliedCursor = options.cursor
-      ? decodeCursor(options.cursor, agentId, this.cursorSecret)
+      ? decodeCursor(options.cursor, agentId, this.cursorSigningKey)
       : undefined;
     return readTransaction(this.pool, async (client) => {
       const agentRows = await client.query<AgentRow>(`${agentSelection} WHERE a.id = $1`, [
@@ -339,19 +399,23 @@ export class PostgresAgentProfileStore {
       const lastVersionNo = pageRows.at(-1)?.version_no;
       const nextCursor =
         hasNext && lastVersionNo !== undefined
-          ? encodeCursor({ ...snapshot, lastVersionNo }, this.cursorSecret)
+          ? encodeCursor({ ...snapshot, lastVersionNo }, this.cursorSigningKey)
           : null;
       return {
         agent,
-        versions: pageRows.map((row) => ({
-          versionId: row.version_id,
-          versionNo: row.version_no,
-          profession: row.profession,
-          seniority: row.seniority,
-          createdAt: row.created_at.toISOString(),
-          createdBy: { id: row.created_by_id, displayName: row.created_by_display_name },
-          isCurrent: row.version_no === snapshot.currentVersionNo,
-        })),
+        versions: pageRows.map((row) => {
+          const version = {
+            versionId: row.version_id,
+            versionNo: row.version_no,
+            profession: row.profession,
+            seniority: row.seniority,
+            createdAt: row.created_at.toISOString(),
+            createdBy: { id: row.created_by_id, displayName: row.created_by_display_name },
+            isCurrent: row.version_no === snapshot.currentVersionNo,
+          };
+          assertNoCredentialMaterial(version);
+          return version;
+        }),
         page: { total: snapshot.total, complete: nextCursor === null, nextCursor },
       };
     });

@@ -1,5 +1,5 @@
 import { timingSafeEqual } from 'node:crypto';
-import Fastify from 'fastify';
+import Fastify, { type FastifyReply } from 'fastify';
 import {
   AgentDirectoryQuerySchema,
   AgentIdSchema,
@@ -89,6 +89,12 @@ const recoveryTimer = setInterval(() => {
 }, 5_000);
 recoveryTimer.unref();
 
+function sendAgentProfileStoreError(error: unknown, reply: FastifyReply): boolean {
+  if (!(error instanceof AgentProfileStoreError)) return false;
+  reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
+  return true;
+}
+
 app.addHook('preHandler', async (request, reply) => {
   const supplied = request.headers['x-omnis-internal-token'];
   const candidate = typeof supplied === 'string' ? Buffer.from(supplied) : Buffer.alloc(0);
@@ -119,11 +125,7 @@ app.get('/internal/v1/agents', async (request, reply) => {
   try {
     return await agentProfiles.listAgents();
   } catch (error) {
-    if (error instanceof AgentProfileStoreError) {
-      return reply
-        .code(error.statusCode)
-        .send({ error: { code: error.code, message: error.message } });
-    }
+    if (sendAgentProfileStoreError(error, reply)) return;
     throw error;
   }
 });
@@ -134,13 +136,18 @@ app.get<{ Params: { agentId: string } }>('/internal/v1/agents/:agentId', async (
     return reply.code(422).send({
       error: { code: 'invalid_input', message: 'Agent identifier is invalid.' },
     });
-  const profile = await agentProfiles.getAgent(agentId.data);
-  return (
-    profile ??
-    reply.code(404).send({
-      error: { code: 'not_found', message: 'Agent or profile version was not found.' },
-    })
-  );
+  try {
+    const profile = await agentProfiles.getAgent(agentId.data);
+    return (
+      profile ??
+      reply.code(404).send({
+        error: { code: 'not_found', message: 'Agent or profile version was not found.' },
+      })
+    );
+  } catch (error) {
+    if (sendAgentProfileStoreError(error, reply)) return;
+    throw error;
+  }
 });
 app.get<{ Params: { agentId: string }; Querystring: { cursor?: string; limit?: string } }>(
   '/internal/v1/agents/:agentId/versions',
@@ -163,11 +170,7 @@ app.get<{ Params: { agentId: string }; Querystring: { cursor?: string; limit?: s
         })
       );
     } catch (error) {
-      if (error instanceof AgentProfileStoreError) {
-        return reply
-          .code(error.statusCode)
-          .send({ error: { code: error.code, message: error.message } });
-      }
+      if (sendAgentProfileStoreError(error, reply)) return;
       throw error;
     }
   },
@@ -182,13 +185,18 @@ app.get<{ Params: { agentId: string; version: string } }>(
       return reply.code(422).send({
         error: { code: 'invalid_input', message: 'Agent profile version identifier is invalid.' },
       });
-    const result = await agentProfiles.getVersion(agentId.data, version.data);
-    return (
-      result ??
-      reply.code(404).send({
-        error: { code: 'not_found', message: 'Agent or profile version was not found.' },
-      })
-    );
+    try {
+      const result = await agentProfiles.getVersion(agentId.data, version.data);
+      return (
+        result ??
+        reply.code(404).send({
+          error: { code: 'not_found', message: 'Agent or profile version was not found.' },
+        })
+      );
+    } catch (error) {
+      if (sendAgentProfileStoreError(error, reply)) return;
+      throw error;
+    }
   },
 );
 app.post('/internal/v1/tasks', async (request, reply) => {
