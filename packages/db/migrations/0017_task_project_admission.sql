@@ -67,10 +67,10 @@ BEGIN
     RAISE EXCEPTION 'runtime admission denial reason is not permitted'
       USING ERRCODE = '22023';
   END IF;
-  SELECT authorization.id, authorization.task_id, authorization.correlation_id
+  SELECT auth_record.id, auth_record.task_id, auth_record.correlation_id
     INTO v_authorization_id, v_task_id, v_correlation_id
-    FROM omnis.runtime_authorizations AS authorization
-   WHERE authorization.id = p_authorization_id AND authorization.task_id = p_task_id;
+    FROM omnis.runtime_authorizations AS auth_record
+   WHERE auth_record.id = p_authorization_id AND auth_record.task_id = p_task_id;
   IF v_task_id IS NULL THEN
     SELECT task.id INTO v_task_id FROM omnis.tasks AS task WHERE task.id = p_task_id;
     v_authorization_id := NULL;
@@ -214,8 +214,8 @@ BEGIN
   END IF;
   IF EXISTS (SELECT 1 FROM omnis.runs AS run WHERE run.task_id = p_task_id)
      OR EXISTS (
-       SELECT 1 FROM omnis.runtime_authorizations AS authorization
-        WHERE authorization.task_id = p_task_id
+       SELECT 1 FROM omnis.runtime_authorizations AS auth_record
+        WHERE auth_record.task_id = p_task_id
      ) THEN
     RAISE EXCEPTION 'task association is immutable after authorization or run history' USING ERRCODE = 'P2003';
   END IF;
