@@ -76,7 +76,7 @@ const postgresSuite = describe(
         'GRANT SELECT, INSERT, UPDATE, DELETE ON omnis.test_queue_outbox TO omnis_runtime',
       );
       await adminPool!.query(
-        'TRUNCATE omnis.test_queue_outbox, omnis.department_management_audit, omnis.agent_profile_versions, omnis.agents, omnis.departments, omnis.mock_sandbox_launches, omnis.legacy_unscoped_runs, omnis.authorization_audit, omnis.runtime_authorizations, omnis.run_idempotency, omnis.run_events, omnis.runs, omnis.tasks',
+        'TRUNCATE omnis.test_queue_outbox, omnis.agent_management_idempotency, omnis.agent_management_audit, omnis.agent_profile_drafts, omnis.department_management_audit, omnis.agent_profile_versions, omnis.agents, omnis.departments, omnis.mock_sandbox_launches, omnis.legacy_unscoped_runs, omnis.authorization_audit, omnis.runtime_authorizations, omnis.run_idempotency, omnis.run_events, omnis.runs, omnis.tasks',
       );
       await adminPool!.query('ALTER SEQUENCE omnis.task_id_seq RESTART WITH 1');
       await adminPool!.query('ALTER SEQUENCE omnis.run_id_seq RESTART WITH 1');
