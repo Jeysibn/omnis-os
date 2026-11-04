@@ -146,7 +146,6 @@ try {
         'unsafeRunStates', (SELECT count(*) FROM omnis.runs
           WHERE status IN ('queued', 'running', 'stopping', 'unknown')),
         'recordFingerprints', json_build_object(
-          'tasks', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(t)::text), ':' ORDER BY t.id), '')) FROM omnis.tasks t),
           'runs', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(r)::text), ':' ORDER BY r.id), '')) FROM omnis.runs r),
           'events', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(e)::text), ':' ORDER BY e.run_id, e.sequence), '')) FROM omnis.run_events e),
           'idempotency', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(i)::text), ':' ORDER BY i.idempotency_key), '')) FROM omnis.run_idempotency i)
@@ -154,6 +153,7 @@ try {
       )
     `)
   ).rows[0].json_build_object;
+  const beforeTaskCoreFingerprint = await taskCoreFingerprint(databaseAdminPool);
   assert.equal(beforeUpgrade.tasks, 3);
   assert.equal(beforeUpgrade.runs, 3);
   assert.equal(beforeUpgrade.events, 3);
@@ -177,6 +177,11 @@ try {
   for (const [table, fingerprint] of Object.entries(beforeUpgrade.recordFingerprints)) {
     assert.equal(afterUpgrade.recordFingerprints[table], fingerprint);
   }
+  assert.equal(
+    await taskCoreFingerprint(databaseAdminPool),
+    beforeTaskCoreFingerprint,
+    'the migration may add task columns but must preserve pre-existing task fields',
+  );
   assert.deepEqual(afterUpgrade.migrations, [
     '0001_initial',
     '0002_runtime_grants',
@@ -692,6 +697,22 @@ async function verifyPost0005ProvenanceUpgrade() {
       await clusterAdminPool.query(`DROP DATABASE ${quoteIdentifier(stagedName)}`);
     }
   }
+}
+
+async function taskCoreFingerprint(pool) {
+  return (
+    await pool.query(`
+      SELECT md5(COALESCE(string_agg(
+        md5(jsonb_build_object(
+          'id', task.id,
+          'title', task.title,
+          'detail', task.detail,
+          'status', task.status,
+          'created_at', task.created_at
+        )::text), ':' ORDER BY task.id), '')) AS fingerprint
+      FROM omnis.tasks AS task
+    `)
+  ).rows[0].fingerprint;
 }
 
 async function removeLegacyWorktree() {
