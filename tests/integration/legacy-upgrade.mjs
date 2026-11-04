@@ -171,6 +171,7 @@ try {
     '0010_runtime_admission_identity',
     '0011_authorized_mock_sandbox_launch',
     '0012_agent_profiles',
+    '0013_department_management',
   ]);
   assert.equal(afterUpgrade.unsafeRunStates, 3);
   assert.equal(
