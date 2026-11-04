@@ -23,6 +23,7 @@ import {
   Plus,
   ShieldCheck,
   Sparkles,
+  Users,
   X,
 } from 'lucide-react';
 import {
@@ -36,9 +37,10 @@ import {
   type Task,
 } from '@omnis/contracts';
 import { ApiRequestError, request } from './api.js';
+import { AgentsWorkspace } from './agents/AgentsWorkspace.js';
 
 type Owner = { id: string; displayName: string };
-type Page = 'command-center' | 'tasks' | 'runs';
+type Page = 'command-center' | 'tasks' | 'runs' | 'agents';
 type StreamState = 'connecting' | 'connected' | 'reconnecting' | 'closed' | 'ended';
 type ApprovalOperation = {
   taskId: string;
@@ -922,6 +924,7 @@ function App() {
             onStop={(run) => void stopRun(run)}
           />
         )}
+        {page === 'agents' && <AgentsWorkspace onUnauthorized={expireSessionIfNeeded} />}
         <footer className="page-foot">
           <ShieldCheck size={14} />
           <span>
@@ -957,16 +960,19 @@ const navItems = [
   { id: 'command-center' as const, label: 'Command Center', icon: Activity },
   { id: 'tasks' as const, label: 'Tasks', icon: ListChecks },
   { id: 'runs' as const, label: 'Runs', icon: FolderKanban },
+  { id: 'agents' as const, label: 'Agents', icon: Users },
 ];
 const pageTitles: Record<Page, string> = {
   'command-center': 'Command Center',
   tasks: 'Tasks',
   runs: 'Runs',
+  agents: 'Agents & Profiles',
 };
 const pageSubtitles: Record<Page, string> = {
   'command-center': 'Your operational overview for tasks and synthetic runs.',
   tasks: 'Create and review work in your local workspace.',
   runs: 'Follow current and historical mock run activity.',
+  agents: 'Review agent identities and immutable profile versions. Read-only in this release.',
 };
 
 // The app uses hash routing, so the default `#main-content` anchor jump would replace
@@ -988,7 +994,9 @@ function skipToMain(event: MouseEvent<HTMLAnchorElement>) {
 }
 
 function readRoute(): { page: Page; runId?: string } {
-  const [destination, encodedRunId] = window.location.hash.slice(1).split('/', 2);
+  const [head = '', encodedRunId] = window.location.hash.slice(1).split('/', 2);
+  const destination = head.split('?', 1)[0];
+  if (destination === 'agents') return { page: 'agents' };
   if (destination === 'tasks') return { page: 'tasks' };
   if (destination === 'runs') {
     if (!encodedRunId) return { page: 'runs' };
