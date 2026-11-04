@@ -102,6 +102,9 @@ const applicationReadTables = new Set([
   'run_events',
   'run_idempotency',
   'runtime_authorizations',
+  'departments',
+  'agents',
+  'agent_profile_versions',
 ]);
 const applicationColumnPrivileges = new Map([
   ['tasks', new Set(['INSERT:id', 'INSERT:title', 'INSERT:detail', 'UPDATE:status'])],

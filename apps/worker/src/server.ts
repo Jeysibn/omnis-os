@@ -1,10 +1,18 @@
 import { timingSafeEqual } from 'node:crypto';
 import Fastify from 'fastify';
+import {
+  AgentDirectoryQuerySchema,
+  AgentIdSchema,
+  AgentVersionQuerySchema,
+  AgentVersionRouteParamSchema,
+} from '@omnis/contracts';
 import { PgBoss } from 'pg-boss';
 import {
   createPool,
   PostgresRuntimeAuthorizationReader,
   PostgresRunStore,
+  AgentProfileStoreError,
+  PostgresAgentProfileStore,
   StoreError,
 } from '@omnis/db';
 import { CreateRunSchema, CreateTaskSchema } from '@omnis/contracts';
@@ -58,6 +66,7 @@ await boss.start({ attempts: 5 });
 await boss.createQueue(queueName, { retryLimit: 0, retryDelay: 0 });
 
 const store = new PostgresRunStore(pool);
+const agentProfiles = new PostgresAgentProfileStore(pool, internalToken);
 const launcherSocket = process.env.OMNIS_SANDBOX_LAUNCHER_SOCKET;
 if (!launcherSocket || !launcherSocket.startsWith('/')) {
   throw new Error('OMNIS_SANDBOX_LAUNCHER_SOCKET must point to the provisioned private socket.');
@@ -101,6 +110,87 @@ app.get('/internal/v1/health', async () => ({
   queueName,
 }));
 app.get('/internal/v1/tasks', async () => coordinator.listTasks());
+app.get('/internal/v1/agents', async (request, reply) => {
+  if (!AgentDirectoryQuerySchema.safeParse(request.query).success) {
+    return reply.code(422).send({
+      error: { code: 'invalid_input', message: 'Agent directory query parameters are invalid.' },
+    });
+  }
+  try {
+    return await agentProfiles.listAgents();
+  } catch (error) {
+    if (error instanceof AgentProfileStoreError) {
+      return reply
+        .code(error.statusCode)
+        .send({ error: { code: error.code, message: error.message } });
+    }
+    throw error;
+  }
+});
+app.get<{ Params: { agentId: string } }>('/internal/v1/agents/:agentId', async (request, reply) => {
+  const agentId = AgentIdSchema.safeParse(request.params.agentId);
+  const query = AgentDirectoryQuerySchema.safeParse(request.query);
+  if (!agentId.success || !query.success)
+    return reply.code(422).send({
+      error: { code: 'invalid_input', message: 'Agent identifier is invalid.' },
+    });
+  const profile = await agentProfiles.getAgent(agentId.data);
+  return (
+    profile ??
+    reply.code(404).send({
+      error: { code: 'not_found', message: 'Agent or profile version was not found.' },
+    })
+  );
+});
+app.get<{ Params: { agentId: string }; Querystring: { cursor?: string; limit?: string } }>(
+  '/internal/v1/agents/:agentId/versions',
+  async (request, reply) => {
+    const agentId = AgentIdSchema.safeParse(request.params.agentId);
+    const query = AgentVersionQuerySchema.safeParse(request.query);
+    if (!agentId.success || !query.success)
+      return reply.code(422).send({
+        error: { code: 'invalid_input', message: 'Agent version history query is invalid.' },
+      });
+    try {
+      const result = await agentProfiles.listVersions(agentId.data, {
+        ...(query.data.cursor ? { cursor: query.data.cursor } : {}),
+        ...(query.data.limit !== undefined ? { limit: query.data.limit } : {}),
+      });
+      return (
+        result ??
+        reply.code(404).send({
+          error: { code: 'not_found', message: 'Agent or profile version was not found.' },
+        })
+      );
+    } catch (error) {
+      if (error instanceof AgentProfileStoreError) {
+        return reply
+          .code(error.statusCode)
+          .send({ error: { code: error.code, message: error.message } });
+      }
+      throw error;
+    }
+  },
+);
+app.get<{ Params: { agentId: string; version: string } }>(
+  '/internal/v1/agents/:agentId/versions/:version',
+  async (request, reply) => {
+    const agentId = AgentIdSchema.safeParse(request.params.agentId);
+    const version = AgentVersionRouteParamSchema.safeParse(request.params.version);
+    const query = AgentDirectoryQuerySchema.safeParse(request.query);
+    if (!agentId.success || !version.success || !query.success)
+      return reply.code(422).send({
+        error: { code: 'invalid_input', message: 'Agent profile version identifier is invalid.' },
+      });
+    const result = await agentProfiles.getVersion(agentId.data, version.data);
+    return (
+      result ??
+      reply.code(404).send({
+        error: { code: 'not_found', message: 'Agent or profile version was not found.' },
+      })
+    );
+  },
+);
 app.post('/internal/v1/tasks', async (request, reply) => {
   const parsed = await parseTaskInput(request.body);
   if (!parsed.success)

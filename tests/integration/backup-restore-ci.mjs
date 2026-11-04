@@ -641,6 +641,18 @@ async function verifyLegacyRuntimeAclParity(sourceUrl, restoredUrl) {
       true,
       'ACL-free restore runtime grants must match the approved fresh-database grant set',
     );
+    const functionPrivilege = await Promise.all([
+      source.query(
+        `SELECT has_function_privilege('omnis_runtime',
+           'omnis.is_bounded_string_array(jsonb,integer,integer)', 'EXECUTE') AS allowed`,
+      ),
+      restored.query(
+        `SELECT has_function_privilege('omnis_runtime',
+           'omnis.is_bounded_string_array(jsonb,integer,integer)', 'EXECUTE') AS allowed`,
+      ),
+    ]);
+    assert.equal(functionPrivilege[0].rows[0]?.allowed, false);
+    assert.equal(functionPrivilege[1].rows[0]?.allowed, false);
   } finally {
     await Promise.all([source.end(), restored.end()]);
   }

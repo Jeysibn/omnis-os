@@ -31,6 +31,28 @@ GRANT INSERT (id, run_id, sequence, event_type, at, message)
 GRANT INSERT (idempotency_key, request_fingerprint, run_id)
   ON omnis.run_idempotency TO omnis_runtime;
 GRANT SELECT ON omnis.runtime_authorizations TO omnis_runtime;
+DO $agent_profile_acl$
+BEGIN
+  IF pg_catalog.to_regclass('omnis.departments') IS NOT NULL
+     AND pg_catalog.to_regclass('omnis.agents') IS NOT NULL
+     AND pg_catalog.to_regclass('omnis.agent_profile_versions') IS NOT NULL THEN
+    EXECUTE 'GRANT SELECT ON omnis.departments, omnis.agents, omnis.agent_profile_versions TO omnis_runtime';
+  END IF;
+END
+$agent_profile_acl$;
+DO $agent_profile_function_acl$
+BEGIN
+  IF pg_catalog.to_regprocedure('omnis.is_bounded_string_array(jsonb,integer,integer)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.is_bounded_string_array(jsonb, integer, integer) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.reject_agent_profile_version_mutation()') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.reject_agent_profile_version_mutation() FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.assert_agent_profile_version_head()') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.assert_agent_profile_version_head() FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+END
+$agent_profile_function_acl$;
 REVOKE ALL PRIVILEGES ON TABLE omnis.authorization_audit FROM omnis_runtime;
 REVOKE INSERT (
   id, authorization_id, task_id, run_id, event_type, actor_id,

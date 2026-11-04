@@ -18,6 +18,7 @@ import { authorizerRequest, AuthorizerRequestError } from './authorizer-client.t
 import { env } from './env.ts';
 import { LocalSessionStore } from './session-store.ts';
 import { AuthThrottle } from './auth-throttle.ts';
+import { registerAgentReadRoutes } from './agent-routes.ts';
 import {
   parseRun,
   parseRunList,
@@ -194,6 +195,7 @@ app.get('/api/v1/me', { preHandler: requireOwner }, async () => ({
   product: 'Omnis OS',
   authMode: 'local-owner-session',
 }));
+registerAgentReadRoutes(app);
 
 app.get('/api/v1/tasks', { preHandler: requireOwner }, async () =>
   workerRequest('/internal/v1/tasks', {}, parseTaskList),

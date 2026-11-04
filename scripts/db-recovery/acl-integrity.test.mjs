@@ -19,6 +19,9 @@ const allowed = [
   acl('table', 'omnis', 'run_events', 'SELECT'),
   acl('table', 'omnis', 'run_idempotency', 'SELECT'),
   acl('table', 'omnis', 'runtime_authorizations', 'SELECT'),
+  acl('table', 'omnis', 'departments', 'SELECT'),
+  acl('table', 'omnis', 'agents', 'SELECT'),
+  acl('table', 'omnis', 'agent_profile_versions', 'SELECT'),
   acl(
     'routine',
     'omnis',
