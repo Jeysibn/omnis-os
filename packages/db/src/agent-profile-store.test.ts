@@ -94,9 +94,11 @@ function store(pool: ReturnType<typeof mockPool>) {
 }
 
 describe('agent profile credential scanning', () => {
-  it('rejects quoted, escaped, and nested credential-like strings without exposing their value', async () => {
+  it('rejects balanced and unterminated quoted, escaped, and nested credential-like strings safely', async () => {
     const samples = [
       'password: "quoted synthetic-secret-value-123456"',
+      'password: "hunter2hunter2',
+      "password: 'hunter2hunter2",
       String.raw`api_key = \"escaped synthetic-secret-value-123456\"`,
       String.raw`password\u003dsynthetic-secret-value-123456`,
       'password="nested synthetic-secret-value-123456"',
@@ -124,6 +126,7 @@ describe('agent profile credential scanning', () => {
         assert.equal(error.statusCode, 422);
         assert.equal(error.message, 'Agent profile contains disallowed credential material.');
         assert.doesNotMatch(error.message, /synthetic-secret-value-123456/);
+        assert.doesNotMatch(error.message, /hunter2hunter2/);
         return true;
       });
     }

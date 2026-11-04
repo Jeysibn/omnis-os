@@ -52,6 +52,8 @@ type Cursor = {
 const credentialPatterns = [
   /-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/i,
   /\b(?:password|passwd|api[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|service[_-]?token|credential)\s*[:=]\s*(?:"(?:\\.|[^"\\]){8,}"|'(?:\\.|[^'\\]){8,}'|[^\s,;'"`]{8,})/i,
+  // Bound the unterminated-quote fallback to the 16 KiB profile-text limit.
+  /\b(?:password|passwd|api[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|service[_-]?token|credential)\s*[:=]\s*(?:"(?:\\.|[^"\\\r\n]){8,16384}(?:\r?\n|$)|'(?:\\.|[^'\\\r\n]){8,16384}(?:\r?\n|$))/i,
   /\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[A-Z0-9]{16}|sk-[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{20,})\b/,
 ];
 
