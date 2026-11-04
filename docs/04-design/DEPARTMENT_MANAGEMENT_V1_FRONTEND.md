@@ -316,7 +316,7 @@ After a **confirmed** create, rename or archive the UI re-reads the list (with t
 The **recheck** is one read-only request, `GET /departments?includeArchived=true`, so it can see active and archived rows. It is never a mutation, and the UI never sends one in response to its result. The first recheck is offered as **Check departments**; after a failed or inconclusive one the same control is labelled **Check again**.
 
 - **What a recheck establishes:** only the contents of that single response. It describes the server's state at the moment it was read. It cannot establish which request, session or time caused that state, and it cannot rule out a change that commits after it was read.
-- **Wording rule:** the UI describes observations as "currently" and "in the latest list". It never uses causal or settled words for an unknown outcome: not "was created", "succeeded", "failed", "didn't happen", "was archived" or "was not saved".
+- **Claim rule (semantic, not word-based):** the UI describes observations as "currently" and "in the latest list". What is limited is the **claim a message makes**, not the vocabulary it uses; section 7.8 defines the claim types and the evidence levels that permit them. A sentence that expresses uncertainty ("this doesn't prove the create failed") is allowed even though it contains the word "failed", while an assertion that the create failed is not allowed for an unknown outcome.
 - **A failed recheck** (network error, `5xx`, `401` follows session expiry, invalid response, duplicate ids or slugs, or a missing row set) leaves the outcome **unresolved**. The UI says so ("Omnis OS couldn't check either, so the outcome is still unknown.") and offers **Check again**. It never turns a failed recheck into a conclusion.
 - **Unresolved state:** while a recheck has not succeeded, a screen-level `role="status"` banner names the unresolved operation and its target and keeps **Check again** available, and the controls that could repeat that operation stay unavailable: for create, the form's submit button and "New department"; for rename or archive, that department's Rename and Archive. Other departments stay usable. Closing the form or dialog does not clear the unresolved banner.
 
@@ -340,7 +340,7 @@ Submitted values are slug `S` and name `N`. After a successful recheck (7.4):
 
 | Observation in the latest list | UI statement | Controls |
 |---|---|---|
-| A department has slug `S` **and** name `N` (active or archived) | "The latest list includes a department with this slug and name. It may be the one you submitted or one created elsewhere; Omnis OS can't tell." Not "Created". | **Close**; no resubmit offered |
+| A department has slug `S` **and** name `N` (active or archived) | "The latest list includes a department with this slug and name. It may be the one you submitted or one created elsewhere; Omnis OS can't tell." No `success` or `cause` claim (it does not say this request created it). | **Close**; no resubmit offered |
 | A department has slug `S` but a **different name or is archived** | "The latest list has a department with this slug, named "<name>"<, archived>. Choose a different slug." (an observation; it doesn't say whether your request or another one produced it) | Slug field error; form re-enabled with the input kept |
 | **No** department has slug `S` | "No department with this slug appears in the latest list. This doesn't prove the create failed: a late commit can't be ruled out. If it does commit later, trying again would report the slug as taken." | **Check again** and an explicit **Try creating again** (a user action; duplicates are impossible because slugs are unique); form re-enabled |
 | Recheck fails | Unresolved (7.4) | **Check again** only; submit stays disabled |
@@ -354,7 +354,7 @@ A department created by another session with the same slug is indistinguishable 
 | Observation in the latest list | UI statement | Controls |
 |---|---|---|
 | `I` is absent | "This department doesn't appear in the latest list, so the outcome of the rename can't be determined." (the API has no delete, so this is unexpected) | Unresolved; **Check again** |
-| `I` is active with slug `S` and name `N` | "The department currently has the name <N> and the slug <S>. This may be the result of your request or of another change; Omnis OS can't tell." No "Renamed" claim | Form closes; the row shows the current values |
+| `I` is active with slug `S` and name `N` | "The department currently has the name <N> and the slug <S>. This may be the result of your request or of another change; Omnis OS can't tell." No `success` or `cause` claim (it does not say the rename succeeded or that this request caused the values) | Form closes; the row shows the current values |
 | `I` is active with its earlier values `P` | "The department currently still has its previous name and slug. This doesn't prove the request never reached the server." | Form stays open with the input; explicit **Try again** (last-write-wins applies, D-3) |
 | `I` is active with other values (matching neither `P` nor `S`/`N`, including a partial match) | "The department currently has the name <X> and the slug <Y>, which differs from your change and from its earlier values. It may have been changed elsewhere." | **Edit current values** (reloads the form from the latest list); nothing is overwritten without a user action |
 | `I` appears archived | "The department currently appears as archived, so it can't be renamed. Omnis OS can't tell whether that happened before or after your request." | Form closes; row archived |
@@ -365,11 +365,36 @@ A department created by another session with the same slug is indistinguishable 
 | Observation in the latest list | UI statement | Controls |
 |---|---|---|
 | `I` is absent | "This department doesn't appear in the latest list, so the outcome of the archive can't be determined." | Unresolved; **Check again** |
-| `I` appears archived | "The department currently appears as archived. This may be the result of your request or of another session; Omnis OS can't tell." Not "It was archived" | Dialog closes; the row shows its archived state per the toggle |
+| `I` appears archived | "The department currently appears as archived. This may be the result of your request or of another session; Omnis OS can't tell." No `success` or `cause` claim | Dialog closes; the row shows its archived state per the toggle |
 | `I` appears active (including with a different name or slug than before) | "The department currently appears active. This doesn't prove the archive request wasn't applied; it could still commit. Archiving again is safe: the server treats it as a no-op if the department is already archived." If the name or slug changed, the current values are shown. | Dialog stays open; **Archive department** is re-enabled as an explicit user action |
 | Recheck fails | Unresolved (7.4) | **Check again**; Archive stays unavailable |
 
 **Concurrent changes** by another session can produce any of the observations above at any time. The wording above is deliberately limited to the latest list, so the UI never attributes a state to a request, and it always offers **Check again** because an observation can be out of date the moment it is read.
+
+### 7.8 Message claims and a deterministic way to test them
+
+Every user-visible message in the create, rename and archive flows (status, alert, banner, field and form errors) makes zero or more **claims**. A claim is a statement of fact about the mutation or the server's state:
+
+| Claim type | Meaning | Example (illustrative) |
+|---|---|---|
+| `success` | The mutation took effect | "The server confirmed the department was created." |
+| `failure` | The mutation did not take effect or was refused | "Creation failed." / "The server rejected this change." |
+| `cause` | The observed state was produced by this request | "Your rename definitely succeeded." / "Your request archived it." |
+| `observation` | What the latest list currently shows, without attributing it | "The department is currently archived." |
+| `uncertainty` | An explicit statement that the outcome is not established, including negated forms | "The latest list does not establish whether the create failed." |
+| `progress` | The request is in flight | "Creating department…" |
+
+Which claims each evidence level (7.2) permits:
+
+| Evidence state | Permitted claim types | Not permitted |
+|---|---|---|
+| **Confirmed** (validated `2xx` that matches the request) | `success` (as "The server confirmed ..."), `progress`, and an `uncertainty` about list freshness when a refresh failed (7.3) | `cause` about other sessions; any claim that the visible list is current while a refresh is failed |
+| **Rejected** (definitive `4xx`) | `failure` limited to what the response establishes: "The server rejected ..."; for `403` also that the change was not applied; and `observation` from a diagnosing read-back (7.5) | `success`; a `cause` the response does not establish; for `404`, `409` and `422`, a claim that no part of the change was applied beyond what the endpoint's contract states |
+| **Unknown** | `uncertainty`, `observation`, `progress` | `success`, `failure`, and `cause` of any kind. Negated or hedged sentences ("doesn't prove it failed", "can't tell whether this was your request") are `uncertainty`, not `failure` or `success` |
+
+The words "created", "renamed", "archived", "failed" and "succeeded" are therefore **not** banned. They are allowed wherever the claim they carry is permitted: for example, "Created <name>" is a permitted `success` announcement only after Confirmed creation, and "The department is currently archived" is a permitted `observation` after an unknown archive outcome, but "Your archive succeeded" is a forbidden `success` or `cause` claim in that state.
+
+**Deterministic test mechanism.** Substring or keyword checks on visible text are not an acceptable acceptance test. The implementation renders these messages from a single typed message catalog keyed `<evidence>.<operation>.<observation>` (for example `confirmed.create`, `confirmed.listStale`, `unknown.create.noMatch`, `unknown.archive.active`, `rejected.rename.conflictOtherSlug`; the full set is the entries named in 7.5 to 7.7 and 12.7), where each entry declares its claim types and its exact text. The rendered message element carries its catalog key in a `data-message-key` attribute. Future tests then assert, per scenario: (1) the message key shown is the one this document assigns to that scenario (each row in 7.5 to 7.7 and 12.7 names one entry); (2) the visible text equals the catalogued text; (3) a catalog-level test asserts that every entry's declared claim types are a subset of the types permitted for its evidence level in the table above. Reviewers read the catalog and the declared claim types for meaning; the key assertion makes the check deterministic without banning vocabulary.
 
 ## 8. Error mapping
 
@@ -399,12 +424,12 @@ A form that fails validation (client-side or server-side) shows one error summar
 - **Validation feedback:** section 8.3. Errors are text with an icon, not color alone, and meet contrast 4.5:1 using shipped tokens (`--red` on white).
 - **Keyboard:** every control is reachable and operable with Tab, Shift+Tab, Enter and Space. Tab order follows reading order: toolbar, create form (if open), rows (heading, Rename, Archive). No keyboard traps; the native dialog traps focus only while modal.
 - **Archive confirmation and focus restoration:** focus moves to Cancel on open; Esc and Cancel restore focus to the originating Archive button (which stays in the DOM unless its row legitimately disappeared, in which case focus goes to the result count or list heading, never to `body`). After a successful archive the focus target is defined in 6.4.
-- **Status announcements:** one polite `role="status"` region owned by the workspace announces: screen changes, "Creating department…", "Created <name>.", "Renamed to <name>.", "Archived <name>…", and re-read results. Errors use `role="alert"` only in the error summary and the inline resource-failure pattern, so each failure is announced once.
+- **Status announcements:** one polite `role="status"` region owned by the workspace announces screen changes, progress ("Creating department…") and the outcome of each mutation, limited by the evidence level (7.2, 7.8). "Created <name>." is permitted **only after a confirmed creation**, "Renamed to <name>." **only after a confirmed rename**, and "Archived <name>." **only after a confirmed archive** (the longer wording in 6.2 to 6.4, "The server confirmed ...", is equally acceptable). For an **unknown** outcome the announcement uses the uncertainty and current-state observation wording of 7.6 and 7.7 and never a success, failure or cause claim. For a **definitive rejection** the announcement states the supported rejection ("The server rejected this change") without claiming any effect that was not observed. Errors use `role="alert"` only in the error summary and the inline resource-failure pattern, so each failure is announced once.
 - **Focus indicators:** shipped 3px `--blue` focus outline on every focusable element, including inside the dialog and the error-summary buttons, never removed; the form panel does not clip it.
 - **Touch targets:** buttons, checkbox rows and row actions are at least 44 x 44 CSS px at <= 820 px.
 - **Reduced motion:** no new animation; the existing global `prefers-reduced-motion` rule applies and no transition is required for any state change.
 - **Skip link:** unchanged and tested on `#departments` (PR #16 behavior: hash and history preserved, `<main>` focused).
-- **Zoom and text size:** content must reflow at 200% browser zoom and at a 16px minimum user font size, and remain usable at the WCAG 1.4.10 reflow size (320 x 256 CSS px, equivalent to 400% zoom at 1280 px): no horizontal scrolling, no clipped or inaccessible controls, no truncated labels or messages, and long names and slugs wrap (`overflow-wrap: anywhere`). The verification method and acceptance conditions are DM-31 and section 12.8.
+- **Zoom and text size:** content must reflow at 200% **browser zoom**, at the WCAG 1.4.10 reflow size (320 x 256 CSS px, the size of 400% zoom at 1280 px) and at a 16px minimum user font size: no horizontal scrolling, no clipped or inaccessible controls, no truncated labels or messages, and long names and slugs wrap (`overflow-wrap: anywhere`). Automated viewport and density tests cover reflow geometry; a recorded manual verification in a real browser at 200% zoom is mandatory (DM-31, section 12.8).
 
 ## 10. Responsive requirements
 
@@ -441,7 +466,7 @@ All Playwright tests use **strictly schema-validated synthetic fixtures**: respo
 | ID | Criterion |
 |---|---|
 | DM-08 | Client validation blocks empty/overlong names, empty/overlong or malformed slugs (uppercase, spaces, underscores, leading/trailing/doubled hyphens) with an error summary and field errors; **no request** is sent; uppercase slugs are not silently lowercased. |
-| DM-09 | A valid create sends exactly `{ slug, name }` (trimmed, schema-parsed in the fixture) with the CSRF header, disables submit while pending, closes on `201`, re-reads the list and announces success. The new row appears only after the re-read. |
+| DM-09 | A valid create sends exactly `{ slug, name }` (trimmed, schema-parsed in the fixture) with the CSRF header, disables submit while pending, closes on a confirmed `201`, re-reads the list and announces the confirmed creation (`confirmed.create`). The new row appears only after the re-read. |
 | DM-10 | `409` shows the slug field error and keeps the name; the slug field receives focus; no row is added. |
 | DM-11 | `422` `invalid_input` shows the form-level rejection without flagging a field; `422` `limit` shows the limit message. |
 | DM-12 | `403` refreshes the CSRF token, keeps the input and the session, and a manual retry then succeeds; the fixture proves the second request carries the refreshed token. |
@@ -465,7 +490,7 @@ All Playwright tests use **strictly schema-validated synthetic fixtures**: respo
 | DM-20 | "Archive <name>" opens the confirmation dialog with the one-way explanation, focus on Cancel; Esc and Cancel send no request and restore focus to the originating button. |
 | DM-21 | Confirming sends one POST with the CSRF header; the row is unchanged during the request; after a confirmed `200` and a successful re-read the row is archived (toggle on) or removed with the explanatory status (toggle off); focus lands on the defined target, never `body`. If the re-read fails after the confirmed `200` the confirmation stays, the list is marked possibly out of date with a read-only **Refresh list**, the row is **not** changed or removed locally, and no second POST is sent (RM-03). |
 | DM-22 | `409` keeps the dialog open with the "agents still belong to it" message and makes no change; the row stays active. |
-| DM-23 | `404`, `403` (CSRF refresh and manual retry) and `401` behave as in 6.4. Unknown archive outcomes follow section 7.7 and RM-16 to RM-20: failed recheck and absent id (unresolved, Archive unavailable), archived observation (never "It was archived"), active observation (never "it was not archived"; explicit retry sends exactly one more POST), and active with changed details. No archive success or failure is ever announced for an unknown outcome, and no POST is sent without a user action. |
+| DM-23 | `404`, `403` (CSRF refresh and manual retry) and `401` behave as in 6.4. Unknown archive outcomes follow section 7.7 and RM-16 to RM-20: failed recheck and absent id (unresolved, Archive unavailable), archived observation (an `observation` only, with no `success` or `cause` claim), active observation (an `uncertainty` that the archive was not applied is allowed, a `failure` claim is not; explicit retry sends exactly one more POST), and active with changed details. For an unknown outcome no archive `success`, `failure` or `cause` claim is made, and no POST is sent without a user action (7.8). |
 | DM-24 | There is no Unarchive, Delete or Undo control anywhere, and no archived row can be edited. |
 
 ### 12.5 Navigation, accessibility and regression
@@ -476,9 +501,9 @@ All Playwright tests use **strictly schema-validated synthetic fixtures**: respo
 | DM-26 | The primary nav has exactly four links, none marked current on `#departments`; the "Manage departments" link on `#agents` and the "← Agents" link navigate correctly. |
 | DM-27 | The skip link on `#departments` keeps the hash, adds no history entry and focuses `<main>` with a visible ring. |
 | DM-28 | Error summary behavior: it takes focus on a failed submit, its items are buttons that focus the right field, fields expose `aria-invalid` and `aria-describedby`, and no fragment links are used. |
-| DM-29 | Status announcements appear in the single polite region (asserted by text), and errors are announced once. |
+| DM-29 | Status announcements appear in the single polite region and errors are announced once. Each mutation announcement is asserted by catalog key and exact catalogued text (7.8); "Created", "Renamed" and "Archived" announcements occur only for confirmed outcomes, unknown outcomes use only uncertainty and observation messages, and rejections state only the supported rejection. |
 | DM-30 | Axe reports no serious or critical violations on the list, empty, error, create form with errors, rename form, archive dialog (open, pending, 409) at 1440, 390 and 320 px. |
-| DM-31 | Responsive and zoom conditions, verified with the methods in section 12.8: (a) no horizontal overflow and all controls reachable at 1440, 820, 390, 360 and 320 px, with 120-character names and 80-character slugs, and touch targets >= 44 px at <= 820 px; (b) the same checks at **200% zoom** equivalents (1440 x 900 window as 720 x 450 CSS px at device scale 2, and 820 and 390 px windows likewise) and at the **WCAG reflow size 320 x 256 CSS px**; (c) the same checks with a **16px minimum font size**; under (b) and (c): form labels, helper text, inline errors and the error summary are fully visible and not truncated or clipped; the archive dialog scrolls internally, keeps both buttons reachable and visible after keyboard focus, and Esc, Tab and Shift+Tab work; text reflows without horizontal scrolling (`scrollWidth <= clientWidth`, so no two-dimensional scrolling is needed) and no action is unreachable; create, rename and archive complete end to end by keyboard. |
+| DM-31 | Responsive, reflow, font-size and zoom conditions, verified with section 12.8. **Automated:** (a) no horizontal overflow and all controls reachable at 1440, 820, 390, 360 and 320 px, with 120-character names and 80-character slugs, and touch targets >= 44 px at <= 820 px; (b) the same checks in a reduced CSS viewport at device scale 2 (for example 720 x 450), which is a viewport and pixel-density test and **not** browser zoom; (c) the same checks at the WCAG reflow size of 320 x 256 CSS px; (d) the same checks with a 16px minimum font size. Under (b) to (d): labels, helper text, inline errors and the error summary are fully visible and not truncated or clipped; the archive dialog scrolls internally, keeps both buttons reachable and visible after keyboard focus, and Esc, Tab and Shift+Tab work; text reflows with `scrollWidth <= clientWidth`; create, rename and archive complete end to end by keyboard. **Manual and mandatory:** (e) the recorded real-browser 200% zoom verification of section 12.8, covering form readability, list layout, labels and validation errors, create and rename controls, the archive dialog, keyboard focus and navigation, text reflow, visible error summaries and the absence of clipped or unreachable controls. DM-31 passes only when (a) to (d) pass and (e) is recorded as passed. |
 | DM-32 | Reduced-motion emulation produces no animation-dependent state; keyboard-only operation completes create, rename and archive end to end. |
 | DM-33 | Hostile text (`<img onerror>`, `<script>`, markdown, bidi controls) in names and slugs renders inert as text and executes nothing. |
 | DM-34 | Regression: all existing tests (117 at `a3c53e2`) pass unmodified: Command Center, Tasks, Runs, SSE, approvals, the four-link nav, Agents and the F0b skip link. |
@@ -487,46 +512,66 @@ All Playwright tests use **strictly schema-validated synthetic fixtures**: respo
 
 Independent reviewers should confirm, by temporarily disabling each guard in a disposable worktree, that tests fail when: the CSRF header is omitted; the strict body check is removed; the re-read after mutation is skipped (optimistic update); the archive dialog's Cancel-first focus or focus restoration is removed; the rename-409 re-read is replaced by a guess; and the "no automatic retry" rule is broken (the fixture counts requests).
 
-Additional guards for the recovery model (section 7): sending any mutation without a user action (automatic retry after an unknown outcome, a failed recheck, or a failed refresh); turning a failed recheck into a success or failure message; using causal wording ("created", "renamed", "archived", "failed") for observations after an unknown outcome; treating an active observation as proof that an archive never happened; producing the rename slug-conflict message without a supporting observation; showing stale rows as current after a confirmed mutation whose refresh failed.
+Additional guards for the recovery model (section 7): sending any mutation without a user action (automatic retry after an unknown outcome, a failed recheck, or a failed refresh); turning a failed recheck into a success or failure message; making a `success`, `failure` or `cause` claim (7.8) for an unknown outcome, or adding a catalog entry whose declared claim types exceed its evidence level; treating an active observation as proof that an archive never happened; producing the rename slug-conflict message without a supporting observation; showing stale rows as current after a confirmed mutation whose refresh failed.
 
 ### 12.7 Recovery test matrix (referenced by DM-13, DM-17, DM-21 and DM-23)
 
-Fixtures are schema-valid. "Fixture" means a scripted synthetic response; "concurrent" means the fixture changes the list between the mutation and the recheck. Every row also asserts: the mutation POST/PATCH count equals the number of explicit user submissions (never an automatic one), the status and alert texts contain no word forbidden by section 7.4 for the situation, and focus lands on a defined target rather than `body`.
+Fixtures are schema-valid. "Fixture" means a scripted synthetic response; "concurrent" means the fixture changes the list between the mutation and the recheck. Every row also asserts: the mutation POST/PATCH count equals the number of explicit user submissions (never an automatic one), the message shown is the catalogued message this row names and its declared claim types are permitted for the row's evidence level (7.8; asserted by `data-message-key`, exact catalogued text and the catalog-level claim-type test, not by banning words), and focus lands on a defined target rather than `body`.
 
 | ID | Scenario | Expected |
 |---|---|---|
-| RM-01 | Create `201`, then the list refresh fails | Confirmation naming the values stays; "list may be out of date" with **Refresh list**; no rows shown as current; no mutation controls; one POST; after a successful refresh the rows appear and the confirmation is not repeated |
-| RM-02 | Rename `200`, then the refresh fails | Same pattern as RM-01 for the update |
-| RM-03 | Archive `200`, then the refresh fails | Same pattern; the row is not changed or removed locally; no second POST |
-| RM-04 | Create `503 department_outcome_unknown`, recheck fails | "Outcome unknown"; "Omnis OS couldn't check either"; submit and "New department" disabled; **Check again** works; one POST |
-| RM-05 | Create unknown; recheck shows slug `S` with name `N` | "The latest list includes a department with this slug and name ... can't tell"; no "Created"; Close only |
-| RM-06 | Create unknown; recheck shows slug `S` with a different name, and again with an archived row | Observation message and slug field error; form re-enabled with input kept; no attribution |
-| RM-07 | Create unknown; recheck shows no slug `S` | "doesn't prove the create failed"; no "failed" word; **Try creating again** is a user action that sends exactly one more POST; if the fixture then answers `409`, the slug field error appears |
-| RM-08 | Create unknown; concurrent: the fixture inserts a department with slug `S` and name `N` before the recheck | Same wording as RM-05 (cannot tell whose it is); no claim that this request created it |
-| RM-09 | Rename unknown, recheck fails | Unresolved; that row's Rename and Archive unavailable; other rows usable; **Check again** works |
-| RM-10 | Rename unknown; recheck lacks the department id | "can't be determined"; unresolved; no field error |
-| RM-11 | Rename unknown; recheck shows the requested name and slug | "currently has the name ... and slug ..." observation; no "Renamed"; form closes |
-| RM-12 | Rename unknown; recheck shows the earlier values | "doesn't prove the request never reached the server"; explicit **Try again** only |
-| RM-13 | Rename unknown; concurrent: third values `X`/`Y` (and a partial match) | Current values shown; **Edit current values**; nothing overwritten without a user action |
-| RM-14 | Rename unknown; recheck shows the department archived | "currently appears as archived ... can't tell whether before or after"; form closes |
-| RM-15 | Rename `409` diagnosis: (a) another id has the slug; (b) department archived; (c) active and slug unused by others; (d) read-back fails; (e) id absent | (a) slug field error; (b) archived observation; (c) inconclusive message, no field error; (d) neutral message, no field error; (e) unresolved |
-| RM-16 | Archive unknown, recheck fails | Unresolved; Archive unavailable; **Check again** |
-| RM-17 | Archive unknown; id absent | "can't be determined"; unresolved |
-| RM-18 | Archive unknown; recheck shows archived (variants: archived by this request, archived by another session) | Same observation wording for both; never "It was archived"; dialog closes |
-| RM-19 | Archive unknown; recheck shows active | "doesn't prove the archive request wasn't applied"; no "not archived" claim; Archive re-enabled; explicit retry sends exactly one more POST |
-| RM-20 | Archive unknown; recheck shows active with a changed name or slug | RM-19 wording plus the current values |
-| RM-21 | Recheck response invalid (schema failure, duplicate ids or slugs, total mismatch) for any operation | Treated as a failed recheck (unresolved), never as an observation |
-| RM-22 | A `2xx` mutation response whose body is invalid or does not match the request | Treated as unknown outcome, not as confirmed |
+| RM-01 | Create `201`, then the list refresh fails | `confirmed.create` stays (a permitted `success` claim) together with `confirmed.listStale` (`uncertainty` about list freshness); confirmation naming the values stays; "list may be out of date" with **Refresh list**; no rows shown as current; no mutation controls; one POST; after a successful refresh the rows appear and the confirmation is not repeated |
+| RM-02 | Rename `200`, then the refresh fails | Same pattern as RM-01 with `confirmed.rename` and `confirmed.listStale` |
+| RM-03 | Archive `200`, then the refresh fails | Same pattern with `confirmed.archive` and `confirmed.listStale`; the row is not changed or removed locally; no second POST |
+| RM-04 | Create `503 department_outcome_unknown`, recheck fails | `unknown.create.outcome` then `unknown.create.recheckFailed`: "Outcome unknown"; "Omnis OS couldn't check either"; submit and "New department" disabled; **Check again** works; one POST |
+| RM-05 | Create unknown; recheck shows slug `S` with name `N` | `unknown.create.matchingRow`: "The latest list includes a department with this slug and name ... can't tell" (`observation` + `uncertainty`; no `success` or `cause` claim); Close only |
+| RM-06 | Create unknown; recheck shows slug `S` with a different name, and again with an archived row | `unknown.create.slugTaken`: `observation` message and slug field error; form re-enabled with input kept; no `cause` claim |
+| RM-07 | Create unknown; recheck shows no slug `S` | `unknown.create.noMatch`: "No department with this slug appears in the latest list. This doesn't prove the create failed ..." is an `uncertainty` claim and is the expected text; the message makes no `failure` claim (it must not assert that the create failed). **Try creating again** is a user action that sends exactly one more POST; if the fixture then answers `409`, the slug field error appears |
+| RM-08 | Create unknown; concurrent: the fixture inserts a department with slug `S` and name `N` before the recheck | Same catalog entry as RM-05 (`unknown.create.matchingRow`; cannot tell whose it is); no `cause` claim that this request created it |
+| RM-09 | Rename unknown, recheck fails | `unknown.rename.recheckFailed`; unresolved; that row's Rename and Archive unavailable; other rows usable; **Check again** works |
+| RM-10 | Rename unknown; recheck lacks the department id | `unknown.rename.absent`: "can't be determined"; unresolved; no field error |
+| RM-11 | Rename unknown; recheck shows the requested name and slug | `unknown.rename.requestedValues`: "currently has the name ... and slug ..." `observation` + `uncertainty`; no `success` or `cause` claim that the rename succeeded or caused the values; form closes |
+| RM-12 | Rename unknown; recheck shows the earlier values | `unknown.rename.previousValues`: "doesn't prove the request never reached the server" (`uncertainty`; no `failure` claim); explicit **Try again** only |
+| RM-13 | Rename unknown; concurrent: third values `X`/`Y` (and a partial match) | `unknown.rename.otherValues`: current values shown as an `observation`; **Edit current values**; nothing overwritten without a user action |
+| RM-14 | Rename unknown; recheck shows the department archived | `unknown.rename.archived`: "currently appears as archived ... can't tell whether before or after" (`observation` + `uncertainty`); form closes |
+| RM-15 | Rename `409` diagnosis: (a) another id has the slug; (b) department archived; (c) active and slug unused by others; (d) read-back fails; (e) id absent | (a) `rejected.rename.conflictOtherSlug`: slug field error; (b) `rejected.rename.archived`: archived `observation`; (c) `rejected.rename.inconclusive`: inconclusive message, no field error; (d) `rejected.rename.readbackFailed`: neutral message, no field error; (e) `rejected.rename.absent`: unresolved. None makes a diagnosis the observation does not support |
+| RM-16 | Archive unknown, recheck fails | `unknown.archive.recheckFailed`; unresolved; Archive unavailable; **Check again** |
+| RM-17 | Archive unknown; id absent | `unknown.archive.absent`: "can't be determined"; unresolved |
+| RM-18 | Archive unknown; recheck shows archived (variants: archived by this request, archived by another session) | The same entry for both variants (`unknown.archive.archived`): "The department currently appears as archived ..." (`observation` + `uncertainty`); no `success` or `cause` claim that the archive succeeded or was done by this request; dialog closes |
+| RM-19 | Archive unknown; recheck shows active | `unknown.archive.active`: "doesn't prove the archive request wasn't applied" (`uncertainty`); no `failure` claim that the archive failed or was not applied; Archive re-enabled; explicit retry sends exactly one more POST |
+| RM-20 | Archive unknown; recheck shows active with a changed name or slug | Same entry as RM-19 (`unknown.archive.active`) plus the current values as an `observation` |
+| RM-21 | Recheck response invalid (schema failure, duplicate ids or slugs, total mismatch) for any operation | Treated as a failed recheck (`unknown.<operation>.recheckFailed`, unresolved), never as an `observation` |
+| RM-22 | A `2xx` mutation response whose body is invalid or does not match the request | Treated as an unknown outcome (`unknown.<operation>.outcome`), not as confirmed: no `success` claim |
 
-### 12.8 Reproducible zoom and font-size verification (method only)
+### 12.8 Viewport, density, font-size and browser-zoom verification (method only)
 
-This section specifies how DM-31 is to be verified later. **No browser validation of this feature has been performed** (the feature does not exist yet). Playwright cannot drive the browser's zoom UI, so Playwright runs use equivalents, and a reviewer should also repeat a short manual pass.
+This section specifies how DM-31 is to be verified later. **No browser validation of this feature has been performed** (the feature does not exist yet), and nothing here is a claim that any of these checks has passed.
 
-- **200% zoom equivalent:** a window of `W x H` at 200% zoom is a layout viewport of `W/2 x H/2` CSS px at device scale factor 2. In Playwright use `browser.newContext({ viewport: { width: W/2, height: H/2 }, deviceScaleFactor: 2 })` (for example 720 x 450 for a 1440 x 900 window). Verified once on 2026-11-04 with the repository's Playwright Chromium: such a context reports `innerWidth` 720, `innerHeight` 450 and `devicePixelRatio` 2.
-- **WCAG reflow size:** a 320 x 256 CSS px viewport (device scale factor 1 or 4) for 400% zoom at 1280 px. The existing 320 px width coverage is extended with this short height so the dialog and error summary are exercised in a tiny viewport.
-- **16px minimum font size:** run Chromium with `--blink-settings=minimumFontSize=16` (a dedicated Playwright project or launch option). Verified once on 2026-11-04 with the repository's Playwright Chromium that the setting takes effect: an 11px text run measured 153 CSS px wide by default and 215 CSS px with the setting. The check confirms the method only; it says nothing about this feature.
-- **Assertions:** `document.documentElement.scrollWidth <= clientWidth`; each interactive control, label, inline error, error-summary item and dialog button is fully inside the viewport horizontally and reachable by keyboard (focusing it scrolls it into view vertically); no label or message has `scrollWidth > clientWidth`; the archive dialog's content scrolls inside the dialog and its buttons stay reachable; Esc closes it and focus is restored; create, rename and archive complete by keyboard only.
-- **Manual pass (reviewer):** repeat in real Chrome or Firefox with Ctrl/Cmd + to 200%, and with the browser's minimum font size set to 16 where available; confirm text reflows and nothing is clipped.
+**What the automated checks are, and are not.** A reduced CSS viewport combined with an adjusted device-scale factor is a viewport and pixel-density test. It is not a substitute for actual browser zoom and does not reproduce all browser text-scaling behavior. The automated checks below are retained for responsive and reflow verification, and they do not satisfy the real-browser-zoom requirement on their own.
+
+| Check | How | Automated or manual |
+|---|---|---|
+| Responsive widths | Viewports 1440, 820, 390, 360 and 320 px (DM-31 a) | **Automated** (Playwright) |
+| Reduced viewport with density 2 | A window of `W x H` becomes a layout viewport of `W/2 x H/2` CSS px at `deviceScaleFactor` 2: `browser.newContext({ viewport: { width: W/2, height: H/2 }, deviceScaleFactor: 2 })` (for example 720 x 450 for 1440 x 900). It tests layout at the reduced CSS size and pixel density only. Verified once on 2026-11-04 with the repository's Playwright Chromium that such a context reports `innerWidth` 720, `innerHeight` 450 and `devicePixelRatio` 2 (a statement about the setup, not about this feature) | **Automated**; a viewport/density test, not browser zoom |
+| WCAG reflow size | A 320 x 256 CSS px viewport (device scale factor 1 or 4), the size of 400% zoom at 1280 px, so the dialog and error summary are exercised in a tiny viewport | **Automated**; a viewport test |
+| 16px minimum font size | Chromium with `--blink-settings=minimumFontSize=16` (a dedicated Playwright project or launch option). Verified once on 2026-11-04 that the setting takes effect: an 11px text run measured 153 CSS px wide by default and 215 CSS px with the setting (the method only) | **Automated**, plus the manual setting below where the browser offers it |
+| **Real browser zoom at 200%** | In a real desktop browser, zoom to 200% with the browser's own zoom control (Ctrl/Cmd and +, or the browser menu) | **Manual, mandatory** |
+
+**Assertions for the automated checks:** `document.documentElement.scrollWidth <= clientWidth`; each interactive control, label, inline error, error-summary item and dialog button is fully inside the viewport horizontally and reachable by keyboard (focusing it scrolls it into view vertically); no label or message has `scrollWidth > clientWidth`; the archive dialog's content scrolls inside the dialog and its buttons stay reachable; Esc closes it and focus is restored; create, rename and archive complete by keyboard only.
+
+**Mandatory manual verification (part of satisfying DM-31).** A reviewer performs, in at least one real desktop browser (named with its version and operating system; a second engine is recommended), the following at **200% browser zoom**, once per implementation milestone for the screens it adds (milestone 2: list, create and rename; milestone 3: the archive dialog):
+
+1. Form readability: Name and Slug labels, helper text and values are readable and not clipped.
+2. Department-list layout: rows, badges, times and actions reflow without horizontal scrolling or overlap.
+3. Labels and validation errors: inline errors stay attached to their fields and fully visible.
+4. Create and rename controls: all fields and buttons are reachable and operable.
+5. Archive confirmation dialog (milestone 3): the title, explanation and both buttons are reachable, the dialog scrolls internally if needed, Esc works and focus is restored.
+6. Keyboard focus and navigation: Tab order is logical, focus rings are visible, and nothing is trapped.
+7. Text reflow: text wraps at the zoomed width with no two-dimensional scrolling.
+8. Visible error summaries: the error summary receives focus and is fully visible after a failed submit.
+9. No clipped or unreachable interactive controls anywhere on the screen.
+
+The reviewer also repeats the pass with the browser's minimum font size set to 16 where the browser offers that setting. The result is recorded in the PR: browser, version, operating system, window size, zoom level, and a pass or fail with notes for each of the nine items. **DM-31 is not satisfied by the automated checks alone, and an unrecorded manual pass does not satisfy it.**
 
 ## 13. PR boundaries and dependencies
 
