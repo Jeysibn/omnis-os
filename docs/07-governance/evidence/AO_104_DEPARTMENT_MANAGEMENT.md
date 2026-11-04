@@ -41,9 +41,9 @@ Starting baseline: `a5a29325d8bb3187c1601b82e799ca54b2810d37`.
 
 PR base after integrating the subsequent `main` update: `d865015b4440990c3dbb6fad45cfa667c01ea2d7`.
 
-Local formatting, lint, serialized workspace typecheck/build, API, authorizer, contracts, database unit, and database-recovery policy checks passed. The test suites cover owner/CSRF handling, request schemas, department audit events, archive and assignment rules, least-privilege grants, nested credential-like values, and the 16 KiB input bound.
+Local formatting, lint, serialized workspace typecheck/build, API, authorizer, contracts, database unit, and database-recovery policy checks passed. The test suites cover owner/CSRF handling, request schemas, department audit events, archive and assignment rules, least-privilege grants, nested credential-like values, and the 16 KiB input bound. The final source candidate `71e1038c7e16e01a5af29aa40699e20885da6977` passed GitHub Actions run [41824283015](https://github.com/Jeysibn/omnis-os/actions/runs/41824283015): `checks` and `frontend-browser` both succeeded. The checks job passed 173 workspace and recovery-policy tests, the 2 host-security regression tests, build, PostgreSQL migration/role checks, legacy upgrade, recovery, backup/restore, packaging/cleanup checks, and disposable systemd host isolation. The browser job passed all 64 Playwright tests. No test was skipped in those reported suites.
 
-Local PostgreSQL integration, backup/restore execution, Docker sandbox verification, and disposable systemd verification were not run: Docker socket access was denied and a local PostgreSQL client was unavailable. Exact PR CI results will be recorded after the Draft PR run completes. A skipped local PostgreSQL suite is not counted as a pass.
+Local PostgreSQL integration, backup/restore execution, Docker sandbox verification, and disposable systemd verification were not run: Docker socket access was denied and a local PostgreSQL client was unavailable. Those checks ran in GitHub's disposable CI environment; they do not establish production or homelab assurance. A skipped local PostgreSQL suite is not counted as a pass.
 
 ### PR #17 post-merge CI gap
 
