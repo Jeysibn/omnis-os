@@ -607,23 +607,28 @@ async function verifyPost0005ProvenanceUpgrade() {
     }
 
     const runtimeStore = new PostgresRunStore(stagedRuntime);
-    const modernTask = await runtimeStore.createTask({
-      title: 'Modern grantless task',
-      detail: 'Must not be classified as pre-authorization data.',
-    });
+    // This staged database intentionally stops before the current task-write
+    // function migration. Create the post-0005 fixture using the legacy runtime
+    // table grant so the current store is only used after `migrate()` below.
+    const modernTask = await stagedRuntime.query(
+      `INSERT INTO omnis.tasks (id, title, detail)
+       VALUES ('task-' || lpad(nextval('omnis.task_id_seq')::text, 4, '0'),
+         'Modern grantless task', 'Must not be classified as pre-authorization data.')
+       RETURNING id`,
+    );
     const modernRun = await stagedRuntime.query(
       `
       INSERT INTO omnis.runs (id, task_id, task_title)
       VALUES ('run-' || lpad(nextval('omnis.run_id_seq')::text, 4, '0'), $1, $2)
       RETURNING id
       `,
-      [modernTask.id, 'Modern grantless task'],
+      [modernTask.rows[0].id, 'Modern grantless task'],
     );
     await assert.rejects(
       stagedRuntime.query(
         `INSERT INTO omnis.runs (id, task_id, task_title, created_at)
          VALUES ('run-forged-date', $1, $2, '2000-01-01T00:00:00Z')`,
-        [modernTask.id, 'Backdated run'],
+        [modernTask.rows[0].id, 'Backdated run'],
       ),
       /permission denied/i,
     );
