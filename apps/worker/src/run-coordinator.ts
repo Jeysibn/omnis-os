@@ -7,6 +7,9 @@ import {
   CreateTaskSchema,
   RunEventSchema,
   RunSchema,
+  ProjectWorkspaceQuerySchema,
+  ProjectWorkspaceTaskPageSchema,
+  type ProjectWorkspaceTaskPage,
   SetTaskProjectSchema,
   TaskSchema,
   type CreateTaskInput,
@@ -27,8 +30,9 @@ export class CoordinatorError extends Error {
     | 'project_archived'
     | 'concurrency_limit'
     | 'admission_busy'
-    | 'conflict';
-  readonly statusCode: 400 | 404 | 409 | 503;
+    | 'conflict'
+    | 'invalid_cursor';
+  readonly statusCode: 400 | 404 | 409 | 422 | 503;
 
   constructor(
     code:
@@ -38,9 +42,10 @@ export class CoordinatorError extends Error {
       | 'project_archived'
       | 'concurrency_limit'
       | 'admission_busy'
-      | 'conflict',
+      | 'conflict'
+      | 'invalid_cursor',
     message: string,
-    statusCode: 400 | 404 | 409 | 503,
+    statusCode: 400 | 404 | 409 | 422 | 503,
   ) {
     super(message);
     this.code = code;
@@ -104,6 +109,20 @@ export class RunCoordinator {
 
   async listTasks(): Promise<Task[]> {
     return this.store.listTasks();
+  }
+
+  async listProjectWorkspaceTasks(
+    projectId: string,
+    query: unknown,
+  ): Promise<ProjectWorkspaceTaskPage> {
+    const parsed = ProjectWorkspaceQuerySchema.safeParse(query);
+    if (!parsed.success)
+      throw new CoordinatorError('invalid_input', 'Project workspace query is invalid.', 422);
+    return translateStoreError(async () =>
+      ProjectWorkspaceTaskPageSchema.parse(
+        await this.store.listProjectWorkspaceTasks(projectId, parsed.data),
+      ),
+    );
   }
 
   async startRun(

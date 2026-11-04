@@ -21,6 +21,7 @@ import { registerAgentReadRoutes } from './agent-routes.ts';
 import { registerAgentManagementRoutes } from './agent-management-routes.ts';
 import { registerDepartmentRoutes } from './department-routes.ts';
 import { registerProjectRoutes } from './project-routes.ts';
+import { registerProjectWorkspaceRoutes } from './project-workspace-routes.ts';
 import { registerTaskRoutes } from './task-routes.ts';
 import {
   parseRun,
@@ -200,6 +201,7 @@ registerAgentReadRoutes(app);
 registerAgentManagementRoutes(app);
 registerDepartmentRoutes(app);
 registerProjectRoutes(app);
+registerProjectWorkspaceRoutes(app);
 registerTaskRoutes(app);
 app.get('/api/v1/runs', { preHandler: requireOwner }, async () =>
   workerRequest('/internal/v1/runs', {}, parseRunList),

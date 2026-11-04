@@ -1,5 +1,8 @@
 import {
   CreateTaskSchema,
+  ProjectIdSchema,
+  ProjectWorkspaceQuerySchema,
+  ProjectWorkspaceTaskPageSchema,
   RunEventSchema,
   RunSchema,
   SetTaskProjectSchema,
@@ -10,10 +13,11 @@ import {
   type RunEvent,
   type RunEventType,
   type Task,
+  type ProjectWorkspaceTaskPage,
 } from '@omnis/contracts';
 import type { Pool, PoolClient, QueryResultRow } from 'pg';
 import { asPgBossTransaction, inTransaction, type PgBossTransaction } from './database.ts';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHmac, createHash, hkdfSync, randomUUID, timingSafeEqual } from 'node:crypto';
 
 export type StoreErrorCode =
   | 'invalid_input'
@@ -21,13 +25,14 @@ export type StoreErrorCode =
   | 'invalid_transition'
   | 'project_archived'
   | 'concurrency_limit'
-  | 'conflict';
+  | 'conflict'
+  | 'invalid_cursor';
 
 export class StoreError extends Error {
   readonly code: StoreErrorCode;
-  readonly statusCode: 400 | 404 | 409;
+  readonly statusCode: 400 | 404 | 409 | 422;
 
-  constructor(code: StoreErrorCode, message: string, statusCode: 400 | 404 | 409) {
+  constructor(code: StoreErrorCode, message: string, statusCode: 400 | 404 | 409 | 422) {
     super(message);
     this.code = code;
     this.statusCode = statusCode;
@@ -59,6 +64,27 @@ type RunRow = QueryResultRow & {
   updated_at: Date | string;
 };
 
+type WorkspaceCursor = {
+  version: 1;
+  projectId: string;
+  lastCreatedAt: string;
+  lastTaskId: string;
+};
+
+type WorkspaceTaskRow = QueryResultRow & {
+  id: string | null;
+  title: string | null;
+  status: Task['status'] | null;
+  created_at: Date | string | null;
+  cursor_created_at: string | null;
+  association_revision: number | string | null;
+  latest_run_id: string | null;
+  latest_run_status: Run['status'] | null;
+  latest_run_created_at: Date | string | null;
+  latest_run_updated_at: Date | string | null;
+  observed_total: string;
+};
+
 type EventRow = QueryResultRow & {
   id: string;
   run_id: string;
@@ -88,11 +114,75 @@ const terminalStatuses = new Set<Run['status']>([
   'interrupted',
 ]);
 
+function deriveWorkspaceCursorKey(internalToken: string): Buffer {
+  return Buffer.from(
+    hkdfSync(
+      'sha256',
+      Buffer.from(internalToken, 'utf8'),
+      Buffer.from('omnis-os/ao-105/project-workspace-cursor/v1', 'utf8'),
+      Buffer.from('project-workspace-page-signature', 'utf8'),
+      32,
+    ),
+  );
+}
+
+function workspaceCursorSignature(payload: string, key: Buffer): Buffer {
+  return createHmac('sha256', key)
+    .update('omnis-project-workspace-cursor-v1:')
+    .update(payload)
+    .digest();
+}
+
+function decodeWorkspaceCursor(encoded: string, projectId: string, key: Buffer): WorkspaceCursor {
+  try {
+    const [payload, signature, extra] = encoded.split('.');
+    if (!payload || !signature || extra !== undefined) throw new Error('Invalid cursor.');
+    const decoded = Buffer.from(signature, 'base64url');
+    const expected = workspaceCursorSignature(payload, key);
+    if (
+      decoded.length !== expected.length ||
+      !timingSafeEqual(decoded, expected) ||
+      decoded.toString('base64url') !== signature
+    )
+      throw new Error('Invalid cursor.');
+    const json = Buffer.from(payload, 'base64url').toString('utf8');
+    const value: unknown = JSON.parse(json);
+    if (
+      typeof value !== 'object' ||
+      value === null ||
+      !('version' in value && value.version === 1) ||
+      !('projectId' in value && value.projectId === projectId) ||
+      !('lastCreatedAt' in value && typeof value.lastCreatedAt === 'string') ||
+      !('lastTaskId' in value && typeof value.lastTaskId === 'string') ||
+      !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z$/.test(value.lastCreatedAt) ||
+      !Number.isFinite(Date.parse(value.lastCreatedAt)) ||
+      value.lastTaskId.length < 1 ||
+      value.lastTaskId.length > 128 ||
+      value.lastTaskId.includes('\0') ||
+      Buffer.from(payload, 'base64url').toString('base64url') !== payload
+    )
+      throw new Error('Invalid cursor.');
+    return value as WorkspaceCursor;
+  } catch {
+    throw new StoreError('invalid_cursor', 'Project workspace cursor is invalid.', 422);
+  }
+}
+
+function encodeWorkspaceCursor(cursor: WorkspaceCursor, key: Buffer): string {
+  const payload = Buffer.from(JSON.stringify(cursor)).toString('base64url');
+  return `${payload}.${workspaceCursorSignature(payload, key).toString('base64url')}`;
+}
+
 export class PostgresRunStore {
   private readonly pool: Pool;
+  private readonly workspaceCursorKey?: Buffer;
 
-  constructor(pool: Pool) {
+  constructor(pool: Pool, internalToken?: string) {
     this.pool = pool;
+    if (internalToken !== undefined) {
+      if (internalToken.length < 32) throw new Error('Worker internal token is invalid.');
+      this.workspaceCursorKey = deriveWorkspaceCursorKey(internalToken);
+    }
   }
 
   async createTask(input: CreateTaskInput, requestId?: string): Promise<Task> {
@@ -151,6 +241,102 @@ export class PostgresRunStore {
       'SELECT id, title, detail, status, created_at, project_id, association_revision FROM omnis.tasks ORDER BY created_at DESC, id DESC',
     );
     return result.rows.map(mapTask);
+  }
+
+  async listProjectWorkspaceTasks(
+    projectIdValue: string,
+    queryValue: unknown,
+  ): Promise<ProjectWorkspaceTaskPage> {
+    const projectId = ProjectIdSchema.safeParse(projectIdValue);
+    const query = ProjectWorkspaceQuerySchema.safeParse(queryValue);
+    if (!projectId.success || !query.success)
+      throw new StoreError('invalid_input', 'Project workspace query is invalid.', 400);
+    if (!this.workspaceCursorKey)
+      throw new Error('Project workspace cursor key is not configured.');
+    const cursor = query.data.cursor
+      ? decodeWorkspaceCursor(query.data.cursor, projectId.data, this.workspaceCursorKey)
+      : undefined;
+    const limit = query.data.limit ?? 50;
+    const result = await this.pool.query<WorkspaceTaskRow>(
+      `
+        WITH observed AS MATERIALIZED (
+          SELECT count(*)::text AS observed_total
+          FROM omnis.tasks
+          WHERE project_id = $1
+        )
+        SELECT task.id, task.title, task.status, task.created_at,
+               to_char(task.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
+                 AS cursor_created_at,
+               task.association_revision, observed.observed_total,
+               latest.id AS latest_run_id, latest.status AS latest_run_status,
+               latest.created_at AS latest_run_created_at,
+               latest.updated_at AS latest_run_updated_at
+        FROM observed
+        LEFT JOIN LATERAL (
+          SELECT current_task.id, current_task.title, current_task.status,
+                 current_task.created_at, current_task.association_revision
+          FROM omnis.tasks AS current_task
+          WHERE current_task.project_id = $1
+            AND ($2::timestamptz IS NULL OR
+                 (current_task.created_at, current_task.id) < ($2::timestamptz, $3::text))
+          ORDER BY current_task.created_at DESC, current_task.id DESC
+          LIMIT $4
+        ) AS task ON true
+        LEFT JOIN LATERAL (
+          SELECT run.id, run.status, run.created_at, run.updated_at
+          FROM omnis.runs AS run
+          WHERE run.task_id = task.id
+          ORDER BY run.created_at DESC, run.id DESC
+          LIMIT 1
+        ) AS latest ON task.id IS NOT NULL
+        ORDER BY task.created_at DESC NULLS LAST, task.id DESC NULLS LAST
+      `,
+      [projectId.data, cursor?.lastCreatedAt ?? null, cursor?.lastTaskId ?? null, limit + 1],
+    );
+    const observedTotal = Number(result.rows[0]?.observed_total ?? 0);
+    if (!Number.isSafeInteger(observedTotal) || observedTotal < 0)
+      throw new Error('Project workspace task count is outside the supported range.');
+    const rows = result.rows.filter((row): row is WorkspaceTaskRow & { id: string } =>
+      Boolean(row.id),
+    );
+    const hasNext = rows.length > limit;
+    const pageRows = rows.slice(0, limit);
+    const lastRow = pageRows.at(-1);
+    const nextCursor =
+      hasNext && lastRow?.cursor_created_at
+        ? encodeWorkspaceCursor(
+            {
+              version: 1,
+              projectId: projectId.data,
+              lastCreatedAt: lastRow.cursor_created_at,
+              lastTaskId: lastRow.id,
+            },
+            this.workspaceCursorKey,
+          )
+        : null;
+    return ProjectWorkspaceTaskPageSchema.parse({
+      tasks: pageRows.map((row) => ({
+        id: requiredWorkspaceValue(row.id),
+        title: requiredWorkspaceValue(row.title),
+        status: requiredWorkspaceValue(row.status),
+        createdAt: asIso(requiredWorkspaceValue(row.created_at)),
+        projectId: projectId.data,
+        associationRevision: Number(requiredWorkspaceValue(row.association_revision)),
+        latestRun: row.latest_run_id
+          ? {
+              id: row.latest_run_id,
+              status: requiredWorkspaceValue(row.latest_run_status),
+              createdAt: asIso(requiredWorkspaceValue(row.latest_run_created_at)),
+              updatedAt: asIso(requiredWorkspaceValue(row.latest_run_updated_at)),
+            }
+          : null,
+      })),
+      page: {
+        observedTotal,
+        complete: nextCursor === null,
+        nextCursor,
+      },
+    });
   }
 
   async getTask(taskId: string): Promise<Task | undefined> {
@@ -911,6 +1097,11 @@ async function appendEvent(
     [event.id, event.runId, event.sequence, event.type, event.at, event.message],
   );
   return event;
+}
+
+function requiredWorkspaceValue<T>(value: T | null): T {
+  if (value === null) throw new Error('Project workspace query returned an incomplete task row.');
+  return value;
 }
 
 function mapTask(row: TaskRow): Task {

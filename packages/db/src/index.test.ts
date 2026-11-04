@@ -315,6 +315,201 @@ const postgresSuite = describe(
       );
     });
 
+    it('lists only current project tasks with bounded pages and the latest safe run summary', async () => {
+      const projects = new PostgresProjectManagementStore(authorizerPool!, Buffer.alloc(32, 23));
+      const project = await projects.create(
+        { key: 'WORKSPACE', name: 'Workspace', objective: 'Read its task and run state.' },
+        randomUUID(),
+      );
+      const otherProject = await projects.create(
+        { key: 'OTHER-WORKSPACE', name: 'Other workspace', objective: 'Keep task data isolated.' },
+        randomUUID(),
+      );
+      const workspaceStore = new PostgresRunStore(
+        pool!,
+        'workspace-test-internal-token'.padEnd(64, 'x'),
+      );
+      const taskWithRun = await store.createTask(
+        {
+          title: 'Task with a run',
+          detail: 'Expose only the latest run status.',
+          projectId: project.id,
+        },
+        randomUUID(),
+      );
+      const noRunTask = await store.createTask(
+        {
+          title: 'Task without a run',
+          detail: 'Keep run state explicitly empty.',
+          projectId: project.id,
+        },
+        randomUUID(),
+      );
+      const completedRunTask = await store.createTask(
+        {
+          title: 'Task with a completed run',
+          detail: 'Expose the actual completed run status.',
+          projectId: project.id,
+        },
+        randomUUID(),
+      );
+      const cancelledRunTask = await store.createTask(
+        {
+          title: 'Task with a cancelled run',
+          detail: 'Expose the actual cancelled run status.',
+          projectId: project.id,
+        },
+        randomUUID(),
+      );
+      const otherTask = await store.createTask(
+        {
+          title: 'Task in another project',
+          detail: 'Do not leak it into this workspace.',
+          projectId: otherProject.id,
+        },
+        randomUUID(),
+      );
+      const unassignedTask = await store.createTask({
+        title: 'Legacy unassigned task',
+        detail: 'Do not guess a project for legacy tasks.',
+      });
+      const runResult = await admit(
+        taskWithRun.id,
+        `workspace-run-${randomUUID()}`,
+        async () => 'workspace-job',
+      );
+      await adminPool!.query("UPDATE omnis.runs SET status='failed' WHERE id=$1", [
+        runResult.run.id,
+      ]);
+      const completedRun = await admit(
+        completedRunTask.id,
+        `workspace-completed-${randomUUID()}`,
+        async () => 'workspace-completed-job',
+      );
+      await adminPool!.query("UPDATE omnis.runs SET status='completed' WHERE id=$1", [
+        completedRun.run.id,
+      ]);
+      const cancelledRun = await admit(
+        cancelledRunTask.id,
+        `workspace-cancelled-${randomUUID()}`,
+        async () => 'workspace-cancelled-job',
+      );
+      await adminPool!.query("UPDATE omnis.runs SET status='cancelled' WHERE id=$1", [
+        cancelledRun.run.id,
+      ]);
+
+      const first = await workspaceStore.listProjectWorkspaceTasks(project.id, { limit: 2 });
+      assert.equal(first.tasks.length, 2);
+      assert.equal(first.page.complete, false);
+      assert.equal(first.page.observedTotal, 4);
+      assert.ok(first.page.nextCursor);
+      const second = await workspaceStore.listProjectWorkspaceTasks(project.id, {
+        limit: 2,
+        cursor: first.page.nextCursor!,
+      });
+      assert.equal(second.tasks.length, 2);
+      assert.equal(second.page.complete, true);
+      assert.equal(second.page.nextCursor, null);
+      assert.deepEqual(
+        new Set([...first.tasks, ...second.tasks].map((task) => task.id)),
+        new Set([taskWithRun.id, noRunTask.id, completedRunTask.id, cancelledRunTask.id]),
+      );
+      assert.deepEqual(
+        first.tasks.map((task) => task.id),
+        [cancelledRunTask.id, completedRunTask.id],
+      );
+      assert.deepEqual(
+        second.tasks.map((task) => task.id),
+        [noRunTask.id, taskWithRun.id],
+      );
+      const projectedRunTask = [...first.tasks, ...second.tasks].find(
+        (task) => task.id === taskWithRun.id,
+      );
+      assert.equal(projectedRunTask?.latestRun?.id, runResult.run.id);
+      assert.equal(projectedRunTask?.latestRun?.status, 'failed');
+      assert.equal(Object.hasOwn(projectedRunTask!, 'detail'), false);
+      assert.equal(first.tasks[0]?.latestRun?.status, 'cancelled');
+      assert.equal(first.tasks[1]?.latestRun?.status, 'completed');
+      assert.equal(
+        [...first.tasks, ...second.tasks].find((task) => task.id === noRunTask.id)?.latestRun,
+        null,
+      );
+      const nextProjectPage = await workspaceStore.listProjectWorkspaceTasks(otherProject.id, {});
+      assert.deepEqual(
+        nextProjectPage.tasks.map((task) => task.id),
+        [otherTask.id],
+      );
+      const emptyProject = await projects.create(
+        { key: 'EMPTY', name: 'Empty', objective: 'Return a complete empty page.' },
+        randomUUID(),
+      );
+      assert.deepEqual(await workspaceStore.listProjectWorkspaceTasks(emptyProject.id, {}), {
+        tasks: [],
+        page: { observedTotal: 0, complete: true, nextCursor: null },
+      });
+      assert.equal(
+        (await workspaceStore.listProjectWorkspaceTasks(project.id, {})).tasks.some(
+          (task) => task.id === unassignedTask.id,
+        ),
+        false,
+      );
+      const movableTask = await store.createTask(
+        {
+          title: 'Movable pre-history task',
+          detail: 'Its current association controls visibility.',
+          projectId: project.id,
+        },
+        randomUUID(),
+      );
+      assert.ok(
+        (await workspaceStore.listProjectWorkspaceTasks(project.id, {})).tasks.some(
+          (task) => task.id === movableTask.id,
+        ),
+      );
+      await store.setTaskProject(
+        movableTask.id,
+        { projectId: otherProject.id, expectedAssociationRevision: 1 },
+        randomUUID(),
+      );
+      assert.equal(
+        (await workspaceStore.listProjectWorkspaceTasks(project.id, {})).tasks.some(
+          (task) => task.id === movableTask.id,
+        ),
+        false,
+      );
+      assert.ok(
+        (await workspaceStore.listProjectWorkspaceTasks(otherProject.id, {})).tasks.some(
+          (task) => task.id === movableTask.id,
+        ),
+      );
+      await assert.rejects(
+        workspaceStore.listProjectWorkspaceTasks(otherProject.id, {
+          cursor: first.page.nextCursor!,
+        }),
+        (error: unknown) => error instanceof StoreError && error.code === 'invalid_cursor',
+      );
+      await assert.rejects(
+        workspaceStore.listProjectWorkspaceTasks(project.id, {
+          cursor: `${first.page.nextCursor!.slice(0, -1)}x`,
+        }),
+        (error: unknown) => error instanceof StoreError && error.code === 'invalid_cursor',
+      );
+      const rotatedWorkspaceStore = new PostgresRunStore(
+        pool!,
+        'rotated-workspace-test-internal-token'.padEnd(64, 'y'),
+      );
+      await assert.rejects(
+        rotatedWorkspaceStore.listProjectWorkspaceTasks(project.id, {
+          cursor: first.page.nextCursor!,
+        }),
+        (error: unknown) => error instanceof StoreError && error.code === 'invalid_cursor',
+      );
+      await assert.rejects(
+        workspaceStore.listProjectWorkspaceTasks(project.id, { limit: 101 }),
+        (error: unknown) => error instanceof StoreError && error.code === 'invalid_input',
+      );
+    });
+
     it('blocks archived-project run admission but preserves admitted work and exact retries', async () => {
       const projects = new PostgresProjectManagementStore(authorizerPool!, Buffer.alloc(32, 23));
       const admittedProject = await projects.create(

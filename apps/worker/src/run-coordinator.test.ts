@@ -48,6 +48,36 @@ function testCoordinator(
 }
 
 describe('durable mock run coordinator', () => {
+  it('validates and forwards bounded project workspace reads without touching run state', async () => {
+    const calls: Array<{ projectId: string; query: unknown }> = [];
+    const coordinator = testCoordinator(
+      {
+        listProjectWorkspaceTasks: async (projectId: string, query: unknown) => {
+          calls.push({ projectId, query });
+          return {
+            tasks: [],
+            page: { observedTotal: 0, complete: true, nextCursor: null },
+          };
+        },
+      } as unknown as PostgresRunStore,
+      { send: async () => null, findJobs: async () => [] },
+      new MockRuntimeAdapter(),
+    );
+    const projectId = `prj_${'a'.repeat(32)}`;
+    assert.deepEqual(await coordinator.listProjectWorkspaceTasks(projectId, { limit: '25' }), {
+      tasks: [],
+      page: { observedTotal: 0, complete: true, nextCursor: null },
+    });
+    assert.deepEqual(calls, [{ projectId, query: { limit: 25 } }]);
+    await assert.rejects(
+      coordinator.listProjectWorkspaceTasks(projectId, { limit: '101' }),
+      (error: unknown) =>
+        error instanceof CoordinatorError &&
+        error.statusCode === 422 &&
+        error.code === 'invalid_input',
+    );
+  });
+
   it('translates archived-project admission failures into a stable conflict', async () => {
     const denials: string[] = [];
     const coordinator = testCoordinator(
