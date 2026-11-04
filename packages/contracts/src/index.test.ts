@@ -7,6 +7,11 @@ import {
   AgentProfileVersionResponseSchema,
   AgentProfileVersionsResponseSchema,
   AgentVersionQuerySchema,
+  AgentProfileDraftResponseSchema,
+  AgentMutationReceiptSchema,
+  CreateAgentInputSchema,
+  SaveAgentProfileDraftInputSchema,
+  PublishAgentProfileInputSchema,
   CreateDepartmentSchema,
   DepartmentListResponseSchema,
   RunEventSchema,
@@ -240,6 +245,118 @@ describe('agent profile read contracts', () => {
 });
 
 describe('AO-104 management input contracts', () => {
+  const profileInput = {
+    profession: 'Systems Analyst',
+    seniority: null,
+    specialties: [],
+    personality: { traits: [], tone: null, principles: [] },
+    behavior: { autonomy: null, escalation: null },
+    instructions: 'Use verified evidence.',
+  };
+
+  it('validates owner-managed agent creation and expected profile revisions', () => {
+    assert.deepEqual(
+      CreateAgentInputSchema.parse({ name: 'Atlas', slug: 'atlas', departmentId: null }),
+      { name: 'Atlas', slug: 'atlas', departmentId: null },
+    );
+    assert.equal(
+      CreateAgentInputSchema.safeParse({ name: 'Atlas', slug: 'Atlas', departmentId: null })
+        .success,
+      false,
+    );
+    assert.equal(
+      SaveAgentProfileDraftInputSchema.safeParse({
+        expectedDraftRevision: 0,
+        baseVersionNo: null,
+        profile: profileInput,
+      }).success,
+      true,
+    );
+    assert.equal(
+      SaveAgentProfileDraftInputSchema.safeParse({
+        expectedDraftRevision: Number.MAX_SAFE_INTEGER,
+        baseVersionNo: null,
+        profile: profileInput,
+      }).success,
+      false,
+    );
+    assert.equal(
+      PublishAgentProfileInputSchema.safeParse({
+        expectedVersionNo: null,
+        expectedDraftRevision: 1,
+      }).success,
+      true,
+    );
+    assert.equal(
+      PublishAgentProfileInputSchema.safeParse({
+        expectedVersionNo: 0,
+        expectedDraftRevision: 1,
+      }).success,
+      false,
+    );
+  });
+
+  it('represents resumable empty and populated profile drafts with safe revision counters', () => {
+    const base = {
+      agentId: 'agt_atlas',
+      draftRevision: 0,
+      baseVersionNo: null,
+    };
+    assert.equal(
+      AgentProfileDraftResponseSchema.safeParse({
+        ...base,
+        profile: null,
+        updatedAt: null,
+      }).success,
+      true,
+    );
+    assert.equal(
+      AgentProfileDraftResponseSchema.safeParse({
+        ...base,
+        draftRevision: 1,
+        profile: profileInput,
+        updatedAt: '2026-11-04T00:00:00.000Z',
+      }).success,
+      true,
+    );
+    assert.equal(
+      AgentProfileDraftResponseSchema.safeParse({
+        ...base,
+        draftRevision: 1.5,
+        profile: profileInput,
+        updatedAt: '2026-11-04T00:00:00.000Z',
+      }).success,
+      false,
+    );
+    assert.equal(
+      AgentProfileDraftResponseSchema.safeParse({
+        ...base,
+        profile: null,
+        updatedAt: '2026-11-04T00:00:00.000Z',
+      }).success,
+      false,
+    );
+  });
+
+  it('accepts only stable metadata in mutation receipts', () => {
+    const receipt = {
+      requestId: '123e4567-e89b-42d3-a456-426614174000',
+      operation: 'profile.published',
+      agentId: 'agt_atlas',
+      lifecycle: 'available',
+      versionId: 'apv_atlas_1',
+      versionNo: 1,
+      draftRevision: 1,
+      occurredAt: '2026-11-04T00:00:00.000Z',
+    };
+    assert.equal(AgentMutationReceiptSchema.safeParse(receipt).success, true);
+    assert.equal(
+      AgentMutationReceiptSchema.safeParse({ ...receipt, instructions: 'must not be echoed' })
+        .success,
+      false,
+    );
+  });
+
   it('bounds every profile field and retains the existing 16 KiB instruction limit', () => {
     const profile = {
       profession: 'Systems Analyst',
