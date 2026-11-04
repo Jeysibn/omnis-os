@@ -78,6 +78,14 @@ function mapDatabaseError(error: unknown): never {
   throw error;
 }
 
+function mapWriteValidation<T>(validate: () => T): T {
+  try {
+    return validate();
+  } catch (error) {
+    mapDatabaseError(error);
+  }
+}
+
 export class PostgresAgentLifecycleStore {
   private readonly pool: Pool;
   private readonly signingKey: Buffer;
@@ -111,7 +119,7 @@ export class PostgresAgentLifecycleStore {
     requestId: string,
   ): Promise<AgentMutationReceipt> {
     const input = safeParse(CreateAgentInputSchema, inputValue);
-    assertNoCredentialMaterial(input);
+    mapWriteValidation(() => assertNoCredentialMaterial(input));
     const fingerprint = this.fingerprint('agent.created', null, input);
     const proposedId = `agt_${randomUUID().replaceAll('-', '')}`;
     return this.mutate(`SELECT omnis.create_agent($1,$2,$3,$4,$5,$6,$7) AS result`, [
@@ -131,7 +139,7 @@ export class PostgresAgentLifecycleStore {
     requestId: string,
   ): Promise<AgentMutationReceipt> {
     const input = safeParse(SaveAgentProfileDraftInputSchema, inputValue);
-    const profile = validateAgentProfileWriteInput(input.profile);
+    const profile = mapWriteValidation(() => validateAgentProfileWriteInput(input.profile));
     const normalized = { ...input, profile };
     const fingerprint = this.fingerprint('profile.draft_saved', agentId, normalized);
     return this.mutate(
