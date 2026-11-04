@@ -10,7 +10,10 @@ export function VersionSnapshot({ result }: { result: AgentProfileVersionRespons
     <div className="agents-profile">
       <p>
         <a className="agents-back" href={profileHash(agent.id)}>
-          ← Back to <Text>{agent.name}</Text>
+          <span aria-hidden="true">←</span>
+          <span className="agents-back-label">
+            Back to <Text>{agent.name}</Text>
+          </span>
         </a>
       </p>
       {agent.lifecycle === 'archived' && <ArchivedBanner />}

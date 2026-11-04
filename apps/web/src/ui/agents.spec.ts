@@ -114,6 +114,7 @@ type Options = {
   historyFailAfterFirst?: boolean;
   historyChangeTotal?: boolean;
   versionBody?: (agentId: string, versionNo: number) => unknown;
+  profileBody?: (agentId: string) => unknown;
   signedOut?: boolean;
 };
 
@@ -174,6 +175,8 @@ function createApi(page: Page) {
     if (!fixture) return error(route, 404, 'not_found', 'Agent not found.');
     const current = fixture.versions[fixture.versions.length - 1] ?? null;
 
+    if (parts.length === 1 && options.profileBody)
+      return route.fulfill({ json: options.profileBody(fixture.summary.id) });
     if (parts.length === 1)
       return route.fulfill({
         json: AgentProfileResponseSchema.parse({ agent: fixture.summary, currentVersion: current }),
@@ -651,6 +654,28 @@ test.describe('Agent Profile', () => {
     await expect(page.getByText('Showing 2 of 5 versions')).toBeVisible();
   });
 
+  test('a contract-valid profile that belongs to a DIFFERENT AGENT is rejected', async ({
+    page,
+    api,
+  }) => {
+    // The response for /agents/agent-atlas is agent B's complete, schema-valid profile.
+    api.configure({
+      profileBody: () =>
+        AgentProfileResponseSchema.parse({
+          agent: mira.summary,
+          currentVersion: mira.versions[mira.versions.length - 1],
+        }),
+    });
+    await openAgents(page, '#agents/agent-atlas');
+    await expect(page.getByText('Omnis OS received an unexpected agent response.')).toBeVisible();
+    await expect(page.getByText('Agent profile unavailable')).toBeVisible();
+    await expect(page.getByText('Mira Vale')).toHaveCount(0);
+    await expect(page.getByText('Research Analyst')).toHaveCount(0);
+    await expect(page.getByText('Instructions for agent-mira v1.')).toHaveCount(0);
+    await expect(page.getByRole('heading', { level: 3, name: 'Identity' })).toHaveCount(0);
+    await expect(page.getByRole('heading', { level: 2, name: 'Agent profile' })).toBeVisible();
+  });
+
   test('an unknown agent shows Agent not found', async ({ page, api }) => {
     api.configure();
     await openAgents(page, '#agents/does-not-exist');
@@ -691,6 +716,43 @@ test.describe('Historical version', () => {
     await expect(page.getByText('Old instructions.')).toHaveCount(0);
   });
 
+  for (const width of [1440, 320]) {
+    test(`the back link reads "Back to <name>" with a space at ${width}px`, async ({
+      page,
+      api,
+    }) => {
+      api.configure();
+      await page.setViewportSize({ width, height: 800 });
+      await openAgents(page, '#agents/agent-mira/v/1');
+      const back = page.getByRole('link', { name: 'Back to Mira Vale', exact: true });
+      await expect(back).toBeVisible();
+      await expect(back).toHaveAttribute('href', '#agents/agent-mira');
+      // textContent cannot see CSS whitespace collapsing (the link is a flex box), so measure the
+      // rendered geometry: a visible gap after the arrow and between "Back to" and the name.
+      const gaps = await back.evaluate((node) => {
+        const label = node.querySelector('.agents-back-label')!;
+        const arrow = node.firstElementChild!;
+        const name = label.querySelector('.agents-text')!;
+        const range = document.createRange();
+        // Only the visible words "Back to" (7 characters), not the trailing space.
+        range.setStart(label.firstChild!, 0);
+        range.setEnd(label.firstChild!, 7);
+        const words = range.getBoundingClientRect();
+        return {
+          afterArrow: label.getBoundingClientRect().left - arrow.getBoundingClientRect().right,
+          beforeName: name.getBoundingClientRect().left - words.right,
+          label: (label as HTMLElement).innerText,
+        };
+      });
+      expect(gaps.afterArrow).toBeGreaterThanOrEqual(4);
+      expect(gaps.beforeName).toBeGreaterThanOrEqual(2);
+      expect(gaps.label).toBe('Back to Mira Vale');
+      await expectNoHorizontalOverflow(page);
+      await back.click();
+      await expect(page).toHaveURL(/#agents\/agent-mira$/);
+    });
+  }
+
   test('an archived agent keeps its banner on a historical version', async ({ page, api }) => {
     api.configure();
     await openAgents(page, '#agents/agent-old/v/1');
@@ -714,7 +776,7 @@ test.describe('Historical version', () => {
     await expect(page.getByText("We couldn't find this agent version.")).toBeVisible();
   });
 
-  test('a response for a different version or agent is an unexpected-response error', async ({
+  test('a response for a different version NUMBER is an unexpected-response error', async ({
     page,
     api,
   }) => {
@@ -729,6 +791,36 @@ test.describe('Historical version', () => {
     await openAgents(page, '#agents/agent-atlas/v/2');
     await expect(page.getByText('Omnis OS received an unexpected agent response.')).toBeVisible();
     await expect(page.getByText('Instructions for agent-atlas v1.')).toHaveCount(0);
+  });
+
+  test('a contract-valid snapshot that belongs to a DIFFERENT AGENT is rejected', async ({
+    page,
+    api,
+  }) => {
+    // Agent B's v2 is fully schema-valid and has the requested version number (2); only the
+    // agent identity differs from the route (#agents/agent-atlas/v/2).
+    const other = agent('agent-mira', 'Mira Vale', {
+      versionCount: 3,
+      department: research,
+      versionOverrides: (n) => ({ instructions: `Mira private instructions v${n}.` }),
+    });
+    api.configure({
+      versionBody: () =>
+        AgentProfileVersionResponseSchema.parse({
+          agent: other.summary,
+          version: other.versions[1],
+          isCurrent: false,
+        }),
+    });
+    await openAgents(page, '#agents/agent-atlas/v/2');
+    await expect(page.getByText('Omnis OS received an unexpected agent response.')).toBeVisible();
+    await expect(page.getByText('Profile version unavailable')).toBeVisible();
+    await expect(page.getByText('Mira Vale')).toHaveCount(0);
+    await expect(page.getByText('Mira private instructions v2.')).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: /Version 2/ })).toHaveCount(0);
+    // No silent fallback to the requested agent's current profile either.
+    await expect(page.getByText('Instructions for agent-atlas v3.')).toHaveCount(0);
+    await expect(page.getByText('This is the current version')).toHaveCount(0);
   });
 });
 
