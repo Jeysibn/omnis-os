@@ -390,6 +390,20 @@ test.describe('Message catalog', () => {
     expect(entry.claims).toEqual(['uncertainty']);
   });
 
+  test('rejected entries that declare uncertainty also declare failure (cause uncertainty only); inflight is progress only', () => {
+    for (const [key, entry] of Object.entries(catalog)) {
+      const claims = entry.claims as readonly string[];
+      if (entry.evidence === 'rejected' && claims.includes('uncertainty'))
+        expect(claims, `${key} keeps the rejection certain`).toContain('failure');
+      if (entry.evidence === 'inflight') {
+        expect(claims, key).toEqual(['progress']);
+        expect(key.startsWith('inflight.'), key).toBe(true);
+      }
+      if (key.endsWith('.outcome') || key.includes('.newRequest'))
+        expect(entry.evidence, key).toBe('unknown');
+    }
+  });
+
   test('recovery analysis is pure: a failed recheck is never an observation', () => {
     const create = { kind: 'create', slug: 's', name: 'N' } as const;
     expect(analyse(create, 'unknown', null).messages).toEqual([
@@ -1538,6 +1552,184 @@ test.describe('Rename department', () => {
     await page.keyboard.type('R and D');
     await page.keyboard.press('Enter');
     await expectStatus(page, 'confirmed.rename', { name: 'R and D', slug: 'research' });
+  });
+});
+
+test.describe('Recovery retry sends exactly what is shown (stale-payload regression)', () => {
+  async function unknownCreate(page: Page, api: ReturnType<typeof createApi>) {
+    api.configure();
+    await openDepartments(page);
+    await openCreate(page);
+    await fillForm(page, 'Alpha', 'alpha');
+    api.next('POST', { status: 503, code: 'department_outcome_unknown', message: 'Read first.' });
+    await page.getByRole('button', { name: 'Create department' }).click();
+    await expectStatus(page, 'unknown.create.outcome');
+    await page.getByRole('button', { name: 'Check departments' }).click();
+    await expectStatus(page, 'unknown.create.noMatch');
+  }
+
+  async function unknownRename(page: Page, api: ReturnType<typeof createApi>) {
+    api.configure();
+    await openDepartments(page);
+    await startRename(page, 'Engineering');
+    await page.getByLabel(/^Name/).fill('Platform');
+    await page.getByLabel(/^Slug/).fill('platform');
+    api.next('PATCH', { status: 500 });
+    await save(page).click();
+    await expectStatus(page, 'unknown.rename.outcome');
+    await page.getByRole('button', { name: 'Check departments' }).click();
+    await expectStatus(page, 'unknown.rename.previousValues');
+  }
+
+  test('create: the saved operation is frozen, shown, and Try creating again sends Alpha', async ({
+    page,
+    api,
+  }) => {
+    await unknownCreate(page, api);
+    await expect(page.getByLabel(/^Name/)).toHaveAttribute('readonly', '');
+    await expect(page.getByLabel(/^Slug/)).toHaveAttribute('readonly', '');
+    await expect(page.getByRole('button', { name: 'Create department' })).toBeDisabled();
+    await expect(page.locator('.dept-recovery')).toContainText(
+      'Try creating again will send: name Alpha, slug alpha.',
+    );
+    // Typing into the frozen fields changes nothing.
+    await page.getByLabel(/^Name/).focus();
+    await page.keyboard.type('Beta');
+    await expect(page.getByLabel(/^Name/)).toHaveValue('Alpha');
+    await page.getByRole('button', { name: 'Try creating again' }).click();
+    await expectStatus(page, 'confirmed.create', { name: 'Alpha', slug: 'alpha' });
+    expect(api.posts().map((entry) => entry.body)).toEqual([
+      { slug: 'alpha', name: 'Alpha' },
+      { slug: 'alpha', name: 'Alpha' },
+    ]);
+  });
+
+  test('create: Edit values instead is an explicit new request that sends the visible Beta values', async ({
+    page,
+    api,
+  }) => {
+    await unknownCreate(page, api);
+    await page.getByRole('button', { name: 'Edit values instead' }).click();
+    await expectStatus(page, 'unknown.create.newRequest');
+    expect(await keysOnScreen(page)).toEqual(['unknown.create.newRequest']);
+    await expect(page.getByLabel(/^Name/)).not.toHaveAttribute('readonly', '');
+    await expect(page.getByRole('button', { name: 'Try creating again' })).toHaveCount(0);
+    // The new values are validated like any new submission and no request is sent for bad input.
+    await fillForm(page, 'Beta', 'BETA');
+    await page.getByRole('button', { name: 'Create department' }).click();
+    await expect(page.locator('.dept-summary')).toBeFocused();
+    expect(api.posts()).toHaveLength(1);
+    await fillForm(page, 'Beta', 'beta');
+    await page.getByRole('button', { name: 'Create department' }).click();
+    await expectStatus(page, 'confirmed.create', { name: 'Beta', slug: 'beta' });
+    expect(api.posts().map((entry) => entry.body)).toEqual([
+      { slug: 'alpha', name: 'Alpha' },
+      { slug: 'beta', name: 'Beta' },
+    ]);
+  });
+
+  test('rename: the saved operation is frozen, shown, and Try again sends the full Platform pair', async ({
+    page,
+    api,
+  }) => {
+    await unknownRename(page, api);
+    await expect(page.getByLabel(/^Name/)).toHaveAttribute('readonly', '');
+    await expect(page.getByLabel(/^Slug/)).toHaveAttribute('readonly', '');
+    await expect(save(page)).toBeDisabled();
+    await expect(page.locator('.dept-recovery')).toContainText(
+      'Try again will send: name Platform, slug platform.',
+    );
+    await page.getByLabel(/^Slug/).focus();
+    await page.keyboard.type('other');
+    await expect(page.getByLabel(/^Slug/)).toHaveValue('platform');
+    await page.getByRole('button', { name: 'Try again' }).click();
+    await expectStatus(page, 'confirmed.rename', { name: 'Platform', slug: 'platform' });
+    expect(api.patches().map((entry) => entry.body)).toEqual([
+      { slug: 'platform', name: 'Platform' },
+      { slug: 'platform', name: 'Platform' },
+    ]);
+  });
+
+  test('rename: Edit values instead sends the visible values as a new, validated request', async ({
+    page,
+    api,
+  }) => {
+    await unknownRename(page, api);
+    await page.getByRole('button', { name: 'Edit values instead' }).click();
+    await expectStatus(page, 'unknown.rename.newRequest');
+    await page.getByLabel(/^Name/).fill('Core');
+    await page.getByLabel(/^Slug/).fill('Bad Slug');
+    await save(page).click();
+    await expect(page.locator('.dept-summary')).toBeFocused();
+    expect(api.patches()).toHaveLength(1);
+    await page.getByLabel(/^Slug/).fill('core');
+    await save(page).click();
+    await expectStatus(page, 'confirmed.rename', { name: 'Core', slug: 'core' });
+    expect(api.patches().map((entry) => entry.body)).toEqual([
+      { slug: 'platform', name: 'Platform' },
+      { slug: 'core', name: 'Core' },
+    ]);
+  });
+
+  test('no hidden replay: editing, rechecking, focus changes and waiting never send the saved operation', async ({
+    page,
+    api,
+  }) => {
+    await unknownCreate(page, api);
+    await page.getByRole('button', { name: 'Check again' }).click();
+    await expectStatus(page, 'unknown.create.noMatch');
+    await page.getByLabel(/^Name/).focus();
+    await page.keyboard.press('Tab');
+    await page.keyboard.press('Tab');
+    await page.getByRole('button', { name: 'Edit values instead' }).click();
+    await fillForm(page, 'Gamma', 'gamma');
+    await page.getByLabel(/^Slug/).blur();
+    await page.waitForTimeout(700);
+    expect(api.posts()).toHaveLength(1);
+  });
+
+  test('recovery exit: Edit values instead then Cancel leaves a clean new flow without resubmitting', async ({
+    page,
+    api,
+  }) => {
+    await unknownCreate(page, api);
+    await page.getByRole('button', { name: 'Edit values instead' }).click();
+    await page.getByRole('button', { name: 'Cancel' }).click();
+    await expect(page.locator('form.dept-form')).toHaveCount(0);
+    await page.getByRole('button', { name: 'New department' }).click();
+    await expect(page.getByLabel(/^Name/)).toHaveValue('');
+    await expect(page.getByLabel(/^Name/)).not.toHaveAttribute('readonly', '');
+    await expect(page.getByRole('button', { name: 'Try creating again' })).toHaveCount(0);
+    await page.waitForTimeout(400);
+    expect(api.posts()).toHaveLength(1);
+  });
+
+  test('rename: closing the frozen form keeps the banner, and Try again still sends the displayed operation', async ({
+    page,
+    api,
+  }) => {
+    await unknownRename(page, api);
+    await page.getByRole('button', { name: 'Cancel' }).click();
+    await expect(page.locator('.dept-recovery')).toContainText(
+      'Try again will send: name Platform, slug platform.',
+    );
+    await page.getByRole('button', { name: 'Try again' }).click();
+    await expectStatus(page, 'confirmed.rename', { name: 'Platform', slug: 'platform' });
+    expect(api.patches().map((entry) => entry.body)).toEqual([
+      { slug: 'platform', name: 'Platform' },
+      { slug: 'platform', name: 'Platform' },
+    ]);
+  });
+
+  test('a rapid double click and Enter on Try creating again send exactly one more POST', async ({
+    page,
+    api,
+  }) => {
+    await unknownCreate(page, api);
+    api.next('POST', { delayMs: 500 });
+    await page.getByRole('button', { name: 'Try creating again' }).dblclick();
+    await expectStatus(page, 'confirmed.create', { name: 'Alpha', slug: 'alpha' });
+    expect(api.posts()).toHaveLength(2);
   });
 });
 

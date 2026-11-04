@@ -62,6 +62,8 @@ const actionLabel = (action: RecoveryAction, op: Op, first: boolean) => {
       return op.kind === 'create' ? 'Try creating again' : 'Try again';
     case 'editCurrent':
       return 'Edit current values';
+    case 'editValues':
+      return 'Edit values instead';
   }
 };
 
@@ -196,6 +198,18 @@ export function DepartmentsWorkspace({
     );
   };
 
+  /** The form that belongs to this operation: the open one if it matches, else one seeded from the operation. */
+  const formForOp = (op: Op, current: FormState | null): FormState =>
+    current && current.mode === op.kind && (op.kind === 'create' || current.id === op.id)
+      ? current
+      : {
+          mode: op.kind,
+          ...(op.kind === 'rename' ? { id: op.id } : {}),
+          seed: { name: op.name, slug: op.slug },
+          nonce: ++nonce.current,
+          autoFocus: false,
+        };
+
   /** Applies one analysis to the screen: field error, form lifecycle, banner and focus. */
   const applyConclusion = (op: Op, mode: RecoveryMode, conclusion: Conclusion) => {
     setMessages(conclusion.slugProblem ? [] : conclusion.messages);
@@ -205,16 +219,7 @@ export function DepartmentsWorkspace({
     }
     if (conclusion.slugProblem) {
       // The observation lives in the form, next to the field. Reopen the form if the user closed it.
-      setForm(
-        (current) =>
-          current ?? {
-            mode: op.kind,
-            ...(op.kind === 'rename' ? { id: op.id } : {}),
-            seed: { name: op.name, slug: op.slug },
-            nonce: ++nonce.current,
-            autoFocus: false,
-          },
-      );
+      setForm((current) => formForOp(op, current));
       newProblems(
         [
           {
@@ -230,17 +235,7 @@ export function DepartmentsWorkspace({
     setRecovery(needsBanner ? { op, mode, checking: false, conclusion } : null);
     if (needsBanner && !conclusion.slugProblem) {
       // Bring the form back for outcomes that let the user try again with their own input.
-      if (conclusion.actions.includes('tryAgain'))
-        setForm(
-          (current) =>
-            current ?? {
-              mode: op.kind,
-              ...(op.kind === 'rename' ? { id: op.id } : {}),
-              seed: { name: op.name, slug: op.slug },
-              nonce: ++nonce.current,
-              autoFocus: false,
-            },
-        );
+      if (conclusion.actions.includes('tryAgain')) setForm((current) => formForOp(op, current));
     }
   };
 
@@ -413,6 +408,18 @@ export function DepartmentsWorkspace({
       refreshAfter({ kind: 'new' });
       return;
     }
+    if (action === 'editValues') {
+      // An explicit transition: the visible values become a NEW request. The earlier outcome stays unknown.
+      setMessages([
+        { key: op.kind === 'create' ? 'unknown.create.newRequest' : 'unknown.rename.newRequest' },
+      ]);
+      setRecovery(null);
+      setForm((current) => ({ ...formForOp(op, current), autoFocus: false }));
+      window.requestAnimationFrame(() =>
+        document.querySelector<HTMLInputElement>('.dept-form input')?.focus(),
+      );
+      return;
+    }
     if (action === 'editCurrent' && conclusion.current && op.kind === 'rename') {
       setMessages([]);
       setRecovery(null);
@@ -420,9 +427,14 @@ export function DepartmentsWorkspace({
     }
   };
 
+  // While a saved operation can still be retried, its form is frozen: the visible values ARE the
+  // operation that "Try again" sends. Changing them requires the explicit "Edit values instead".
   const blocking = recovery?.conclusion.blocking === true;
+  const frozen = blocking || recovery?.conclusion.actions.includes('tryAgain') === true;
   const blockedCreate = blocking && recovery?.op.kind === 'create';
+  const frozenCreate = frozen && recovery?.op.kind === 'create';
   const blockedRenameId = blocking && recovery?.op.kind === 'rename' ? recovery.op.id : null;
+  const frozenRenameId = frozen && recovery?.op.kind === 'rename' ? recovery.op.id : null;
   const idle = busy === null;
   const status = recovery ? recovery.conclusion.messages : messages;
   const target =
@@ -466,6 +478,11 @@ export function DepartmentsWorkspace({
       </div>
       {recovery && !recovery.checking && recovery.conclusion.actions.length > 0 && (
         <div className="dept-recovery">
+          {recovery.conclusion.actions.includes('tryAgain') && (
+            <p className="dept-target">
+              <Text>{`${recovery.op.kind === 'create' ? 'Try creating again' : 'Try again'} will send: name ${recovery.op.name}, slug ${recovery.op.slug}.`}</Text>
+            </p>
+          )}
           {recovery.conclusion.actions.map((action) => (
             <button
               key={action}
@@ -544,7 +561,7 @@ export function DepartmentsWorkspace({
               heading="New department"
               initial={form.seed}
               pending={busy === 'create'}
-              locked={!idle || blockedCreate}
+              locked={!idle || frozenCreate}
               problems={problems}
               submitLabel={
                 problems.items.some((item) => item.key === 'rejected.create.csrf')
@@ -608,7 +625,7 @@ export function DepartmentsWorkspace({
                             heading="Rename department"
                             initial={form.seed}
                             pending={busy === 'rename'}
-                            locked={!idle || blockedRenameId === item.id}
+                            locked={!idle || frozenRenameId === item.id}
                             problems={problems}
                             submitLabel={
                               problems.items.some((p) => p.key === 'rejected.rename.csrf')

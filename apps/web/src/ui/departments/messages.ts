@@ -135,6 +135,17 @@ export const catalog = {
     "No department with this slug appears in the latest list. This doesn't prove the create failed: a late commit can't be ruled out. If it does commit later, trying again would report the slug as taken.",
   ),
 
+  'unknown.create.newRequest': fixed(
+    'unknown',
+    ['uncertainty'],
+    'The outcome of your earlier request is still unknown. Submitting these values sends a new request.',
+  ),
+  'unknown.rename.newRequest': fixed(
+    'unknown',
+    ['uncertainty'],
+    'The outcome of your earlier request is still unknown. Submitting these values sends a new request.',
+  ),
+
   'unknown.rename.outcome': fixed(
     'unknown',
     ['uncertainty'],

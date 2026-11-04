@@ -14,7 +14,7 @@ export type Op =
 
 /** `unknown`: the mutation outcome is unknown. `conflict`: a rename 409 whose cause needs diagnosing. */
 export type RecoveryMode = 'unknown' | 'conflict';
-export type RecoveryAction = 'checkAgain' | 'close' | 'tryAgain' | 'editCurrent';
+export type RecoveryAction = 'checkAgain' | 'close' | 'tryAgain' | 'editCurrent' | 'editValues';
 
 export type Conclusion = {
   messages: Msg[];
@@ -77,7 +77,7 @@ export function analyse(
     return {
       ...base,
       messages: [{ key: 'unknown.create.noMatch' }],
-      actions: ['checkAgain', 'tryAgain'],
+      actions: ['checkAgain', 'tryAgain', 'editValues'],
     };
   }
 
@@ -143,7 +143,7 @@ export function analyse(
     return {
       ...base,
       messages: [{ key: 'unknown.rename.previousValues' }],
-      actions: ['tryAgain', 'checkAgain'],
+      actions: ['tryAgain', 'editValues', 'checkAgain'],
     };
   // Other values: submit stays unavailable until the user chooses "Edit current values".
   return {

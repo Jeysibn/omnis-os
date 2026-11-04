@@ -124,7 +124,7 @@ export function DepartmentForm(props: Props) {
           id={ids[which]}
           type="text"
           value={value}
-          readOnly={pending}
+          readOnly={pending || locked}
           autoComplete="off"
           spellCheck={which === 'name'}
           autoCapitalize="off"
