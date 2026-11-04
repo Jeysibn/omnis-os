@@ -20,7 +20,7 @@ export function registerProjectRoutes(
 
   app.post(
     '/api/v1/projects',
-    { preHandler: [requireOwner, requireMutationProtection], bodyLimit: 16 * 1024 },
+    { preHandler: [requireOwner, requireMutationProtection], bodyLimit: 32 * 1024 },
     async (httpRequest, reply) => {
       const body = CreateProjectSchema.safeParse(httpRequest.body);
       const requestId = httpRequest.headers['idempotency-key'];

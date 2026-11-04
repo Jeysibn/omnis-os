@@ -192,7 +192,7 @@ export function createAuthorizerApp(input: {
     },
   );
 
-  app.post('/internal/v1/projects', { bodyLimit: 16 * 1024 }, async (request, reply) => {
+  app.post('/internal/v1/projects', { bodyLimit: 32 * 1024 }, async (request, reply) => {
     const body = CreateProjectSchema.safeParse(request.body);
     const requestId = request.headers['idempotency-key'];
     if (!body.success || typeof requestId !== 'string' || !isUuid(requestId))
