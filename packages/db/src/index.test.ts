@@ -1445,7 +1445,7 @@ const postgresSuite = describe(
         );
 
       const audit = await adminPool!.query<{ action: string; record: Record<string, unknown> }>(
-        'SELECT action, to_jsonb(audit) AS record FROM omnis.task_epic_management_audit WHERE task_id = $1',
+        'SELECT audit.action, to_jsonb(audit) AS record FROM omnis.task_epic_management_audit AS audit WHERE audit.task_id = $1',
         [firstTask.id],
       );
       assert.deepEqual(
