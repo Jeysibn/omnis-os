@@ -63,6 +63,24 @@ const allowed = [
   acl(
     'routine',
     'omnis',
+    'update_project(p_id text, p_expected_revision integer, p_name text, p_objective text, p_priority text, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
+    'EXECUTE',
+    null,
+    'omnis_authorizer',
+    true,
+  ),
+  acl(
+    'routine',
+    'omnis',
+    'archive_project(p_id text, p_expected_revision integer, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
+    'EXECUTE',
+    null,
+    'omnis_authorizer',
+    true,
+  ),
+  acl(
+    'routine',
+    'omnis',
     'create_agent(p_id text, p_name text, p_slug text, p_department_id text, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
     'EXECUTE',
     null,
@@ -123,10 +141,26 @@ const allowed = [
     'omnis_runtime',
     true,
   ),
-  acl('column', 'omnis', 'tasks', 'INSERT', 'id'),
   acl('column', 'omnis', 'tasks', 'UPDATE', 'status'),
-  acl('sequence', 'omnis', 'task_id_seq', 'USAGE'),
   acl('sequence', 'omnis', 'run_id_seq', 'SELECT'),
+  acl(
+    'routine',
+    'omnis',
+    'create_task(p_title text, p_detail text, p_project_id text, p_request_id uuid, p_fingerprint bytea)',
+    'EXECUTE',
+    null,
+    'omnis_runtime',
+    true,
+  ),
+  acl(
+    'routine',
+    'omnis',
+    'set_task_project(p_task_id text, p_expected_association_revision integer, p_project_id text, p_request_id uuid, p_fingerprint bytea)',
+    'EXECUTE',
+    null,
+    'omnis_runtime',
+    true,
+  ),
   acl('table', 'pgboss', 'job', 'DELETE'),
   acl('default:table', 'pgboss', '', 'INSERT'),
   acl('routine', 'public', 'extension_helper()', 'EXECUTE', null, 'PUBLIC', false),
@@ -143,6 +177,16 @@ describe('post-restore PostgreSQL ACL integrity', () => {
       () => assertRuntimeAclPolicy([...allowed, acl('table', 'omnis', 'tasks', 'DELETE')]),
       /DELETE is prohibited on omnis\.tasks/,
     );
+  });
+
+  it('rejects direct task identity/project writes and task sequence access', () => {
+    for (const entry of [
+      acl('column', 'omnis', 'tasks', 'INSERT', 'id'),
+      acl('column', 'omnis', 'tasks', 'UPDATE', 'project_id'),
+      acl('sequence', 'omnis', 'task_id_seq', 'USAGE'),
+    ]) {
+      assert.throws(() => assertRuntimeAclPolicy([...allowed, entry]));
+    }
   });
 
   it('allows SELECT only on the explicitly approved application tables', () => {
@@ -383,6 +427,28 @@ describe('post-restore PostgreSQL ACL integrity', () => {
     assert.throws(() => assertRestoreDatabaseClosed(source), /must remain closed/);
     assert.equal(
       restoreAclSnapshotsMatch(source, [...restored, { ...source[0], privilege: 'CREATE' }]),
+      false,
+    );
+  });
+
+  it('canonicalizes task sequence owner ACLs only when the restore role owns the sequence', () => {
+    const ownerEntries = [
+      acl('sequence', 'omnis', 'task_id_seq', 'SELECT', null, 'omnis_migrator'),
+      acl('sequence', 'omnis', 'task_id_seq', 'UPDATE', null, 'omnis_migrator'),
+    ];
+    assert.equal(restoreAclSnapshotsMatch([...allowed, ...ownerEntries], allowed), true);
+    assert.equal(
+      restoreAclSnapshotsMatch(
+        [...allowed, ...ownerEntries],
+        [...allowed, { ...ownerEntries[0], grantee: 'omnis_runtime' }],
+      ),
+      false,
+    );
+    assert.equal(
+      restoreAclSnapshotsMatch(
+        [...allowed, ...ownerEntries],
+        [...allowed, { ...ownerEntries[0], privilege: 'USAGE' }],
+      ),
       false,
     );
   });

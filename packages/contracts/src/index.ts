@@ -15,22 +15,39 @@ export type RunStatus = z.infer<typeof RunStatusSchema>;
 export const TaskStatusSchema = z.enum(['open', 'in_progress', 'completed']);
 export type TaskStatus = z.infer<typeof TaskStatusSchema>;
 
+export const ProjectIdSchema = z.string().regex(/^prj_[0-9a-f]{32}$/);
+export const TaskIdSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .refine((value) => !value.includes('\0'));
+
 export const TaskSchema = z.object({
   id: z.string().min(1),
   title: z.string().min(1).max(120),
   detail: z.string().max(2000),
   status: TaskStatusSchema,
   createdAt: z.string().datetime(),
+  projectId: ProjectIdSchema.nullable().optional(),
+  associationRevision: z.number().int().positive().safe().optional(),
 });
 export type Task = z.infer<typeof TaskSchema>;
 
 export const CreateTaskSchema = z.object({
   title: z.string().trim().min(3).max(120),
   detail: z.string().trim().min(10).max(2000),
+  projectId: ProjectIdSchema.nullable().optional(),
 });
 export type CreateTaskInput = z.infer<typeof CreateTaskSchema>;
 
-export const ProjectIdSchema = z.string().regex(/^prj_[0-9a-f]{32}$/);
+export const SetTaskProjectSchema = z
+  .object({
+    projectId: ProjectIdSchema.nullable(),
+    expectedAssociationRevision: z.number().int().positive().safe(),
+  })
+  .strict();
+export type SetTaskProjectInput = z.infer<typeof SetTaskProjectSchema>;
+
 export const ProjectStatusSchema = z.enum([
   'proposed',
   'active',
@@ -39,6 +56,7 @@ export const ProjectStatusSchema = z.enum([
   'archived',
 ]);
 export const ProjectPrioritySchema = z.enum(['low', 'normal', 'high', 'urgent']);
+export const ProjectRevisionSchema = z.number().int().positive().safe();
 export const CreateProjectSchema = z
   .object({
     key: z
@@ -61,6 +79,30 @@ export const CreateProjectSchema = z
   );
 export type CreateProjectInput = z.infer<typeof CreateProjectSchema>;
 
+export const UpdateProjectSchema = z
+  .object({
+    expectedRevision: ProjectRevisionSchema,
+    name: z.string().trim().min(1).max(120).optional(),
+    objective: z.string().trim().min(1).max(4000).optional(),
+    priority: ProjectPrioritySchema.optional(),
+  })
+  .strict()
+  .refine(
+    (project) =>
+      project.name !== undefined ||
+      project.objective !== undefined ||
+      project.priority !== undefined,
+    'At least one project field must be changed.',
+  )
+  .refine(
+    (project) => !project.name?.includes('\0') && !project.objective?.includes('\0'),
+    'Project text cannot contain NUL characters.',
+  );
+export type UpdateProjectInput = z.infer<typeof UpdateProjectSchema>;
+
+export const ArchiveProjectSchema = z.object({ expectedRevision: ProjectRevisionSchema }).strict();
+export type ArchiveProjectInput = z.infer<typeof ArchiveProjectSchema>;
+
 export const ProjectSummarySchema = z
   .object({
     id: ProjectIdSchema,
@@ -69,6 +111,7 @@ export const ProjectSummarySchema = z
     name: z.string().min(1).max(120),
     status: ProjectStatusSchema,
     priority: ProjectPrioritySchema,
+    revision: ProjectRevisionSchema,
     createdAt: z.string().datetime(),
     updatedAt: z.string().datetime(),
   })
@@ -79,6 +122,73 @@ export const ProjectSchema = ProjectSummarySchema.extend({
   objective: z.string().min(1).max(4000),
 }).strict();
 export type Project = z.infer<typeof ProjectSchema>;
+
+export const ProjectWorkspaceQuerySchema = z
+  .object({
+    cursor: z.string().min(1).max(1024).optional(),
+    limit: z
+      .union([
+        z
+          .string()
+          .regex(/^[1-9][0-9]*$/)
+          .transform(Number),
+        z.number().int(),
+      ])
+      .pipe(z.number().int().min(1).max(100))
+      .optional(),
+  })
+  .strict();
+export type ProjectWorkspaceQuery = z.infer<typeof ProjectWorkspaceQuerySchema>;
+
+export const ProjectWorkspaceTaskSummarySchema = z
+  .object({
+    id: TaskIdSchema,
+    title: z.string().min(1).max(120),
+    status: TaskStatusSchema,
+    createdAt: z.string().datetime(),
+    projectId: ProjectIdSchema,
+    associationRevision: z.number().int().positive().safe(),
+    latestRun: z
+      .object({
+        id: z.string().min(1),
+        status: RunStatusSchema,
+        createdAt: z.string().datetime(),
+        updatedAt: z.string().datetime(),
+      })
+      .strict()
+      .nullable(),
+  })
+  .strict();
+export type ProjectWorkspaceTaskSummary = z.infer<typeof ProjectWorkspaceTaskSummarySchema>;
+
+export const ProjectWorkspacePageSchema = z
+  .object({
+    observedTotal: z.number().int().nonnegative().safe(),
+    complete: z.boolean(),
+    nextCursor: z.string().min(1).max(1024).nullable(),
+  })
+  .strict()
+  .refine((page) => page.complete === (page.nextCursor === null));
+export type ProjectWorkspacePage = z.infer<typeof ProjectWorkspacePageSchema>;
+
+export const ProjectWorkspaceTaskPageSchema = z
+  .object({
+    tasks: z.array(ProjectWorkspaceTaskSummarySchema).max(100),
+    page: ProjectWorkspacePageSchema,
+  })
+  .strict()
+  .refine((result) => result.page.observedTotal >= result.tasks.length);
+export type ProjectWorkspaceTaskPage = z.infer<typeof ProjectWorkspaceTaskPageSchema>;
+
+export const ProjectWorkspaceResponseSchema = z
+  .object({
+    project: ProjectSchema,
+    tasks: z.array(ProjectWorkspaceTaskSummarySchema).max(100),
+    page: ProjectWorkspacePageSchema,
+  })
+  .strict()
+  .refine((result) => result.page.observedTotal >= result.tasks.length);
+export type ProjectWorkspaceResponse = z.infer<typeof ProjectWorkspaceResponseSchema>;
 
 export const ProjectListResponseSchema = z
   .object({
