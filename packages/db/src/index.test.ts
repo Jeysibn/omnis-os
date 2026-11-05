@@ -3866,6 +3866,12 @@ const postgresSuite = describe(
           );
           assert.ok(lifecycle.includes('authorization.consumed'));
           assert.ok(lifecycle.includes('authorization.revoked'));
+          await store.requestStop(runId);
+          assert.equal(
+            (await store.interruptQueuedRun(runId, 'Terminate the completed race fixture.'))?.run
+              .status,
+            'cancelled',
+          );
         } finally {
           await consumer.query('ROLLBACK').catch(() => undefined);
           consumer.release();
@@ -5061,6 +5067,10 @@ const postgresSuite = describe(
       const eventStore = new PostgresMissionEventStore(authorizerPool!, Buffer.alloc(32, 77));
       const projects = new PostgresProjectManagementStore(authorizerPool!, Buffer.alloc(32, 31));
       const epics = new PostgresProjectEpicStore(authorizerPool!, Buffer.alloc(32, 32));
+      await assert.rejects(
+        authorizerPool!.query('SELECT omnis.list_mission_events_after(NULL,NULL,NULL,0,1000000)'),
+        (error: unknown) => (error as { code?: string }).code === '22023',
+      );
       const project = await projects.create(
         {
           key: 'MISSION-LANE',
@@ -5132,7 +5142,7 @@ const postgresSuite = describe(
           "SELECT set_config('omnis.mission_event_clock_locked','true',true)",
         );
         await forgedMarkerClient.query(
-          "INSERT INTO omnis.tasks (id,title,detail) VALUES ('task-forged-marker','Forged marker','The custom GUC must not bypass the actual cursor row lock.')",
+          "SELECT omnis.create_task('Forged marker','The custom GUC must not bypass the actual cursor row lock.',NULL,NULL,NULL)",
         );
         await forgedMarkerClient.query('COMMIT');
       } catch (error) {

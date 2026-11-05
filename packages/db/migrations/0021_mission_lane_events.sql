@@ -621,6 +621,9 @@ BEGIN
   IF session_user <> 'omnis_authorizer' THEN
     RAISE EXCEPTION 'mission event reads require the authorizer identity' USING ERRCODE = '42501';
   END IF;
+  IF p_limit NOT BETWEEN 1 AND 100 OR p_after_seq IS NULL OR p_after_seq < 0 THEN
+    RAISE EXCEPTION 'mission event query is invalid' USING ERRCODE = '22023';
+  END IF;
   WITH metadata AS MATERIALIZED (
     SELECT last_seq FROM omnis.mission_event_clock WHERE singleton = true
   ), page_rows AS MATERIALIZED (

@@ -203,6 +203,7 @@ try {
     '0018_project_milestones',
     '0019_project_epics',
     '0020_epic_task_association',
+    '0021_mission_lane_events',
   ]);
   assert.equal(afterUpgrade.unsafeRunStates, 3);
   assert.equal(

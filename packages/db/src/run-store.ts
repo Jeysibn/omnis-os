@@ -648,7 +648,7 @@ export class PostgresRunStore {
           'run.cancelled',
           'Mock worker acknowledged cancellation.',
         );
-        return { run: mapRun(cancelled.rows[0]!), events: [{ runId, event }] };
+        return { run: mapRun(cancelled), events: [{ runId, event }] };
       }
       const authorizationLock = await client.query<{ allowed: boolean }>(
         'SELECT omnis.lock_active_run_authorization($1) AS allowed',
@@ -669,7 +669,7 @@ export class PostgresRunStore {
           'run.interrupted',
           'Authorization was revoked or expired before completion was committed.',
         );
-        return { run: mapRun(interrupted.rows[0]!), events: [{ runId, event }] };
+        return { run: mapRun(interrupted), events: [{ runId, event }] };
       }
       if (
         current.status !== 'running' ||
