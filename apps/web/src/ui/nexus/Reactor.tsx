@@ -81,6 +81,7 @@ export function Reactor({ state, runs, selectedRunId, onSelectRun }: Props) {
     <div
       className="reactor"
       data-reactor-state={state.id}
+      data-markers={beads.map((bead) => `${bead.id}:${bead.status}`).join(',')}
       data-reactor-mode={failed ? 'unavailable' : animated ? 'animated' : 'static'}
     >
       <div className="reactor-grid" aria-hidden="true" />

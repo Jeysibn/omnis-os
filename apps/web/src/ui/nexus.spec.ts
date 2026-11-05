@@ -8,11 +8,20 @@ import {
   orbitPoint,
   ORBITS,
 } from './nexus/geometry.js';
-import { buildMissionEvents } from './nexus/missionEvents.js';
+import {
+  addRunEvent,
+  buildMissionEvents,
+  deriveLaneStatus,
+  MAX_EVENTS_PER_RUN,
+  MAX_STREAMS,
+  pruneRunEvents,
+  selectMonitoredRuns,
+  type RunEventLog,
+} from './nexus/missionEvents.js';
 import { deriveReactorState, type ReactorInput } from './nexus/reactorState.js';
 import { formatManilaStamp } from './nexus/time.js';
 import { computeVitals } from './nexus/vitals.js';
-import { csrf, mockApi, run, task, T0, type NexusApiOptions } from './nexusFixture.js';
+import { csrf, mockApi, run, runEvent, task, T0, type NexusApiOptions } from './nexusFixture.js';
 
 const shotDir = process.env.NEXUS_SHOT_DIR;
 if (shotDir) mkdirSync(shotDir, { recursive: true });
@@ -130,14 +139,78 @@ test.describe('vitals', () => {
 });
 
 test.describe('mission events and time', () => {
-  test('orders chronologically, dedupes, and never invents events for a queued run', () => {
+  const at = (minute: number) => `2026-11-03T02:${String(minute).padStart(2, '0')}:00.000Z`;
+  const fold = (events: ReturnType<typeof runEvent>[]) =>
+    events.reduce<RunEventLog>((log, event) => addRunEvent(log, event), {});
+
+  test('replayed events are de-duplicated and out-of-order arrivals are sequenced', () => {
+    const e1 = runEvent('a', 1, 'run.queued', at(1));
+    const e2 = runEvent('a', 2, 'run.started', at(2));
+    const e3 = runEvent('a', 3, 'run.stop_requested', at(3));
+    const log = fold([e1, e3, e2, e1, e2, e3]); // out of order, then a full replay
+    expect(log['a']!.map((e) => e.sequence)).toEqual([1, 2, 3]);
+    expect(addRunEvent(log, e2)).toBe(log); // a duplicate is a no-op, same reference
+  });
+
+  test('lane nodes are ordered by time, then run, then sequence, and omit output lines', () => {
+    const runs = [run('a', 't', 'Alpha', 'running'), run('b', 't', 'Bravo', 'completed')];
+    const log = fold([
+      runEvent('b', 1, 'run.queued', at(2)),
+      runEvent('a', 2, 'run.output', at(4)),
+      runEvent('a', 1, 'run.queued', at(1)),
+      runEvent('b', 2, 'run.completed', at(5)),
+      runEvent('a', 3, 'run.started', at(3)),
+    ]);
+    const nodes = buildMissionEvents(log, runs);
+    expect(nodes.map((n) => n.id)).toEqual(['a:1', 'b:1', 'a:3', 'b:2']);
+    expect(nodes.map((n) => n.label)).toEqual(['Queued', 'Queued', 'Started', 'Completed']);
+    expect(nodes.every((n) => n.label !== 'Output')).toBe(true);
+  });
+
+  test('history is bounded per run and pruned for runs that are no longer followed', () => {
+    let log: RunEventLog = {};
+    log = addRunEvent(log, runEvent('a', 1, 'run.queued', at(1)));
+    for (let i = 2; i <= MAX_EVENTS_PER_RUN + 25; i++)
+      log = addRunEvent(log, runEvent('a', i, 'run.output', at(2)));
+    log = addRunEvent(log, runEvent('a', 999, 'run.completed', at(9)));
+    const kept = log['a']!;
+    expect(kept.length).toBe(MAX_EVENTS_PER_RUN);
+    expect(kept[0]!.type).toBe('run.queued'); // lifecycle events survive output trimming
+    expect(kept.at(-1)!.type).toBe('run.completed');
+    expect(
+      pruneRunEvents({ ...log, b: [runEvent('b', 1, 'run.queued', at(1))] }, new Set(['a'])),
+    ).not.toHaveProperty('b');
+  });
+
+  test('only a bounded set of runs is followed, unfinished first', () => {
     const runs = [
-      run('b', 't', 'B', 'completed', '2026-11-03T03:00:00.000Z', '2026-11-03T02:00:00.000Z'),
-      run('a', 't', 'A', 'queued', '2026-11-03T01:00:00.000Z', '2026-11-03T01:00:00.000Z'),
+      run('done-new', 't', 'D', 'completed', at(50)),
+      ...Array.from({ length: 5 }, (_, i) => run(`live-${i}`, 't', 'L', 'running', at(i))),
     ];
-    const events = buildMissionEvents([...runs, ...runs]);
-    expect(events.map((e) => e.id)).toEqual(['a:queued', 'b:queued', 'b:state']);
-    expect(events.map((e) => e.at)).toEqual([...events.map((e) => e.at)].sort());
+    const picked = selectMonitoredRuns(runs).map((r) => r.id);
+    expect(picked).toHaveLength(MAX_STREAMS);
+    expect(picked).not.toContain('done-new');
+    expect(picked[0]).toBe('live-4');
+  });
+
+  test('lane status is only "live" while an unfinished run has an open stream', () => {
+    const live = run('r', 't', 'R', 'running');
+    const done = run('d', 't', 'D', 'completed');
+    const d = (
+      runs: (typeof live)[],
+      health: Record<string, never | 'open' | 'connecting' | 'reconnecting' | 'ended' | 'failed'>,
+      eventCount: number,
+      paused = false,
+    ) => deriveLaneStatus({ runs, health, eventCount, paused });
+    expect(d([live], { r: 'open' }, 2)).toBe('live');
+    expect(d([done], { d: 'open' }, 2)).toBe('loading'); // replaying finished history is not live
+    expect(d([done], { d: 'ended' }, 2)).toBe('history');
+    expect(d([live], { r: 'connecting' }, 0)).toBe('loading');
+    expect(d([live], { r: 'reconnecting' }, 2)).toBe('reconnecting');
+    expect(d([live], { r: 'failed' }, 2)).toBe('disconnected');
+    expect(d([live], { r: 'failed' }, 0)).toBe('unavailable');
+    expect(d([live], { r: 'open' }, 2, true)).toBe('disconnected'); // runs list unavailable
+    expect(d([], {}, 0)).toBe('empty');
   });
   test('formats timestamps in Asia/Manila regardless of host timezone', () => {
     expect(formatManilaStamp('2026-11-03T02:00:00.000Z')).toContain('10:00:00');
@@ -179,7 +252,7 @@ test('renders the cinematic shell with landmarks, live data and a canvas reactor
   await expect(page.getByRole('main')).toBeVisible();
   await expect(page.getByRole('complementary', { name: 'System vitals' })).toBeVisible();
   await expect(page.getByRole('complementary', { name: 'Requires attention' })).toBeVisible();
-  await expect(page.getByRole('region', { name: 'Live mission lane' })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Mission lane' })).toBeVisible();
   await expect(page.locator('canvas.reactor-canvas')).toBeVisible();
   await expect(page.locator('.reactor')).toHaveAttribute('data-reactor-mode', 'animated');
   await expect(readout(page)).toHaveText('Mock execution active');
@@ -344,20 +417,25 @@ test('selecting a run focuses the inspector, marks the lane, and can return to t
 test('clicking a run marker on the reactor selects that run', async ({ page }) => {
   await open(page, { runs: [run('only', 't', 'Only run', 'completed')] });
   const canvas = page.locator('canvas.reactor-canvas');
-  const box = (await canvas.boundingBox())!;
-  // Markers rest on their orbit; scan the stage for the marker instead of guessing geometry.
-  let hit = false;
-  for (let y = 0.1; y < 0.95 && !hit; y += 0.03) {
-    for (let x = 0.05; x < 0.95 && !hit; x += 0.03) {
-      await canvas.hover({ position: { x: box.width * x, y: box.height * y }, force: true });
-      if ((await canvas.evaluate((el) => (el as HTMLElement).style.cursor)) === 'pointer') {
-        await page.mouse.down();
-        await page.mouse.up();
-        hit = true;
+  // Markers rest on their orbit; scan the canvas for the marker instead of guessing geometry.
+  const scan = () =>
+    canvas.evaluate((el: HTMLCanvasElement) => {
+      const box = el.getBoundingClientRect();
+      for (let y = 0.1; y < 0.95; y += 0.02) {
+        for (let x = 0.05; x < 0.95; x += 0.02) {
+          const clientX = box.left + box.width * x;
+          const clientY = box.top + box.height * y;
+          el.dispatchEvent(new PointerEvent('pointermove', { clientX, clientY, bubbles: true }));
+          if (el.style.cursor === 'pointer') {
+            el.dispatchEvent(new MouseEvent('click', { clientX, clientY, bubbles: true }));
+            return true;
+          }
+        }
       }
-    }
-  }
-  expect(hit).toBe(true);
+      return false;
+    });
+  // markers only become hit-testable once the entrance sequence has drawn them
+  await expect.poll(scan, { timeout: 10_000 }).toBe(true);
   await expect(page.locator('.nx-block[aria-labelledby="nx-selected-h"]')).toContainText(
     'Only run',
   );
@@ -365,12 +443,13 @@ test('clicking a run marker on the reactor selects that run', async ({ page }) =
 
 test('mission lane is chronological, Manila-timed, pausable and expandable', async ({ page }) => {
   await open(page);
-  const lane = page.getByRole('region', { name: 'Live mission lane' });
+  const lane = page.getByRole('region', { name: 'Mission lane' });
   const times = lane.locator('.nx-node time');
   await expect(times.first()).toContainText('09:00:00'); // 01:00Z queued run-old
   const stamps = await times.evaluateAll((els) => els.map((e) => e.getAttribute('datetime')!));
   expect(stamps).toEqual([...stamps].sort());
-  await expect(lane.getByText(/No event stream is open on this screen/)).toBeVisible();
+  await expect(lane.getByText(/Following 3 of 3 runs/)).toBeVisible();
+  await expect(lane.getByText(/Live: receiving updates/)).toBeVisible(); // run-active's stream is open
   const pause = lane.getByRole('button', { name: 'Pause auto-scroll' });
   await pause.click();
   await expect(lane.getByRole('button', { name: 'Resume auto-scroll' })).toHaveAttribute(
@@ -389,7 +468,7 @@ test('mission lane is chronological, Manila-timed, pausable and expandable', asy
 test('empty workspace shows true empties, not fabricated activity', async ({ page }) => {
   await open(page, { tasks: [], runs: [] });
   await expect(readout(page)).toHaveText('Idle');
-  await expect(page.getByText('No runs recorded.')).toBeVisible();
+  await expect(laneOf(page).locator('.nx-empty')).toContainText('No events recorded.');
   await expect(page.getByText('No active run.')).toBeVisible();
   await expect(page.getByRole('button', { name: /^Active runs:\s*0/ })).toBeVisible();
   await expect(page.getByText('None recorded')).toBeVisible();
@@ -401,21 +480,74 @@ test('agents are never shown as executing', async ({ page }) => {
 });
 
 // ------------------------------------------------------------ graphics paths
+type FrameControl = {
+  requested: number;
+  cancelled: number;
+  pending: () => number;
+  step: (count?: number) => void;
+};
+type Win = Window & { __frames: FrameControl; __io: (visible: boolean) => void };
+
+/**
+ * Replaces requestAnimationFrame with a queue the test advances by hand, and lets the test
+ * drive IntersectionObserver visibility. No assertion below depends on wall-clock timing.
+ */
+async function installManualFrames(page: Page) {
+  await page.addInitScript(() => {
+    const w = window as unknown as Win;
+    const queue = new Map<number, FrameRequestCallback>();
+    let nextId = 0;
+    let clock = 1000;
+    const control: FrameControl = {
+      requested: 0,
+      cancelled: 0,
+      pending: () => queue.size,
+      step(count = 1) {
+        for (let i = 0; i < count; i++) {
+          const batch = [...queue.values()];
+          queue.clear();
+          clock += 16.7;
+          for (const callback of batch) callback(clock);
+        }
+      },
+    };
+    w.__frames = control;
+    window.requestAnimationFrame = (callback) => {
+      control.requested++;
+      queue.set(++nextId, callback);
+      return nextId;
+    };
+    window.cancelAnimationFrame = (id) => {
+      if (queue.delete(id)) control.cancelled++;
+    };
+    const Native = window.IntersectionObserver;
+    const callbacks: IntersectionObserverCallback[] = [];
+    window.IntersectionObserver = class extends Native {
+      constructor(callback: IntersectionObserverCallback, options?: IntersectionObserverInit) {
+        super(callback, options);
+        callbacks.push(callback);
+      }
+    };
+    w.__io = (visible) =>
+      callbacks.forEach((callback) =>
+        callback(
+          [{ isIntersecting: visible } as IntersectionObserverEntry],
+          {} as IntersectionObserver,
+        ),
+      );
+  });
+}
+const frames = <T>(page: Page, fn: (f: FrameControl) => T) =>
+  page.evaluate(`(${fn.toString()})(window.__frames)`) as Promise<T>;
+
 test('reduced motion renders a static, non-blank reactor and no animation loop', async ({
   page,
 }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  await page.addInitScript(() => {
-    let calls = 0;
-    const raf = window.requestAnimationFrame.bind(window);
-    window.requestAnimationFrame = (cb) => {
-      calls++;
-      return raf(cb);
-    };
-    (window as unknown as { __raf: () => number }).__raf = () => calls;
-  });
+  await installManualFrames(page);
   await open(page);
   await expect(page.locator('.reactor')).toHaveAttribute('data-reactor-mode', 'static');
+  await frames(page, (f) => f.step(4)); // draws the single static frame, if any is scheduled
   const nonBlank = await page.locator('canvas.reactor-canvas').evaluate((c: HTMLCanvasElement) => {
     const data = c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data;
     let lit = 0;
@@ -423,11 +555,11 @@ test('reduced motion renders a static, non-blank reactor and no animation loop',
     return lit;
   });
   expect(nonBlank).toBeGreaterThan(500);
-  await page.waitForTimeout(300);
-  const a = await page.evaluate(() => (window as unknown as { __raf: () => number }).__raf());
-  await page.waitForTimeout(700);
-  const b = await page.evaluate(() => (window as unknown as { __raf: () => number }).__raf());
-  expect(b - a).toBeLessThan(5); // React/app frames only; no continuous reactor loop
+  // No loop: once drained, stepping again schedules nothing new.
+  const before = await frames(page, (f) => f.requested);
+  await frames(page, (f) => f.step(5));
+  expect(await frames(page, (f) => f.pending())).toBe(0);
+  expect(await frames(page, (f) => f.requested)).toBe(before);
 });
 
 test('graphics failure falls back to a static illustration with intact controls', async ({
@@ -448,46 +580,69 @@ test('graphics failure falls back to a static illustration with intact controls'
   await axe(page);
 });
 
-test('rendering is paused when hidden and released on unmount', async ({ page }) => {
-  await page.addInitScript(() => {
-    let calls = 0;
-    const raf = window.requestAnimationFrame.bind(window);
-    window.requestAnimationFrame = (cb) => {
-      calls++;
-      return raf(cb);
-    };
-    (window as unknown as { __raf: () => number }).__raf = () => calls;
-  });
-  await open(page);
-  const raf = () => page.evaluate(() => (window as unknown as { __raf: () => number }).__raf());
-  await page.waitForTimeout(400);
-  const running = (await raf()) - 0;
-  await page.waitForTimeout(500);
-  expect((await raf()) - running).toBeGreaterThan(15); // animating while visible
+test.describe('renderer lifecycle (manual frame clock)', () => {
+  const setHidden = (page: Page, hidden: boolean) =>
+    page.evaluate((value) => {
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => value });
+      document.dispatchEvent(new Event('visibilitychange'));
+    }, hidden);
 
-  await page.evaluate(() => {
-    Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
-    document.dispatchEvent(new Event('visibilitychange'));
+  test('keeps scheduling frames while visible', async ({ page }) => {
+    await installManualFrames(page);
+    await open(page);
+    await expect.poll(() => frames(page, (f) => f.pending())).toBeGreaterThan(0);
+    const before = await frames(page, (f) => f.requested);
+    await frames(page, (f) => f.step(5));
+    // every stepped frame re-armed the loop
+    expect((await frames(page, (f) => f.requested)) - before).toBeGreaterThanOrEqual(5);
+    expect(await frames(page, (f) => f.pending())).toBeGreaterThan(0);
   });
-  await page.waitForTimeout(100);
-  const hiddenStart = await raf();
-  await page.waitForTimeout(600);
-  expect((await raf()) - hiddenStart).toBeLessThan(3);
-  await page.evaluate(() => {
-    Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
-    document.dispatchEvent(new Event('visibilitychange'));
-  });
-  await page.waitForTimeout(300);
-  const resumedStart = await raf();
-  await page.waitForTimeout(400);
-  expect((await raf()) - resumedStart).toBeGreaterThan(10);
 
-  await page.getByRole('link', { name: 'Tasks' }).click();
-  await expect(page.locator('canvas.reactor-canvas')).toHaveCount(0);
-  await page.waitForTimeout(150);
-  const after = await raf();
-  await page.waitForTimeout(500);
-  expect((await raf()) - after).toBeLessThan(3);
+  test('suspends while the document is hidden and resumes when shown', async ({ page }) => {
+    await installManualFrames(page);
+    await open(page);
+    await expect.poll(() => frames(page, (f) => f.pending())).toBeGreaterThan(0);
+    await setHidden(page, true);
+    await frames(page, (f) => f.step(3));
+    expect(await frames(page, (f) => f.pending())).toBe(0);
+    await setHidden(page, false);
+    expect(await frames(page, (f) => f.pending())).toBeGreaterThan(0);
+  });
+
+  test('suspends while scrolled offscreen and resumes when visible again', async ({ page }) => {
+    await installManualFrames(page);
+    await open(page);
+    await expect.poll(() => frames(page, (f) => f.pending())).toBeGreaterThan(0);
+    await page.evaluate(() => (window as unknown as Win).__io(false));
+    await frames(page, (f) => f.step(3));
+    expect(await frames(page, (f) => f.pending())).toBe(0);
+    await page.evaluate(() => (window as unknown as Win).__io(true));
+    expect(await frames(page, (f) => f.pending())).toBeGreaterThan(0);
+  });
+
+  test('unmount cancels the pending frame, stops the loop and releases the canvas', async ({
+    page,
+  }) => {
+    await installManualFrames(page);
+    await open(page);
+    await expect.poll(() => frames(page, (f) => f.pending())).toBeGreaterThan(0);
+    await frames(page, (f) => f.step(2));
+    const canvas = await page.locator('canvas.reactor-canvas').elementHandle();
+    expect(await canvas!.evaluate((c: HTMLCanvasElement) => c.width)).toBeGreaterThan(0);
+    const cancelledBefore = await frames(page, (f) => f.cancelled);
+
+    await page.getByRole('link', { name: 'Tasks' }).click();
+    await expect(page.locator('canvas.reactor-canvas')).toHaveCount(0);
+
+    // destroy() cancelled the frame that was waiting, and nothing re-armed it
+    expect(await frames(page, (f) => f.cancelled)).toBeGreaterThan(cancelledBefore);
+    await frames(page, (f) => f.step(3));
+    const requested = await frames(page, (f) => f.requested);
+    await frames(page, (f) => f.step(3));
+    expect(await frames(page, (f) => f.requested)).toBe(requested);
+    // backing store released
+    expect(await canvas!.evaluate((c: HTMLCanvasElement) => [c.width, c.height])).toEqual([0, 0]);
+  });
 });
 
 test('measured reactor cost at 1440x900 (reported, not asserted against a target)', async ({
@@ -594,4 +749,235 @@ test('sign out remains reachable from the cinematic shell', async ({ page }) => 
   const api = await open(page);
   await page.getByRole('button', { name: 'Sign out' }).click();
   await expect.poll(() => api.requests.some((r) => r.path === '/api/v1/auth/logout')).toBe(true);
+});
+
+// ------------------------------------------------------------ mission lane (event-driven)
+const laneOf = (page: Page) => page.getByRole('region', { name: 'Mission lane' });
+const nodesOf = (page: Page, runId: string) => page.locator(`.nx-node[data-run="${runId}"]`);
+const min = (n: number) => `2026-11-03T02:${String(n).padStart(2, '0')}:00.000Z`;
+
+type SourceStats = { created: number; closed: number; open: number; maxOpen: number };
+async function countEventSources(page: Page) {
+  await page.addInitScript(() => {
+    const stats = { created: 0, closed: 0, open: 0, maxOpen: 0 };
+    (window as unknown as { __sse: typeof stats }).__sse = stats;
+    const Native = window.EventSource;
+    window.EventSource = class extends Native {
+      private done = false;
+      constructor(url: string | URL, init?: EventSourceInit) {
+        super(url, init);
+        stats.created++;
+        stats.open++;
+        stats.maxOpen = Math.max(stats.maxOpen, stats.open);
+      }
+      override close() {
+        if (!this.done) {
+          this.done = true;
+          stats.closed++;
+          stats.open--;
+        }
+        super.close();
+      }
+    } as typeof EventSource;
+  });
+}
+const sourceStats = (page: Page) =>
+  page.evaluate(() => (window as unknown as { __sse: SourceStats }).__sse);
+
+test('lane shows persisted events from the run event stream, in order, with their messages', async ({
+  page,
+}) => {
+  const api = await open(page, {
+    events: {
+      'run-active': [
+        runEvent('run-active', 1, 'run.queued', min(1), 'Queued for the mock runtime.'),
+        runEvent('run-active', 2, 'run.started', min(2)),
+        runEvent('run-active', 3, 'run.output', min(3), 'Reading notes'),
+      ],
+    },
+  });
+  const lane = laneOf(page);
+  await expect(lane.getByText(/Live: receiving updates/)).toBeVisible();
+  const labels = await nodesOf(page, 'run-active').locator('.nx-node-label').allTextContents();
+  expect(labels).toEqual(['Queued', 'Started']); // output lines stay in the inspector
+  await expect(nodesOf(page, 'run-active').first()).toContainText('Index the knowledge base');
+  await expect(nodesOf(page, 'run-active').first()).toContainText('Queued for the mock runtime.');
+  const stamps = await lane
+    .locator('.nx-node time')
+    .evaluateAll((els) => els.map((e) => e.getAttribute('datetime')!));
+  expect(stamps.length).toBeGreaterThanOrEqual(5);
+  expect(stamps).toEqual([...stamps].sort());
+  expect(api.hub.requests.map((r) => r.runId).sort()).toEqual(['run-active', 'run-bad', 'run-old']);
+  expect(api.requests.filter((r) => r.method !== 'GET')).toEqual([]); // reading never writes
+});
+
+test('events pushed after load appear live, once, in order', async ({ page }) => {
+  const api = await open(page);
+  await expect(nodesOf(page, 'run-active')).toHaveCount(2);
+  api.hub.publish('run-active', runEvent('run-active', 3, 'run.stop_requested', min(6)));
+  await expect(nodesOf(page, 'run-active')).toHaveCount(3);
+  expect(await nodesOf(page, 'run-active').locator('.nx-node-label').allTextContents()).toEqual([
+    'Queued',
+    'Started',
+    'Stop requested',
+  ]);
+});
+
+test('reconnect resumes from the last event id, drops replays and keeps history', async ({
+  page,
+}) => {
+  const api = await open(page);
+  await expect(nodesOf(page, 'run-active')).toHaveCount(2);
+  api.hub.publish('run-active', runEvent('run-active', 3, 'run.stop_requested', min(6)));
+  await expect(nodesOf(page, 'run-active')).toHaveCount(3);
+
+  api.hub.replayAll = true; // a lossy server that re-sends everything on reconnect
+  api.hub.drop('run-active');
+  await expect.poll(() => api.hub.connections('run-active')).toBe(1);
+  const attempts = api.hub.requests.filter((r) => r.runId === 'run-active');
+  expect(attempts[0]!.lastEventId).toBeUndefined();
+  expect(attempts.at(-1)!.lastEventId).toBe('3'); // browser resumes from its cursor
+  await expect(nodesOf(page, 'run-active')).toHaveCount(3); // replay produced no duplicates
+
+  api.hub.publish('run-active', runEvent('run-active', 4, 'run.interrupted', min(7)));
+  await expect(nodesOf(page, 'run-active')).toHaveCount(4);
+});
+
+test('a dropped connection is reported and the loaded history stays visible', async ({ page }) => {
+  const api = await open(page);
+  await expect(laneOf(page).getByText(/Live: receiving updates/)).toBeVisible();
+  api.hub.failWith('run-active', 503);
+  api.hub.drop('run-active');
+  const lane = laneOf(page);
+  await expect(lane.locator('[data-lane-status="reconnecting"]')).toBeVisible();
+  await expect(lane.getByText(/Connection interrupted/)).toBeVisible();
+  await expect(nodesOf(page, 'run-active')).toHaveCount(2); // history retained
+  await expect(lane.getByText(/Live: receiving updates/)).toHaveCount(0); // not labelled live
+
+  api.hub.failWith('run-active', null); // service returns: the lane recovers on its own
+  await expect(lane.locator('[data-lane-status="live"]')).toBeVisible({ timeout: 15000 });
+  await expect(nodesOf(page, 'run-active')).toHaveCount(2);
+});
+
+test('gives up after bounded retries, reports disconnected, and Refresh reconnects', async ({
+  page,
+}) => {
+  test.setTimeout(60_000);
+  const api = await open(page);
+  const lane = laneOf(page);
+  await expect(lane.locator('[data-lane-status="live"]')).toBeVisible();
+  api.hub.failWith('run-active', 503);
+  api.hub.drop('run-active');
+  // three retries with 1s, 2s and 4s backoff, then the lane stops trying
+  await expect(lane.locator('[data-lane-status="disconnected"]')).toBeVisible({ timeout: 20_000 });
+  await expect(nodesOf(page, 'run-active')).toHaveCount(2); // history retained
+  const attempts = () => api.hub.requests.filter((r) => r.runId === 'run-active').length;
+  const settled = attempts();
+  await page.waitForTimeout(1500);
+  expect(attempts()).toBe(settled); // no unbounded retry loop
+
+  api.hub.failWith('run-active', null);
+  await page.getByRole('button', { name: 'Refresh data' }).click();
+  await expect(lane.locator('[data-lane-status="live"]')).toBeVisible();
+  await expect(nodesOf(page, 'run-active')).toHaveCount(2);
+});
+
+test('lane says the event source is unavailable when no history could be loaded', async ({
+  page,
+}) => {
+  test.setTimeout(60_000);
+  const api = await mockApi(page, {
+    runs: [run('run-x', 'task-x', 'Only run', 'running', min(5), min(1))],
+  });
+  api.hub.failWith('run-x', 503);
+  await page.goto('/#command-center');
+  await expect(laneOf(page).locator('[data-lane-status="unavailable"]')).toBeVisible({
+    timeout: 20_000,
+  });
+  await expect(laneOf(page).getByText(/event source could not be reached/i)).toBeVisible();
+});
+
+test('finished runs replay history but are not labelled live', async ({ page }) => {
+  await open(page, {
+    runs: [run('run-old', 'task-done', 'Audit access notes', 'completed', min(30), min(20))],
+  });
+  await expect(laneOf(page).locator('[data-lane-status="history"]')).toBeVisible();
+  await expect(laneOf(page).getByText(/Live: receiving updates/)).toHaveCount(0);
+  await expect(nodesOf(page, 'run-old')).toHaveCount(2);
+});
+
+test('follows at most four runs and closes every stream when the screen unmounts', async ({
+  page,
+}) => {
+  await countEventSources(page);
+  const many = Array.from({ length: 6 }, (_, i) =>
+    run(`run-${i}`, `task-${i}`, `Mission ${i}`, 'running', min(10 + i), min(i)),
+  );
+  const api = await open(page, { runs: many });
+  await expect(laneOf(page).getByText(/Following 4 of 6 runs/)).toBeVisible();
+  await expect.poll(async () => (await sourceStats(page)).open).toBe(4);
+  expect((await sourceStats(page)).maxOpen).toBe(4);
+  expect([...new Set(api.hub.requests.map((r) => r.runId))].sort()).toEqual([
+    'run-2',
+    'run-3',
+    'run-4',
+    'run-5',
+  ]);
+  // an ordinary rerender (selecting a run) must not open duplicate streams
+  const created = (await sourceStats(page)).created;
+  await page.locator('.nx-node').first().click();
+  await page.locator('.nx-node').first().click();
+  expect((await sourceStats(page)).created).toBe(created);
+
+  await page.getByRole('link', { name: 'Tasks' }).click();
+  await expect(laneOf(page)).toHaveCount(0);
+  await expect.poll(async () => (await sourceStats(page)).open).toBe(0);
+  const after = await sourceStats(page);
+  expect(after.closed).toBe(after.created);
+  for (const id of ['run-2', 'run-3', 'run-4', 'run-5'])
+    await expect.poll(() => api.hub.connections(id)).toBe(0); // the server saw them close
+});
+
+test('a terminal event closes that stream and refreshes the stale run record once', async ({
+  page,
+}) => {
+  await countEventSources(page);
+  const api = await open(page);
+  await expect(laneOf(page).getByText(/Live: receiving updates/)).toBeVisible();
+  const listFetches = () =>
+    api.requests.filter((r) => r.path === '/api/v1/runs' && r.method === 'GET').length;
+  const before = listFetches();
+  api.hub.publish('run-active', runEvent('run-active', 3, 'run.completed', min(8)));
+  await expect(nodesOf(page, 'run-active')).toHaveCount(3);
+  await expect.poll(listFetches).toBe(before + 1); // record said "running": refetched, once
+  await page.waitForTimeout(300);
+  expect(listFetches()).toBe(before + 1);
+  await expect.poll(() => api.hub.connections('run-active')).toBe(0);
+});
+
+// ------------------------------------------------------------ stale reactor markers
+test('a failed runs refresh removes reactor markers instead of showing stale activity', async ({
+  page,
+}) => {
+  const api = await open(page);
+  const reactor = page.locator('.reactor');
+  await expect(readout(page)).toHaveText('Mock execution active');
+  const markers = (await reactor.getAttribute('data-markers'))!.split(',').sort();
+  expect(markers).toEqual(['run-active:running', 'run-bad:failed', 'run-old:completed']);
+
+  api.setRunFailures(1);
+  await page.getByRole('button', { name: 'Refresh data' }).click();
+  await expect(readout(page)).toHaveText('System state unavailable');
+  await expect(reactor).toHaveAttribute('data-reactor-state', 'data-unavailable');
+  await expect(reactor).toHaveAttribute('data-markers', ''); // nothing implies current activity
+  await expect(page.getByRole('button', { name: /^Active runs:\s*Unavailable/ })).toBeVisible();
+  await expect(page.getByRole('button', { name: /^Active runs:\s*0/ })).toHaveCount(0);
+  // loaded event history is retained, but the lane says it is disconnected
+  await expect(laneOf(page).locator('[data-lane-status="disconnected"]')).toBeVisible();
+  await expect(nodesOf(page, 'run-active').first()).toBeVisible();
+
+  await page.getByRole('button', { name: 'Refresh data' }).click();
+  await expect(readout(page)).toHaveText('Mock execution active');
+  expect((await reactor.getAttribute('data-markers'))!.split(',').sort()).toEqual(markers);
+  await expect(laneOf(page).locator('[data-lane-status="live"]')).toBeVisible();
 });

@@ -6,7 +6,8 @@ import { MissionLane } from './MissionLane.js';
 import { PhtClock } from './PhtClock.js';
 import { Reactor } from './Reactor.js';
 import { VitalsPanel } from './VitalsPanel.js';
-import { buildMissionEvents } from './missionEvents.js';
+import { buildMissionEvents, deriveLaneStatus } from './missionEvents.js';
+import { useMissionStream } from './useMissionStream.js';
 import { deriveReactorState } from './reactorState.js';
 import { computeVitals, type LoadState } from './vitals.js';
 import './nexus.css';
@@ -76,7 +77,17 @@ export default function NexusCommandCenter(props: NexusProps) {
     () => computeVitals({ tasks, runs, tasksState, runsState }),
     [tasks, runs, tasksState, runsState],
   );
-  const events = useMemo(() => buildMissionEvents(runs), [runs]);
+  // Stale runs are never drawn as current activity: when the last refresh failed the reactor
+  // receives no run markers at all (the readout already says so).
+  const currentRuns = useMemo(() => (runsState === 'error' ? [] : runs), [runsState, runs]);
+  const stream = useMissionStream(runs, runsState !== 'error', props.onRetryRuns);
+  const events = useMemo(() => buildMissionEvents(stream.log, runs), [stream.log, runs]);
+  const laneStatus = deriveLaneStatus({
+    runs: stream.monitored,
+    health: stream.health,
+    eventCount: events.length,
+    paused: runsState === 'error',
+  });
 
   const focusApprovals = () => {
     const heading = document.getElementById('nx-approvals-heading');
@@ -86,6 +97,7 @@ export default function NexusCommandCenter(props: NexusProps) {
   const refresh = () => {
     props.onRetryTasks();
     props.onRetryRuns();
+    stream.reconnect();
   };
   const select = (runId: string) =>
     setSelectedRunId((current) => (current === runId ? null : runId));
@@ -164,7 +176,12 @@ export default function NexusCommandCenter(props: NexusProps) {
             <h1>Command Center</h1>
           </div>
           {props.notice}
-          <Reactor state={state} runs={runs} selectedRunId={selectedRunId} onSelectRun={select} />
+          <Reactor
+            state={state}
+            runs={currentRuns}
+            selectedRunId={selectedRunId}
+            onSelectRun={select}
+          />
           <div className="nx-readout">
             <p className="nx-readout-label" role="status">
               {state.label}
@@ -208,6 +225,9 @@ export default function NexusCommandCenter(props: NexusProps) {
 
         <MissionLane
           events={events}
+          status={laneStatus}
+          monitoredCount={stream.monitored.length}
+          totalRuns={runs.length}
           runsState={runsState}
           selectedRunId={selectedRunId}
           loadedAt={loadedAt}

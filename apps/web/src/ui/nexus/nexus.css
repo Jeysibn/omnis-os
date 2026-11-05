@@ -630,6 +630,7 @@ body:has(.nexus) {
   padding-top: 10px;
 }
 .nx-node {
+  position: relative; /* contains the screen-reader message */
   display: grid;
   grid-template-columns: auto 1fr;
   grid-template-areas: 'glyph label' 'time time' 'title title';
@@ -896,4 +897,18 @@ body:has(.nexus) {
   .nx-status-strip li:last-child {
     display: none; /* avoid a clipped label; runtime is also stated in System context and Mode */
   }
+}
+
+.nx-lane-status {
+  margin: 2px 0 0;
+  font-size: 0.8rem;
+  color: var(--nx-frost);
+}
+.nx-lane-status[data-lane-status='live'] {
+  color: var(--nx-jade);
+}
+.nx-lane-status[data-lane-status='reconnecting'],
+.nx-lane-status[data-lane-status='disconnected'],
+.nx-lane-status[data-lane-status='unavailable'] {
+  color: var(--nx-amber);
 }

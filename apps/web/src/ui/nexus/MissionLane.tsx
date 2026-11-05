@@ -2,11 +2,14 @@ import { useEffect, useRef, useState } from 'react';
 import { ChevronDown, ChevronUp, Pause, Play, RefreshCw } from 'lucide-react';
 import { StatusGlyph } from './StatusGlyph.js';
 import { formatManilaStamp } from './time.js';
-import type { MissionEvent } from './missionEvents.js';
+import type { LaneStatus, MissionEvent } from './missionEvents.js';
 import type { LoadState } from './vitals.js';
 
 type Props = {
   events: MissionEvent[];
+  status: LaneStatus;
+  monitoredCount: number;
+  totalRuns: number;
   runsState: LoadState;
   selectedRunId: string | null;
   loadedAt: Date | null;
@@ -14,8 +17,21 @@ type Props = {
   onRefresh: () => void;
 };
 
+const STATUS_TEXT: Record<LaneStatus, string> = {
+  loading: 'Loading event history…',
+  live: 'Live: receiving updates for unfinished runs.',
+  history: 'Historical events. No run is receiving live updates.',
+  reconnecting: 'Connection interrupted. Reconnecting; loaded history is kept.',
+  disconnected: 'Disconnected. Showing the history loaded so far; it may be out of date.',
+  unavailable: 'Event source unavailable. No history could be loaded.',
+  empty: 'No events recorded.',
+};
+
 export function MissionLane({
   events,
+  status,
+  monitoredCount,
+  totalRuns,
   runsState,
   selectedRunId,
   loadedAt,
@@ -47,12 +63,15 @@ export function MissionLane({
       <div className="nx-lane-head">
         <div>
           <h2 id="nx-lane-h" className="nx-label nx-heading">
-            Live mission lane
+            Mission lane
           </h2>
+          <p className="nx-lane-status" data-lane-status={status} role="status">
+            {STATUS_TEXT[status]}
+          </p>
           <p className="nx-quiet">
-            Run records, Asia/Manila time.{' '}
-            {loadedAt ? `Loaded ${formatManilaStamp(loadedAt.toISOString())}.` : ''} No event stream
-            is open on this screen; open a run for live replay.
+            Persisted run events, Asia/Manila time. Following {monitoredCount} of {totalRuns} runs
+            (unfinished first, then most recent); output lines are in the run inspector.
+            {loadedAt ? ` Run list loaded ${formatManilaStamp(loadedAt.toISOString())}.` : ''}
           </p>
         </div>
         <div className="nx-lane-actions">
@@ -88,24 +107,30 @@ export function MissionLane({
           </button>
         </div>
       </div>
-      {runsState === 'loading' ? (
+      {events.length === 0 && runsState === 'loading' ? (
         <p className="nx-empty" role="status">
           Loading mission records…
         </p>
-      ) : runsState === 'error' ? (
+      ) : events.length === 0 && runsState === 'error' ? (
         <p className="nx-empty">
           Mission records are unavailable until runs load. Use the retry control in Current
           activity.
         </p>
       ) : events.length === 0 ? (
-        <p className="nx-empty">No runs recorded. Approved mock runs will appear here in order.</p>
+        <p className="nx-empty">
+          {status === 'loading'
+            ? 'Loading event history…'
+            : status === 'unavailable'
+              ? 'The event source could not be reached. Use Refresh to try again, or open a run.'
+              : 'No events recorded. Approved mock runs will appear here in order.'}
+        </p>
       ) : (
         <ol
           id="nx-lane-list"
           className="nx-lane-list"
           ref={scroller}
           tabIndex={0}
-          aria-label="Mission records, oldest first"
+          aria-label="Mission events, oldest first"
         >
           {shown.map((event) => (
             <li key={event.id}>
@@ -123,6 +148,7 @@ export function MissionLane({
                   {formatManilaStamp(event.at)}
                 </time>
                 <span className="nx-node-title">{event.taskTitle}</span>
+                <span className="nx-sr">{event.message}</span>
               </button>
             </li>
           ))}

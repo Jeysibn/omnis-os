@@ -1,5 +1,6 @@
 import type { Page, Route } from '@playwright/test';
-import { RunSchema, TaskSchema, type Run, type Task } from '@omnis/contracts';
+import { EventHub } from './nexusEventHub.js';
+import { RunSchema, TaskSchema, type Run, type RunEvent, type Task } from '@omnis/contracts';
 
 export const T0 = '2026-11-03T02:00:00.000Z'; // 10:00 Asia/Manila
 export const csrf = 'csrf-nexus-fixture-token';
@@ -31,7 +32,44 @@ export const run = (
   updatedAt,
 });
 
+export const runEvent = (
+  runId: string,
+  sequence: number,
+  type: RunEvent['type'],
+  at: string,
+  message = `${type} for ${runId}`,
+): RunEvent => ({
+  id: `${runId}-evt-${sequence}`,
+  runId,
+  sequence,
+  at,
+  type,
+  source: 'mock',
+  synthetic: true,
+  message,
+});
+
+const TYPE_FOR_STATUS: Record<Run['status'], RunEvent['type']> = {
+  queued: 'run.queued',
+  running: 'run.started',
+  stopping: 'run.stop_requested',
+  completed: 'run.completed',
+  cancelled: 'run.cancelled',
+  failed: 'run.failed',
+  interrupted: 'run.interrupted',
+  unknown: 'run.interrupted', // fixture only: a run whose outcome was never recorded
+};
+
+/** Persisted history consistent with a run record: queued at creation, then its latest state. */
+export function defaultRunEvents(r: Run): RunEvent[] {
+  const events = [runEvent(r.id, 1, 'run.queued', r.createdAt)];
+  if (r.status !== 'queued') events.push(runEvent(r.id, 2, TYPE_FOR_STATUS[r.status], r.updatedAt));
+  return events;
+}
+
 export type NexusApiOptions = {
+  /** Persisted history per run id; defaults to events consistent with each run record. */
+  events?: Record<string, RunEvent[]>;
   tasks?: Task[];
   runs?: Run[];
   runFailures?: number;
@@ -113,13 +151,18 @@ export async function mockApi(page: Page, options: NexusApiOptions = {}) {
     }
     return fail(route, 404, 'unexpected_route', `Unexpected ${req.method()} ${path}`);
   });
-  // Runs page streams are out of scope for these tests; hold the connection idle.
-  await page.route('**/api/v1/runs/*/events', (route) =>
-    route.fulfill({
-      status: 200,
-      headers: { 'content-type': 'text/event-stream' },
-      body: 'retry: 60000\n\n',
-    }),
-  );
-  return { requests };
+  const hub = new EventHub();
+  await hub.start();
+  page.on('close', () => hub.stop());
+  for (const r of runs) hub.history.set(r.id, options.events?.[r.id] ?? defaultRunEvents(r));
+  await page.route('**/api/v1/runs/*/events', (route) => {
+    const runId = decodeURIComponent(new URL(route.request().url()).pathname.split('/')[4] ?? '');
+    return route.continue({ url: `${hub.url}/${encodeURIComponent(runId)}` });
+  });
+  return {
+    requests,
+    hub,
+    setRuns: (next: Run[]) => (runs = next),
+    setRunFailures: (count: number) => (runFailures = count),
+  };
 }
