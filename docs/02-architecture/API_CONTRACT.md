@@ -13,28 +13,28 @@
 
 ## Stage 1 endpoints
 
-| Method    | Path                                     | Meaning                                             |
-| --------- | ---------------------------------------- | --------------------------------------------------- |
-| GET       | `/api/v1/health`                         | App health, no secret details                       |
-| GET       | `/api/v1/me`                             | Authenticated director identity                     |
-| GET/POST  | `/api/v1/departments`                    | List/create departments                             |
-| GET/POST  | `/api/v1/agents`                         | List/create agent                                   |
-| GET/PATCH | `/api/v1/agents/{agentId}`               | Agent details and versioned profile edit            |
-| GET       | `/api/v1/runtime-connections`            | Display configured runtime status/capabilities      |
-| POST      | `/api/v1/runtime-connections/{id}/probe` | Re-check capability under privileged backend policy |
-| GET/POST  | `/api/v1/projects`                       | List/create project                                 |
-| GET       | `/api/v1/projects/{id}`                  | Read project details                                |
-| PUT       | `/api/v1/tasks/{taskId}/project`         | Associate or unassign a task from a project         |
-| POST      | `/api/v1/tasks`                          | Create an unassigned or project-associated task     |
-| GET       | `/api/v1/tasks`                          | List owner-visible tasks with project association   |
-| GET/POST  | `/api/v1/projects/{id}/tasks`            | List/create task                                    |
-| GET       | `/api/v1/tasks/{id}`                     | Task, acceptance criteria, verification status      |
-| POST      | `/api/v1/tasks/{id}/runs`                | Admit execution attempt (Idempotency-Key required)  |
-| GET       | `/api/v1/runs/{id}`                      | Run state and sanitized evidence                    |
-| GET       | `/api/v1/runs/{id}/events`               | SSE, supports cursor resume                         |
-| POST      | `/api/v1/runs/{id}/cancel`               | Request stop, not guaranteed immediate              |
-| POST      | `/api/v1/runs/{id}/accept`               | Explicitly accept verified task result              |
-| GET       | `/api/v1/runs/{id}/usage`                | Measured token telemetry or unknown                 |
+| Method    | Path                                     | Meaning                                                    |
+| --------- | ---------------------------------------- | ---------------------------------------------------------- |
+| GET       | `/api/v1/health`                         | App health, no secret details                              |
+| GET       | `/api/v1/me`                             | Authenticated director identity                            |
+| GET/POST  | `/api/v1/departments`                    | List/create departments                                    |
+| GET/POST  | `/api/v1/agents`                         | List/create agent                                          |
+| GET/PATCH | `/api/v1/agents/{agentId}`               | Agent details and versioned profile edit                   |
+| GET       | `/api/v1/runtime-connections`            | Display configured runtime status/capabilities             |
+| POST      | `/api/v1/runtime-connections/{id}/probe` | Re-check capability under privileged backend policy        |
+| GET/POST  | `/api/v1/projects`                       | List/create project                                        |
+| GET       | `/api/v1/projects/{id}`                  | Read project details                                       |
+| PUT       | `/api/v1/tasks/{taskId}/project`         | Associate or unassign a task from a project                |
+| POST      | `/api/v1/tasks`                          | Create an unassigned or project-associated task            |
+| GET       | `/api/v1/tasks`                          | List owner-visible tasks with project association          |
+| GET       | `/api/v1/projects/{projectId}/tasks`     | Read a bounded page of project tasks and latest run states |
+| GET       | `/api/v1/tasks/{id}`                     | Task, acceptance criteria, verification status             |
+| POST      | `/api/v1/tasks/{id}/runs`                | Admit execution attempt (Idempotency-Key required)         |
+| GET       | `/api/v1/runs/{id}`                      | Run state and sanitized evidence                           |
+| GET       | `/api/v1/runs/{id}/events`               | SSE, supports cursor resume                                |
+| POST      | `/api/v1/runs/{id}/cancel`               | Request stop, not guaranteed immediate                     |
+| POST      | `/api/v1/runs/{id}/accept`               | Explicitly accept verified task result                     |
+| GET       | `/api/v1/runs/{id}/usage`                | Measured token telemetry or unknown                        |
 
 ### Implemented Project Foundation
 
@@ -49,6 +49,10 @@ Task responses include `projectId` and `associationRevision`; legacy tasks witho
 Only `archived` project status blocks association and new run admission; `proposed`, `active`, `paused`, and `completed` projects remain admissible in this mock-only increment. A database trigger guards every run-row insert, including the supported runtime admission transaction, by locking the task and associated project through commit. Project archival takes a conflicting row lock, so either a run admission commits before the archive or it observes the archived status and fails with `409 project_archived`. Legacy tasks with no project remain admissible. Already admitted runs, queue entries and recovery continue after archival; an exact retry returns the previously admitted run, while a new admission is denied. Archiving does not cancel runs or mutate task/run/authorization history. No project-based runtime permissions or general runtime database grants are added.
 
 The implemented department endpoints (`GET`/`POST /departments`, `PATCH /departments/{id}`, `POST /departments/{id}/archive`) and their error behavior are defined by `packages/contracts` and the [AO-104 department evidence](../07-governance/evidence/AO_104_DEPARTMENT_MANAGEMENT.md); the planned web screens are in the [Department Management V1 frontend specification](../04-design/DEPARTMENT_MANAGEMENT_V1_FRONTEND.md). That specification is documentation only and changes no contract.
+
+The owner-authenticated Project Workspace read API is `GET /api/v1/projects/{projectId}/tasks`. It resolves project identity and lifecycle through the existing authorizer project-detail read, then requests a bounded task/latest-run projection from the worker. It accepts optional `limit` (default 50, maximum 100) and signed `cursor` query parameters. The response contains the existing `Project` detail, task summaries (`id`, `title`, task `status`, `createdAt`, `projectId`, `associationRevision`), and `latestRun` (`id`, actual run `status`, `createdAt`, `updatedAt`) or `null`. It omits task detail, run usage, event/log content, leases, and authorization metadata. Tasks are ordered by `(created_at DESC, id DESC)`; `page.observedTotal` is the project task count observed by that request, `page.complete` says no further page currently remains, and `page.nextCursor` is null only when complete. This is a live association view, not a snapshot spanning HTTP requests. If an unexecuted task is reassigned while paging, restart from the first page. Tasks with any run or runtime authorization cannot be reassigned under the existing contract, keeping historical runs attached to the task's project. Archived projects remain readable; unknown projects return `404`; malformed identifiers, pagination values, or cursors return `422`. Legacy unassigned tasks do not appear in any project workspace. No database privileges or mutation paths are added.
+
+See [Project Workspace API V1](../03-modules/PROJECT_WORKSPACE_API_V1.md) for response and frontend integration examples.
 
 The minimum **read-only** slice of the agent and profile-version endpoints needed by the first Agents & Profiles frontend is requested, with conventions and open decisions, in [Agents & Profiles - Proposed Read API Contract](AGENTS_READ_API_PROPOSAL.md). That document is a proposal, not an implemented API. It follows the implemented `camelCase` contract convention rather than the `snake_case` used in the examples below.
 

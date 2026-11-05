@@ -123,6 +123,73 @@ export const ProjectSchema = ProjectSummarySchema.extend({
 }).strict();
 export type Project = z.infer<typeof ProjectSchema>;
 
+export const ProjectWorkspaceQuerySchema = z
+  .object({
+    cursor: z.string().min(1).max(1024).optional(),
+    limit: z
+      .union([
+        z
+          .string()
+          .regex(/^[1-9][0-9]*$/)
+          .transform(Number),
+        z.number().int(),
+      ])
+      .pipe(z.number().int().min(1).max(100))
+      .optional(),
+  })
+  .strict();
+export type ProjectWorkspaceQuery = z.infer<typeof ProjectWorkspaceQuerySchema>;
+
+export const ProjectWorkspaceTaskSummarySchema = z
+  .object({
+    id: TaskIdSchema,
+    title: z.string().min(1).max(120),
+    status: TaskStatusSchema,
+    createdAt: z.string().datetime(),
+    projectId: ProjectIdSchema,
+    associationRevision: z.number().int().positive().safe(),
+    latestRun: z
+      .object({
+        id: z.string().min(1),
+        status: RunStatusSchema,
+        createdAt: z.string().datetime(),
+        updatedAt: z.string().datetime(),
+      })
+      .strict()
+      .nullable(),
+  })
+  .strict();
+export type ProjectWorkspaceTaskSummary = z.infer<typeof ProjectWorkspaceTaskSummarySchema>;
+
+export const ProjectWorkspacePageSchema = z
+  .object({
+    observedTotal: z.number().int().nonnegative().safe(),
+    complete: z.boolean(),
+    nextCursor: z.string().min(1).max(1024).nullable(),
+  })
+  .strict()
+  .refine((page) => page.complete === (page.nextCursor === null));
+export type ProjectWorkspacePage = z.infer<typeof ProjectWorkspacePageSchema>;
+
+export const ProjectWorkspaceTaskPageSchema = z
+  .object({
+    tasks: z.array(ProjectWorkspaceTaskSummarySchema).max(100),
+    page: ProjectWorkspacePageSchema,
+  })
+  .strict()
+  .refine((result) => result.page.observedTotal >= result.tasks.length);
+export type ProjectWorkspaceTaskPage = z.infer<typeof ProjectWorkspaceTaskPageSchema>;
+
+export const ProjectWorkspaceResponseSchema = z
+  .object({
+    project: ProjectSchema,
+    tasks: z.array(ProjectWorkspaceTaskSummarySchema).max(100),
+    page: ProjectWorkspacePageSchema,
+  })
+  .strict()
+  .refine((result) => result.page.observedTotal >= result.tasks.length);
+export type ProjectWorkspaceResponse = z.infer<typeof ProjectWorkspaceResponseSchema>;
+
 export const ProjectListResponseSchema = z
   .object({
     projects: z.array(ProjectSummarySchema).max(500),

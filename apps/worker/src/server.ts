@@ -5,6 +5,8 @@ import {
   AgentIdSchema,
   AgentVersionQuerySchema,
   AgentVersionRouteParamSchema,
+  ProjectIdSchema,
+  ProjectWorkspaceQuerySchema,
   SetTaskProjectSchema,
   TaskIdSchema,
 } from '@omnis/contracts';
@@ -67,7 +69,7 @@ boss.on('error', (error) => {
 await boss.start({ attempts: 5 });
 await boss.createQueue(queueName, { retryLimit: 0, retryDelay: 0 });
 
-const store = new PostgresRunStore(pool);
+const store = new PostgresRunStore(pool, internalToken);
 const agentProfiles = new PostgresAgentProfileStore(pool, internalToken);
 const launcherSocket = process.env.OMNIS_SANDBOX_LAUNCHER_SOCKET;
 if (!launcherSocket || !launcherSocket.startsWith('/')) {
@@ -118,6 +120,26 @@ app.get('/internal/v1/health', async () => ({
   queueName,
 }));
 app.get('/internal/v1/tasks', async () => coordinator.listTasks());
+app.get<{ Params: { projectId: string }; Querystring: { cursor?: string; limit?: string } }>(
+  '/internal/v1/projects/:projectId/tasks',
+  async (request, reply) => {
+    const projectId = ProjectIdSchema.safeParse(request.params.projectId);
+    const query = ProjectWorkspaceQuerySchema.safeParse(request.query);
+    if (!projectId.success || !query.success)
+      return reply.code(422).send({
+        error: { code: 'invalid_input', message: 'Project workspace query is invalid.' },
+      });
+    try {
+      return await coordinator.listProjectWorkspaceTasks(projectId.data, query.data);
+    } catch (error) {
+      if (error instanceof CoordinatorError)
+        return reply.code(error.statusCode).send({
+          error: { code: error.code, message: error.message },
+        });
+      throw error;
+    }
+  },
+);
 app.get('/internal/v1/agents', async (request, reply) => {
   if (!AgentDirectoryQuerySchema.safeParse(request.query).success) {
     return reply.code(422).send({
