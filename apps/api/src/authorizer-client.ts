@@ -40,6 +40,10 @@ export async function authorizerRequest<T>(
       (init.method ?? 'GET') !== 'GET' && path.startsWith('/internal/v1/agents');
     const projectMutation =
       (init.method ?? 'GET') !== 'GET' && path.startsWith('/internal/v1/projects');
+    const taskEpicMutation =
+      (init.method ?? 'GET') !== 'GET' &&
+      path.startsWith('/internal/v1/tasks/') &&
+      path.endsWith('/epic');
     throw new AuthorizerRequestError(503, {
       error: {
         code: outcomeUnknown
@@ -49,7 +53,9 @@ export async function authorizerRequest<T>(
               ? 'management_outcome_unknown'
               : projectMutation
                 ? 'project_outcome_unknown'
-                : 'authorization_outcome_unknown'
+                : taskEpicMutation
+                  ? 'task_epic_outcome_unknown'
+                  : 'authorization_outcome_unknown'
           : 'authorizer_unavailable',
         message: outcomeUnknown
           ? departmentMutation
@@ -58,7 +64,9 @@ export async function authorizerRequest<T>(
               ? 'The authorizer response was lost; the agent change may have committed. Read agent state or retry with the same idempotency key.'
               : projectMutation
                 ? 'The authorizer response was lost; the project change may have committed. Retry with the same idempotency key or read the project.'
-                : 'The authorizer response was lost; the decision may have committed. Retry with the same idempotency key or read the authorization state.'
+                : taskEpicMutation
+                  ? 'The authorizer response was lost; the task Epic change may have committed. Read the task Epic or retry with the same idempotency key.'
+                  : 'The authorizer response was lost; the decision may have committed. Retry with the same idempotency key or read the authorization state.'
           : 'The authorizer could not be reached; no decision was submitted. Retry when the service is available.',
       },
     });
@@ -86,6 +94,7 @@ export async function authorizerRequest<T>(
       const departmentMutation = path.startsWith('/internal/v1/departments');
       const agentMutation = path.startsWith('/internal/v1/agents');
       const projectMutation = path.startsWith('/internal/v1/projects');
+      const taskEpicMutation = path.startsWith('/internal/v1/tasks/') && path.endsWith('/epic');
       throw new AuthorizerRequestError(503, {
         error: {
           code: departmentMutation
@@ -94,14 +103,18 @@ export async function authorizerRequest<T>(
               ? 'management_outcome_unknown'
               : projectMutation
                 ? 'project_outcome_unknown'
-                : 'authorization_outcome_unknown',
+                : taskEpicMutation
+                  ? 'task_epic_outcome_unknown'
+                  : 'authorization_outcome_unknown',
           message: departmentMutation
             ? 'The authorizer response could not be validated; the department change may have committed. Read the department state before retrying.'
             : agentMutation
               ? 'The authorizer response could not be validated; the agent change may have committed. Read agent state or retry with the same idempotency key.'
               : projectMutation
                 ? 'The authorizer response could not be validated; the project change may have committed. Retry with the same idempotency key or read the project.'
-                : 'The authorizer response could not be validated; the decision may have committed. Read the authorization state or retry with the same idempotency key.',
+                : taskEpicMutation
+                  ? 'The authorizer response could not be validated; the task Epic change may have committed. Read the task Epic or retry with the same idempotency key.'
+                  : 'The authorizer response could not be validated; the decision may have committed. Read the authorization state or retry with the same idempotency key.',
         },
       });
     }

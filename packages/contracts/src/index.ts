@@ -185,6 +185,24 @@ export const EpicSchema = z
   .refine((epic) => (epic.status === 'archived') === (epic.archivedAt !== null));
 export type Epic = z.infer<typeof EpicSchema>;
 
+export const SetTaskEpicSchema = z
+  .object({
+    expectedAssociationRevision: z.number().int().positive().safe(),
+    epicId: EpicIdSchema.nullable(),
+  })
+  .strict();
+export type SetTaskEpicInput = z.infer<typeof SetTaskEpicSchema>;
+
+export const TaskEpicAssociationSchema = z
+  .object({
+    taskId: TaskIdSchema,
+    projectId: ProjectIdSchema.nullable(),
+    epicId: EpicIdSchema.nullable(),
+    associationRevision: z.number().int().positive().safe(),
+  })
+  .strict();
+export type TaskEpicAssociation = z.infer<typeof TaskEpicAssociationSchema>;
+
 export const EpicListQuerySchema = z
   .object({
     cursor: z.string().min(1).max(1024).optional(),
@@ -336,6 +354,17 @@ export const ProjectWorkspaceTaskSummarySchema = z
   .strict();
 export type ProjectWorkspaceTaskSummary = z.infer<typeof ProjectWorkspaceTaskSummarySchema>;
 
+export const TaskEpicResponseSchema = z
+  .object({
+    taskId: TaskIdSchema,
+    projectId: ProjectIdSchema.nullable(),
+    epic: EpicSchema.nullable(),
+    associationRevision: z.number().int().positive().safe(),
+  })
+  .strict()
+  .refine((response) => response.epic === null || response.epic.projectId === response.projectId);
+export type TaskEpicResponse = z.infer<typeof TaskEpicResponseSchema>;
+
 export const ProjectWorkspacePageSchema = z
   .object({
     observedTotal: z.number().int().nonnegative().safe(),
@@ -372,6 +401,9 @@ export const ProjectWorkspaceTaskPageSchema = z
   .strict()
   .refine((result) => result.page.observedTotal >= result.tasks.length);
 export type ProjectWorkspaceTaskPage = z.infer<typeof ProjectWorkspaceTaskPageSchema>;
+
+export const ProjectEpicTaskPageSchema = ProjectWorkspaceTaskPageSchema;
+export type ProjectEpicTaskPage = z.infer<typeof ProjectEpicTaskPageSchema>;
 
 export const ProjectWorkspaceResponseSchema = z
   .object({

@@ -53,6 +53,11 @@ function makeApp(
           epics: [epic],
           page: { observedTotal: 1, complete: true, nextCursor: null },
         });
+      if ((init?.method ?? 'GET') === 'GET' && path.includes('/tasks?'))
+        return parse({
+          tasks: [],
+          page: { observedTotal: 0, complete: true, nextCursor: null },
+        });
       if (path.endsWith('/archive'))
         return parse({
           ...epic,
@@ -128,6 +133,13 @@ describe('owner project epic routes', () => {
         url: `/api/v1/projects/${projectId}/epics/${epic.id}`,
       });
       assert.equal(detail.statusCode, 200);
+      const tasks = await app.inject({
+        method: 'GET',
+        url: `/api/v1/projects/${projectId}/epics/${epic.id}/tasks?limit=20`,
+      });
+      assert.equal(tasks.statusCode, 200);
+      assert.deepEqual(tasks.json().tasks, []);
+      assert.match(calls.at(-1)!.path, /\/tasks\?limit=20$/);
       const edited = await app.inject({
         method: 'PATCH',
         url: `/api/v1/projects/${projectId}/epics/${epic.id}`,
@@ -148,16 +160,17 @@ describe('owner project epic routes', () => {
           ['GET', `/internal/v1/projects/${projectId}/epics?cursor=opaque&limit=20`],
           ['POST', `/internal/v1/projects/${projectId}/epics`],
           ['GET', `/internal/v1/projects/${projectId}/epics/${epic.id}`],
+          ['GET', `/internal/v1/projects/${projectId}/epics/${epic.id}/tasks?limit=20`],
           ['PATCH', `/internal/v1/projects/${projectId}/epics/${epic.id}`],
           ['POST', `/internal/v1/projects/${projectId}/epics/${epic.id}/archive`],
         ],
       );
-      assert.deepEqual(JSON.parse(calls[3]!.body!), { expectedRevision: 1, title: 'Updated' });
+      assert.deepEqual(JSON.parse(calls[4]!.body!), { expectedRevision: 1, title: 'Updated' });
       assert.equal(
-        new Headers(calls[4]!.headers).get('idempotency-key'),
+        new Headers(calls[5]!.headers).get('idempotency-key'),
         mutationHeaders['idempotency-key'],
       );
-      assert.equal(new Headers(calls[4]!.headers).get('x-omnis-authorizer-token'), null);
+      assert.equal(new Headers(calls[5]!.headers).get('x-omnis-authorizer-token'), null);
     } finally {
       await app.close();
     }

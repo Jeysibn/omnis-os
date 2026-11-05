@@ -112,7 +112,7 @@ describe('authorizer transport outcome handling', () => {
     );
   });
 
-  it('treats an invalid successful mutation response as uncertain instead of definite failure', async () => {
+  it('classifies an invalid Epic association mutation response as uncertain', async () => {
     const directory = await mkdtemp(path.join(tmpdir(), 'omnis-authorizer-client-'));
     const socketPath = path.join(directory, 'authorizer.sock');
     const server = createServer((_request, response) => {
@@ -127,8 +127,8 @@ describe('authorizer transport outcome handling', () => {
       env.authorizerSocket = socketPath;
       await assert.rejects(
         authorizerRequest(
-          '/internal/v1/authorizations',
-          { method: 'POST', body: JSON.stringify({ taskId: 'task-0001' }) },
+          '/internal/v1/tasks/task-0001/epic',
+          { method: 'PUT', body: JSON.stringify({ epicId: null }) },
           (value) => {
             if (typeof value !== 'object' || value === null || !('id' in value)) {
               throw new Error('invalid synthetic response');
@@ -138,7 +138,7 @@ describe('authorizer transport outcome handling', () => {
         ),
         (error: unknown) => {
           assert.ok(error instanceof AuthorizerRequestError);
-          assert.equal(error.body.error.code, 'authorization_outcome_unknown');
+          assert.equal(error.body.error.code, 'task_epic_outcome_unknown');
           return true;
         },
       );

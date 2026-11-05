@@ -16,6 +16,8 @@ Migration source: `packages/db/migrations/0001_initial.sql`. PostgreSQL is autho
     PROJECTS ||--o{ MILESTONES : tracks
     PROJECTS ||--o{ EPICS : organizes
     PROJECTS ||--o{ TASKS : contains
+    TASKS ||--o| TASK_EPIC_ASSOCIATIONS : classified
+    EPICS ||--o{ TASK_EPIC_ASSOCIATIONS : groups
     TASKS ||--o{ RUNS : attempts
     RUNS ||--o{ RUN_EVENTS : records
     RUNS ||--o{ ARTIFACTS : yields
@@ -49,8 +51,8 @@ Migration source: `packages/db/migrations/0001_initial.sql`. PostgreSQL is autho
 
 - `projects(id, owner_id, key UNIQUE, name, objective_md, status, priority, budget_policy_id NULL, created_at)`.
 - `project_milestones(id, project_id, title, description NULL, target_date NULL, status, revision, archived_at NULL, created_at, updated_at)`. A milestone belongs to one project; milestone target dates are date-only, and all event timestamps are UTC `timestamptz`.
-- `project_epics(id, project_id, title, description NULL, status, revision, archived_at NULL, created_at, updated_at)`. V1 Epics are project-scoped and have no task or milestone association; see `docs/03-modules/PROJECT_EPICS_API_V1.md`.
-- `tasks(id, project_id, epic_id NULL, milestone_id NULL, parent_task_id NULL, assignee_agent_id NULL, title, objective_md, acceptance_md, status, priority, due_at NULL)`. Epic/task and milestone/task associations remain future work and are not implemented by the current read-only/management APIs.
+- `project_epics(id, project_id, title, description NULL, status, revision, archived_at NULL, created_at, updated_at)`. V1 Epics are project-scoped and do not calculate task progress; see `docs/03-modules/PROJECT_EPICS_API_V1.md`.
+- `tasks(id, project_id NULL, association_revision, title, detail, status, created_at)`. `task_epic_associations(task_id PRIMARY KEY, project_id, epic_id, updated_at)` stores the optional current Epic membership separately from `tasks`. Composite foreign keys require both the task and Epic to belong to that same project. No Epic association is added to runtime-visible task columns. See `docs/03-modules/PROJECT_EPIC_TASK_ASSOCIATION_API_V1.md`.
 - `task_dependencies(task_id, depends_on_task_id, kind)`, UNIQUE on pair, cycle prevention in domain logic.
 - `workspaces(id, project_id, relative_path, storage_ref, read_policy, write_policy, status)`; paths must resolve in permitted root.
 - `runs(id, task_id, agent_id, profile_version_id, runtime_connection_id, workspace_id, external_run_id NULL, idempotency_key, execution_generation, status, started_at NULL, terminal_at NULL, terminal_reason NULL, verification_status, requested_by)`.

@@ -4,7 +4,7 @@
 
 An Epic is an owner-managed planning record scoped to exactly one project. V1 supports create, list, detail, metadata/status update, and archive. Epic completion is explicitly owner-set and is not computed from tasks, milestones, or runs.
 
-V1 does not associate Epics with tasks or milestones, calculate progress, schedule agents, or change task/run execution. These relationships require a separate contract and privilege review.
+V1 Epic Management does not calculate progress, associate milestones, schedule agents, or change task/run execution. Task membership is defined separately in `PROJECT_EPIC_TASK_ASSOCIATION_API_V1.md` and does not alter the Epic lifecycle contract.
 
 ## Data model
 

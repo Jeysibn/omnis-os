@@ -268,6 +268,27 @@ BEGIN
     EXECUTE 'REVOKE ALL ON FUNCTION omnis.archive_project_epic(text,text,integer,uuid,integer,bytea) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
     EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.archive_project_epic(text,text,integer,uuid,integer,bytea) TO omnis_authorizer';
   END IF;
+  IF pg_catalog.to_regclass('omnis.task_epic_associations') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON omnis.task_epic_associations FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+  IF pg_catalog.to_regclass('omnis.task_epic_management_audit') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON omnis.task_epic_management_audit FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.reject_task_epic_audit_mutation()') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.reject_task_epic_audit_mutation() FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.get_task_epic(text)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.get_task_epic(text) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.get_task_epic(text) TO omnis_authorizer';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.list_project_epic_tasks(text,text,timestamptz,text,integer)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.list_project_epic_tasks(text,text,timestamptz,text,integer) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.list_project_epic_tasks(text,text,timestamptz,text,integer) TO omnis_authorizer';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.set_task_epic(text,integer,text,uuid,bytea)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.set_task_epic(text,integer,text,uuid,bytea) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.set_task_epic(text,integer,text,uuid,bytea) TO omnis_authorizer';
+  END IF;
 END
 $project_epic_acl$;
 GRANT USAGE, SELECT ON SEQUENCE omnis.run_id_seq TO omnis_runtime;

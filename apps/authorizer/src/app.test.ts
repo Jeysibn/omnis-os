@@ -181,6 +181,26 @@ function makeStore() {
         calls.push({ method: 'archiveEpic', requestId });
         return { ...epic, status: 'archived', revision: 2, archivedAt: epic.createdAt };
       },
+      async listTasks(projectId, epicId, query) {
+        calls.push({
+          method: 'listEpicTasks',
+          requestId: `${projectId}:${epicId}:${JSON.stringify(query)}`,
+        });
+        return { tasks: [], page: { observedTotal: 0, complete: true, nextCursor: null } };
+      },
+      async getTaskEpic(taskId) {
+        calls.push({ method: 'getTaskEpic', requestId: taskId });
+        return {
+          taskId,
+          projectId: project.id,
+          epic,
+          associationRevision: 2,
+        };
+      },
+      async setTaskEpic(taskId, _input, requestId) {
+        calls.push({ method: 'setTaskEpic', requestId });
+        return { taskId, projectId: project.id, epicId: epic.id, associationRevision: 3 };
+      },
     },
   };
   return { store, calls };
@@ -281,6 +301,28 @@ describe('independent authorizer service boundary', () => {
         payload: { title: ' ' },
       });
       assert.equal(malformed.statusCode, 400);
+      const taskPage = await app.inject({
+        method: 'GET',
+        url: `/internal/v1/projects/${project.id}/epics/${epic.id}/tasks?limit=5`,
+        headers,
+      });
+      assert.equal(taskPage.statusCode, 200);
+      assert.deepEqual(taskPage.json().tasks, []);
+      const taskEpic = await app.inject({
+        method: 'GET',
+        url: '/internal/v1/tasks/task-0001/epic',
+        headers,
+      });
+      assert.equal(taskEpic.statusCode, 200);
+      assert.equal(taskEpic.json().epic.id, epic.id);
+      const assigned = await app.inject({
+        method: 'PUT',
+        url: '/internal/v1/tasks/task-0001/epic',
+        headers: { ...headers, 'idempotency-key': authorization.correlationId },
+        payload: { expectedAssociationRevision: 2, epicId: epic.id },
+      });
+      assert.equal(assigned.statusCode, 200);
+      assert.equal(assigned.json().associationRevision, 3);
     } finally {
       await app.close();
     }
