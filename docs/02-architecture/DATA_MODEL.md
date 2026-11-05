@@ -48,7 +48,7 @@ Migration source: `packages/db/migrations/0001_initial.sql`. PostgreSQL is autho
 ### Projects & work
 
 - `projects(id, owner_id, key UNIQUE, name, objective_md, status, priority, budget_policy_id NULL, created_at)`.
-- `milestones(id, project_id, title, due_at NULL, status, acceptance_md)`.
+- `project_milestones(id, project_id, title, description NULL, target_date NULL, status, revision, archived_at NULL, created_at, updated_at)`. A milestone belongs to one project; milestone target dates are date-only, and all event timestamps are UTC `timestamptz`.
 - `epics(id, project_id, milestone_id NULL, title, status)`.
 - `tasks(id, project_id, epic_id NULL, milestone_id NULL, parent_task_id NULL, assignee_agent_id NULL, title, objective_md, acceptance_md, status, priority, due_at NULL)`.
 - `task_dependencies(task_id, depends_on_task_id, kind)`, UNIQUE on pair, cycle prevention in domain logic.

@@ -16,6 +16,8 @@ import {
   PostgresAuthorizationStore,
   PostgresDepartmentManagementStore,
   PostgresProjectManagementStore,
+  PostgresProjectMilestoneStore,
+  MilestoneStoreError,
   ProjectStoreError,
   PostgresRunStore,
   StoreError,
@@ -78,7 +80,7 @@ const postgresSuite = describe(
         'GRANT SELECT, INSERT, UPDATE, DELETE ON omnis.test_queue_outbox TO omnis_runtime',
       );
       await adminPool!.query(
-        'TRUNCATE omnis.test_queue_outbox, omnis.task_project_management_idempotency, omnis.task_project_management_audit, omnis.project_management_idempotency, omnis.project_management_audit, omnis.projects, omnis.agent_management_idempotency, omnis.agent_management_audit, omnis.agent_profile_drafts, omnis.department_management_audit, omnis.agent_profile_versions, omnis.agents, omnis.departments, omnis.mock_sandbox_launches, omnis.legacy_unscoped_runs, omnis.authorization_audit, omnis.runtime_authorizations, omnis.run_idempotency, omnis.run_events, omnis.runs, omnis.tasks',
+        'TRUNCATE omnis.test_queue_outbox, omnis.task_project_management_idempotency, omnis.task_project_management_audit, omnis.project_milestone_management_audit, omnis.project_milestones, omnis.project_management_idempotency, omnis.project_management_audit, omnis.projects, omnis.agent_management_idempotency, omnis.agent_management_audit, omnis.agent_profile_drafts, omnis.department_management_audit, omnis.agent_profile_versions, omnis.agents, omnis.departments, omnis.mock_sandbox_launches, omnis.legacy_unscoped_runs, omnis.authorization_audit, omnis.runtime_authorizations, omnis.run_idempotency, omnis.run_events, omnis.runs, omnis.tasks',
       );
       await adminPool!.query('ALTER SEQUENCE omnis.task_id_seq RESTART WITH 1');
       await adminPool!.query('ALTER SEQUENCE omnis.run_id_seq RESTART WITH 1');
@@ -658,6 +660,301 @@ const postgresSuite = describe(
           async () => 'never',
         ),
         (error: unknown) => error instanceof StoreError && error.code === 'project_archived',
+      );
+    });
+
+    it('manages project milestones with immutable identity, revisions, idempotency, and scoped privileges', async () => {
+      const projects = new PostgresProjectManagementStore(authorizerPool!, Buffer.alloc(32, 23));
+      const milestones = new PostgresProjectMilestoneStore(authorizerPool!, Buffer.alloc(32, 23));
+      const project = await projects.create(
+        {
+          key: 'MILESTONE-V1',
+          name: 'Milestone test',
+          objective: 'Exercise milestone lifecycle behavior.',
+        },
+        randomUUID(),
+      );
+      assert.deepEqual(await milestones.list(project.id), {
+        milestones: [],
+        page: { observedTotal: 0, complete: true, nextCursor: null },
+      });
+
+      const createKey = randomUUID();
+      const input = {
+        title: 'Planning',
+        description: 'Plan the first delivery.',
+        targetDate: '2027-01-31',
+      };
+      const [first, replayed] = await Promise.all([
+        milestones.create(project.id, input, createKey),
+        milestones.create(project.id, input, createKey),
+      ]);
+      assert.equal(first.id, replayed.id);
+      assert.equal(first.status, 'planned');
+      assert.equal(first.revision, 1);
+      assert.equal(first.targetDate, '2027-01-31');
+      await assert.rejects(
+        milestones.create(project.id, { ...input, title: 'Different' }, createKey),
+        (error: unknown) => error instanceof MilestoneStoreError && error.code === 'conflict',
+      );
+      await assert.rejects(
+        milestones.create(
+          project.id,
+          { title: 'password: "milestone-secret-123456"' },
+          randomUUID(),
+        ),
+        (error: unknown) => error instanceof MilestoneStoreError && error.statusCode === 422,
+      );
+      await assert.rejects(
+        milestones.create('prj_ffffffffffffffffffffffffffffffff', input, randomUUID()),
+        (error: unknown) => error instanceof MilestoneStoreError && error.code === 'not_found',
+      );
+
+      const second = await milestones.create(project.id, { title: 'Delivery' }, randomUUID());
+      const firstPage = await milestones.list(project.id, { limit: 1 });
+      assert.equal(firstPage.milestones.length, 1);
+      assert.equal(firstPage.page.observedTotal, 2);
+      assert.equal(firstPage.page.complete, false);
+      assert.ok(firstPage.page.nextCursor);
+      const secondPage = await milestones.list(project.id, {
+        limit: 1,
+        cursor: firstPage.page.nextCursor!,
+      });
+      assert.equal(secondPage.milestones.length, 1);
+      assert.equal(secondPage.page.observedTotal, 2);
+      assert.equal(secondPage.page.complete, true);
+      assert.notEqual(firstPage.milestones[0]?.id, secondPage.milestones[0]?.id);
+      await assert.rejects(
+        milestones.list(second.id, { cursor: firstPage.page.nextCursor! }),
+        (error: unknown) => error instanceof MilestoneStoreError && error.code === 'invalid_cursor',
+      );
+      assert.equal((await milestones.get(project.id, first.id))?.id, first.id);
+      const otherProject = await projects.create(
+        { key: 'MILESTONE-OTHER', name: 'Other project', objective: 'Test project scoping.' },
+        randomUUID(),
+      );
+      assert.equal(await milestones.get(otherProject.id, first.id), undefined);
+
+      const started = await milestones.update(
+        project.id,
+        first.id,
+        { expectedRevision: 1, status: 'in_progress' },
+        randomUUID(),
+      );
+      const completed = await milestones.update(
+        project.id,
+        first.id,
+        { expectedRevision: 2, status: 'completed' },
+        randomUUID(),
+      );
+      assert.equal(started.status, 'in_progress');
+      assert.equal(completed.status, 'completed');
+      assert.equal((await milestones.get(project.id, first.id))?.status, 'completed');
+      await assert.rejects(
+        milestones.update(
+          project.id,
+          first.id,
+          { expectedRevision: 3, status: 'planned' },
+          randomUUID(),
+        ),
+        (error: unknown) =>
+          error instanceof MilestoneStoreError && error.code === 'invalid_transition',
+      );
+      const races = await Promise.allSettled([
+        milestones.update(
+          project.id,
+          first.id,
+          { expectedRevision: 3, title: 'Race A' },
+          randomUUID(),
+        ),
+        milestones.update(
+          project.id,
+          first.id,
+          { expectedRevision: 3, title: 'Race B' },
+          randomUUID(),
+        ),
+      ]);
+      assert.equal(races.filter((entry) => entry.status === 'fulfilled').length, 1);
+      assert.equal(races.filter((entry) => entry.status === 'rejected').length, 1);
+
+      const racing = await milestones.create(
+        project.id,
+        { title: 'Update archive race' },
+        randomUUID(),
+      );
+      const mutationRace = await Promise.allSettled([
+        milestones.update(
+          project.id,
+          racing.id,
+          { expectedRevision: 1, title: 'Race edit' },
+          randomUUID(),
+        ),
+        milestones.archive(project.id, racing.id, { expectedRevision: 1 }, randomUUID()),
+      ]);
+      assert.equal(mutationRace.filter((entry) => entry.status === 'fulfilled').length, 1);
+      assert.equal((await milestones.get(project.id, racing.id))?.revision, 2);
+
+      const afterRace = await milestones.get(project.id, first.id);
+      assert.ok(afterRace);
+      const archiveKey = randomUUID();
+      const archived = await milestones.archive(
+        project.id,
+        first.id,
+        { expectedRevision: afterRace.revision },
+        archiveKey,
+      );
+      const archiveReplay = await milestones.archive(
+        project.id,
+        first.id,
+        { expectedRevision: afterRace.revision },
+        archiveKey,
+      );
+      assert.equal(archived.status, 'archived');
+      assert.equal(archived.id, archiveReplay.id);
+      assert.equal((await milestones.get(project.id, first.id))?.status, 'archived');
+      await assert.rejects(
+        milestones.update(
+          project.id,
+          first.id,
+          { expectedRevision: archived.revision, title: 'No longer editable' },
+          randomUUID(),
+        ),
+        (error: unknown) =>
+          error instanceof MilestoneStoreError && error.code === 'invalid_transition',
+      );
+      await assert.rejects(
+        milestones.archive(
+          project.id,
+          first.id,
+          { expectedRevision: archived.revision },
+          randomUUID(),
+        ),
+        (error: unknown) =>
+          error instanceof MilestoneStoreError && error.code === 'invalid_transition',
+      );
+
+      const parentRace = await Promise.allSettled([
+        milestones.create(project.id, { title: 'Parent archive race' }, randomUUID()),
+        projects.archive(project.id, { expectedRevision: 1 }, randomUUID()),
+      ]);
+      assert.equal(parentRace[1]?.status, 'fulfilled');
+      if (parentRace[0]?.status === 'rejected')
+        assert.ok(
+          parentRace[0].reason instanceof MilestoneStoreError &&
+            parentRace[0].reason.code === 'invalid_transition',
+        );
+      assert.equal((await milestones.get(project.id, first.id))?.status, 'archived');
+      assert.equal(
+        (await milestones.list(project.id)).page.observedTotal,
+        parentRace[0]?.status === 'fulfilled' ? 4 : 3,
+      );
+      await assert.rejects(
+        milestones.create(project.id, { title: 'Too late' }, randomUUID()),
+        (error: unknown) =>
+          error instanceof MilestoneStoreError && error.code === 'invalid_transition',
+      );
+      await assert.rejects(
+        milestones.update(
+          project.id,
+          second.id,
+          { expectedRevision: 1, title: 'Too late' },
+          randomUUID(),
+        ),
+        (error: unknown) =>
+          error instanceof MilestoneStoreError && error.code === 'invalid_transition',
+      );
+
+      const audit = await adminPool!.query<{
+        action: string;
+        changed_fields: string[];
+        record: Record<string, unknown>;
+      }>(
+        `SELECT action, changed_fields, to_jsonb(audit) AS record
+           FROM omnis.project_milestone_management_audit audit
+          WHERE milestone_id = $1`,
+        [first.id],
+      );
+      assert.deepEqual(
+        audit.rows.map((row) => row.action).sort(),
+        ['created', 'updated', 'updated', 'updated', 'archived'].sort(),
+      );
+      assert.ok(
+        audit.rows.every(
+          (row) =>
+            !JSON.stringify(row.record).includes('First release') &&
+            !JSON.stringify(row.record).includes('Plan the first delivery.'),
+        ),
+      );
+      await assert.rejects(
+        adminPool!.query(
+          "UPDATE omnis.project_milestone_management_audit SET action = 'created' WHERE milestone_id = $1",
+          [first.id],
+        ),
+      );
+      const privileges = await adminPool!.query<{
+        runtime_select: boolean;
+        runtime_insert: boolean;
+        runtime_update: boolean;
+        runtime_delete: boolean;
+        authorizer_select: boolean;
+        authorizer_insert: boolean;
+        authorizer_update: boolean;
+        authorizer_delete: boolean;
+        runtime_create_function: boolean;
+        authorizer_create_function: boolean;
+        runtime_list_function: boolean;
+        authorizer_list_function: boolean;
+        runtime_get_function: boolean;
+        authorizer_get_function: boolean;
+        runtime_update_function: boolean;
+        authorizer_update_function: boolean;
+        runtime_archive_function: boolean;
+        authorizer_archive_function: boolean;
+      }>(`
+        SELECT has_table_privilege('omnis_runtime', 'omnis.project_milestones', 'SELECT') AS runtime_select,
+               has_table_privilege('omnis_runtime', 'omnis.project_milestones', 'INSERT') AS runtime_insert,
+               has_table_privilege('omnis_runtime', 'omnis.project_milestones', 'UPDATE') AS runtime_update,
+               has_table_privilege('omnis_runtime', 'omnis.project_milestones', 'DELETE') AS runtime_delete,
+               has_table_privilege('omnis_authorizer', 'omnis.project_milestones', 'SELECT') AS authorizer_select,
+               has_table_privilege('omnis_authorizer', 'omnis.project_milestones', 'INSERT') AS authorizer_insert,
+               has_table_privilege('omnis_authorizer', 'omnis.project_milestones', 'UPDATE') AS authorizer_update,
+               has_table_privilege('omnis_authorizer', 'omnis.project_milestones', 'DELETE') AS authorizer_delete,
+               has_function_privilege('omnis_runtime', 'omnis.create_project_milestone(text,text,text,text,date,uuid,integer,bytea)', 'EXECUTE') AS runtime_create_function,
+               has_function_privilege('omnis_authorizer', 'omnis.create_project_milestone(text,text,text,text,date,uuid,integer,bytea)', 'EXECUTE') AS authorizer_create_function,
+               has_function_privilege('omnis_runtime', 'omnis.list_project_milestones(text,timestamp with time zone,text,integer)', 'EXECUTE') AS runtime_list_function,
+               has_function_privilege('omnis_authorizer', 'omnis.list_project_milestones(text,timestamp with time zone,text,integer)', 'EXECUTE') AS authorizer_list_function,
+               has_function_privilege('omnis_runtime', 'omnis.get_project_milestone(text,text)', 'EXECUTE') AS runtime_get_function,
+               has_function_privilege('omnis_authorizer', 'omnis.get_project_milestone(text,text)', 'EXECUTE') AS authorizer_get_function,
+               has_function_privilege('omnis_runtime', 'omnis.update_project_milestone(text,text,integer,text,text,boolean,date,boolean,text,uuid,integer,bytea)', 'EXECUTE') AS runtime_update_function,
+               has_function_privilege('omnis_authorizer', 'omnis.update_project_milestone(text,text,integer,text,text,boolean,date,boolean,text,uuid,integer,bytea)', 'EXECUTE') AS authorizer_update_function,
+               has_function_privilege('omnis_runtime', 'omnis.archive_project_milestone(text,text,integer,uuid,integer,bytea)', 'EXECUTE') AS runtime_archive_function,
+               has_function_privilege('omnis_authorizer', 'omnis.archive_project_milestone(text,text,integer,uuid,integer,bytea)', 'EXECUTE') AS authorizer_archive_function
+      `);
+      assert.deepEqual(privileges.rows[0], {
+        runtime_select: false,
+        runtime_insert: false,
+        runtime_update: false,
+        runtime_delete: false,
+        authorizer_select: false,
+        authorizer_insert: false,
+        authorizer_update: false,
+        authorizer_delete: false,
+        runtime_create_function: false,
+        authorizer_create_function: true,
+        runtime_list_function: false,
+        authorizer_list_function: true,
+        runtime_get_function: false,
+        authorizer_get_function: true,
+        runtime_update_function: false,
+        authorizer_update_function: true,
+        runtime_archive_function: false,
+        authorizer_archive_function: true,
+      });
+      await assert.rejects(
+        launcherPool!.query(
+          'INSERT INTO omnis.project_milestones(id, project_id, title) VALUES ($1,$2,$3)',
+          [`mil_${randomUUID().replaceAll('-', '')}`, project.id, 'Unauthorized'],
+        ),
       );
     });
 
@@ -4050,6 +4347,7 @@ const postgresSuite = describe(
         await adminPool!.query(`
         TRUNCATE omnis.test_queue_outbox, omnis.task_project_management_idempotency,
           omnis.task_project_management_audit, omnis.project_management_idempotency,
+          omnis.project_milestone_management_audit, omnis.project_milestones,
           omnis.project_management_audit, omnis.projects, omnis.agent_management_idempotency,
           omnis.agent_management_audit, omnis.agent_profile_drafts, omnis.department_management_audit,
           omnis.agent_profile_versions, omnis.agents, omnis.departments,

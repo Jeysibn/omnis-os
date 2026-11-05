@@ -123,6 +123,102 @@ export const ProjectSchema = ProjectSummarySchema.extend({
 }).strict();
 export type Project = z.infer<typeof ProjectSchema>;
 
+export const MilestoneIdSchema = z.string().regex(/^mil_[0-9a-f]{32}$/);
+export const MilestoneStatusSchema = z.enum(['planned', 'in_progress', 'completed', 'archived']);
+export const MilestoneRevisionSchema = z.number().int().positive().safe();
+export const MilestoneTargetDateSchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/)
+  .refine((value) => {
+    if (value.startsWith('0000-')) return false;
+    const parsed = new Date(`${value}T00:00:00.000Z`);
+    return !Number.isNaN(parsed.valueOf()) && parsed.toISOString().slice(0, 10) === value;
+  }, 'Target date must be a valid calendar date.');
+
+const MilestoneTextSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .refine((value) => !value.includes('\0'));
+
+export const CreateMilestoneSchema = z
+  .object({
+    title: MilestoneTextSchema.max(120),
+    description: z
+      .string()
+      .trim()
+      .max(2000)
+      .refine((value) => !value.includes('\0'))
+      .optional(),
+    targetDate: MilestoneTargetDateSchema.nullable().optional(),
+  })
+  .strict();
+export type CreateMilestoneInput = z.infer<typeof CreateMilestoneSchema>;
+
+export const UpdateMilestoneSchema = z
+  .object({
+    expectedRevision: MilestoneRevisionSchema,
+    title: MilestoneTextSchema.max(120).optional(),
+    description: z
+      .string()
+      .trim()
+      .max(2000)
+      .refine((value) => !value.includes('\0'))
+      .nullable()
+      .optional(),
+    targetDate: MilestoneTargetDateSchema.nullable().optional(),
+    status: z.enum(['planned', 'in_progress', 'completed']).optional(),
+  })
+  .strict()
+  .refine(
+    (milestone) =>
+      milestone.title !== undefined ||
+      milestone.description !== undefined ||
+      milestone.targetDate !== undefined ||
+      milestone.status !== undefined,
+    'At least one milestone field must be changed.',
+  );
+export type UpdateMilestoneInput = z.infer<typeof UpdateMilestoneSchema>;
+
+export const ArchiveMilestoneSchema = z
+  .object({ expectedRevision: MilestoneRevisionSchema })
+  .strict();
+export type ArchiveMilestoneInput = z.infer<typeof ArchiveMilestoneSchema>;
+
+export const MilestoneSchema = z
+  .object({
+    id: MilestoneIdSchema,
+    projectId: ProjectIdSchema,
+    title: z.string().min(1).max(120),
+    description: z.string().max(2000).nullable(),
+    status: MilestoneStatusSchema,
+    targetDate: MilestoneTargetDateSchema.nullable(),
+    revision: MilestoneRevisionSchema,
+    archivedAt: z.string().datetime().nullable(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .strict()
+  .refine((milestone) => (milestone.status === 'archived') === (milestone.archivedAt !== null));
+export type Milestone = z.infer<typeof MilestoneSchema>;
+
+export const MilestoneListQuerySchema = z
+  .object({
+    cursor: z.string().min(1).max(1024).optional(),
+    limit: z
+      .union([
+        z
+          .string()
+          .regex(/^[1-9][0-9]*$/)
+          .transform(Number),
+        z.number().int(),
+      ])
+      .pipe(z.number().int().min(1).max(100))
+      .optional(),
+  })
+  .strict();
+export type MilestoneListQuery = z.infer<typeof MilestoneListQuerySchema>;
+
 export const ProjectWorkspaceQuerySchema = z
   .object({
     cursor: z.string().min(1).max(1024).optional(),
@@ -170,6 +266,15 @@ export const ProjectWorkspacePageSchema = z
   .strict()
   .refine((page) => page.complete === (page.nextCursor === null));
 export type ProjectWorkspacePage = z.infer<typeof ProjectWorkspacePageSchema>;
+
+export const MilestoneListResponseSchema = z
+  .object({
+    milestones: z.array(MilestoneSchema).max(100),
+    page: ProjectWorkspacePageSchema,
+  })
+  .strict()
+  .refine((response) => response.page.observedTotal >= response.milestones.length);
+export type MilestoneListResponse = z.infer<typeof MilestoneListResponseSchema>;
 
 export const ProjectWorkspaceTaskPageSchema = z
   .object({

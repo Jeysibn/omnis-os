@@ -27,8 +27,22 @@ import {
   type ProjectListResponse,
   UpdateProjectSchema,
   ArchiveProjectSchema,
+  ArchiveMilestoneSchema,
+  CreateMilestoneSchema,
+  MilestoneIdSchema,
+  MilestoneListQuerySchema,
+  MilestoneListResponseSchema,
+  MilestoneSchema,
+  UpdateMilestoneSchema,
+  type Milestone,
+  type MilestoneListResponse,
 } from '@omnis/contracts';
-import { AgentLifecycleStoreError, DepartmentStoreError, ProjectStoreError } from '@omnis/db';
+import {
+  AgentLifecycleStoreError,
+  DepartmentStoreError,
+  MilestoneStoreError,
+  ProjectStoreError,
+} from '@omnis/db';
 
 export type AuthorizerStore = {
   request(taskId: string, actor: 'owner', correlationId: string): Promise<Authorization>;
@@ -48,6 +62,25 @@ export type AuthorizerStore = {
   createProject(input: unknown, requestId: string): Promise<Project>;
   updateProject(id: string, input: unknown, requestId: string): Promise<Project>;
   archiveProject(id: string, input: unknown, requestId: string): Promise<Project>;
+  projectMilestones?:
+    | {
+        list(projectId: string, query: unknown): Promise<MilestoneListResponse>;
+        get(projectId: string, milestoneId: string): Promise<Milestone | undefined>;
+        create(projectId: string, input: unknown, requestId: string): Promise<Milestone>;
+        update(
+          projectId: string,
+          milestoneId: string,
+          input: unknown,
+          requestId: string,
+        ): Promise<Milestone>;
+        archive(
+          projectId: string,
+          milestoneId: string,
+          input: unknown,
+          requestId: string,
+        ): Promise<Milestone>;
+      }
+    | undefined;
   agentLifecycle?:
     | {
         getDraft(agentId: string): Promise<unknown>;
@@ -249,6 +282,153 @@ export function createAuthorizerApp(input: {
         return ProjectSchema.parse(await input.store.archiveProject(id.data, body.data, requestId));
       } catch (error) {
         return sendProjectStoreError(error, reply);
+      }
+    },
+  );
+
+  app.get<{ Params: { projectId: string }; Querystring: { cursor?: string; limit?: string } }>(
+    '/internal/v1/projects/:projectId/milestones',
+    async (request, reply) => {
+      const projectId = ProjectIdSchema.safeParse(request.params.projectId);
+      const query = MilestoneListQuerySchema.safeParse(request.query);
+      if (!projectId.success || !query.success)
+        return reply.code(400).send({
+          error: { code: 'invalid_input', message: 'Milestone query is invalid.' },
+        });
+      try {
+        return MilestoneListResponseSchema.parse(
+          await requireProjectMilestones(input.store).list(projectId.data, query.data),
+        );
+      } catch (error) {
+        return sendMilestoneStoreError(error, reply);
+      }
+    },
+  );
+
+  app.post<{ Params: { projectId: string } }>(
+    '/internal/v1/projects/:projectId/milestones',
+    { bodyLimit: 16 * 1024 },
+    async (request, reply) => {
+      const projectId = ProjectIdSchema.safeParse(request.params.projectId);
+      const body = CreateMilestoneSchema.safeParse(request.body);
+      const requestId = request.headers['idempotency-key'];
+      if (
+        !projectId.success ||
+        !body.success ||
+        typeof requestId !== 'string' ||
+        !isUuid(requestId)
+      )
+        return reply.code(400).send({
+          error: {
+            code: 'invalid_input',
+            message: 'Milestone input and Idempotency-Key are required.',
+          },
+        });
+      try {
+        return reply
+          .code(201)
+          .send(
+            MilestoneSchema.parse(
+              await requireProjectMilestones(input.store).create(
+                projectId.data,
+                body.data,
+                requestId,
+              ),
+            ),
+          );
+      } catch (error) {
+        return sendMilestoneStoreError(error, reply);
+      }
+    },
+  );
+
+  app.get<{ Params: { projectId: string; milestoneId: string } }>(
+    '/internal/v1/projects/:projectId/milestones/:milestoneId',
+    async (request, reply) => {
+      const projectId = ProjectIdSchema.safeParse(request.params.projectId);
+      const milestoneId = MilestoneIdSchema.safeParse(request.params.milestoneId);
+      if (!projectId.success || !milestoneId.success)
+        return reply.code(400).send({
+          error: { code: 'invalid_input', message: 'Milestone identifier is invalid.' },
+        });
+      try {
+        const milestone = await requireProjectMilestones(input.store).get(
+          projectId.data,
+          milestoneId.data,
+        );
+        if (!milestone)
+          return reply.code(404).send({
+            error: { code: 'not_found', message: 'Project or milestone was not found.' },
+          });
+        return MilestoneSchema.parse(milestone);
+      } catch (error) {
+        return sendMilestoneStoreError(error, reply);
+      }
+    },
+  );
+
+  app.patch<{ Params: { projectId: string; milestoneId: string } }>(
+    '/internal/v1/projects/:projectId/milestones/:milestoneId',
+    { bodyLimit: 16 * 1024 },
+    async (request, reply) => {
+      const projectId = ProjectIdSchema.safeParse(request.params.projectId);
+      const milestoneId = MilestoneIdSchema.safeParse(request.params.milestoneId);
+      const body = UpdateMilestoneSchema.safeParse(request.body);
+      const requestId = request.headers['idempotency-key'];
+      if (
+        !projectId.success ||
+        !milestoneId.success ||
+        !body.success ||
+        typeof requestId !== 'string' ||
+        !isUuid(requestId)
+      )
+        return reply.code(400).send({
+          error: { code: 'invalid_input', message: 'Milestone update input is invalid.' },
+        });
+      try {
+        return MilestoneSchema.parse(
+          await requireProjectMilestones(input.store).update(
+            projectId.data,
+            milestoneId.data,
+            body.data,
+            requestId,
+          ),
+        );
+      } catch (error) {
+        return sendMilestoneStoreError(error, reply);
+      }
+    },
+  );
+
+  app.post<{ Params: { projectId: string; milestoneId: string } }>(
+    '/internal/v1/projects/:projectId/milestones/:milestoneId/archive',
+    { bodyLimit: 16 * 1024 },
+    async (request, reply) => {
+      const projectId = ProjectIdSchema.safeParse(request.params.projectId);
+      const milestoneId = MilestoneIdSchema.safeParse(request.params.milestoneId);
+      const body = ArchiveMilestoneSchema.safeParse(request.body);
+      const requestId = request.headers['idempotency-key'];
+      if (
+        !projectId.success ||
+        !milestoneId.success ||
+        !body.success ||
+        typeof requestId !== 'string' ||
+        !isUuid(requestId)
+      )
+        return reply.code(400).send({
+          error: { code: 'invalid_input', message: 'Milestone archive input is invalid.' },
+        });
+      try {
+        return MilestoneSchema.parse(
+          await requireProjectMilestones(input.store).archive(
+            projectId.data,
+            milestoneId.data,
+            body.data,
+            requestId,
+          ),
+        );
+      } catch (error) {
+        return sendMilestoneStoreError(error, reply);
       }
     },
   );
@@ -491,6 +671,16 @@ function sendDepartmentStoreError(error: unknown, reply: FastifyReply) {
 
 function sendProjectStoreError(error: unknown, reply: FastifyReply) {
   if (!(error instanceof ProjectStoreError)) throw error;
+  return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
+}
+
+function requireProjectMilestones(store: AuthorizerStore) {
+  if (!store.projectMilestones) throw new Error('Project milestone store is unavailable.');
+  return store.projectMilestones;
+}
+
+function sendMilestoneStoreError(error: unknown, reply: FastifyReply) {
+  if (!(error instanceof MilestoneStoreError)) throw error;
   return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
 }
 

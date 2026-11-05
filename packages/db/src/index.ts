@@ -14,6 +14,8 @@ export {
 export type { DepartmentStoreErrorCode } from './department-management-store.ts';
 export { ProjectStoreError, PostgresProjectManagementStore } from './project-management-store.ts';
 export type { ProjectStoreErrorCode } from './project-management-store.ts';
+export { MilestoneStoreError, PostgresProjectMilestoneStore } from './project-milestone-store.ts';
+export type { MilestoneStoreErrorCode } from './project-milestone-store.ts';
 export {
   PostgresAuthorizationStore,
   PostgresRuntimeAuthorizationReader,
