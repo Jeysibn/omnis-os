@@ -5096,6 +5096,12 @@ const postgresSuite = describe(
         randomUUID(),
       );
       assert.ok(task.associationRevision);
+      const noOp = await store.setTaskProject(
+        task.id,
+        { projectId: project.id, expectedAssociationRevision: task.associationRevision },
+        randomUUID(),
+      );
+      assert.equal(noOp.projectId, project.id);
       // A pre-cutover run has no mission_events row. Its project/task/run filter
       // must still validate from the durable run→task→project relationship.
       const legacyRunId = `run-legacy-${randomUUID()}`;
@@ -5158,12 +5164,6 @@ const postgresSuite = describe(
       } finally {
         forgedMarkerClient.release();
       }
-      const noOp = await store.setTaskProject(
-        task.id,
-        { projectId: project.id, expectedAssociationRevision: task.associationRevision },
-        randomUUID(),
-      );
-      assert.equal(noOp.projectId, project.id);
       page = await eventStore.history({ projectId: project.id });
       assert.deepEqual(
         page.events.map((event) => event.type),
