@@ -54,6 +54,10 @@ import {
   type ProjectWorkspaceTaskPage,
   type TaskEpicAssociation,
   type TaskEpicResponse,
+  MissionEventQuerySchema,
+  MissionEventPageSchema,
+  MissionEventBatchSchema,
+  MissionEventWaitQuerySchema,
 } from '@omnis/contracts';
 import {
   AgentLifecycleStoreError,
@@ -61,6 +65,7 @@ import {
   MilestoneStoreError,
   EpicStoreError,
   ProjectStoreError,
+  MissionEventStoreError,
 } from '@omnis/db';
 
 export type AuthorizerStore = {
@@ -139,8 +144,23 @@ export type AuthorizerStore = {
     | undefined;
 };
 
+type AuthorizerMissionEventStore = {
+  history(query: unknown): Promise<unknown>;
+  eventsAfter(filter: unknown, cursor: string, limit?: number): Promise<unknown>;
+  waitAfter(
+    filter: unknown,
+    cursor: string,
+    limit?: number,
+    waitMs?: number,
+    signal?: AbortSignal,
+  ): Promise<unknown>;
+  close(): Promise<void>;
+  storageMetrics(): Promise<{ rows: string; bytes: string; clockSeq: string }>;
+};
+
 export function createAuthorizerApp(input: {
   store: AuthorizerStore;
+  missionEvents?: AuthorizerMissionEventStore;
   serviceToken: string;
   checkDatabase: () => Promise<void>;
 }): FastifyInstance {
@@ -172,6 +192,55 @@ export function createAuthorizerApp(input: {
       return reply.code(401).send({
         error: { code: 'unauthorized', message: 'Control-plane authentication failed.' },
       });
+    }
+  });
+
+  app.get('/internal/v1/mission-events', async (request, reply) => {
+    const query = MissionEventQuerySchema.safeParse(request.query);
+    if (!query.success)
+      return reply.code(422).send({
+        error: { code: 'invalid_input', message: 'Mission event query is invalid.' },
+      });
+    try {
+      return MissionEventPageSchema.parse(
+        await requireMissionEvents(input.missionEvents).history(query.data),
+      );
+    } catch (error) {
+      return sendMissionEventStoreError(error, reply);
+    }
+  });
+
+  app.get('/internal/v1/mission-events/after', async (request, reply) => {
+    const query = MissionEventWaitQuerySchema.safeParse(request.query);
+    if (!query.success)
+      return reply.code(422).send({
+        error: { code: 'invalid_input', message: 'Mission event stream cursor is invalid.' },
+      });
+    const controller = new AbortController();
+    const onClose = () => controller.abort();
+    reply.raw.once('close', onClose);
+    try {
+      return MissionEventBatchSchema.parse(
+        await requireMissionEvents(input.missionEvents).waitAfter(
+          { projectId: query.data.projectId, taskId: query.data.taskId, runId: query.data.runId },
+          query.data.after,
+          query.data.limit,
+          query.data.waitMs,
+          controller.signal,
+        ),
+      );
+    } catch (error) {
+      return sendMissionEventStoreError(error, reply);
+    } finally {
+      reply.raw.off('close', onClose);
+    }
+  });
+
+  app.get('/internal/v1/mission-events/storage-metrics', async (_request, reply) => {
+    try {
+      return await requireMissionEvents(input.missionEvents).storageMetrics();
+    } catch (error) {
+      return sendMissionEventStoreError(error, reply);
     }
   });
 
@@ -926,6 +995,16 @@ function sendProjectStoreError(error: unknown, reply: FastifyReply) {
 function requireProjectMilestones(store: AuthorizerStore) {
   if (!store.projectMilestones) throw new Error('Project milestone store is unavailable.');
   return store.projectMilestones;
+}
+
+function requireMissionEvents(store: AuthorizerMissionEventStore | undefined) {
+  if (!store) throw new Error('Mission event store is unavailable.');
+  return store;
+}
+
+function sendMissionEventStoreError(error: unknown, reply: FastifyReply) {
+  if (!(error instanceof MissionEventStoreError)) throw error;
+  return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
 }
 
 function sendMilestoneStoreError(error: unknown, reply: FastifyReply) {

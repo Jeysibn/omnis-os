@@ -475,6 +475,156 @@ export const RunEventSchema = z.object({
 });
 export type RunEvent = z.infer<typeof RunEventSchema>;
 
+const MissionSequenceSchema = z.string().regex(/^[1-9][0-9]{0,18}$/);
+const MissionEventIdSchema = z.string().regex(/^mev_[0-9a-f]{32}$/);
+const MissionTimestampSchema = z.string().datetime({ offset: true });
+const EmptyMissionPayloadSchema = z.object({}).strict();
+const MissionBaseSchema = z.object({
+  id: MissionEventIdSchema,
+  seq: MissionSequenceSchema,
+  occurredAt: MissionTimestampSchema,
+  taskId: TaskIdSchema,
+  projectId: ProjectIdSchema.nullable(),
+});
+
+export const MissionTaskEventSchema = z.discriminatedUnion('type', [
+  MissionBaseSchema.extend({
+    type: z.literal('task.created'),
+    runId: z.null(),
+    actor: z.literal('owner'),
+    origin: z.object({ kind: z.literal('task_state'), synthetic: z.literal(false) }).strict(),
+    payload: EmptyMissionPayloadSchema,
+  }).strict(),
+  MissionBaseSchema.extend({
+    type: z.literal('task.project_assigned'),
+    runId: z.null(),
+    previousProjectId: z.null(),
+    projectId: ProjectIdSchema,
+    actor: z.literal('owner'),
+    origin: z.object({ kind: z.literal('task_state'), synthetic: z.literal(false) }).strict(),
+    payload: EmptyMissionPayloadSchema,
+  }).strict(),
+  MissionBaseSchema.extend({
+    type: z.literal('task.project_unassigned'),
+    runId: z.null(),
+    previousProjectId: ProjectIdSchema,
+    projectId: z.null(),
+    actor: z.literal('owner'),
+    origin: z.object({ kind: z.literal('task_state'), synthetic: z.literal(false) }).strict(),
+    payload: EmptyMissionPayloadSchema,
+  }).strict(),
+  MissionBaseSchema.extend({
+    type: z.literal('task.project_reassigned'),
+    runId: z.null(),
+    previousProjectId: ProjectIdSchema,
+    projectId: ProjectIdSchema,
+    actor: z.literal('owner'),
+    origin: z.object({ kind: z.literal('task_state'), synthetic: z.literal(false) }).strict(),
+    payload: EmptyMissionPayloadSchema,
+  }).strict(),
+  MissionBaseSchema.extend({
+    type: z.literal('task.epic_assigned'),
+    runId: z.null(),
+    actor: z.literal('owner'),
+    origin: z.object({ kind: z.literal('task_state'), synthetic: z.literal(false) }).strict(),
+    payload: z.object({ previousEpicId: z.null(), epicId: EpicIdSchema }).strict(),
+  }).strict(),
+  MissionBaseSchema.extend({
+    type: z.literal('task.epic_unassigned'),
+    runId: z.null(),
+    actor: z.literal('owner'),
+    origin: z.object({ kind: z.literal('task_state'), synthetic: z.literal(false) }).strict(),
+    payload: z.object({ previousEpicId: EpicIdSchema, epicId: z.null() }).strict(),
+  }).strict(),
+  MissionBaseSchema.extend({
+    type: z.literal('task.epic_reassigned'),
+    runId: z.null(),
+    actor: z.literal('owner'),
+    origin: z.object({ kind: z.literal('task_state'), synthetic: z.literal(false) }).strict(),
+    payload: z.object({ previousEpicId: EpicIdSchema, epicId: EpicIdSchema }).strict(),
+  }).strict(),
+  MissionBaseSchema.extend({
+    type: z.literal('task.status_changed'),
+    runId: z.string().min(1).max(128),
+    actor: z.literal('system'),
+    origin: z.object({ kind: z.literal('task_state'), synthetic: z.literal(false) }).strict(),
+    payload: z.object({ fromStatus: TaskStatusSchema, toStatus: TaskStatusSchema }).strict(),
+  }).strict(),
+]);
+
+export const MissionRunEventSchema = MissionBaseSchema.extend({
+  type: z.enum([
+    'run.queued',
+    'run.started',
+    'run.stop_requested',
+    'run.completed',
+    'run.cancelled',
+    'run.failed',
+    'run.interrupted',
+  ]),
+  runId: z.string().min(1).max(128),
+  actor: z.literal('system'),
+  origin: z
+    .object({ kind: z.literal('run_event'), source: z.literal('mock'), synthetic: z.literal(true) })
+    .strict(),
+  payload: EmptyMissionPayloadSchema,
+}).strict();
+
+export const MissionEventSchema = z.union([MissionTaskEventSchema, MissionRunEventSchema]);
+export type MissionEvent = z.infer<typeof MissionEventSchema>;
+
+export const MissionEventFilterSchema = z
+  .object({
+    projectId: ProjectIdSchema.optional(),
+    taskId: TaskIdSchema.optional(),
+    runId: z.string().min(1).max(128).optional(),
+  })
+  .strict()
+  .refine((filter) => !(filter.runId && !filter.taskId), 'runId requires taskId.');
+export type MissionEventFilter = z.infer<typeof MissionEventFilterSchema>;
+
+export const MissionEventQuerySchema = MissionEventFilterSchema.extend({
+  limit: z.coerce.number().int().min(1).max(100).default(40),
+  before: z.string().min(1).max(2048).optional(),
+}).strict();
+export type MissionEventQuery = z.infer<typeof MissionEventQuerySchema>;
+export const MissionEventStreamQuerySchema = MissionEventFilterSchema.extend({
+  after: z.string().min(1).max(2048),
+  limit: z.coerce.number().int().min(1).max(100).default(100),
+}).strict();
+export const MissionEventWaitQuerySchema = MissionEventStreamQuerySchema.extend({
+  waitMs: z.coerce.number().int().min(0).max(15_000).default(0),
+}).strict();
+
+export const MissionEventPageSchema = z
+  .object({
+    events: z.array(MissionEventSchema).max(100),
+    page: z
+      .object({
+        olderCursor: z.string().max(2048).nullable(),
+        hasOlder: z.boolean(),
+        streamCursor: z.string().max(2048).nullable(),
+        observedThroughSeq: z.string().regex(/^(0|[1-9][0-9]{0,18})$/),
+        historyStartedAt: MissionTimestampSchema,
+        historyStartSeq: z.string().regex(/^[1-9][0-9]{0,18}$/),
+        preCutoverHistoryAvailable: z.literal(false),
+        truncated: z.literal(false),
+      })
+      .strict(),
+  })
+  .strict();
+export type MissionEventPage = z.infer<typeof MissionEventPageSchema>;
+export const MissionEventBatchSchema = z
+  .object({
+    events: z.array(MissionEventSchema).max(100),
+    eventCursors: z.array(z.string().min(1).max(2048)).max(100),
+    nextCursor: z.string().min(1).max(2048),
+    observedThroughSeq: z.string().regex(/^(0|[1-9][0-9]{0,18})$/),
+  })
+  .strict()
+  .refine((batch) => batch.events.length === batch.eventCursors.length);
+export type MissionEventBatch = z.infer<typeof MissionEventBatchSchema>;
+
 export const CreateRunSchema = z.object({
   taskId: z.string().min(1),
   authorizationId: z.string().uuid(),

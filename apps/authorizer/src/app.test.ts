@@ -702,3 +702,69 @@ describe('authorizer department management boundary', () => {
     }
   });
 });
+
+describe('authorizer Mission Lane internal read boundary', () => {
+  it('validates bounded long-poll parameters and forwards cancellation to the event store', async () => {
+    const { store } = makeStore();
+    let receivedWaitMs: number | undefined;
+    let receivedSignal: AbortSignal | undefined;
+    let calls = 0;
+    const missionEvents = {
+      async history() {
+        throw new Error('not used');
+      },
+      async eventsAfter() {
+        throw new Error('not used');
+      },
+      async waitAfter(
+        _filter: unknown,
+        _cursor: string,
+        _limit?: number,
+        waitMs?: number,
+        signal?: AbortSignal,
+      ) {
+        calls += 1;
+        receivedWaitMs = waitMs;
+        receivedSignal = signal;
+        return {
+          events: [],
+          eventCursors: [],
+          nextCursor: 'opaque-cursor',
+          observedThroughSeq: '0',
+        };
+      },
+      async close() {},
+      async storageMetrics() {
+        return { rows: '0', bytes: '0', clockSeq: '0' };
+      },
+    };
+    const app = createAuthorizerApp({
+      store,
+      missionEvents,
+      serviceToken,
+      checkDatabase: async () => undefined,
+    });
+    const headers = { 'x-omnis-authorizer-token': serviceToken };
+    try {
+      const invalid = await app.inject({
+        method: 'GET',
+        url: '/internal/v1/mission-events/after?after=cursor&waitMs=15001',
+        headers,
+      });
+      assert.equal(invalid.statusCode, 422);
+      assert.equal(calls, 0);
+
+      const valid = await app.inject({
+        method: 'GET',
+        url: '/internal/v1/mission-events/after?after=cursor&waitMs=1000',
+        headers,
+      });
+      assert.equal(valid.statusCode, 200);
+      assert.equal(receivedWaitMs, 1000);
+      assert.ok(receivedSignal instanceof AbortSignal);
+      assert.equal(calls, 1);
+    } finally {
+      await app.close();
+    }
+  });
+});

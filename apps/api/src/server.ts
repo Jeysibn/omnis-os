@@ -26,6 +26,8 @@ import { registerProjectEpicRoutes } from './project-epic-routes.ts';
 import { registerProjectWorkspaceRoutes } from './project-workspace-routes.ts';
 import { registerTaskEpicRoutes } from './task-epic-routes.ts';
 import { registerTaskRoutes } from './task-routes.ts';
+import { registerMissionEventRoutes } from './mission-event-routes.ts';
+import { MissionEventStreamRegistry } from './mission-event-stream-registry.ts';
 import {
   parseRun,
   parseRunList,
@@ -40,6 +42,7 @@ const app = Fastify({
 });
 // Memory-backed sessions are limited to this single-owner local mock gate. Durable session storage is a later gate.
 const sessions = new LocalSessionStore(env.sessionSecret, env.secureCookies);
+const missionEventStreams = new MissionEventStreamRegistry(4, 16);
 const authThrottle = new AuthThrottle();
 app.decorateRequest('omnisSession', undefined);
 app.addHook('onRequest', async (request, reply) => {
@@ -94,6 +97,7 @@ app.post('/api/v1/auth/login', async (request, reply) => {
     admission.release();
   }
   const rotated = sessions.rotate(request.omnisSession?.id ?? '');
+  if (request.omnisSession) missionEventStreams.revokeSession(request.omnisSession.id);
   if (!rotated) {
     return reply
       .code(429)
@@ -107,7 +111,10 @@ app.post(
   '/api/v1/auth/logout',
   { preHandler: [requireOwner, requireMutationProtection] },
   async (request, reply) => {
-    if (request.omnisSession) sessions.destroy(request.omnisSession.id);
+    if (request.omnisSession) {
+      missionEventStreams.revokeSession(request.omnisSession.id);
+      sessions.destroy(request.omnisSession.id);
+    }
     reply.header('set-cookie', sessions.clearCookie());
     return reply.code(204).send();
   },
@@ -209,6 +216,7 @@ registerProjectEpicRoutes(app);
 registerProjectWorkspaceRoutes(app);
 registerTaskEpicRoutes(app);
 registerTaskRoutes(app);
+registerMissionEventRoutes(app, sessions, missionEventStreams);
 app.get('/api/v1/runs', { preHandler: requireOwner }, async () =>
   workerRequest('/internal/v1/runs', {}, parseRunList),
 );

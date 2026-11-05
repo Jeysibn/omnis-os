@@ -7,6 +7,11 @@ export const metricsQuery = `SELECT json_build_object(
     FROM (SELECT status, count(*) AS run_count FROM omnis.runs GROUP BY status) statuses
   ),
   'events', (SELECT count(*) FROM omnis.run_events),
+  'missionEvents', (SELECT count(*) FROM omnis.mission_events),
+  'missionEventClock', (SELECT json_build_object('feedEpoch', feed_epoch, 'lastSeq', last_seq::text,
+    'historyStartedAt', history_started_at, 'historyStartSeq', history_start_seq::text)
+    FROM omnis.mission_event_clock WHERE singleton = true),
+  'missionEventStorageBytes', pg_total_relation_size('omnis.mission_events')::text,
   'eventTypes', (
     SELECT COALESCE(json_object_agg(event_type, event_count), '{}'::json)
     FROM (SELECT event_type, count(*) AS event_count FROM omnis.run_events GROUP BY event_type) types
@@ -34,6 +39,7 @@ export const metricsQuery = `SELECT json_build_object(
     'tasks', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(t)::text), ':' ORDER BY t.id), '')) FROM omnis.tasks t),
     'runs', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(r)::text), ':' ORDER BY r.id), '')) FROM omnis.runs r),
     'events', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(e)::text), ':' ORDER BY e.run_id, e.sequence), '')) FROM omnis.run_events e),
+    'missionEvents', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(e)::text), ':' ORDER BY e.seq), '')) FROM omnis.mission_events e),
     'idempotency', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(i)::text), ':' ORDER BY i.idempotency_key), '')) FROM omnis.run_idempotency i),
     'departments', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(d)::text), ':' ORDER BY d.id), '')) FROM omnis.departments d),
     'agents', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(a)::text), ':' ORDER BY a.id), '')) FROM omnis.agents a),
@@ -121,6 +127,8 @@ export function assertValidMetrics(report) {
     !report.migrations.includes('0015_project_management') ||
     !report.migrations.includes('0016_project_lifecycle') ||
     !report.migrations.includes('0017_task_project_admission') ||
+    !report.migrations.includes('0021_mission_lane_events') ||
+    !validMissionEventMetrics(report) ||
     !validAgentManagementCounts(report.agentManagementCounts) ||
     !validProjectManagementCounts(report.projectManagementCounts) ||
     !validTaskProjectManagementCounts(report.taskProjectManagementCounts) ||
@@ -133,6 +141,26 @@ export function assertValidMetrics(report) {
   ) {
     throw new Error('Database did not satisfy Omnis backup invariants.');
   }
+}
+
+function validMissionEventMetrics(report) {
+  const clock = report.missionEventClock;
+  return (
+    Number.isSafeInteger(report.missionEvents) &&
+    report.missionEvents >= 0 &&
+    typeof report.missionEventStorageBytes === 'string' &&
+    /^\d+$/.test(report.missionEventStorageBytes) &&
+    clock &&
+    typeof clock.feedEpoch === 'string' &&
+    /^[0-9a-f-]{36}$/i.test(clock.feedEpoch) &&
+    typeof clock.lastSeq === 'string' &&
+    /^\d+$/.test(clock.lastSeq) &&
+    BigInt(clock.lastSeq) === BigInt(report.missionEvents) &&
+    typeof clock.historyStartSeq === 'string' &&
+    /^[1-9][0-9]*$/.test(clock.historyStartSeq) &&
+    typeof clock.historyStartedAt === 'string' &&
+    Number.isFinite(Date.parse(clock.historyStartedAt))
+  );
 }
 
 function validProjectManagementCounts(value) {
@@ -186,17 +214,24 @@ export function assertBackupSafe(report) {
 
 export function metricsMatch(source, restored) {
   assertValidMetrics(restored);
-  for (const key of ['tasks', 'runs', 'events', 'idempotencyRecords', 'leasedRuns']) {
+  for (const key of [
+    'tasks',
+    'runs',
+    'events',
+    'missionEvents',
+    'idempotencyRecords',
+    'leasedRuns',
+  ]) {
     if (source[key] !== restored[key]) return false;
   }
   for (const key of [
     'migrations',
     'runStatuses',
     'eventTypes',
-    'recordFingerprints',
     'agentManagementCounts',
     'projectManagementCounts',
     'taskProjectManagementCounts',
+    'missionEventClock',
     'recordFingerprints',
   ]) {
     if (JSON.stringify(canonical(source[key])) !== JSON.stringify(canonical(restored[key]))) {
@@ -238,6 +273,7 @@ function validManagementFingerprints(value) {
     'projectManagementIdempotency',
     'taskProjectManagementAudit',
     'taskProjectManagementIdempotency',
+    'missionEvents',
   ].every((key) => typeof value[key] === 'string' && /^[a-f0-9]{32}$/.test(value[key]));
 }
 

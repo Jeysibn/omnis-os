@@ -73,6 +73,12 @@ export class LocalSessionStore {
     this.sessions.delete(id);
   }
 
+  isActiveOwner(id: string): boolean {
+    this.removeExpired(this.now());
+    const session = this.sessions.get(id);
+    return Boolean(session?.owner && session.expiresAt > this.now());
+  }
+
   cookie(session: LocalSession): string {
     const token = `${session.id}.${this.sign(session.id)}`;
     return `${cookieName}=${token}; Path=/; Max-Age=${maxAgeSeconds}; HttpOnly; SameSite=Strict${this.secureCookies ? '; Secure' : ''}`;

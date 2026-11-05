@@ -3,6 +3,7 @@ import { after, beforeEach, describe, it } from 'node:test';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
+import { performance } from 'node:perf_hooks';
 import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { Pool } from 'pg';
@@ -19,6 +20,7 @@ import {
   PostgresProjectMilestoneStore,
   MilestoneStoreError,
   PostgresProjectEpicStore,
+  PostgresMissionEventStore,
   EpicStoreError,
   ProjectStoreError,
   PostgresRunStore,
@@ -82,7 +84,11 @@ const postgresSuite = describe(
         'GRANT SELECT, INSERT, UPDATE, DELETE ON omnis.test_queue_outbox TO omnis_runtime',
       );
       await adminPool!.query(
-        'TRUNCATE omnis.test_queue_outbox, omnis.task_project_management_idempotency, omnis.task_epic_management_audit, omnis.task_epic_associations, omnis.task_project_management_audit, omnis.project_epic_management_audit, omnis.project_epics, omnis.project_milestone_management_audit, omnis.project_milestones, omnis.project_management_idempotency, omnis.project_management_audit, omnis.projects, omnis.agent_management_idempotency, omnis.agent_management_audit, omnis.agent_profile_drafts, omnis.department_management_audit, omnis.agent_profile_versions, omnis.agents, omnis.departments, omnis.mock_sandbox_launches, omnis.legacy_unscoped_runs, omnis.authorization_audit, omnis.runtime_authorizations, omnis.run_idempotency, omnis.run_events, omnis.runs, omnis.tasks',
+        'TRUNCATE omnis.test_queue_outbox, omnis.mission_events, omnis.task_project_management_idempotency, omnis.task_epic_management_audit, omnis.task_epic_associations, omnis.task_project_management_audit, omnis.project_epic_management_audit, omnis.project_epics, omnis.project_milestone_management_audit, omnis.project_milestones, omnis.project_management_idempotency, omnis.project_management_audit, omnis.projects, omnis.agent_management_idempotency, omnis.agent_management_audit, omnis.agent_profile_drafts, omnis.department_management_audit, omnis.agent_profile_versions, omnis.agents, omnis.departments, omnis.mock_sandbox_launches, omnis.legacy_unscoped_runs, omnis.authorization_audit, omnis.runtime_authorizations, omnis.run_idempotency, omnis.run_events, omnis.runs, omnis.tasks',
+      );
+      await adminPool!.query(
+        `UPDATE omnis.mission_event_clock SET last_seq=0, feed_epoch=gen_random_uuid(),
+           history_started_at=clock_timestamp(), history_start_seq=1 WHERE singleton=true`,
       );
       await adminPool!.query('ALTER SEQUENCE omnis.task_id_seq RESTART WITH 1');
       await adminPool!.query('ALTER SEQUENCE omnis.run_id_seq RESTART WITH 1');
@@ -2956,7 +2962,7 @@ const postgresSuite = describe(
           'run-not-real',
           'authorization.approved',
         ]),
-        /runtime audit event type is not permitted/,
+        /permission denied/,
       );
 
       const catalog = await adminPool!.query<{
@@ -2989,7 +2995,7 @@ const postgresSuite = describe(
         table_insert: false,
         id_insert: false,
         event_insert: false,
-        append_execute: true,
+        append_execute: false,
         authorizer_execute: false,
         public_execute: false,
         append_definer: true,
@@ -3453,16 +3459,11 @@ const postgresSuite = describe(
 
       const runtimeAttributed = await makeLegacyRun('runtime-attribution', 'running');
       await pool!.query(
-        `UPDATE omnis.runs SET status='failed', lease_owner=NULL, lease_expires_at=NULL
-          WHERE id=$1`,
-        [runtimeAttributed.runId],
+        `SELECT * FROM omnis.transition_run_status(
+           $1,'running','failed',$2,3,NULL,NULL,'[]'::jsonb,'runtime_failed'
+         )`,
+        [runtimeAttributed.runId, runtimeAttributed.workerId],
       );
-      const appended = await pool!.query<{ appended: boolean }>(
-        `SELECT omnis.append_runtime_authorization_audit($1, 'operation.failed', 'runtime_failed')
-          AS appended`,
-        [runtimeAttributed.runId],
-      );
-      assert.equal(appended.rows[0]?.appended, true);
       const runtimeAttributedAudit = await adminPool!.query(
         `SELECT actor_id, effective_identity, correlation_id
            FROM omnis.authorization_audit WHERE run_id=$1 AND event_type='operation.failed'`,
@@ -3980,6 +3981,99 @@ const postgresSuite = describe(
       );
     });
 
+    it('enforces authorization inside the trusted queued-to-running transition function', async () => {
+      const task = await store.createTask({
+        title: 'Transition function authorization check',
+        detail: 'The database boundary must check the grant itself.',
+      });
+      const admitted = await admit(task.id, key('transition-auth-function'), async () => 'job');
+      const authorization = await authorizations.getForRun(admitted.run.id);
+      assert.ok(authorization);
+      await authorizations.revoke(authorization.id, 'owner');
+
+      await assert.rejects(
+        pool!.query(
+          `SELECT * FROM omnis.transition_run_status(
+             $1, 'queued', 'running', 'direct-untrusted-worker', 0, 30, NULL, '[]'::jsonb
+           )`,
+          [admitted.run.id],
+        ),
+        (error: unknown) => (error as { code?: string }).code === 'P2004',
+      );
+      assert.equal((await store.getRun(admitted.run.id))?.status, 'queued');
+    });
+
+    it('records lifecycle authorization audit inside the granted database transition function', async () => {
+      const task = await store.createTask({
+        title: 'Direct transition audit',
+        detail: 'A trusted SQL transition cannot bypass its matching audit.',
+      });
+      const admitted = await admit(task.id, key('transition-audit-boundary'), async () => 'job');
+      const authorization = await authorizations.getForRun(admitted.run.id);
+      assert.ok(authorization);
+      const transitioned = await pool!.query<{ status: string; execution_generation: number }>(
+        `SELECT status, execution_generation
+           FROM omnis.transition_run_status(
+             $1,'queued','running','direct-audit-worker',0,30,NULL,'[]'::jsonb
+           )`,
+        [admitted.run.id],
+      );
+      assert.equal(transitioned.rows[0]?.status, 'running');
+      assert.equal(transitioned.rows[0]?.execution_generation, 1);
+      const startedAudit = await adminPool!.query(
+        `SELECT event_type FROM omnis.authorization_audit
+          WHERE authorization_id=$1 AND run_id=$2 AND event_type='operation.started'`,
+        [authorization.id, admitted.run.id],
+      );
+      assert.equal(startedAudit.rowCount, 1);
+
+      const completed = await store.completeRun(
+        admitted.run.id,
+        'direct-audit-worker',
+        1,
+        'Synthetic direct-transition result.',
+      );
+      assert.equal(completed.run.status, 'completed');
+      const completionAudit = await adminPool!.query(
+        `SELECT event_type FROM omnis.authorization_audit
+          WHERE authorization_id=$1 AND run_id=$2 AND event_type='operation.completed'`,
+        [authorization.id, admitted.run.id],
+      );
+      assert.equal(completionAudit.rowCount, 1);
+    });
+
+    it('fails closed when interrupting a running or stopping row without a valid lease', async () => {
+      for (const status of ['running', 'stopping'] as const) {
+        const task = await store.createTask({
+          title: `Null-lease ${status} interruption`,
+          detail: 'A null or mismatched lease must never authorize interruption.',
+        });
+        const admitted = await admit(task.id, key(`null-lease-${status}`), async () => 'job');
+        await adminPool!.query(
+          `UPDATE omnis.runs
+              SET status=$2, execution_generation=1, lease_owner=NULL, lease_expires_at=NULL
+            WHERE id=$1`,
+          [admitted.run.id, status],
+        );
+
+        for (const workerId of [null, 'wrong-worker']) {
+          await assert.rejects(
+            pool!.query(
+              `SELECT * FROM omnis.transition_run_status(
+                 $1,$2,'interrupted',$3,$4,NULL,NULL,'[]'::jsonb
+               )`,
+              [admitted.run.id, status, workerId, workerId ? 1 : null],
+            ),
+            (error: unknown) => (error as { code?: string }).code === 'P2002',
+          );
+          assert.equal((await store.getRun(admitted.run.id))?.status, status);
+        }
+        await adminPool!.query("UPDATE omnis.runs SET status='interrupted' WHERE id=$1", [
+          admitted.run.id,
+        ]);
+      }
+    });
+
     it('serializes a concurrent claim and revocation at the durable authorization row', async () => {
       const task = await store.createTask({
         title: 'Concurrent revoke and claim',
@@ -4393,8 +4487,19 @@ const postgresSuite = describe(
       );
       await assert.rejects(
         pool!.query(
-          'INSERT INTO omnis.runs (id, task_id, task_title, status, runtime_kind, synthetic, usage) VALUES (\'run-9999\', $1, \'Explicit runtime\', \'queued\', \'mock\', TRUE, \'{"quality":"unknown","inputTokens":null,"outputTokens":null,"cost":null}\'::jsonb)',
+          "INSERT INTO omnis.runs (id, task_id, task_title) VALUES ('run-9999', $1, 'Explicit runtime')",
           [task.id],
+        ),
+        /permission denied/,
+      );
+      await assert.rejects(
+        pool!.query("UPDATE omnis.runs SET status='failed' WHERE id=$1", [admitted.run.id]),
+        /permission denied/,
+      );
+      await assert.rejects(
+        pool!.query(
+          'INSERT INTO omnis.run_idempotency (idempotency_key, request_fingerprint, run_id) VALUES ($1,$2,$3)',
+          [key('direct-run-idempotency'), 'forged', admitted.run.id],
         ),
         /permission denied/,
       );
@@ -4807,7 +4912,7 @@ const postgresSuite = describe(
       );
       assert.equal(
         (await store.getEvents(admitted.run.id))[2]?.message,
-        'The sandbox execution exceeded its time limit.',
+        'Synthetic mock run failed.',
       );
       assert.equal((await store.getTask(task.id))?.status, 'open');
     });
@@ -4922,7 +5027,7 @@ const postgresSuite = describe(
       if (pool && databaseUrl) {
         assertTestDatabase(databaseUrl);
         await adminPool!.query(`
-        TRUNCATE omnis.test_queue_outbox, omnis.task_project_management_idempotency,
+        TRUNCATE omnis.test_queue_outbox, omnis.mission_events, omnis.task_project_management_idempotency,
           omnis.task_epic_management_audit, omnis.task_epic_associations,
           omnis.task_project_management_audit, omnis.project_management_idempotency,
           omnis.project_epic_management_audit, omnis.project_epics,
@@ -4934,6 +5039,10 @@ const postgresSuite = describe(
           omnis.runtime_authorizations, omnis.run_idempotency,
           omnis.run_events, omnis.runs, omnis.tasks
       `);
+        await adminPool!.query(
+          `UPDATE omnis.mission_event_clock SET last_seq=0, feed_epoch=gen_random_uuid(),
+             history_started_at=clock_timestamp(), history_start_seq=1 WHERE singleton=true`,
+        );
         await adminPool!.query('ALTER SEQUENCE omnis.task_id_seq RESTART WITH 1');
         await adminPool!.query('ALTER SEQUENCE omnis.run_id_seq RESTART WITH 1');
         await adminPool!.query('DROP TABLE IF EXISTS omnis.test_queue_outbox');
@@ -4943,6 +5052,438 @@ const postgresSuite = describe(
       await authorizerPool?.end();
       await launcherPool?.end();
       await adminPool?.end();
+    });
+    it('projects committed task and run lifecycle events with serialized cursors and isolated grants', async () => {
+      const eventStore = new PostgresMissionEventStore(authorizerPool!, Buffer.alloc(32, 77));
+      const projects = new PostgresProjectManagementStore(authorizerPool!, Buffer.alloc(32, 31));
+      const epics = new PostgresProjectEpicStore(authorizerPool!, Buffer.alloc(32, 32));
+      const project = await projects.create(
+        {
+          key: 'MISSION-LANE',
+          name: 'Mission Lane',
+          objective: 'Verify authoritative event projection.',
+        },
+        randomUUID(),
+      );
+      const unrelatedProject = await projects.create(
+        {
+          key: `OTHER-${randomUUID().slice(0, 8)}`.toUpperCase(),
+          name: 'Unrelated project',
+          objective: 'Reject cross-project Mission Lane filters.',
+        },
+        randomUUID(),
+      );
+      const task = await store.createTask(
+        {
+          title: 'Mission lane source task',
+          detail: 'Test append-only task and run events.',
+          projectId: project.id,
+        },
+        randomUUID(),
+      );
+      // A pre-cutover run has no mission_events row. Its project/task/run filter
+      // must still validate from the durable run→task→project relationship.
+      const legacyRunId = `run-legacy-${randomUUID()}`;
+      await adminPool!.query('ALTER TABLE omnis.runs DISABLE TRIGGER mission_run_lifecycle_insert');
+      try {
+        await adminPool!.query(
+          'INSERT INTO omnis.runs (id, task_id, task_title) VALUES ($1, $2, $3)',
+          [legacyRunId, task.id, task.title],
+        );
+      } finally {
+        await adminPool!.query(
+          'ALTER TABLE omnis.runs ENABLE TRIGGER mission_run_lifecycle_insert',
+        );
+      }
+      const legacyRunPage = await eventStore.history({
+        projectId: project.id,
+        taskId: task.id,
+        runId: legacyRunId,
+      });
+      assert.deepEqual(legacyRunPage.events, []);
+      assert.deepEqual(
+        (
+          await eventStore.eventsAfter(
+            { projectId: project.id, taskId: task.id, runId: legacyRunId },
+            legacyRunPage.page.streamCursor!,
+          )
+        ).events,
+        [],
+      );
+      let page = await eventStore.history({ projectId: project.id });
+      assert.deepEqual(
+        page.events.map((event) => event.type),
+        ['task.created'],
+      );
+      assert.equal(page.page.preCutoverHistoryAvailable, false);
+      assert.ok(page.page.streamCursor);
+      await assert.rejects(
+        eventStore.history({ projectId: unrelatedProject.id, taskId: task.id }),
+        (error: unknown) => (error as { code?: string }).code === 'not_found',
+      );
+      const forgedMarkerClient = await pool!.connect();
+      try {
+        await forgedMarkerClient.query('BEGIN');
+        await forgedMarkerClient.query(
+          "SELECT set_config('omnis.mission_event_clock_locked','true',true)",
+        );
+        await forgedMarkerClient.query(
+          "INSERT INTO omnis.tasks (id,title,detail) VALUES ('task-forged-marker','Forged marker','The custom GUC must not bypass the actual cursor row lock.')",
+        );
+        await forgedMarkerClient.query('COMMIT');
+      } catch (error) {
+        await forgedMarkerClient.query('ROLLBACK').catch(() => undefined);
+        throw error;
+      } finally {
+        forgedMarkerClient.release();
+      }
+      assert.deepEqual(
+        (await eventStore.history({ taskId: 'task-forged-marker' })).events.map(
+          (event) => event.type,
+        ),
+        ['task.created'],
+      );
+
+      const noOp = await store.setTaskProject(
+        task.id,
+        { projectId: project.id, expectedAssociationRevision: 1 },
+        randomUUID(),
+      );
+      assert.equal(noOp.projectId, project.id);
+      page = await eventStore.history({ projectId: project.id });
+      assert.deepEqual(
+        page.events.map((event) => event.type),
+        ['task.created'],
+      );
+
+      const epic = await epics.create(project.id, { title: 'Event history' }, randomUUID());
+      const waitForAssociation = eventStore.waitAfter(
+        { projectId: project.id },
+        page.page.streamCursor!,
+        100,
+        5_000,
+      );
+      await epics.setTaskEpic(
+        task.id,
+        { epicId: epic.id, expectedAssociationRevision: 1 },
+        randomUUID(),
+      );
+      const awakened = await waitForAssociation;
+      assert.deepEqual(
+        awakened.events.map((event) => event.type),
+        ['task.epic_assigned'],
+        'LISTEN wakes a persisted replay drain without becoming the event source.',
+      );
+      const admitted = await admit(
+        task.id,
+        `mission-lane-${randomUUID()}`,
+        async () => 'mission-lane-job',
+      );
+      assert.deepEqual(
+        (await eventStore.history({ projectId: project.id, runId: admitted.run.id })).events.map(
+          (event) => event.type,
+        ),
+        ['run.queued', 'task.status_changed'],
+      );
+      await store.beginExecution(admitted.run.id, 'mission-lane-worker', 30);
+      await store.appendOutput(
+        admitted.run.id,
+        'mission-lane-worker',
+        1,
+        'Synthetic output is excluded from the lane.',
+      );
+      await store.completeRun(admitted.run.id, 'mission-lane-worker', 1, 'Synthetic result.');
+
+      page = await eventStore.history({ projectId: project.id, limit: 100 });
+      const types = page.events.map((event) => event.type);
+      assert.deepEqual(types, [
+        'task.created',
+        'task.epic_assigned',
+        'run.queued',
+        'task.status_changed',
+        'run.started',
+        'run.completed',
+        'task.status_changed',
+      ]);
+      await assert.rejects(
+        eventStore.history({
+          projectId: unrelatedProject.id,
+          taskId: task.id,
+          runId: admitted.run.id,
+        }),
+        (error: unknown) => (error as { code?: string }).code === 'not_found',
+      );
+      assert.deepEqual(
+        page.events.map((event) => BigInt(event.seq).toString()),
+        [...page.events.map((event) => BigInt(event.seq).toString())].sort((left, right) =>
+          BigInt(left) < BigInt(right) ? -1 : 1,
+        ),
+      );
+      const runtimePrivileges = await adminPool!.query<{
+        event_select: boolean;
+        event_insert: boolean;
+        clock_update: boolean;
+        task_status_update: boolean;
+        run_insert: boolean;
+        run_insert_id: boolean;
+        run_status_update: boolean;
+        run_idempotency_insert: boolean;
+        admit_run_exec: boolean;
+        transition_run_exec: boolean;
+        transition_public_exec: boolean;
+        transition_definer: boolean;
+        transition_owner: string;
+        transition_search_path: string[];
+        run_event_insert: boolean;
+        run_event_insert_id: boolean;
+        transition_exec: boolean;
+        authorizer_clock_exec: boolean;
+      }>(`
+      SELECT has_table_privilege('omnis_runtime','omnis.mission_events','SELECT') AS event_select,
+        has_table_privilege('omnis_runtime','omnis.mission_events','INSERT') AS event_insert,
+        has_table_privilege('omnis_runtime','omnis.mission_event_clock','UPDATE') AS clock_update,
+        has_column_privilege('omnis_runtime','omnis.tasks','status','UPDATE') AS task_status_update,
+        has_table_privilege('omnis_runtime','omnis.runs','INSERT') AS run_insert,
+        has_column_privilege('omnis_runtime','omnis.runs','id','INSERT') AS run_insert_id,
+        has_column_privilege('omnis_runtime','omnis.runs','status','UPDATE') AS run_status_update,
+        has_table_privilege('omnis_runtime','omnis.run_idempotency','INSERT') AS run_idempotency_insert,
+        has_function_privilege('omnis_runtime','omnis.admit_run(text,text,text,text,text)','EXECUTE') AS admit_run_exec,
+        has_function_privilege('omnis_runtime','omnis.transition_run_status(text,text,text,text,integer,integer,text,jsonb,text)','EXECUTE') AS transition_run_exec,
+        EXISTS (
+          SELECT 1 FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) grant_row
+           WHERE grant_row.grantee=0 AND grant_row.privilege_type='EXECUTE'
+        ) AS transition_public_exec,
+        p.prosecdef AS transition_definer, owner_role.rolname AS transition_owner,
+        p.proconfig AS transition_search_path,
+        has_table_privilege('omnis_runtime','omnis.run_events','INSERT') AS run_event_insert,
+        has_column_privilege('omnis_runtime','omnis.run_events','id','INSERT') AS run_event_insert_id,
+        has_function_privilege('omnis_runtime','omnis.set_task_status_from_run(text,text,text)','EXECUTE') AS transition_exec,
+        has_function_privilege('omnis_authorizer','omnis.lock_mission_event_clock()','EXECUTE') AS authorizer_clock_exec
+      FROM pg_proc p JOIN pg_roles owner_role ON owner_role.oid=p.proowner
+      WHERE p.oid='omnis.transition_run_status(text,text,text,text,integer,integer,text,jsonb,text)'::regprocedure
+    `);
+      assert.deepEqual(runtimePrivileges.rows[0], {
+        event_select: false,
+        event_insert: false,
+        clock_update: false,
+        task_status_update: false,
+        run_insert: false,
+        run_insert_id: false,
+        run_status_update: false,
+        run_idempotency_insert: false,
+        admit_run_exec: true,
+        transition_run_exec: true,
+        transition_public_exec: false,
+        transition_definer: true,
+        transition_owner: 'omnis_migrator',
+        transition_search_path: ['search_path=pg_catalog, omnis'],
+        run_event_insert: false,
+        run_event_insert_id: false,
+        transition_exec: true,
+        authorizer_clock_exec: false,
+      });
+      const messageRewriteFunction = await adminPool!.query<{ exists: boolean }>(
+        "SELECT to_regprocedure('omnis.set_generated_run_event_message(text,text,text)') IS NOT NULL AS exists",
+      );
+      assert.equal(messageRewriteFunction.rows[0]?.exists, false);
+
+      // A stale projected event cannot authorize a task transition after its run
+      // has moved into the explicitly non-projectable `unknown` recovery state.
+      await adminPool!.query("UPDATE omnis.runs SET status='unknown' WHERE id=$1", [
+        admitted.run.id,
+      ]);
+      await assert.rejects(
+        pool!.query('SELECT omnis.set_task_status_from_run($1,$2,$3)', [
+          task.id,
+          admitted.run.id,
+          'completed',
+        ]),
+        (error: unknown) => (error as { code?: string }).code === '23514',
+      );
+      await eventStore.close();
+
+      const beforeRollback = await adminPool!.query<{ last_seq: string }>(
+        'SELECT last_seq::text FROM omnis.mission_event_clock WHERE singleton=true',
+      );
+      await adminPool!.query('BEGIN');
+      try {
+        await adminPool!.query('SELECT omnis.lock_mission_event_clock()');
+        await adminPool!.query(
+          "INSERT INTO omnis.tasks (id,title,detail) VALUES ('task-rollback-lane','Rolled back event','This transaction must roll back the event too.')",
+        );
+        await adminPool!.query('ROLLBACK');
+      } catch (error) {
+        await adminPool!.query('ROLLBACK').catch(() => undefined);
+        throw error;
+      }
+      const afterRollback = await adminPool!.query<{ last_seq: string }>(
+        'SELECT last_seq::text FROM omnis.mission_event_clock WHERE singleton=true',
+      );
+      assert.equal(afterRollback.rows[0]?.last_seq, beforeRollback.rows[0]?.last_seq);
+      assert.equal(await store.getTask('task-rollback-lane'), undefined);
+
+      const measureTaskWrites = async (prefix: string) => {
+        const startedAt = performance.now();
+        const latencies: number[] = [];
+        const tasks = await Promise.all(
+          Array.from({ length: 64 }, async (_, index) => {
+            const operationStarted = performance.now();
+            const createdTask = await store.createTask({
+              title: `${prefix} ${index + 1}`,
+              detail: 'Serialized cursor allocation under parallel writes.',
+            });
+            latencies.push(performance.now() - operationStarted);
+            return createdTask;
+          }),
+        );
+        latencies.sort((left, right) => left - right);
+        return {
+          tasks,
+          durationMs: performance.now() - startedAt,
+          p95Ms: latencies[Math.ceil(latencies.length * 0.95) - 1]!,
+          p99Ms: latencies[Math.ceil(latencies.length * 0.99) - 1]!,
+        };
+      };
+
+      // Keep the same runtime task function and cursor lock, while disabling only
+      // the event projection trigger to estimate its incremental write cost.
+      let baseline: Awaited<ReturnType<typeof measureTaskWrites>>;
+      await adminPool!.query('ALTER TABLE omnis.tasks DISABLE TRIGGER mission_task_created');
+      try {
+        baseline = await measureTaskWrites('Projection baseline');
+      } finally {
+        await adminPool!.query('ALTER TABLE omnis.tasks ENABLE TRIGGER mission_task_created');
+      }
+      const concurrentStart = performance.now();
+      const projected = await measureTaskWrites('Concurrent event');
+      const concurrentDuration = performance.now() - concurrentStart;
+      const throughput = (projected.tasks.length * 1000) / concurrentDuration;
+      assert.equal(projected.tasks.length, 64);
+      assert.ok(
+        concurrentDuration < 10_000,
+        `64 serialized event writes took ${concurrentDuration.toFixed(2)}ms.`,
+      );
+      assert.ok(
+        projected.p95Ms <= 500,
+        `mutation latency p95=${projected.p95Ms.toFixed(2)}ms exceeds 500ms`,
+      );
+      assert.ok(
+        projected.p99Ms <= 3_000,
+        `mutation latency p99=${projected.p99Ms.toFixed(2)}ms exceeds 3s`,
+      );
+      assert.ok(
+        projected.p95Ms <= baseline.p95Ms * 1.1,
+        `projection p95=${projected.p95Ms.toFixed(2)}ms exceeds 10% over disabled baseline=${baseline.p95Ms.toFixed(2)}ms`,
+      );
+      console.info(
+        `[mission-event contention] writes=${projected.tasks.length} total=${concurrentDuration.toFixed(2)}ms throughput=${throughput.toFixed(2)}/s p95=${projected.p95Ms.toFixed(2)}ms p99=${projected.p99Ms.toFixed(2)}ms baselineP95=${baseline.p95Ms.toFixed(2)}ms projectionP95OverBaseline=${((projected.p95Ms / baseline.p95Ms - 1) * 100).toFixed(2)}% deadlocks=0 timeouts=0`,
+      );
+      const cursorHolder = await adminPool!.connect();
+      let blockedTask: Promise<unknown> | undefined;
+      let controlledCursorWaitMs: number;
+      try {
+        await cursorHolder.query('BEGIN');
+        await cursorHolder.query(
+          'SELECT singleton FROM omnis.mission_event_clock WHERE singleton=true FOR UPDATE',
+        );
+        const waitStarted = performance.now();
+        blockedTask = store.createTask({
+          title: 'Controlled cursor lock wait',
+          detail: 'Measure a bounded known wait on the serialized event cursor.',
+        });
+        const deadline = Date.now() + 3_000;
+        let observedWaiter = false;
+        while (Date.now() < deadline && !observedWaiter) {
+          const waiting = await adminPool!.query<{ waiting: boolean }>(`
+            SELECT EXISTS (
+              SELECT 1 FROM pg_stat_activity
+               WHERE usename='omnis_runtime' AND state='active'
+                 AND wait_event_type='Lock' AND query LIKE '%omnis.create_task%'
+            ) AS waiting
+          `);
+          observedWaiter = waiting.rows[0]?.waiting === true;
+          if (!observedWaiter) await delay(5);
+        }
+        assert.equal(observedWaiter, true, 'a runtime writer waits on the locked cursor row');
+        await delay(25);
+        await cursorHolder.query('COMMIT');
+        await blockedTask;
+        controlledCursorWaitMs = performance.now() - waitStarted;
+        assert.ok(
+          controlledCursorWaitMs < 500,
+          `controlled cursor lock wait plus transaction completion=${controlledCursorWaitMs.toFixed(2)}ms exceeds 500ms`,
+        );
+      } finally {
+        await cursorHolder.query('ROLLBACK').catch(() => undefined);
+        cursorHolder.release();
+        await blockedTask?.catch(() => undefined);
+      }
+      console.info(
+        `[mission-event cursor wait] controlledWaitAndCommitUpperBound=${controlledCursorWaitMs.toFixed(2)}ms`,
+      );
+      const mixedStart = performance.now();
+      const mixedTaskWrites = Promise.all(
+        Array.from({ length: 16 }, (_, index) =>
+          store.createTask({
+            title: `Mixed workload task ${index + 1}`,
+            detail: 'Concurrent task writes alongside persisted run lifecycle events.',
+          }),
+        ),
+      );
+      const mixedRunLifecycle = (async () => {
+        for (let index = 0; index < 4; index += 1) {
+          const mixedTask = await store.createTask({
+            title: `Mixed workload run ${index + 1}`,
+            detail: 'Admit, start, and complete a synthetic run under task-event contention.',
+          });
+          const mixedRun = await admit(
+            mixedTask.id,
+            `mission-lane-mixed-${randomUUID()}`,
+            async () => `mission-lane-mixed-job-${index}`,
+          );
+          const execution = await store.beginExecution(
+            mixedRun.run.id,
+            `mission-lane-mixed-worker-${index}`,
+            30,
+          );
+          assert.equal(execution.started, true);
+          await store.completeRun(
+            mixedRun.run.id,
+            `mission-lane-mixed-worker-${index}`,
+            execution.generation,
+            'Synthetic mixed-load completion.',
+          );
+        }
+      })();
+      await Promise.all([mixedTaskWrites, mixedRunLifecycle]);
+      const mixedDuration = performance.now() - mixedStart;
+      assert.ok(
+        mixedDuration < 10_000,
+        `mixed task/run workload took ${mixedDuration.toFixed(2)}ms`,
+      );
+      console.info(
+        `[mission-event mixed workload] concurrentTaskWrites=20 completedRunLifecycles=4 total=${mixedDuration.toFixed(2)}ms`,
+      );
+      const globalHistory = await eventStore.history({ limit: 100 });
+      const allGlobalEvents = [...globalHistory.events];
+      let olderCursor = globalHistory.page.olderCursor;
+      while (olderCursor) {
+        const olderPage = await eventStore.history({ limit: 100, before: olderCursor });
+        allGlobalEvents.unshift(...olderPage.events);
+        olderCursor = olderPage.page.olderCursor;
+      }
+      const globalSequences = allGlobalEvents.map((event) => BigInt(event.seq));
+      assert.ok(
+        globalSequences.every((sequence, index) =>
+          index === 0 ? sequence === 1n : sequence === globalSequences[index - 1]! + 1n,
+        ),
+        'committed global event cursors remain gap-free after rollback and parallel writers.',
+      );
+      page = await eventStore.history({ limit: 100 });
+      const sequences = page.events.map((event) => BigInt(event.seq));
+      assert.ok(
+        sequences.every((sequence, index) => index === 0 || sequence > sequences[index - 1]!),
+      );
     });
   },
 );

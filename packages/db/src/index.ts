@@ -29,3 +29,4 @@ export type {
 } from './authorization-store.ts';
 export type { DurableEvent, EnqueueRun, StoreErrorCode } from './run-store.ts';
 export type { PgBossTransaction, PgTransaction } from './database.ts';
+export { PostgresMissionEventStore, MissionEventStoreError } from './mission-event-store.ts';

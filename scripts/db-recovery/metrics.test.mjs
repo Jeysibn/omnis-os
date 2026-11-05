@@ -9,7 +9,16 @@ const safeSnapshot = {
     '0015_project_management',
     '0016_project_lifecycle',
     '0017_task_project_admission',
+    '0021_mission_lane_events',
   ],
+  missionEvents: 0,
+  missionEventStorageBytes: '8192',
+  missionEventClock: {
+    feedEpoch: '11111111-1111-4111-8111-111111111111',
+    lastSeq: '0',
+    historyStartedAt: '2026-11-06T00:00:00.000Z',
+    historyStartSeq: '1',
+  },
   agentManagementCounts: {
     departments: 0,
     agents: 0,
@@ -32,6 +41,7 @@ const safeSnapshot = {
     projectManagementIdempotency: 'd41d8cd98f00b204e9800998ecf8427e',
     taskProjectManagementAudit: 'd41d8cd98f00b204e9800998ecf8427e',
     taskProjectManagementIdempotency: 'd41d8cd98f00b204e9800998ecf8427e',
+    missionEvents: 'd41d8cd98f00b204e9800998ecf8427e',
   },
   syntheticOnly: true,
   sequenceInvariants: true,
@@ -120,6 +130,22 @@ describe('database backup consistency policy', () => {
     );
   });
 
+  it('requires Mission Lane cutover, cursor, payload count, and storage metrics', () => {
+    assert.doesNotThrow(() => assertValidMetrics(safeSnapshot));
+    assert.throws(() =>
+      assertValidMetrics({
+        ...safeSnapshot,
+        missionEventClock: { ...safeSnapshot.missionEventClock, lastSeq: '1' },
+      }),
+    );
+    assert.throws(() =>
+      assertValidMetrics({
+        ...safeSnapshot,
+        recordFingerprints: { ...safeSnapshot.recordFingerprints, missionEvents: 'bad' },
+      }),
+    );
+  });
+
   it('detects changed agent lifecycle records after restore', () => {
     const source = {
       ...safeSnapshot,
@@ -140,5 +166,35 @@ describe('database backup consistency policy', () => {
       agentManagementCounts: { ...source.agentManagementCounts, agents: 1 },
     };
     assert.equal(metricsMatch(source, restored), false);
+  });
+
+  it('detects changed Mission Lane rows or cutover cursor after restore', () => {
+    const source = {
+      ...safeSnapshot,
+      tasks: 0,
+      runs: 0,
+      events: 0,
+      idempotencyRecords: 0,
+      leasedRuns: 0,
+      runStatuses: {},
+      eventTypes: {},
+      sequenceInvariants: true,
+      syntheticOnly: true,
+      applicationQueryWorks: true,
+      unsafeRunStates: 0,
+    };
+    const changedRows = {
+      ...source,
+      recordFingerprints: { ...source.recordFingerprints, missionEvents: 'e'.repeat(32) },
+    };
+    const changedClock = {
+      ...source,
+      missionEventClock: {
+        ...source.missionEventClock,
+        feedEpoch: '22222222-2222-4222-8222-222222222222',
+      },
+    };
+    assert.equal(metricsMatch(source, changedRows), false);
+    assert.equal(metricsMatch(source, changedClock), false);
   });
 });
