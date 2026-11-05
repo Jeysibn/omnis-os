@@ -3,6 +3,7 @@ import {
   PostgresAuthorizationStore,
   PostgresProjectManagementStore,
   PostgresProjectMilestoneStore,
+  PostgresProjectEpicStore,
 } from '@omnis/db';
 import { chmod, lstat, mkdir, rm } from 'node:fs/promises';
 import path from 'node:path';
@@ -27,6 +28,11 @@ const store = new PostgresAuthorizationStore(pool, pool, {
     env.agentIdempotencyKeyVersion,
   ),
   projectMilestones: new PostgresProjectMilestoneStore(
+    pool,
+    env.agentIdempotencyKey,
+    env.agentIdempotencyKeyVersion,
+  ),
+  projectEpics: new PostgresProjectEpicStore(
     pool,
     env.agentIdempotencyKey,
     env.agentIdempotencyKeyVersion,

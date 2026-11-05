@@ -4,6 +4,8 @@
 
 Project is a container for a goal and delivery evidence. Core entities: `Project`, `Milestone`, `Epic`, `Task`, `Dependency`, `Deliverable`, `Project Team`, `Workspace`, `Project Knowledge Scope` and `Budget`.
 
+The backend V1 Epic contract is in `PROJECT_EPICS_API_V1.md`. Epics are owner-managed, project-scoped planning records; their lifecycle is not inferred from task or run activity. Epic-to-task and Epic-to-milestone associations are deferred.
+
 Each project has key, objective, scope/non-goals, priority, lifecycle (`proposed, active, paused, completed, archived`), attached repo refs, milestones, assigned agents, human approval policies, and evidence-backed progress. Progress is based on accepted tasks/milestones, not agent confidence.
 
 ### Planned views

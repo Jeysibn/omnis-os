@@ -94,7 +94,7 @@ Do not forward the app's `run_id` directly as a provider session ID without the 
 - **Skills:** `GET /skills`, `POST /skills/import`, `POST /skills/{id}/approve`, `PUT /agents/{id}/skill-grants`.
 - **MCP:** `GET /mcp/connections`, `POST /mcp/connections`, `POST /mcp/connections/{id}/probe`, `GET /mcp/connections/{id}/tools`, `PUT /mcp/grants/{id}`.
 - **Knowledge:** `GET /knowledge/search`, `POST /knowledge/proposals`, `POST /knowledge/proposals/{id}/review`, `GET /knowledge/documents/{id}`.
-- **Projects:** `GET /projects/{id}/milestones`, `POST /projects/{id}/epics`, `POST /tasks/{id}/dependencies`.
+- **Projects:** project-scoped milestone endpoints are documented in `PROJECT_MILESTONES_API_V1.md`; owner-managed Epic endpoints are documented in `PROJECT_EPICS_API_V1.md`. Task dependencies remain future work.
 - **Automations:** `GET/POST /automations`, `POST /automations/{id}/run`, `POST /automations/{id}/pause`, `POST /automations/{id}/resume`, `GET /automations/{id}/occurrences`.
 - **Cost:** `GET /usage/summary`, `GET /usage/events`, `GET /budgets`, `POST /budgets`.
 - **Office:** `GET /office/snapshot`, `GET /office/events`, `PATCH /office/placements/{id}` (director actions only).

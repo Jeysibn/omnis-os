@@ -25,6 +25,12 @@ import {
   MilestoneListQuerySchema,
   MilestoneSchema,
   MilestoneListResponseSchema,
+  CreateEpicSchema,
+  UpdateEpicSchema,
+  ArchiveEpicSchema,
+  EpicSchema,
+  EpicListQuerySchema,
+  EpicListResponseSchema,
   ProjectListResponseSchema,
   ProjectWorkspaceQuerySchema,
   ProjectWorkspaceResponseSchema,
@@ -32,6 +38,61 @@ import {
   RunSchema,
   RunStatusSchema,
 } from './index.ts';
+
+describe('project epic management contracts', () => {
+  const projectId = 'prj_0123456789abcdef0123456789abcdef';
+  const epic = {
+    id: 'epc_0123456789abcdef0123456789abcdef',
+    projectId,
+    title: 'Secure launch',
+    description: null,
+    status: 'planned',
+    revision: 1,
+    archivedAt: null,
+    createdAt: '2026-11-06T00:00:00.000Z',
+    updatedAt: '2026-11-06T00:00:00.000Z',
+  } as const;
+
+  it('validates strict bounded inputs, revision updates, and archive requests', () => {
+    assert.equal(CreateEpicSchema.safeParse({ title: 'Secure launch' }).success, true);
+    assert.equal(CreateEpicSchema.safeParse({ title: '  ' }).success, false);
+    assert.equal(CreateEpicSchema.safeParse({ title: 'x'.repeat(121) }).success, false);
+    assert.equal(CreateEpicSchema.safeParse({ title: 'Launch', taskId: 'tsk_1' }).success, false);
+    assert.equal(
+      UpdateEpicSchema.safeParse({ expectedRevision: 1, status: 'in_progress' }).success,
+      true,
+    );
+    assert.equal(UpdateEpicSchema.safeParse({ expectedRevision: 1 }).success, false);
+    assert.equal(
+      UpdateEpicSchema.safeParse({ expectedRevision: 1, status: 'archived' }).success,
+      false,
+    );
+    assert.equal(ArchiveEpicSchema.safeParse({ expectedRevision: 1 }).success, true);
+    assert.equal(ArchiveEpicSchema.safeParse({ expectedRevision: 0 }).success, false);
+  });
+
+  it('validates Epic lifecycle shape and bounded complete pagination', () => {
+    assert.equal(EpicSchema.safeParse(epic).success, true);
+    assert.equal(EpicSchema.safeParse({ ...epic, status: 'archived' }).success, false);
+    assert.deepEqual(EpicListQuerySchema.parse({ limit: '100' }), { limit: 100 });
+    assert.equal(EpicListQuerySchema.safeParse({ limit: '101' }).success, false);
+    assert.equal(EpicListQuerySchema.safeParse({ extra: true }).success, false);
+    assert.equal(
+      EpicListResponseSchema.safeParse({
+        epics: [epic],
+        page: { observedTotal: 1, complete: true, nextCursor: null },
+      }).success,
+      true,
+    );
+    assert.equal(
+      EpicListResponseSchema.safeParse({
+        epics: [epic],
+        page: { observedTotal: 1, complete: false, nextCursor: null },
+      }).success,
+      false,
+    );
+  });
+});
 
 describe('project workspace read contracts', () => {
   const project = {
