@@ -1335,6 +1335,215 @@ test.describe('retry budget survives transport replacement', () => {
     await expect(statusText(page)).toHaveText(EXHAUSTED_1);
   });
 
+  test.describe('cumulative disconnected time', () => {
+    // Fast-forwarding a minute of fake time is slow in a real browser; the clock is exact.
+    test.describe.configure({ timeout: 120_000 });
+    /** First failure, then silence: the disconnected interval runs on the clock alone. */
+    const stall = async (page: Page, id = 'run-a') => {
+      await fake.setHang(page, id, true);
+      await fake.setDown(page, id, true);
+      await fake.drop(page, id);
+    };
+    /** The server answers the stuck attempt: a connection opens at the current clock time. */
+    const reopen = async (page: Page, id = 'run-a') => {
+      await fake.setDown(page, id, false);
+      await fake.setHang(page, id, false);
+      await expect(statusText(page)).toHaveText(LIVE_1);
+    };
+    /** Transport drops again: an error, then silence. */
+    const redrop = async (page: Page, id = 'run-a') => {
+      await fake.setHang(page, id, true);
+      await fake.setDown(page, id, true);
+      await fake.drop(page, id);
+    };
+
+    test('a short successful reconnect does not charge connected time to the allowance', async ({
+      page,
+    }) => {
+      await openFrozen(page, [alpha]);
+      await expect(statusText(page)).toHaveText(LIVE_1);
+      await stall(page); // failure 1: disconnected interval starts
+      await tick(page, 20_000); // 20 s disconnected
+      await expect(statusText(page)).toHaveText(INTERRUPTED);
+      await reopen(page);
+      await tick(page, 5_000); // connected for 5 s: below the 10 s stable threshold
+      await expect(statusText(page)).toHaveText(LIVE_1); // not exhausted while connected
+      await redrop(page); // failure 2
+      expect(await errorsOf(page, 'run-a')).toBe(2);
+      await tick(page, 8_999); // 20 s + 8.999 s = 28.999 s cumulative
+      await expect(statusText(page)).toHaveText(INTERRUPTED);
+      await tick(page, 1); // 29.000 s
+      await expect(statusText(page)).toHaveText(INTERRUPTED);
+      await tick(page, 999); // 29.999 s
+      await expect(statusText(page)).toHaveText(INTERRUPTED);
+      await tick(page, 1); // 30.000 s cumulative
+      await expect(statusText(page)).toHaveText(EXHAUSTED_1);
+    });
+
+    test('exact boundary across intervals: 29,999 ms is alive, 30,000 ms is exhausted', async ({
+      page,
+    }) => {
+      await openFrozen(page, [alpha]);
+      await expect(statusText(page)).toHaveText(LIVE_1);
+      await stall(page);
+      await tick(page, 15_000);
+      await reopen(page);
+      await tick(page, 3_000);
+      await redrop(page);
+      await tick(page, 14_999); // 15,000 + 14,999
+      await expect(statusText(page)).toHaveText(INTERRUPTED);
+      await tick(page, 1);
+      await expect(statusText(page)).toHaveText(EXHAUSTED_1);
+    });
+
+    test('rapid transitions at one instant add no time and do not double-count', async ({
+      page,
+    }) => {
+      await openFrozen(page, [alpha]);
+      await expect(statusText(page)).toHaveText(LIVE_1);
+      await stall(page);
+      await tick(page, 10_000);
+      for (let i = 0; i < 3; i++) {
+        await reopen(page); // open and drop again with no time passing: 0 ms charged
+        await redrop(page);
+      }
+      expect(await errorsOf(page, 'run-a')).toBe(4); // four failures: one more is still allowed
+      await tick(page, 19_999); // 10,000 + 19,999
+      await expect(statusText(page)).toHaveText(INTERRUPTED);
+      await tick(page, 1);
+      await expect(statusText(page)).toHaveText(EXHAUSTED_1);
+    });
+
+    test('several short openings exclude connected time and leave the failure count to count', async ({
+      page,
+    }) => {
+      await openFrozen(page, [alpha]);
+      await expect(statusText(page)).toHaveText(LIVE_1);
+      await stall(page); // failure 1
+      for (let cycle = 2; cycle <= 4; cycle++) {
+        await tick(page, 9_000); // 9 s down
+        await reopen(page);
+        await tick(page, 3_000); // 3 s up: not stable, no progress
+        await redrop(page); // failure `cycle`
+        expect(await errorsOf(page, 'run-a')).toBe(cycle);
+      }
+      // 27 s disconnected after three completed outages; wall clock is already 36 s.
+      await tick(page, 2_999);
+      await expect(statusText(page)).toHaveText(INTERRUPTED);
+      await tick(page, 1); // the 4th failure is not the limit: cumulative time is
+      await expect(statusText(page)).toHaveText(EXHAUSTED_1);
+      expect(await errorsOf(page, 'run-a')).toBe(4);
+    });
+
+    test('short openings do not reset the failure count: the fifth failure still exhausts first', async ({
+      page,
+    }) => {
+      await openFrozen(page, [alpha]);
+      await expect(statusText(page)).toHaveText(LIVE_1);
+      await stall(page);
+      for (let cycle = 2; cycle <= 4; cycle++) {
+        await tick(page, 1_000);
+        await reopen(page);
+        await tick(page, 5_000);
+        await redrop(page);
+      }
+      await tick(page, 1_000);
+      await reopen(page);
+      await tick(page, 5_000);
+      await fake.drop(page, 'run-a'); // the fifth failure, with only 4 s disconnected
+      await expect(statusText(page)).toHaveText(EXHAUSTED_1);
+      expect(await errorsOf(page, 'run-a')).toBe(5);
+    });
+
+    test('ten continuous seconds open reset the allowance; 9,999 ms do not', async ({ page }) => {
+      await openFrozen(page, [alpha]);
+      await expect(statusText(page)).toHaveText(LIVE_1);
+      await stall(page);
+      await tick(page, 20_000);
+      await reopen(page);
+      await tick(page, 10_000); // stable: the budget, including the 20 s, is cleared
+      await redrop(page);
+      await tick(page, 29_999); // a fresh 30 s allowance
+      await expect(statusText(page)).toHaveText(INTERRUPTED);
+      await tick(page, 1);
+      await expect(statusText(page)).toHaveText(EXHAUSTED_1);
+    });
+
+    test('9,999 ms open is not stable: the spent allowance carries over', async ({ page }) => {
+      await openFrozen(page, [alpha]);
+      await expect(statusText(page)).toHaveText(LIVE_1);
+      await stall(page);
+      await tick(page, 20_000);
+      await reopen(page);
+      await tick(page, 9_999);
+      await redrop(page);
+      await tick(page, 9_999); // 20,000 + 9,999
+      await expect(statusText(page)).toHaveText(INTERRUPTED);
+      await tick(page, 1);
+      await expect(statusText(page)).toHaveText(EXHAUSTED_1);
+    });
+
+    test('a new validated event clears the spent allowance', async ({ page }) => {
+      await openFrozen(page, [alpha]);
+      await expect(statusText(page)).toHaveText(LIVE_1);
+      await stall(page);
+      await tick(page, 25_000);
+      await reopen(page);
+      await fake.publish(page, 'run-a', runEvent('run-a', 3, 'run.stop_requested', min(8)));
+      await expect(nodesOf(page, 'run-a')).toHaveCount(3);
+      await redrop(page);
+      await tick(page, 29_999);
+      await expect(statusText(page)).toHaveText(INTERRUPTED);
+      await tick(page, 1);
+      await expect(statusText(page)).toHaveText(EXHAUSTED_1);
+    });
+
+    test('the hidden-tab pause keeps the cumulative total across a short opening', async ({
+      page,
+    }) => {
+      await openFrozen(page, [alpha]);
+      await expect(statusText(page)).toHaveText(LIVE_1);
+      await stall(page);
+      await tick(page, 10_000);
+      await reopen(page);
+      await tick(page, 4_000);
+      await redrop(page);
+      await tick(page, 10_000); // 20 s cumulative
+      await setHidden(page, true);
+      await tick(page, 600_000);
+      await setHidden(page, false);
+      await expect(statusText(page)).toHaveText(INTERRUPTED);
+      await fake.setHang(page, 'run-a', true); // the resumed transport also stays silent
+      await tick(page, 9_999);
+      await expect(statusText(page)).toHaveText(INTERRUPTED);
+      await tick(page, 1);
+      await expect(statusText(page)).toHaveText(EXHAUSTED_1);
+    });
+
+    test('CLOSED retries use the remaining cumulative allowance', async ({ page }) => {
+      await openFrozen(page, [alpha]);
+      await expect(statusText(page)).toHaveText(LIVE_1);
+      await fake.setHardFail(page, 'run-a', true);
+      await fake.setDown(page, 'run-a', true);
+      await fake.drop(page, 'run-a'); // failure 1, CLOSED: app retry in 1 s
+      await tick(page, 1_000); // transport re-created (its attempt is one tick away)
+      await fake.setHardFail(page, 'run-a', false);
+      await fake.setDown(page, 'run-a', false);
+      await tick(page, 1); // opens: 1,001 ms disconnected
+      await expect(statusText(page)).toHaveText(LIVE_1);
+      await tick(page, 5_000);
+      await fake.setHardFail(page, 'run-a', true);
+      await fake.setDown(page, 'run-a', true);
+      await fake.drop(page, 'run-a'); // failure 2, CLOSED: backoff 2 s
+      await fake.setHardFail(page, 'run-a', false);
+      await fake.setHang(page, 'run-a', true); // the re-created transport stays silent
+      await tick(page, 28_998); // 1,001 + 28,998 = 29,999
+      await expect(statusText(page)).toHaveText(INTERRUPTED);
+      await tick(page, 1);
+      await expect(statusText(page)).toHaveText(EXHAUSTED_1);
+    });
+  });
+
   test('app-managed CLOSED retries back off 1/2/4/8 s and then stop', async ({ page }) => {
     test.setTimeout(60_000);
     await openFrozen(page, [alpha]);

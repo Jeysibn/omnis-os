@@ -21,7 +21,10 @@ export type FakeServer = {
   setDown(runId: string, down: boolean): void;
   /** While closing, failures end in CLOSED (like a non-200 response) instead of CONNECTING. */
   setHardFail(runId: string, hard: boolean): void;
-  /** While hanging, connection attempts neither open nor error (a stuck CONNECTING). */
+  /**
+   * While hanging, connection attempts neither open nor error (a stuck CONNECTING). Turning it
+   * off completes every stuck or scheduled attempt synchronously, at the current clock time.
+   */
   setHang(runId: string, hang: boolean): void;
   stats(): FakeStats;
 };
@@ -55,6 +58,8 @@ export async function installFakeEventSource(
       const hard = new Set<string>();
       const hang = new Set<string>();
       const live = new Map<string, Set<Fake>>();
+      const retrying = new Map<string, Set<Fake>>();
+      const hung = new Map<string, Set<Fake>>();
       const stats: FakeStats = {
         created: 0,
         closed: 0,
@@ -110,6 +115,9 @@ export async function installFakeEventSource(
           } else {
             this.readyState = 0;
             this.timer = setTimeout(() => this.attempt(true), retry);
+            let waiting = retrying.get(this.runId);
+            if (!waiting) retrying.set(this.runId, (waiting = new Set()));
+            waiting.add(this);
           }
           this.onerror?.(new Event('error'));
         }
@@ -118,10 +126,17 @@ export async function installFakeEventSource(
         }
         attempt(reconnect = false) {
           if (this.readyState === 2) return;
+          retrying.get(this.runId)?.delete(this);
           if (reconnect) {
             (stats.reconnectIds[this.runId] ??= []).push(this.lastEventId);
           }
-          if (hang.has(this.runId)) return;
+          if (hang.has(this.runId)) {
+            let stuck = hung.get(this.runId);
+            if (!stuck) hung.set(this.runId, (stuck = new Set()));
+            stuck.add(this);
+            return;
+          }
+          hung.get(this.runId)?.delete(this);
           if (down.has(this.runId)) return this.fail();
           this.readyState = 1;
           let set = live.get(this.runId);
@@ -131,6 +146,10 @@ export async function installFakeEventSource(
           const after = this.lastEventId ? Number(this.lastEventId) : 0;
           for (const event of history.get(this.runId) ?? [])
             if (event.sequence > after) frame(this, event);
+        }
+        attemptNow() {
+          if (this.timer) clearTimeout(this.timer);
+          this.attempt(true);
         }
         dropTransport() {
           if (this.readyState !== 1) return;
@@ -166,7 +185,15 @@ export async function installFakeEventSource(
         },
         setHang(runId, value) {
           if (value) hang.add(runId);
-          else hang.delete(runId);
+          else {
+            hang.delete(runId);
+            const stuck = [...(hung.get(runId) ?? [])];
+            hung.delete(runId);
+            for (const instance of stuck) instance.attempt();
+            // a retry that was already scheduled is answered now as well
+            const waiting = [...(retrying.get(runId) ?? [])];
+            for (const instance of waiting) instance.attemptNow();
+          }
         },
         setHardFail(runId, value) {
           if (value) hard.add(runId);

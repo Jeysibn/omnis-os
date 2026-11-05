@@ -26,9 +26,9 @@ const EVENT_TYPES: RunEvent['type'][] = [
  * A "failure" is any error event. The budget resets only on documented progress: a new,
  * validated event, or a connection that stayed open for STABLE_OPEN_MS continuously. Visibility
  * changes, followed-set changes, transport replacement and rerenders never reset it.
- * Exceeding MAX_FAILURES, or staying disconnected for FAILURE_WINDOW_MS (counted from the first
- * failure; time spent in a hidden tab is not counted), closes the stream for good until the
- * user presses Refresh.
+ * Exceeding MAX_FAILURES, or accumulating FAILURE_WINDOW_MS of disconnected time, closes the
+ * stream for good until the user presses Refresh. Disconnected time is cumulative: time while a
+ * transport is genuinely open, and time in a hidden tab, is not charged to the allowance.
  */
 export const MAX_FAILURES = 4;
 export const FAILURE_WINDOW_MS = 30_000;
@@ -43,8 +43,8 @@ const BACKOFF_MAX_MS = 8000;
  */
 type Recovery = {
   failures: number;
-  firstFailureAt: number; // wall-clock ms of the first unrecovered failure; 0 = none
-  spentMs: number; // disconnected time already used when the transport was paused
+  downSince: number; // start of the active disconnected interval; 0 = not disconnected
+  spentMs: number; // disconnected time accumulated by intervals that have ended
   openedAt: number; // when the current transport opened; 0 = not open
   maxSequence: number; // highest validated sequence; replays below it are not progress
   progressed: boolean;
@@ -62,13 +62,19 @@ type Handle = {
 
 const newRecovery = (): Recovery => ({
   failures: 0,
-  firstFailureAt: 0,
+  downSince: 0,
   spentMs: 0,
   openedAt: 0,
   maxSequence: 0,
   progressed: false,
   status: 'active',
 });
+
+/** Closes the active disconnected interval (if any) into the accumulated total. */
+const settle = (record: Recovery, now: number) => {
+  if (record.downSince) record.spentMs += now - record.downSince;
+  record.downSince = 0;
+};
 
 const newHandle = (health: StreamHealth): Handle => ({
   source: null,
@@ -154,7 +160,7 @@ export function useMissionStream(
       if (!handle) return;
       const record = recoveries.current.get(runId);
       if (record) {
-        record.spentMs = record.firstFailureAt ? Date.now() - record.firstFailureAt : 0;
+        settle(record, Date.now());
         record.openedAt = 0;
       }
       handle.closed = true;
@@ -183,8 +189,8 @@ export function useMissionStream(
   const armDeadline = useCallback(
     (runId: string, handle: Handle, now: number) => {
       const record = recoveryFor(runId);
-      if (handle.deadlineTimer || !record.firstFailureAt) return;
-      const remaining = FAILURE_WINDOW_MS - (now - record.firstFailureAt);
+      if (handle.deadlineTimer || !record.downSince) return;
+      const remaining = FAILURE_WINDOW_MS - record.spentMs - (now - record.downSince);
       handle.deadlineTimer = setTimeout(() => exhaust(runId, handle), Math.max(0, remaining));
     },
     [exhaust, recoveryFor],
@@ -208,7 +214,9 @@ export function useMissionStream(
         if (!current()) return;
         if (handle.deadlineTimer) clearTimeout(handle.deadlineTimer);
         handle.deadlineTimer = null;
-        record.openedAt = Date.now();
+        const now = Date.now();
+        settle(record, now); // connected time is not charged to the disconnected allowance
+        record.openedAt = now;
         setRunHealth(runId, handle, 'open');
       };
 
@@ -232,7 +240,8 @@ export function useMissionStream(
           if (isTerminalEvent(event.type)) {
             stopTransport(handle);
             record.failures = 0;
-            record.firstFailureAt = 0;
+            record.downSince = 0;
+            record.spentMs = 0;
             setRunHealth(runId, handle, 'ended');
             const snapshot = runsRef.current.find((run) => run.id === runId);
             if (snapshot && isUnfinished(snapshot.status) && !refreshedFor.current.has(runId)) {
@@ -256,14 +265,15 @@ export function useMissionStream(
         const stable = record.openedAt > 0 && now - record.openedAt >= STABLE_OPEN_MS;
         if (record.progressed || stable) {
           record.failures = 0;
-          record.firstFailureAt = 0;
+          record.downSince = 0;
           record.spentMs = 0;
         }
         record.progressed = false;
         record.openedAt = 0;
         record.failures += 1;
-        if (!record.firstFailureAt) record.firstFailureAt = now;
-        if (record.failures > MAX_FAILURES || now - record.firstFailureAt >= FAILURE_WINDOW_MS) {
+        if (!record.downSince) record.downSince = now;
+        const spent = record.spentMs + (now - record.downSince);
+        if (record.failures > MAX_FAILURES || spent >= FAILURE_WINDOW_MS) {
           exhaust(runId, handle);
           return;
         }
@@ -287,7 +297,7 @@ export function useMissionStream(
   const suspend = useCallback(
     (runId: string, handle: Handle) => {
       const record = recoveryFor(runId);
-      record.spentMs = record.firstFailureAt ? Date.now() - record.firstFailureAt : 0;
+      settle(record, Date.now());
       record.openedAt = 0; // a stable open must be continuous
       stopTransport(handle);
       setRunHealth(runId, handle, 'suspended');
@@ -304,10 +314,11 @@ export function useMissionStream(
         return;
       }
       const now = Date.now();
-      if (record.firstFailureAt) record.firstFailureAt = now - record.spentMs;
+      // An unrecovered failure means the stream is still disconnected: charge from now.
+      if (record.failures > 0 && !record.downSince) record.downSince = now;
       setRunHealth(runId, handle, record.failures > 0 ? 'reconnecting' : 'connecting');
       open(runId, handle);
-      if (record.firstFailureAt) armDeadline(runId, handle, now);
+      if (record.downSince) armDeadline(runId, handle, now);
     },
     [armDeadline, open, recoveryFor, setRunHealth],
   );
@@ -345,9 +356,10 @@ export function useMissionStream(
       setRunHealth(runId, handle, handle.health);
       if (record.status !== 'active') continue; // stays closed until Refresh
       if (hidden) continue;
-      if (record.firstFailureAt) record.firstFailureAt = Date.now() - record.spentMs;
+      const now = Date.now();
+      if (record.failures > 0 && !record.downSince) record.downSince = now;
       open(runId, handle);
-      if (record.firstFailureAt) armDeadline(runId, handle, Date.now());
+      if (record.downSince) armDeadline(runId, handle, now);
     }
     // Bound memory: forget recovery state only for runs that left the run list entirely.
     if (enabled) {
