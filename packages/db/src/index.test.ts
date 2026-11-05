@@ -724,15 +724,15 @@ const postgresSuite = describe(
       assert.equal(secondPage.page.observedTotal, 2);
       assert.equal(secondPage.page.complete, true);
       assert.notEqual(firstPage.milestones[0]?.id, secondPage.milestones[0]?.id);
-      await assert.rejects(
-        milestones.list(second.id, { cursor: firstPage.page.nextCursor! }),
-        (error: unknown) => error instanceof MilestoneStoreError && error.code === 'invalid_cursor',
-      );
-      assert.equal((await milestones.get(project.id, first.id))?.id, first.id);
       const otherProject = await projects.create(
         { key: 'MILESTONE-OTHER', name: 'Other project', objective: 'Test project scoping.' },
         randomUUID(),
       );
+      await assert.rejects(
+        milestones.list(otherProject.id, { cursor: firstPage.page.nextCursor! }),
+        (error: unknown) => error instanceof MilestoneStoreError && error.code === 'invalid_cursor',
+      );
+      assert.equal((await milestones.get(project.id, first.id))?.id, first.id);
       assert.equal(await milestones.get(otherProject.id, first.id), undefined);
 
       const started = await milestones.update(
