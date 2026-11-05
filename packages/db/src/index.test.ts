@@ -3918,20 +3918,20 @@ const postgresSuite = describe(
           await consumer.query('BEGIN');
           const revoke = revoker.revoke(grant.id, 'owner');
           await waitForLockWait(adminPool!, 'omnis-g4-direct-revoke-wins-revoker');
-          const consume = consumer.query('SELECT omnis.admit_run($1,$2,$3,$4,$5) AS result', [
-            task.id,
-            grant.id,
-            idempotencyKey,
-            JSON.stringify({ taskId: task.id, authorizationId: grant.id }),
-            randomUUID(),
-          ]);
+          const consumeRejected = assert.rejects(
+            consumer.query('SELECT omnis.admit_run($1,$2,$3,$4,$5) AS result', [
+              task.id,
+              grant.id,
+              idempotencyKey,
+              JSON.stringify({ taskId: task.id, authorizationId: grant.id }),
+              randomUUID(),
+            ]),
+            (error: unknown) => (error as { code?: string }).code === 'P2004',
+          );
           await waitForLockWait(adminPool!, 'omnis-g4-direct-revoke-wins-consumer');
           await blocker.query('SELECT pg_advisory_unlock($1)', [gateKey]);
           const revoked = await revoke;
-          await assert.rejects(
-            consume,
-            (error: unknown) => (error as { code?: string }).code === 'P2004',
-          );
+          await consumeRejected;
           assert.equal(revoked.status, 'revoked');
           await consumer.query('ROLLBACK');
           assert.equal(
@@ -5141,23 +5141,22 @@ const postgresSuite = describe(
         await forgedMarkerClient.query(
           "SELECT set_config('omnis.mission_event_clock_locked','true',true)",
         );
-        await forgedMarkerClient.query(
-          "SELECT omnis.create_task('Forged marker','The custom GUC must not bypass the actual cursor row lock.',NULL,NULL,NULL)",
+        const forgedTask = await forgedMarkerClient.query<{ task: { id: string } }>(
+          "SELECT to_jsonb(omnis.create_task('Forged marker','The custom GUC must not bypass the actual cursor row lock.',NULL,NULL,NULL)) AS task",
         );
+        const forgedTaskId = forgedTask.rows[0]?.task.id;
+        assert.ok(forgedTaskId);
         await forgedMarkerClient.query('COMMIT');
+        assert.deepEqual(
+          (await eventStore.history({ taskId: forgedTaskId })).events.map((event) => event.type),
+          ['task.created'],
+        );
       } catch (error) {
         await forgedMarkerClient.query('ROLLBACK').catch(() => undefined);
         throw error;
       } finally {
         forgedMarkerClient.release();
       }
-      assert.deepEqual(
-        (await eventStore.history({ taskId: 'task-forged-marker' })).events.map(
-          (event) => event.type,
-        ),
-        ['task.created'],
-      );
-
       const noOp = await store.setTaskProject(
         task.id,
         { projectId: project.id, expectedAssociationRevision: 1 },
