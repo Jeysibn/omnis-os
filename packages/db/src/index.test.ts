@@ -593,8 +593,8 @@ const postgresSuite = describe(
           "INSERT INTO omnis.runs (id, task_id, task_title) VALUES ('run-direct-archived', $1, $2)",
           [rejectedTask.id, rejectedTask.title],
         ),
-        (error: unknown) => (error as { code?: string }).code === 'P2001',
-        'direct runtime run INSERT must remain guarded by the database trigger',
+        (error: unknown) => (error as { code?: string }).code === '42501',
+        'runtime run creation must go through the constrained admission function',
       );
 
       const legacyTask = await store.createTask({
@@ -3758,11 +3758,7 @@ const postgresSuite = describe(
         const startedAt = Date.now();
         await assert.rejects(
           store.admitRun(task.id, key('admission-key-held'), grant.id, async () => 'job'),
-          (error: unknown) =>
-            typeof error === 'object' &&
-            error !== null &&
-            'code' in error &&
-            error.code === '55P03',
+          (error: unknown) => error instanceof StoreError && error.code === 'concurrency_limit',
         );
         assert.ok(
           Date.now() - startedAt >= 2_500 && Date.now() - startedAt < 5_000,
@@ -3815,11 +3811,7 @@ const postgresSuite = describe(
         const startedAt = Date.now();
         await assert.rejects(
           store.admitRun(task.id, key('admission-xact-held'), grant.id, async () => 'job'),
-          (error: unknown) =>
-            typeof error === 'object' &&
-            error !== null &&
-            'code' in error &&
-            error.code === '55P03',
+          (error: unknown) => error instanceof StoreError && error.code === 'concurrency_limit',
         );
         assert.ok(Date.now() - startedAt >= 2_500 && Date.now() - startedAt < 5_000);
         assert.equal((await authorizations.get(grant.id))?.consumedRunId, null);
@@ -3829,7 +3821,7 @@ const postgresSuite = describe(
       }
     });
 
-    it('serializes direct runtime consumption with revocation at the SQL function boundary', async () => {
+    it('serializes trusted run admission with revocation at the SQL function boundary', async () => {
       const iterations = 3;
       for (let iteration = 0; iteration < iterations; iteration += 1) {
         const task = await store.createTask({
@@ -3838,7 +3830,7 @@ const postgresSuite = describe(
         });
         const grant = await authorizations.request(task.id, 'owner');
         await authorizations.decide(grant.id, 'owner', 'approve');
-        const runId = `run-direct-consume-${nextKey}-${iteration}`;
+        const idempotencyKey = `direct-consume-${nextKey}-${iteration}-${randomUUID()}`;
         const runtimeDirectPool = createPool({
           connectionString: databaseUrl!,
           application_name: 'omnis-g4-direct-consume-wins',
@@ -3851,15 +3843,18 @@ const postgresSuite = describe(
         const consumer = await runtimeDirectPool.connect();
         try {
           await consumer.query('BEGIN');
-          await consumer.query(
-            'INSERT INTO omnis.runs (id, task_id, task_title) VALUES ($1,$2,$3)',
-            [runId, task.id, task.title],
-          );
-          const consumed = await consumer.query<{ allowed: boolean }>(
-            'SELECT omnis.consume_run_authorization($1,$2,$3,$4) AS allowed',
-            [grant.id, task.id, runId, grant.correlationId],
-          );
-          assert.equal(consumed.rows[0]?.allowed, true);
+          const admission = await consumer.query<{
+            result: { created: boolean; run: { id: string } };
+          }>('SELECT omnis.admit_run($1,$2,$3,$4,$5) AS result', [
+            task.id,
+            grant.id,
+            idempotencyKey,
+            JSON.stringify({ taskId: task.id, authorizationId: grant.id }),
+            randomUUID(),
+          ]);
+          const runId = admission.rows[0]?.result.run.id;
+          assert.ok(runId);
+          assert.equal(admission.rows[0]?.result.created, true);
           const revoke = revoker.revoke(grant.id, 'owner');
           await waitForLockWait(adminPool!, 'omnis-g4-direct-consume-wins-revoker');
           await consumer.query('COMMIT');
@@ -3885,7 +3880,7 @@ const postgresSuite = describe(
         });
         const grant = await authorizations.request(task.id, 'owner');
         await authorizations.decide(grant.id, 'owner', 'approve');
-        const runId = `run-direct-revoke-${nextKey}-${iteration}`;
+        const idempotencyKey = `direct-revoke-${nextKey}-${iteration}-${randomUUID()}`;
         const gateKey = 7046390999912;
         const blocker = await adminPool!.connect();
         const runtimeDirectPool = createPool({
@@ -3915,25 +3910,27 @@ const postgresSuite = describe(
               FOR EACH ROW EXECUTE FUNCTION omnis.g4_direct_revoke_audit_gate();
           `);
           await consumer.query('BEGIN');
-          await consumer.query(
-            'INSERT INTO omnis.runs (id, task_id, task_title) VALUES ($1,$2,$3)',
-            [runId, task.id, task.title],
-          );
           const revoke = revoker.revoke(grant.id, 'owner');
           await waitForLockWait(adminPool!, 'omnis-g4-direct-revoke-wins-revoker');
-          const consume = consumer.query<{ allowed: boolean }>(
-            'SELECT omnis.consume_run_authorization($1,$2,$3,$4) AS allowed',
-            [grant.id, task.id, runId, grant.correlationId],
-          );
+          const consume = consumer.query('SELECT omnis.admit_run($1,$2,$3,$4,$5) AS result', [
+            task.id,
+            grant.id,
+            idempotencyKey,
+            JSON.stringify({ taskId: task.id, authorizationId: grant.id }),
+            randomUUID(),
+          ]);
           await waitForLockWait(adminPool!, 'omnis-g4-direct-revoke-wins-consumer');
           await blocker.query('SELECT pg_advisory_unlock($1)', [gateKey]);
           const revoked = await revoke;
-          const consumed = await consume;
+          await assert.rejects(
+            consume,
+            (error: unknown) => (error as { code?: string }).code === 'P2004',
+          );
           assert.equal(revoked.status, 'revoked');
-          assert.equal(consumed.rows[0]?.allowed, false);
           await consumer.query('ROLLBACK');
           assert.equal(
-            (await adminPool!.query('SELECT 1 FROM omnis.runs WHERE id=$1', [runId])).rowCount,
+            (await adminPool!.query('SELECT 1 FROM omnis.runs WHERE task_id=$1', [task.id]))
+              .rowCount,
             0,
           );
           assert.equal((await authorizations.get(grant.id))?.consumedRunId, null);
@@ -4982,6 +4979,13 @@ const postgresSuite = describe(
       const admitted = await admit(task.id, key('terminal-queue-stop'), async () => 'job');
       await store.beginExecution(admitted.run.id, 'worker-old', 30);
       await store.requestStop(admitted.run.id);
+      // A terminal queue record does not prove an executor has stopped while
+      // its database lease is still valid. Reconciliation may acknowledge the
+      // stop only after the lease expires.
+      await pool!.query(
+        "UPDATE omnis.runs SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
+        [admitted.run.id],
+      );
 
       const recovered = await store.cancelRunAfterQueueTerminal(admitted.run.id);
       assert.equal(recovered?.run.status, 'cancelled');

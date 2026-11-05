@@ -160,11 +160,15 @@ describe('durable mock run coordinator', () => {
     assert.equal(admissions, 0);
   });
 
-  it('surfaces database admission lock timeouts as an explicit retryable 503', async () => {
+  it('surfaces typed database admission contention as an explicit retryable 503', async () => {
     const coordinator = testCoordinator(
       {
         admitRun: async () => {
-          throw Object.assign(new Error('lock timeout'), { code: '55P03' });
+          throw new StoreError(
+            'concurrency_limit',
+            'Task admission is busy; retry the request.',
+            409,
+          );
         },
       } as unknown as PostgresRunStore,
       { send: async () => 'job', findJobs: async () => [] },

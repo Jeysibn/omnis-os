@@ -31,9 +31,6 @@ const adminPool = createPool({
 const suffix = randomUUID().replaceAll('-', '');
 const taskId = `task-queue-guard-${suffix}`;
 const runId = `run-${Date.now()}${Number.parseInt(suffix.slice(0, 4), 16)}`;
-let taskSeeded = false;
-let runSeeded = false;
-
 try {
   await assertNoExecutableWork(adminPool);
 
@@ -42,14 +39,11 @@ try {
      VALUES ($1, 'Synthetic queue guard task', 'Must never execute.', 'open')`,
     [taskId],
   );
-  taskSeeded = true;
   await adminPool.query('INSERT INTO omnis.runs (id, task_id, task_title) VALUES ($1, $2, $3)', [
     runId,
     taskId,
     'Synthetic queue guard task',
   ]);
-  runSeeded = true;
-
   await assert.rejects(
     startMockServices({
       origin: 'http://127.0.0.1:5174',
@@ -62,12 +56,10 @@ try {
   const row = await adminPool.query('SELECT status FROM omnis.runs WHERE id = $1', [runId]);
   assert.equal(row.rows[0]?.status, 'queued');
 } finally {
-  if (runSeeded) {
-    await adminPool.query('DELETE FROM omnis.runs WHERE id = $1', [runId]);
-  }
-  if (taskSeeded) {
-    await adminPool.query('DELETE FROM omnis.tasks WHERE id = $1', [taskId]);
-  }
+  // The fixture's task/run lifecycle events are append-only and retain source
+  // references. Keep this synthetic fixture in the per-job disposable database;
+  // deleting its source rows would either violate history integrity or require
+  // bypassing the production immutability guard.
   await adminPool.end();
 }
 

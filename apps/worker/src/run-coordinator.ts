@@ -186,6 +186,13 @@ export class RunCoordinator {
           error.code === 'project_archived' ? 'project_archived' : 'admission_authorization_race',
         );
       }
+      if (error instanceof CoordinatorError && error.code === 'concurrency_limit') {
+        throw new CoordinatorError(
+          'admission_busy',
+          'Run admission is temporarily busy. Retry the request; no run was admitted.',
+          503,
+        );
+      }
       if (error && typeof error === 'object' && 'code' in error && error.code === '55P03') {
         throw new CoordinatorError(
           'admission_busy',

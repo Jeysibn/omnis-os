@@ -687,7 +687,7 @@ async function verifyPost0005ProvenanceUpgrade() {
       "SELECT id, length(checksum) AS checksum_length FROM omnis.schema_migrations WHERE id LIKE '00%' ORDER BY id",
     );
     assert.deepEqual(migrationRows.rows.at(-1), {
-      id: '0020_epic_task_association',
+      id: '0021_mission_lane_events',
       checksum_length: 64,
     });
   } finally {

@@ -597,11 +597,15 @@ BEGIN
       'id', page_event.id, 'seq', page_event.seq::text, 'type', page_event.event_type,
       'occurredAt', to_char(page_event.occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
       'taskId', page_event.task_id, 'projectId', page_event.project_id, 'runId', page_event.run_id,
-      'previousProjectId', page_event.previous_project_id, 'actor', page_event.actor,
+      'actor', page_event.actor,
       'origin', CASE page_event.origin_kind WHEN 'task_state' THEN jsonb_build_object('kind','task_state','synthetic',false)
         ELSE jsonb_build_object('kind','run_event','source','mock','synthetic',true) END,
       'payload', page_event.payload
-    ) ORDER BY page_event.seq ASC) FROM page_rows AS page_event), '[]'::jsonb),
+    ) || CASE page_event.event_type
+      WHEN 'task.project_assigned' THEN jsonb_build_object('previousProjectId', NULL)
+      WHEN 'task.project_unassigned' THEN jsonb_build_object('previousProjectId', page_event.previous_project_id)
+      WHEN 'task.project_reassigned' THEN jsonb_build_object('previousProjectId', page_event.previous_project_id)
+      ELSE '{}'::jsonb END ORDER BY page_event.seq ASC) FROM page_rows AS page_event), '[]'::jsonb),
     'oldestSeq', (SELECT min(seq)::text FROM page_rows)
   ) INTO v_result FROM metadata CROSS JOIN resource_check;
   RETURN v_result;
@@ -653,11 +657,15 @@ BEGIN
       'id', page_event.id, 'seq', page_event.seq::text, 'type', page_event.event_type,
       'occurredAt', to_char(page_event.occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
       'taskId', page_event.task_id, 'projectId', page_event.project_id, 'runId', page_event.run_id,
-      'previousProjectId', page_event.previous_project_id, 'actor', page_event.actor,
+      'actor', page_event.actor,
       'origin', CASE page_event.origin_kind WHEN 'task_state' THEN jsonb_build_object('kind','task_state','synthetic',false)
         ELSE jsonb_build_object('kind','run_event','source','mock','synthetic',true) END,
       'payload', page_event.payload
-    ) ORDER BY page_event.seq ASC) FROM page_rows AS page_event), '[]'::jsonb)
+    ) || CASE page_event.event_type
+      WHEN 'task.project_assigned' THEN jsonb_build_object('previousProjectId', NULL)
+      WHEN 'task.project_unassigned' THEN jsonb_build_object('previousProjectId', page_event.previous_project_id)
+      WHEN 'task.project_reassigned' THEN jsonb_build_object('previousProjectId', page_event.previous_project_id)
+      ELSE '{}'::jsonb END ORDER BY page_event.seq ASC) FROM page_rows AS page_event), '[]'::jsonb)
   ) INTO v_result
   FROM metadata CROSS JOIN resource_check;
   RETURN v_result;
