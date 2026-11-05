@@ -64,7 +64,7 @@ Response:
 }
 ```
 
-Cursor signatures use an HKDF-derived, domain-separated key and are bound to purpose, feed epoch, and normalized filters. They are positions, not authorization grants. Malformed, tampered, wrong-purpose, future, or filter-mismatched cursors return generic `422 invalid_cursor`; a retired feed epoch or unavailable history returns `410 history_truncated`. Unknown or inconsistent scoped resources return `404 not_found`. No pruning exists in V1, so valid active-epoch cursors report `truncated: false`.
+Cursor signatures use an HKDF-derived, domain-separated key and are bound to purpose, feed epoch, and normalized filters. They are positions, not authorization grants. Malformed, tampered, wrong-purpose, or filter-mismatched cursors return generic `422 invalid_cursor`; a future cursor, retired feed epoch, or unavailable history returns `410 history_truncated`. Unknown or inconsistent scoped resources return `404 not_found`. No pruning exists in V1, so valid active-epoch cursors report `truncated: false`.
 
 ## SSE and session lifecycle
 

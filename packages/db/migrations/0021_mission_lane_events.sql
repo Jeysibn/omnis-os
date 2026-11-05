@@ -17,7 +17,7 @@ CREATE TABLE omnis.mission_events (
     'run.queued', 'run.started', 'run.stop_requested', 'run.completed', 'run.cancelled',
     'run.failed', 'run.interrupted'
   )),
-  actor text NOT NULL CHECK (actor IN ('owner', 'system')),
+  actor text NOT NULL,
   origin_kind text NOT NULL CHECK (origin_kind IN ('task_state', 'run_event')),
   synthetic boolean NOT NULL,
   task_id text NOT NULL REFERENCES omnis.tasks(id) ON DELETE RESTRICT,
