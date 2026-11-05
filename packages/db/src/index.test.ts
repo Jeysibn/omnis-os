@@ -1025,7 +1025,15 @@ const postgresSuite = describe(
       assert.equal([a, b].filter((result) => result.status === 'rejected').length, 1);
       const current = await epics.get(project.id, created.id);
       assert.equal(current?.revision, 4);
-      assert.equal(await epics.get('prj_ffffffffffffffffffffffffffffffff', created.id), undefined);
+      const otherProject = await projects.create(
+        {
+          key: 'EPIC-CROSS-PROJECT',
+          name: 'Epic isolation',
+          objective: 'Verify project-scoped Epic reads.',
+        },
+        randomUUID(),
+      );
+      assert.equal(await epics.get(otherProject.id, created.id), undefined);
       const archived = await epics.archive(
         project.id,
         created.id,
