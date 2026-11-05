@@ -14,10 +14,127 @@ import {
   PublishAgentProfileInputSchema,
   CreateDepartmentSchema,
   DepartmentListResponseSchema,
+  CreateProjectSchema,
+  CreateTaskSchema,
+  SetTaskProjectSchema,
+  TaskSchema,
+  UpdateProjectSchema,
+  ArchiveProjectSchema,
+  ProjectListResponseSchema,
+  ProjectWorkspaceQuerySchema,
+  ProjectWorkspaceResponseSchema,
   RunEventSchema,
   RunSchema,
   RunStatusSchema,
 } from './index.ts';
+
+describe('project workspace read contracts', () => {
+  const project = {
+    id: 'prj_0123456789abcdef0123456789abcdef',
+    ownerId: 'owner',
+    key: 'AO-105',
+    name: 'Project workspace',
+    objective: 'Read the project task workspace.',
+    status: 'archived',
+    priority: 'normal',
+    revision: 2,
+    createdAt: '2026-11-04T00:00:00.000Z',
+    updatedAt: '2026-11-05T00:00:00.000Z',
+  } as const;
+  const task = {
+    id: 'task-0001',
+    title: 'Review project workspace',
+    status: 'completed',
+    createdAt: '2026-11-04T01:00:00.000Z',
+    projectId: project.id,
+    associationRevision: 1,
+    latestRun: {
+      id: 'run-0001',
+      status: 'failed',
+      createdAt: '2026-11-04T02:00:00.000Z',
+      updatedAt: '2026-11-04T03:00:00.000Z',
+    },
+  } as const;
+
+  it('validates strict bounded pagination and narrow task/run summaries', () => {
+    assert.deepEqual(ProjectWorkspaceQuerySchema.parse({ limit: '100' }), { limit: 100 });
+    assert.equal(ProjectWorkspaceQuerySchema.safeParse({ limit: '0' }).success, false);
+    assert.equal(ProjectWorkspaceQuerySchema.safeParse({ limit: '101' }).success, false);
+    assert.equal(ProjectWorkspaceQuerySchema.safeParse({ limit: '1.5' }).success, false);
+    assert.equal(ProjectWorkspaceQuerySchema.safeParse({ unknown: 'value' }).success, false);
+    assert.equal(
+      ProjectWorkspaceResponseSchema.safeParse({
+        project,
+        tasks: [task],
+        page: { observedTotal: 1, complete: true, nextCursor: null },
+      }).success,
+      true,
+    );
+    assert.equal(
+      ProjectWorkspaceResponseSchema.safeParse({
+        project,
+        tasks: [{ ...task, latestRun: null, detail: 'must not be exposed' }],
+        page: { observedTotal: 1, complete: true, nextCursor: null },
+      }).success,
+      false,
+    );
+    assert.equal(
+      ProjectWorkspaceResponseSchema.safeParse({
+        project,
+        tasks: [task],
+        page: { observedTotal: 1, complete: false, nextCursor: null },
+      }).success,
+      false,
+    );
+  });
+});
+
+describe('task project association contracts', () => {
+  const task = {
+    id: 'task-0001',
+    title: 'Review a synthetic report',
+    detail: 'Read the local report and summarize it.',
+    status: 'open',
+    createdAt: '2026-11-05T00:00:00.000Z',
+  };
+  const projectId = 'prj_0123456789abcdef0123456789abcdef';
+
+  it('keeps legacy task payloads valid and represents unassigned association explicitly', () => {
+    assert.equal(TaskSchema.parse(task).id, task.id);
+    assert.deepEqual(TaskSchema.parse({ ...task, projectId: null, associationRevision: 1 }), {
+      ...task,
+      projectId: null,
+      associationRevision: 1,
+    });
+  });
+
+  it('accepts optional project assignment on task creation and validates project reassignment', () => {
+    assert.equal(CreateTaskSchema.parse({ ...task, projectId }).projectId, projectId);
+    assert.equal(CreateTaskSchema.parse(task).projectId, undefined);
+    assert.equal(
+      SetTaskProjectSchema.safeParse({ projectId, expectedAssociationRevision: 1 }).success,
+      true,
+    );
+    assert.equal(
+      SetTaskProjectSchema.safeParse({ projectId: null, expectedAssociationRevision: 1 }).success,
+      true,
+    );
+    assert.equal(
+      SetTaskProjectSchema.safeParse({ projectId: 'unknown', expectedAssociationRevision: 1 })
+        .success,
+      false,
+    );
+    assert.equal(
+      SetTaskProjectSchema.safeParse({ projectId, expectedAssociationRevision: 0 }).success,
+      false,
+    );
+    assert.equal(
+      SetTaskProjectSchema.safeParse({ projectId, expectedAssociationRevision: 1, extra: true })
+        .success,
+      false,
+    );
+  });
+});
 
 describe('run contracts', () => {
   it('accepts only events marked as synthetic mock activity', () => {
@@ -70,6 +187,108 @@ describe('run contracts', () => {
     });
     assert.equal(event.type, 'run.interrupted');
     assert.equal(RunStatusSchema.parse('interrupted'), 'interrupted');
+  });
+});
+
+describe('project management contracts', () => {
+  const project = {
+    id: 'prj_0123456789abcdef0123456789abcdef',
+    ownerId: 'owner',
+    key: 'OMNIS-OS',
+    name: 'Omnis OS',
+    objective: 'A synthetic project objective.',
+    status: 'proposed',
+    priority: 'normal',
+    revision: 1,
+    createdAt: '2026-11-04T00:00:00.000Z',
+    updatedAt: '2026-11-04T00:00:00.000Z',
+  };
+
+  it('validates bounded owner-created project input and defaults priority', () => {
+    assert.deepEqual(
+      CreateProjectSchema.parse({ key: 'OMNIS-OS', name: ' Omnis OS ', objective: ' Objective ' }),
+      { key: 'OMNIS-OS', name: 'Omnis OS', objective: 'Objective', priority: 'normal' },
+    );
+    assert.equal(
+      CreateProjectSchema.safeParse({ key: 'bad key', name: 'x', objective: 'y' }).success,
+      false,
+    );
+    assert.equal(
+      CreateProjectSchema.safeParse({ key: 'OK', name: 'x', objective: 'y', status: 'active' })
+        .success,
+      false,
+    );
+    assert.equal(
+      CreateProjectSchema.safeParse({ key: 'OK', name: 'x', objective: 'y', extra: true }).success,
+      false,
+    );
+    assert.equal(
+      CreateProjectSchema.safeParse({ key: 'OK', name: 'x\0y', objective: 'objective' }).success,
+      false,
+    );
+  });
+
+  it('requires list completeness, accurate totals, and stable unique project keys', () => {
+    const summary = {
+      id: project.id,
+      ownerId: project.ownerId,
+      key: project.key,
+      name: project.name,
+      status: project.status,
+      priority: project.priority,
+      revision: project.revision,
+      createdAt: project.createdAt,
+      updatedAt: project.updatedAt,
+    };
+    assert.equal(
+      ProjectListResponseSchema.safeParse({ projects: [summary], total: 1, complete: true })
+        .success,
+      true,
+    );
+    assert.equal(
+      ProjectListResponseSchema.safeParse({ projects: [project], total: 1, complete: true })
+        .success,
+      false,
+    );
+    assert.equal(
+      ProjectListResponseSchema.safeParse({ projects: [project], total: 2, complete: true })
+        .success,
+      false,
+    );
+    assert.equal(
+      ProjectListResponseSchema.safeParse({ projects: [project], total: 1, complete: false })
+        .success,
+      false,
+    );
+  });
+
+  it('validates partial project updates with an expected revision', () => {
+    assert.deepEqual(UpdateProjectSchema.parse({ expectedRevision: 3, name: ' New name ' }), {
+      expectedRevision: 3,
+      name: 'New name',
+    });
+    assert.equal(UpdateProjectSchema.safeParse({ expectedRevision: 1 }).success, false);
+    assert.equal(
+      UpdateProjectSchema.safeParse({ expectedRevision: 0, name: 'Name' }).success,
+      false,
+    );
+    assert.equal(
+      UpdateProjectSchema.safeParse({ expectedRevision: 1, key: 'NEW-KEY' }).success,
+      false,
+    );
+    assert.equal(
+      UpdateProjectSchema.safeParse({ expectedRevision: 1, name: '   ' }).success,
+      false,
+    );
+    assert.equal(
+      UpdateProjectSchema.safeParse({ expectedRevision: 1, objective: 'x\0y' }).success,
+      false,
+    );
+    assert.equal(ArchiveProjectSchema.safeParse({ expectedRevision: 2 }).success, true);
+    assert.equal(
+      ArchiveProjectSchema.safeParse({ expectedRevision: 2, restore: true }).success,
+      false,
+    );
   });
 });
 

@@ -19,8 +19,16 @@ import {
   SaveAgentProfileDraftInputSchema,
   type Authorization,
   type Department,
+  ProjectIdSchema,
+  CreateProjectSchema,
+  ProjectListResponseSchema,
+  ProjectSchema,
+  type Project,
+  type ProjectListResponse,
+  UpdateProjectSchema,
+  ArchiveProjectSchema,
 } from '@omnis/contracts';
-import { AgentLifecycleStoreError, DepartmentStoreError } from '@omnis/db';
+import { AgentLifecycleStoreError, DepartmentStoreError, ProjectStoreError } from '@omnis/db';
 
 export type AuthorizerStore = {
   request(taskId: string, actor: 'owner', correlationId: string): Promise<Authorization>;
@@ -35,6 +43,11 @@ export type AuthorizerStore = {
     requestId: string,
   ): Promise<Department>;
   archiveDepartment(id: string, requestId: string): Promise<Department>;
+  listProjects(): Promise<ProjectListResponse>;
+  getProject(id: string): Promise<Project | undefined>;
+  createProject(input: unknown, requestId: string): Promise<Project>;
+  updateProject(id: string, input: unknown, requestId: string): Promise<Project>;
+  archiveProject(id: string, input: unknown, requestId: string): Promise<Project>;
   agentLifecycle?:
     | {
         getDraft(agentId: string): Promise<unknown>;
@@ -150,6 +163,92 @@ export function createAuthorizerApp(input: {
         return DepartmentSchema.parse(await input.store.archiveDepartment(id.data, request.id));
       } catch (error) {
         return sendDepartmentStoreError(error, reply);
+      }
+    },
+  );
+
+  app.get('/internal/v1/projects', async (_request, reply) => {
+    try {
+      return ProjectListResponseSchema.parse(await input.store.listProjects());
+    } catch (error) {
+      return sendProjectStoreError(error, reply);
+    }
+  });
+
+  app.get<{ Params: { projectId: string } }>(
+    '/internal/v1/projects/:projectId',
+    async (request, reply) => {
+      const id = ProjectIdSchema.safeParse(request.params.projectId);
+      if (!id.success)
+        return reply
+          .code(400)
+          .send({ error: { code: 'invalid_input', message: 'Project identifier is invalid.' } });
+      try {
+        const project = await input.store.getProject(id.data);
+        if (!project)
+          return reply
+            .code(404)
+            .send({ error: { code: 'not_found', message: 'Project was not found.' } });
+        return ProjectSchema.parse(project);
+      } catch (error) {
+        return sendProjectStoreError(error, reply);
+      }
+    },
+  );
+
+  app.post('/internal/v1/projects', { bodyLimit: 32 * 1024 }, async (request, reply) => {
+    const body = CreateProjectSchema.safeParse(request.body);
+    const requestId = request.headers['idempotency-key'];
+    if (!body.success || typeof requestId !== 'string' || !isUuid(requestId))
+      return reply.code(400).send({
+        error: {
+          code: 'invalid_input',
+          message: 'Project input and Idempotency-Key are required.',
+        },
+      });
+    try {
+      return reply
+        .code(201)
+        .send(ProjectSchema.parse(await input.store.createProject(body.data, requestId)));
+    } catch (error) {
+      return sendProjectStoreError(error, reply);
+    }
+  });
+
+  app.patch<{ Params: { projectId: string } }>(
+    '/internal/v1/projects/:projectId',
+    { bodyLimit: 32 * 1024 },
+    async (request, reply) => {
+      const id = ProjectIdSchema.safeParse(request.params.projectId);
+      const body = UpdateProjectSchema.safeParse(request.body);
+      const requestId = request.headers['idempotency-key'];
+      if (!id.success || !body.success || typeof requestId !== 'string' || !isUuid(requestId))
+        return reply.code(400).send({
+          error: { code: 'invalid_input', message: 'Project update input is invalid.' },
+        });
+      try {
+        return ProjectSchema.parse(await input.store.updateProject(id.data, body.data, requestId));
+      } catch (error) {
+        return sendProjectStoreError(error, reply);
+      }
+    },
+  );
+
+  app.post<{ Params: { projectId: string } }>(
+    '/internal/v1/projects/:projectId/archive',
+    { bodyLimit: 32 * 1024 },
+    async (request, reply) => {
+      const id = ProjectIdSchema.safeParse(request.params.projectId);
+      const body = ArchiveProjectSchema.safeParse(request.body);
+      const requestId = request.headers['idempotency-key'];
+      if (!id.success || !body.success || typeof requestId !== 'string' || !isUuid(requestId))
+        return reply.code(400).send({
+          error: { code: 'invalid_input', message: 'Project archive input is invalid.' },
+        });
+      try {
+        return ProjectSchema.parse(await input.store.archiveProject(id.data, body.data, requestId));
+      } catch (error) {
+        return sendProjectStoreError(error, reply);
       }
     },
   );
@@ -334,7 +433,8 @@ export function createAuthorizerApp(input: {
     const statusCode =
       error && typeof error === 'object' && 'statusCode' in error ? error.statusCode : undefined;
     if (
-      request.url.startsWith('/internal/v1/agents') &&
+      (request.url.startsWith('/internal/v1/agents') ||
+        request.url.startsWith('/internal/v1/projects')) &&
       (statusCode === 400 || statusCode === 413)
     ) {
       return reply.code(statusCode).send({
@@ -342,8 +442,8 @@ export function createAuthorizerApp(input: {
           code: statusCode === 413 ? 'payload_too_large' : 'invalid_input',
           message:
             statusCode === 413
-              ? 'Agent management request exceeds the allowed size.'
-              : 'Agent management request is malformed.',
+              ? 'Management request exceeds the allowed size.'
+              : 'Management request is malformed.',
         },
       });
     }
@@ -353,6 +453,8 @@ export function createAuthorizerApp(input: {
       request.method !== 'GET' && request.url.startsWith('/internal/v1/departments');
     const agentOutcomeUnknown =
       request.method !== 'GET' && request.url.startsWith('/internal/v1/agents');
+    const projectOutcomeUnknown =
+      request.method !== 'GET' && request.url.startsWith('/internal/v1/projects');
     return reply.code(503).send({
       error: {
         code: decisionOutcomeUnknown
@@ -361,14 +463,18 @@ export function createAuthorizerApp(input: {
             ? 'department_outcome_unknown'
             : agentOutcomeUnknown
               ? 'management_outcome_unknown'
-              : 'authorizer_unavailable',
+              : projectOutcomeUnknown
+                ? 'project_outcome_unknown'
+                : 'authorizer_unavailable',
         message: decisionOutcomeUnknown
           ? 'The authorizer could not confirm whether the decision committed. Read the authorization state or retry with the same idempotency key.'
           : departmentOutcomeUnknown
             ? 'The authorizer could not confirm whether the department change committed. Read the department state before retrying.'
             : agentOutcomeUnknown
               ? 'The authorizer could not confirm whether the agent change committed. Read agent state or retry with the same idempotency key.'
-              : 'The authorization store is unavailable.',
+              : projectOutcomeUnknown
+                ? 'The authorizer could not confirm whether the project was created. Retry with the same idempotency key or read the project list.'
+                : 'The authorization store is unavailable.',
       },
     });
   });
@@ -381,6 +487,11 @@ function sendDepartmentStoreError(error: unknown, reply: FastifyReply) {
   return reply.code(error.statusCode).send({
     error: { code: error.code, message: error.message },
   });
+}
+
+function sendProjectStoreError(error: unknown, reply: FastifyReply) {
+  if (!(error instanceof ProjectStoreError)) throw error;
+  return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
 }
 
 function requireAgentLifecycle(store: AuthorizerStore) {
