@@ -453,7 +453,7 @@ BEGIN
   IF v_audit_type IS NOT NULL AND NOT omnis.append_runtime_authorization_audit(
     p_run_id, v_audit_type, v_reason
   ) THEN
-    RAISE EXCEPTION 'run transition audit could not be recorded' USING ERRCODE = '23514';
+    RAISE EXCEPTION 'runtime audit event could not be associated with the run transition' USING ERRCODE = '23514';
   END IF;
   RETURN v_updated;
 END
