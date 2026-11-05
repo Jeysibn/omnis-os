@@ -2,12 +2,19 @@ import { useEffect, useRef, useState } from 'react';
 import { ChevronDown, ChevronUp, Pause, Play, RefreshCw } from 'lucide-react';
 import { StatusGlyph } from './StatusGlyph.js';
 import { formatManilaStamp } from './time.js';
-import type { LaneStatus, MissionEvent } from './missionEvents.js';
+import {
+  MAX_EVENTS_PER_RUN,
+  MAX_STREAMS,
+  type LaneStatus,
+  type MissionEvent,
+  type StreamCounts,
+} from './missionEvents.js';
 import type { LoadState } from './vitals.js';
 
 type Props = {
   events: MissionEvent[];
   status: LaneStatus;
+  counts: StreamCounts;
   monitoredCount: number;
   totalRuns: number;
   runsState: LoadState;
@@ -17,19 +24,42 @@ type Props = {
   onRefresh: () => void;
 };
 
-const STATUS_TEXT: Record<LaneStatus, string> = {
-  loading: 'Loading event history…',
-  live: 'Live: receiving updates for unfinished runs.',
-  history: 'Historical events. No run is receiving live updates.',
-  reconnecting: 'Connection interrupted. Reconnecting; loaded history is kept.',
-  disconnected: 'Disconnected. Showing the history loaded so far; it may be out of date.',
-  unavailable: 'Event source unavailable. No history could be loaded.',
-  empty: 'No events recorded.',
-};
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+/** Exact lane status copy; it only claims what the stream aggregate establishes. */
+export function laneStatusText(status: LaneStatus, c: StreamCounts): string {
+  switch (status) {
+    case 'loading':
+      return 'Loading event history…';
+    case 'live':
+      return `Live: receiving updates for ${c.unfinished === 1 ? 'the unfinished run' : `all ${c.unfinished} unfinished runs`}.`;
+    case 'partial': {
+      const parts = [`${c.live} of ${plural(c.unfinished, 'unfinished run')} live`];
+      if (c.reconnecting) parts.push(`${c.reconnecting} reconnecting`);
+      if (c.exhausted) parts.push(`${c.exhausted} stopped after retries`);
+      return `Partially connected: ${parts.join(', ')}. Loaded history is kept.`;
+    }
+    case 'reconnecting':
+      return 'Connection interrupted. Reconnecting; loaded history is kept.';
+    case 'exhausted':
+      return `Retry limit reached for ${plural(c.exhausted, 'run')}. Live updates stopped; loaded history is kept. Use Refresh to retry.`;
+    case 'disconnected':
+      return 'Disconnected. Showing the history loaded so far; it may be out of date.';
+    case 'unavailable':
+      return 'Event source unavailable. No history could be loaded.';
+    case 'paused':
+      return 'Paused while this tab is hidden. Loaded history is kept; updates resume when you return.';
+    case 'history':
+      return 'Historical events only. No followed run is unfinished, so no live stream is needed.';
+    case 'empty':
+      return 'No events recorded.';
+  }
+}
 
 export function MissionLane({
   events,
   status,
+  counts,
   monitoredCount,
   totalRuns,
   runsState,
@@ -66,11 +96,14 @@ export function MissionLane({
             Mission lane
           </h2>
           <p className="nx-lane-status" data-lane-status={status} role="status">
-            {STATUS_TEXT[status]}
+            {laneStatusText(status, counts)}
           </p>
           <p className="nx-quiet">
-            Persisted run events, Asia/Manila time. Following {monitoredCount} of {totalRuns} runs
-            (unfinished first, then most recent); output lines are in the run inspector.
+            Run events only: task events are not available from the API yet. Persisted events,
+            Asia/Manila time. Following {monitoredCount} of {totalRuns} runs (limit {MAX_STREAMS};
+            unfinished first, then most recent). Showing up to {MAX_EVENTS_PER_RUN} events per run;
+            this is a display limit, and older events may still exist on the server. Output lines
+            are in the run inspector.
             {loadedAt ? ` Run list loaded ${formatManilaStamp(loadedAt.toISOString())}.` : ''}
           </p>
         </div>
@@ -120,7 +153,7 @@ export function MissionLane({
         <p className="nx-empty">
           {status === 'loading'
             ? 'Loading event history…'
-            : status === 'unavailable'
+            : status === 'unavailable' || status === 'exhausted'
               ? 'The event source could not be reached. Use Refresh to try again, or open a run.'
               : 'No events recorded. Approved mock runs will appear here in order.'}
         </p>
@@ -137,6 +170,7 @@ export function MissionLane({
               <button
                 type="button"
                 data-run={event.runId}
+                data-event-id={event.id}
                 data-status={event.status}
                 aria-pressed={selectedRunId === event.runId}
                 className="nx-node"

@@ -126,14 +126,52 @@ export function buildMissionEvents(log: RunEventLog, runs: Run[]): MissionEvent[
   );
 }
 
-export type StreamHealth = 'connecting' | 'open' | 'reconnecting' | 'ended' | 'failed';
+export type StreamHealth =
+  | 'connecting'
+  | 'open'
+  | 'reconnecting'
+  | 'ended' // finished normally after a terminal event; never a failure
+  | 'failed' // an event broke the shared contract; the stream is no longer trusted
+  | 'exhausted' // the reconnect budget ran out; only a user retry restarts it
+  | 'suspended'; // closed on purpose while the tab is hidden
 
 export type LaneStatus =
-  'loading' | 'live' | 'history' | 'reconnecting' | 'disconnected' | 'unavailable' | 'empty';
+  | 'loading'
+  | 'live' // every unfinished run has an open stream
+  | 'partial' // some unfinished runs are live, others are not
+  | 'reconnecting'
+  | 'exhausted' // retry budget used up; history kept
+  | 'disconnected' // the run list itself is unavailable; history kept
+  | 'unavailable' // nothing could be loaded
+  | 'paused' // tab hidden
+  | 'history' // nothing unfinished, so no live stream is needed
+  | 'empty';
+
+export type StreamCounts = {
+  unfinished: number;
+  live: number;
+  reconnecting: number;
+  exhausted: number;
+};
+
+export function countStreams(runs: Run[], health: Record<string, StreamHealth>): StreamCounts {
+  const counts: StreamCounts = { unfinished: 0, live: 0, reconnecting: 0, exhausted: 0 };
+  for (const run of runs) {
+    const h = health[run.id] ?? 'connecting';
+    if (isUnfinished(run.status)) {
+      counts.unfinished += 1;
+      if (h === 'open') counts.live += 1;
+    }
+    if (h === 'reconnecting') counts.reconnecting += 1;
+    if (h === 'exhausted' || h === 'failed') counts.exhausted += 1;
+  }
+  return counts;
+}
 
 /**
- * "live" is only reported while a stream for an unfinished run is actually open.
- * Loaded history stays visible in every other state.
+ * Aggregates every followed stream. "live" means all unfinished runs are receiving updates and
+ * no followed stream is degraded; a finished run's stream ending normally is not a failure.
+ * Loaded history stays visible in every state.
  */
 export function deriveLaneStatus(input: {
   runs: Run[];
@@ -144,12 +182,24 @@ export function deriveLaneStatus(input: {
   const { runs, health, eventCount, paused } = input;
   if (paused) return eventCount > 0 ? 'disconnected' : 'unavailable';
   if (runs.length === 0) return 'empty';
-  const states = runs.map((run) => ({ run, health: health[run.id] ?? 'connecting' }));
-  if (states.some((s) => s.health === 'reconnecting')) return 'reconnecting';
-  if (states.some((s) => s.health === 'open' && isUnfinished(s.run.status))) return 'live';
-  if (states.every((s) => s.health === 'failed'))
-    return eventCount > 0 ? 'disconnected' : 'unavailable';
-  if (states.some((s) => s.health === 'failed')) return 'disconnected';
-  if (states.some((s) => s.health === 'connecting' || s.health === 'open')) return 'loading';
-  return eventCount > 0 ? 'history' : 'empty';
+  const states = runs.map((run) => health[run.id] ?? 'connecting');
+  if (states.every((h) => h === 'suspended' || h === 'ended')) {
+    if (states.some((h) => h === 'suspended')) return 'paused';
+  }
+  const c = countStreams(runs, health);
+  const degraded = c.reconnecting + c.exhausted;
+  const connecting = runs.filter(
+    (run) =>
+      (health[run.id] ?? 'connecting') === 'connecting' ||
+      ((health[run.id] ?? 'connecting') === 'open' && !isUnfinished(run.status)),
+  ).length;
+  if (c.unfinished > 0) {
+    if (c.live === c.unfinished && degraded === 0) return 'live';
+    if (c.live > 0) return 'partial';
+  }
+  if (c.reconnecting > 0) return 'reconnecting';
+  if (c.exhausted > 0) return eventCount > 0 ? 'exhausted' : 'unavailable';
+  if (connecting > 0) return 'loading';
+  if (states.some((h) => h === 'suspended')) return 'paused';
+  return c.unfinished > 0 ? 'loading' : eventCount > 0 ? 'history' : 'empty';
 }

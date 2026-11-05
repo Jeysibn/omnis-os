@@ -8,10 +8,13 @@ import {
   orbitPoint,
   ORBITS,
 } from './nexus/geometry.js';
+import { laneStatusText } from './nexus/MissionLane.js';
 import {
   addRunEvent,
   buildMissionEvents,
+  countStreams,
   deriveLaneStatus,
+  type StreamHealth,
   MAX_EVENTS_PER_RUN,
   MAX_STREAMS,
   pruneRunEvents,
@@ -22,6 +25,8 @@ import { deriveReactorState, type ReactorInput } from './nexus/reactorState.js';
 import { formatManilaStamp } from './nexus/time.js';
 import { computeVitals } from './nexus/vitals.js';
 import { csrf, mockApi, run, runEvent, task, T0, type NexusApiOptions } from './nexusFixture.js';
+import { defaultRunEvents } from './nexusFixture.js';
+import { fake, installFakeEventSource } from './nexusFakeEventSource.js';
 
 const shotDir = process.env.NEXUS_SHOT_DIR;
 if (shotDir) mkdirSync(shotDir, { recursive: true });
@@ -193,24 +198,43 @@ test.describe('mission events and time', () => {
     expect(picked[0]).toBe('live-4');
   });
 
-  test('lane status is only "live" while an unfinished run has an open stream', () => {
-    const live = run('r', 't', 'R', 'running');
+  test('lane status aggregates every followed stream', () => {
+    const a = run('a', 't', 'A', 'running');
+    const b = run('b', 't', 'B', 'running');
     const done = run('d', 't', 'D', 'completed');
-    const d = (
-      runs: (typeof live)[],
-      health: Record<string, never | 'open' | 'connecting' | 'reconnecting' | 'ended' | 'failed'>,
-      eventCount: number,
-      paused = false,
-    ) => deriveLaneStatus({ runs, health, eventCount, paused });
-    expect(d([live], { r: 'open' }, 2)).toBe('live');
-    expect(d([done], { d: 'open' }, 2)).toBe('loading'); // replaying finished history is not live
-    expect(d([done], { d: 'ended' }, 2)).toBe('history');
-    expect(d([live], { r: 'connecting' }, 0)).toBe('loading');
-    expect(d([live], { r: 'reconnecting' }, 2)).toBe('reconnecting');
-    expect(d([live], { r: 'failed' }, 2)).toBe('disconnected');
-    expect(d([live], { r: 'failed' }, 0)).toBe('unavailable');
-    expect(d([live], { r: 'open' }, 2, true)).toBe('disconnected'); // runs list unavailable
+    type H = Record<string, StreamHealth>;
+    const d = (runs: (typeof a)[], health: H, eventCount = 2, paused = false) =>
+      deriveLaneStatus({ runs, health, eventCount, paused });
+    expect(d([a, b], { a: 'open', b: 'open' })).toBe('live'); // two live streams
+    expect(d([a, b], { a: 'open', b: 'reconnecting' })).toBe('partial');
+    expect(d([a, b], { a: 'open', b: 'exhausted' })).toBe('partial');
+    expect(d([a, b], { a: 'open', b: 'failed' })).toBe('partial');
+    expect(d([a, b], { a: 'reconnecting', b: 'reconnecting' })).toBe('reconnecting');
+    expect(d([a, b], { a: 'exhausted', b: 'exhausted' })).toBe('exhausted'); // all failed
+    expect(d([a, b], { a: 'exhausted', b: 'exhausted' }, 0)).toBe('unavailable');
+    expect(d([a, done], { a: 'open', d: 'ended' })).toBe('live'); // a normal end is not a failure
+    expect(d([a, done], { a: 'open', d: 'exhausted' })).toBe('partial'); // a failed history load is
+    expect(d([done], { d: 'ended' })).toBe('history'); // all completed: no live stream needed
+    expect(d([done], { d: 'open' })).toBe('loading'); // replay in progress is not live
+    expect(d([done], { d: 'exhausted' })).toBe('exhausted');
+    expect(d([a], { a: 'connecting' }, 0)).toBe('loading');
+    expect(d([a, b], { a: 'suspended', b: 'suspended' })).toBe('paused');
+    expect(d([a], { a: 'open' }, 2, true)).toBe('disconnected'); // run list unavailable
     expect(d([], {}, 0)).toBe('empty');
+    expect(countStreams([a, b, done], { a: 'open', b: 'reconnecting', d: 'ended' })).toEqual({
+      unfinished: 2,
+      live: 1,
+      reconnecting: 1,
+      exhausted: 0,
+    });
+    expect(laneStatusText('live', { unfinished: 2, live: 2, reconnecting: 0, exhausted: 0 })).toBe(
+      'Live: receiving updates for all 2 unfinished runs.',
+    );
+    expect(
+      laneStatusText('partial', { unfinished: 2, live: 1, reconnecting: 0, exhausted: 1 }),
+    ).toBe(
+      'Partially connected: 1 of 2 unfinished runs live, 1 stopped after retries. Loaded history is kept.',
+    );
   });
   test('formats timestamps in Asia/Manila regardless of host timezone', () => {
     expect(formatManilaStamp('2026-11-03T02:00:00.000Z')).toContain('10:00:00');
@@ -859,44 +883,6 @@ test('a dropped connection is reported and the loaded history stays visible', as
   await expect(nodesOf(page, 'run-active')).toHaveCount(2);
 });
 
-test('gives up after bounded retries, reports disconnected, and Refresh reconnects', async ({
-  page,
-}) => {
-  test.setTimeout(60_000);
-  const api = await open(page);
-  const lane = laneOf(page);
-  await expect(lane.locator('[data-lane-status="live"]')).toBeVisible();
-  api.hub.failWith('run-active', 503);
-  api.hub.drop('run-active');
-  // three retries with 1s, 2s and 4s backoff, then the lane stops trying
-  await expect(lane.locator('[data-lane-status="disconnected"]')).toBeVisible({ timeout: 20_000 });
-  await expect(nodesOf(page, 'run-active')).toHaveCount(2); // history retained
-  const attempts = () => api.hub.requests.filter((r) => r.runId === 'run-active').length;
-  const settled = attempts();
-  await page.waitForTimeout(1500);
-  expect(attempts()).toBe(settled); // no unbounded retry loop
-
-  api.hub.failWith('run-active', null);
-  await page.getByRole('button', { name: 'Refresh data' }).click();
-  await expect(lane.locator('[data-lane-status="live"]')).toBeVisible();
-  await expect(nodesOf(page, 'run-active')).toHaveCount(2);
-});
-
-test('lane says the event source is unavailable when no history could be loaded', async ({
-  page,
-}) => {
-  test.setTimeout(60_000);
-  const api = await mockApi(page, {
-    runs: [run('run-x', 'task-x', 'Only run', 'running', min(5), min(1))],
-  });
-  api.hub.failWith('run-x', 503);
-  await page.goto('/#command-center');
-  await expect(laneOf(page).locator('[data-lane-status="unavailable"]')).toBeVisible({
-    timeout: 20_000,
-  });
-  await expect(laneOf(page).getByText(/event source could not be reached/i)).toBeVisible();
-});
-
 test('finished runs replay history but are not labelled live', async ({ page }) => {
   await open(page, {
     runs: [run('run-old', 'task-done', 'Audit access notes', 'completed', min(30), min(20))],
@@ -980,4 +966,210 @@ test('a failed runs refresh removes reactor markers instead of showing stale act
   await expect(readout(page)).toHaveText('Mock execution active');
   expect((await reactor.getAttribute('data-markers'))!.split(',').sort()).toEqual(markers);
   await expect(laneOf(page).locator('[data-lane-status="live"]')).toBeVisible();
+});
+
+// ------------------------------------------------------------ transport drops (controlled EventSource)
+const alpha = run('run-a', 't1', 'Alpha mission', 'running', min(5), min(1));
+const bravo = run('run-b', 't2', 'Bravo mission', 'running', min(6), min(2));
+const ended = run('run-d', 't3', 'Done mission', 'completed', min(7), min(3));
+async function openFake(
+  page: Page,
+  runs = [alpha, bravo],
+  extra: NexusApiOptions = {},
+  retryMs = 20,
+) {
+  await installFakeEventSource(
+    page,
+    Object.fromEntries(runs.map((r) => [r.id, defaultRunEvents(r)])),
+    retryMs,
+  );
+  return open(page, { runs, ...extra });
+}
+const statusText = (page: Page) => laneOf(page).locator('.nx-lane-status');
+const eventIds = (page: Page, runId: string) =>
+  nodesOf(page, runId).evaluateAll((els) => els.map((e) => e.getAttribute('data-event-id')!));
+const listFetches = (api: Awaited<ReturnType<typeof open>>) =>
+  api.requests.filter((r) => r.path === '/api/v1/runs' && r.method === 'GET').length;
+const LIVE_2 = 'Live: receiving updates for all 2 unfinished runs.';
+
+test('two live streams are fully live; a normal terminal end is not a failure', async ({
+  page,
+}) => {
+  await openFake(page);
+  await expect(statusText(page)).toHaveText(LIVE_2);
+  await expect(laneOf(page).locator('[data-lane-status="live"]')).toBeVisible();
+});
+
+test('one active and one finished run: live, and the finished stream ended cleanly', async ({
+  page,
+}) => {
+  await openFake(page, [alpha, ended]);
+  await expect(statusText(page)).toHaveText('Live: receiving updates for the unfinished run.');
+  await expect(nodesOf(page, 'run-d')).toHaveCount(2);
+  await expect.poll(async () => (await fake.stats(page)).open).toBe(1); // only alpha stays open
+});
+
+test('a transport drop reports partial connection, keeps history, and replays what was missed once', async ({
+  page,
+}) => {
+  const api = await openFake(page, [alpha, bravo], {}, 400); // slow retries: outage is short
+  await expect(statusText(page)).toHaveText(LIVE_2);
+  const fetchesBefore = listFetches(api);
+  const baseInstances = (await fake.stats(page)).instances['run-a']!;
+
+  await fake.setDown(page, 'run-a', true);
+  await fake.drop(page, 'run-a'); // native stream falls into CONNECTING and keeps retrying
+  await expect(statusText(page)).toHaveText(
+    'Partially connected: 1 of 2 unfinished runs live, 1 reconnecting. Loaded history is kept.',
+  );
+  await expect(nodesOf(page, 'run-a')).toHaveCount(2); // history preserved during the outage
+  await fake.publish(page, 'run-b', runEvent('run-b', 3, 'run.stop_requested', min(9)));
+  await expect(nodesOf(page, 'run-b')).toHaveCount(3); // the healthy stream is unaffected
+
+  // events persisted while run-a was unreachable
+  await fake.publish(page, 'run-a', runEvent('run-a', 3, 'run.stop_requested', min(8)));
+  await fake.setDown(page, 'run-a', false);
+  await expect(statusText(page)).toHaveText(LIVE_2);
+  const ids = await eventIds(page, 'run-a');
+  expect(ids).toEqual(['run-a:1', 'run-a:2', 'run-a:3']); // replayed, no duplicates
+  const stats = await fake.stats(page);
+  expect(stats.reconnectIds['run-a']!.at(-1)).toBe('2'); // browser resumed from its cursor
+  expect(stats.instances['run-a']).toBe(baseInstances); // same stream, not a new subscription
+  expect(listFetches(api)).toBe(fetchesBefore); // a drop alone does not trigger a session check
+});
+
+test('repeated native failures exhaust a finite budget, close the stream and stop retrying', async ({
+  page,
+}) => {
+  const api = await openFake(page);
+  await expect(statusText(page)).toHaveText(LIVE_2);
+  const fetchesBefore = listFetches(api);
+  const base = (await fake.stats(page)).instances['run-a']!;
+  await fake.setDown(page, 'run-a', true);
+  await fake.drop(page, 'run-a');
+  await expect(statusText(page)).toHaveText(
+    'Partially connected: 1 of 2 unfinished runs live, 1 stopped after retries. Loaded history is kept.',
+  );
+  const after = await fake.stats(page);
+  expect(after.errors['run-a']).toBe(5); // MAX_FAILURES + 1: the fifth failure exhausts the budget
+  expect(after.instances['run-a']).toBe(base); // nothing was re-created
+  expect(after.open).toBe(1); // run-a was explicitly closed; only run-b remains open
+  await expect(nodesOf(page, 'run-a')).toHaveCount(2); // history kept
+
+  // the "browser" would retry every 20ms; wait many intervals and prove it did not
+  await page.waitForTimeout(400);
+  const later = await fake.stats(page);
+  expect(later.errors['run-a']).toBe(5);
+  expect(later.instances['run-a']).toBe(base);
+  // exhaustion is when a real request establishes whether the session is still valid
+  await expect.poll(() => listFetches(api)).toBe(fetchesBefore + 1);
+  await page.waitForTimeout(200);
+  expect(listFetches(api)).toBe(fetchesBefore + 1);
+
+  // Recovery from partial connectivity needs an explicit user retry
+  await fake.publish(page, 'run-a', runEvent('run-a', 3, 'run.stop_requested', min(8)));
+  await fake.setDown(page, 'run-a', false);
+  await page.waitForTimeout(150);
+  expect((await fake.stats(page)).instances['run-a']).toBe(base); // not restarted by itself
+  await page.getByRole('button', { name: 'Refresh data' }).click();
+  await expect(statusText(page)).toHaveText(LIVE_2);
+  expect((await fake.stats(page)).instances['run-a']).toBe(base + 1); // exactly one new stream
+  // the new stream replays persisted history from the start; duplicates are dropped
+  expect(await eventIds(page, 'run-a')).toEqual(['run-a:1', 'run-a:2', 'run-a:3']);
+  expect(await eventIds(page, 'run-b')).toEqual(['run-b:1', 'run-b:2']);
+});
+
+test('every stream exhausted: retry limit reported for all runs, history kept', async ({
+  page,
+}) => {
+  await openFake(page);
+  await expect(statusText(page)).toHaveText(LIVE_2);
+  for (const id of ['run-a', 'run-b']) {
+    await fake.setDown(page, id, true);
+    await fake.drop(page, id);
+  }
+  await expect(statusText(page)).toHaveText(
+    'Retry limit reached for 2 runs. Live updates stopped; loaded history is kept. Use Refresh to retry.',
+  );
+  await expect(laneOf(page).locator('[data-lane-status="exhausted"]')).toBeVisible();
+  await expect(laneOf(page).getByText(/Live: receiving updates/)).toHaveCount(0);
+  await expect(page.locator('.nx-node')).toHaveCount(4);
+  expect((await fake.stats(page)).open).toBe(0);
+});
+
+test('a stream stuck connecting (no further errors) is closed after the failure window', async ({
+  page,
+}) => {
+  await page.clock.install();
+  await openFake(page, [alpha]);
+  await page.clock.runFor(100);
+  await expect(statusText(page)).toHaveText('Live: receiving updates for the unfinished run.');
+  await fake.setHang(page, 'run-a', true); // reconnect attempts never answer
+  await fake.setDown(page, 'run-a', true);
+  await fake.drop(page, 'run-a'); // one error, then silence
+  await page.clock.runFor(100);
+  await expect(statusText(page)).toHaveText(
+    'Connection interrupted. Reconnecting; loaded history is kept.',
+  );
+  await page.clock.runFor(31_000);
+  await expect(laneOf(page).locator('[data-lane-status="exhausted"]')).toBeVisible();
+  expect((await fake.stats(page)).open).toBe(0);
+});
+
+test('unmounting while reconnecting closes the stream and leaves no timers behind', async ({
+  page,
+}) => {
+  await openFake(page);
+  await expect(statusText(page)).toHaveText(LIVE_2);
+  await fake.setDown(page, 'run-a', true);
+  await fake.drop(page, 'run-a');
+  await expect(laneOf(page).locator('[data-lane-status="partial"]')).toBeVisible();
+  await page.getByRole('link', { name: 'Tasks' }).click();
+  await expect(laneOf(page)).toHaveCount(0);
+  await expect.poll(async () => (await fake.stats(page)).open).toBe(0);
+  const settled = await fake.stats(page);
+  await page.waitForTimeout(300);
+  const later = await fake.stats(page);
+  expect(later.errors).toEqual(settled.errors); // no retries after unmount
+  expect(later.created).toBe(settled.created); // no new subscriptions
+});
+
+test('an expired session is only acted on once a real request establishes it', async ({ page }) => {
+  const api = await openFake(page, [alpha], {}, 400);
+  await expect(statusText(page)).toHaveText('Live: receiving updates for the unfinished run.');
+  await fake.setDown(page, 'run-a', true);
+  await fake.drop(page, 'run-a');
+  await expect(laneOf(page).locator('[data-lane-status="reconnecting"]')).toBeVisible();
+  // the session expires, but a failing stream says nothing about why: no 401 is inferred
+  api.setRunsUnauthorized(true);
+  await page.waitForTimeout(300);
+  await expect(page.getByRole('heading', { name: 'Welcome back.' })).toHaveCount(0);
+  // only after the budget is exhausted does the app make a real request, which reports 401
+  await expect(page.getByRole('heading', { name: 'Welcome back.' })).toBeVisible({
+    timeout: 10_000,
+  });
+});
+
+test('hidden tabs hold no stream; showing the tab replays missed events without duplicates', async ({
+  page,
+}) => {
+  await openFake(page);
+  await expect(statusText(page)).toHaveText(LIVE_2);
+  const base = (await fake.stats(page)).instances['run-a']!;
+  const setHidden = (hidden: boolean) =>
+    page.evaluate((value) => {
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => value });
+      document.dispatchEvent(new Event('visibilitychange'));
+    }, hidden);
+  await setHidden(true);
+  await expect(statusText(page)).toHaveText(
+    'Paused while this tab is hidden. Loaded history is kept; updates resume when you return.',
+  );
+  expect((await fake.stats(page)).open).toBe(0);
+  await expect(nodesOf(page, 'run-a')).toHaveCount(2); // history kept
+  await fake.publish(page, 'run-a', runEvent('run-a', 3, 'run.stop_requested', min(8)));
+  await setHidden(false);
+  await expect(statusText(page)).toHaveText(LIVE_2);
+  expect(await eventIds(page, 'run-a')).toEqual(['run-a:1', 'run-a:2', 'run-a:3']);
+  expect((await fake.stats(page)).instances['run-a']).toBe(base + 1);
 });

@@ -6,7 +6,7 @@ import { MissionLane } from './MissionLane.js';
 import { PhtClock } from './PhtClock.js';
 import { Reactor } from './Reactor.js';
 import { VitalsPanel } from './VitalsPanel.js';
-import { buildMissionEvents, deriveLaneStatus } from './missionEvents.js';
+import { buildMissionEvents, countStreams, deriveLaneStatus } from './missionEvents.js';
 import { useMissionStream } from './useMissionStream.js';
 import { deriveReactorState } from './reactorState.js';
 import { computeVitals, type LoadState } from './vitals.js';
@@ -226,6 +226,7 @@ export default function NexusCommandCenter(props: NexusProps) {
         <MissionLane
           events={events}
           status={laneStatus}
+          counts={countStreams(stream.monitored, stream.health)}
           monitoredCount={stream.monitored.length}
           totalRuns={runs.length}
           runsState={runsState}

@@ -84,6 +84,7 @@ export type Recorded = { method: string; path: string; csrf: string | undefined 
 export async function mockApi(page: Page, options: NexusApiOptions = {}) {
   const requests: Recorded[] = [];
   let runFailures = options.runFailures ?? 0;
+  let runsUnauthorized = false;
   let taskFailures = options.taskFailures ?? 0;
   const tasks = options.tasks ?? [
     task('task-open', 'Review launch checklist'),
@@ -133,6 +134,7 @@ export async function mockApi(page: Page, options: NexusApiOptions = {}) {
       return route.fulfill({ json: tasks.map((t) => TaskSchema.parse(t)) });
     }
     if (path === '/api/v1/runs' && req.method() === 'GET') {
+      if (runsUnauthorized) return fail(route, 401, 'unauthorized', 'Owner session required.');
       if (runFailures-- > 0)
         return fail(route, 503, 'runs_unavailable', 'Runs are temporarily unavailable.');
       return route.fulfill({ json: runs.map((r) => RunSchema.parse(r)) });
@@ -164,5 +166,6 @@ export async function mockApi(page: Page, options: NexusApiOptions = {}) {
     hub,
     setRuns: (next: Run[]) => (runs = next),
     setRunFailures: (count: number) => (runFailures = count),
+    setRunsUnauthorized: (value: boolean) => (runsUnauthorized = value),
   };
 }
