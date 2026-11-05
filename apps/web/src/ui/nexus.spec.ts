@@ -1357,6 +1357,105 @@ test.describe('retry budget survives transport replacement', () => {
       await fake.drop(page, id);
     };
 
+    /**
+     * Moves only the wall clock. The monotonic clock (performance.now) must not move, which the
+     * helper verifies so these tests cannot pass because the two clocks were coupled.
+     */
+    const HOURS = 3_600_000;
+    const jumpWallClock = async (page: Page, deltaMs: number) => {
+      const before = await page.evaluate(() => ({ wall: Date.now(), mono: performance.now() }));
+      await page.clock.setSystemTime(new Date(before.wall + deltaMs));
+      const after = await page.evaluate(() => ({ wall: Date.now(), mono: performance.now() }));
+      expect(after.wall - before.wall).toBeGreaterThanOrEqual(deltaMs);
+      expect(after.wall - before.wall).toBeLessThan(deltaMs + 1000);
+      expect(Math.abs(after.mono - before.mono)).toBeLessThan(1000); // only real elapsed time
+    };
+
+    test.describe('wall-clock adjustments do not change the allowance', () => {
+      test('a forward wall-clock jump charges nothing extra', async ({ page }) => {
+        await openFrozen(page, [alpha]);
+        await expect(statusText(page)).toHaveText(LIVE_1);
+        await stall(page);
+        await tick(page, 10_000);
+        await jumpWallClock(page, 5 * HOURS);
+        await reopen(page); // closes the interval: 10 s, not 5 h
+        await tick(page, 1_000);
+        await redrop(page);
+        await tick(page, 19_999); // 10 s + 19.999 s
+        await expect(statusText(page)).toHaveText(INTERRUPTED);
+        await tick(page, 1);
+        await expect(statusText(page)).toHaveText(EXHAUSTED_1);
+      });
+
+      test('a backward wall-clock jump neither goes negative nor extends the allowance', async ({
+        page,
+      }) => {
+        await openFrozen(page, [alpha]);
+        await expect(statusText(page)).toHaveText(LIVE_1);
+        await stall(page);
+        await tick(page, 10_000);
+        await jumpWallClock(page, -5 * HOURS);
+        await reopen(page);
+        await tick(page, 1_000);
+        await redrop(page);
+        await tick(page, 19_999); // exactly 10 s + 19.999 s: not a millisecond of extension
+        await expect(statusText(page)).toHaveText(INTERRUPTED);
+        await tick(page, 1);
+        await expect(statusText(page)).toHaveText(EXHAUSTED_1);
+      });
+
+      test('short reconnect (20 s, 5 s open, 9 s, 1 s) holds while the wall clock moves', async ({
+        page,
+      }) => {
+        await openFrozen(page, [alpha]);
+        await expect(statusText(page)).toHaveText(LIVE_1);
+        await stall(page);
+        await tick(page, 20_000);
+        await reopen(page);
+        await tick(page, 2_500);
+        await jumpWallClock(page, 4 * HOURS); // during the connected interval
+        await tick(page, 2_500);
+        await jumpWallClock(page, -9 * HOURS);
+        await expect(statusText(page)).toHaveText(LIVE_1);
+        await redrop(page);
+        await tick(page, 9_000);
+        await expect(statusText(page)).toHaveText(INTERRUPTED); // 29 s cumulative: eligible
+        await jumpWallClock(page, 2 * HOURS); // and during the disconnected interval
+        await tick(page, 1_000);
+        await expect(statusText(page)).toHaveText(EXHAUSTED_1);
+      });
+
+      test('9,999 ms open is not stable even if the wall clock jumps forward', async ({ page }) => {
+        await openFrozen(page, [alpha]);
+        await expect(statusText(page)).toHaveText(LIVE_1);
+        await stall(page);
+        await tick(page, 20_000);
+        await reopen(page);
+        await tick(page, 9_999);
+        await jumpWallClock(page, 5 * HOURS);
+        await redrop(page);
+        await tick(page, 9_999);
+        await expect(statusText(page)).toHaveText(INTERRUPTED); // budget not reset: 10 s left
+        await tick(page, 1);
+        await expect(statusText(page)).toHaveText(EXHAUSTED_1);
+      });
+
+      test('10,000 ms open is stable even if the wall clock jumps backward', async ({ page }) => {
+        await openFrozen(page, [alpha]);
+        await expect(statusText(page)).toHaveText(LIVE_1);
+        await stall(page);
+        await tick(page, 20_000);
+        await reopen(page);
+        await tick(page, 10_000);
+        await jumpWallClock(page, -5 * HOURS);
+        await redrop(page);
+        await tick(page, 29_999); // a fresh allowance
+        await expect(statusText(page)).toHaveText(INTERRUPTED);
+        await tick(page, 1);
+        await expect(statusText(page)).toHaveText(EXHAUSTED_1);
+      });
+    });
+
     test('a short successful reconnect does not charge connected time to the allowance', async ({
       page,
     }) => {

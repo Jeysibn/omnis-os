@@ -37,15 +37,22 @@ const BACKOFF_BASE_MS = 1000;
 const BACKOFF_MAX_MS = 8000;
 
 /**
+ * Every elapsed duration in this hook (disconnected intervals, stable-open time) is measured on
+ * one monotonic clock, so a system clock adjustment cannot change a retry allowance. It is never
+ * compared with a wall-clock timestamp, and it is not used for anything shown to the user.
+ */
+const monotonicNow = () => performance.now();
+
+/**
  * Per-run recovery state. It is owned by the hook, not by an EventSource: transports come and
  * go (hidden tab, eviction from the followed set, re-creation) and this record survives them.
  * Records are dropped only for runs that left the run list, or by an explicit user Refresh.
  */
 type Recovery = {
   failures: number;
-  downSince: number; // start of the active disconnected interval; 0 = not disconnected
+  downSince: number | null; // monotonic start of the active disconnected interval
   spentMs: number; // disconnected time accumulated by intervals that have ended
-  openedAt: number; // when the current transport opened; 0 = not open
+  openedAt: number | null; // monotonic time the current transport opened
   maxSequence: number; // highest validated sequence; replays below it are not progress
   progressed: boolean;
   status: 'active' | 'exhausted' | 'failed';
@@ -62,9 +69,9 @@ type Handle = {
 
 const newRecovery = (): Recovery => ({
   failures: 0,
-  downSince: 0,
+  downSince: null,
   spentMs: 0,
-  openedAt: 0,
+  openedAt: null,
   maxSequence: 0,
   progressed: false,
   status: 'active',
@@ -72,8 +79,8 @@ const newRecovery = (): Recovery => ({
 
 /** Closes the active disconnected interval (if any) into the accumulated total. */
 const settle = (record: Recovery, now: number) => {
-  if (record.downSince) record.spentMs += now - record.downSince;
-  record.downSince = 0;
+  if (record.downSince !== null) record.spentMs += Math.max(0, now - record.downSince);
+  record.downSince = null;
 };
 
 const newHandle = (health: StreamHealth): Handle => ({
@@ -160,8 +167,8 @@ export function useMissionStream(
       if (!handle) return;
       const record = recoveries.current.get(runId);
       if (record) {
-        settle(record, Date.now());
-        record.openedAt = 0;
+        settle(record, monotonicNow());
+        record.openedAt = null;
       }
       handle.closed = true;
       stopTransport(handle);
@@ -189,7 +196,7 @@ export function useMissionStream(
   const armDeadline = useCallback(
     (runId: string, handle: Handle, now: number) => {
       const record = recoveryFor(runId);
-      if (handle.deadlineTimer || !record.downSince) return;
+      if (handle.deadlineTimer || record.downSince === null) return;
       const remaining = FAILURE_WINDOW_MS - record.spentMs - (now - record.downSince);
       handle.deadlineTimer = setTimeout(() => exhaust(runId, handle), Math.max(0, remaining));
     },
@@ -214,7 +221,7 @@ export function useMissionStream(
         if (!current()) return;
         if (handle.deadlineTimer) clearTimeout(handle.deadlineTimer);
         handle.deadlineTimer = null;
-        const now = Date.now();
+        const now = monotonicNow();
         settle(record, now); // connected time is not charged to the disconnected allowance
         record.openedAt = now;
         setRunHealth(runId, handle, 'open');
@@ -240,7 +247,7 @@ export function useMissionStream(
           if (isTerminalEvent(event.type)) {
             stopTransport(handle);
             record.failures = 0;
-            record.downSince = 0;
+            record.downSince = null;
             record.spentMs = 0;
             setRunHealth(runId, handle, 'ended');
             const snapshot = runsRef.current.find((run) => run.id === runId);
@@ -261,17 +268,17 @@ export function useMissionStream(
       source.onerror = () => {
         if (!current()) return;
         if (['ended', 'failed', 'exhausted', 'suspended'].includes(handle.health)) return;
-        const now = Date.now();
-        const stable = record.openedAt > 0 && now - record.openedAt >= STABLE_OPEN_MS;
+        const now = monotonicNow();
+        const stable = record.openedAt !== null && now - record.openedAt >= STABLE_OPEN_MS;
         if (record.progressed || stable) {
           record.failures = 0;
-          record.downSince = 0;
+          record.downSince = null;
           record.spentMs = 0;
         }
         record.progressed = false;
-        record.openedAt = 0;
+        record.openedAt = null;
         record.failures += 1;
-        if (!record.downSince) record.downSince = now;
+        if (record.downSince === null) record.downSince = now;
         const spent = record.spentMs + (now - record.downSince);
         if (record.failures > MAX_FAILURES || spent >= FAILURE_WINDOW_MS) {
           exhaust(runId, handle);
@@ -297,8 +304,8 @@ export function useMissionStream(
   const suspend = useCallback(
     (runId: string, handle: Handle) => {
       const record = recoveryFor(runId);
-      settle(record, Date.now());
-      record.openedAt = 0; // a stable open must be continuous
+      settle(record, monotonicNow());
+      record.openedAt = null; // a stable open must be continuous
       stopTransport(handle);
       setRunHealth(runId, handle, 'suspended');
     },
@@ -313,12 +320,12 @@ export function useMissionStream(
         setRunHealth(runId, handle, record.status === 'failed' ? 'failed' : 'exhausted');
         return;
       }
-      const now = Date.now();
+      const now = monotonicNow();
       // An unrecovered failure means the stream is still disconnected: charge from now.
-      if (record.failures > 0 && !record.downSince) record.downSince = now;
+      if (record.failures > 0 && record.downSince === null) record.downSince = now;
       setRunHealth(runId, handle, record.failures > 0 ? 'reconnecting' : 'connecting');
       open(runId, handle);
-      if (record.downSince) armDeadline(runId, handle, now);
+      if (record.downSince !== null) armDeadline(runId, handle, now);
     },
     [armDeadline, open, recoveryFor, setRunHealth],
   );
@@ -356,10 +363,10 @@ export function useMissionStream(
       setRunHealth(runId, handle, handle.health);
       if (record.status !== 'active') continue; // stays closed until Refresh
       if (hidden) continue;
-      const now = Date.now();
-      if (record.failures > 0 && !record.downSince) record.downSince = now;
+      const now = monotonicNow();
+      if (record.failures > 0 && record.downSince === null) record.downSince = now;
       open(runId, handle);
-      if (record.downSince) armDeadline(runId, handle, now);
+      if (record.downSince !== null) armDeadline(runId, handle, now);
     }
     // Bound memory: forget recovery state only for runs that left the run list entirely.
     if (enabled) {
