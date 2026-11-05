@@ -315,6 +315,11 @@ export function assertRuntimeAclPolicy(snapshot) {
           'get_project(p_id text)',
           'update_project(p_id text, p_expected_revision integer, p_name text, p_objective text, p_priority text, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
           'archive_project(p_id text, p_expected_revision integer, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
+          'list_project_milestones(p_project_id text, p_after_created_at timestamp with time zone, p_after_id text, p_limit integer)',
+          'get_project_milestone(p_project_id text, p_id text)',
+          'create_project_milestone(p_id text, p_project_id text, p_title text, p_description text, p_target_date date, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
+          'update_project_milestone(p_project_id text, p_id text, p_expected_revision integer, p_title text, p_description text, p_description_supplied boolean, p_target_date date, p_target_date_supplied boolean, p_status text, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
+          'archive_project_milestone(p_project_id text, p_id text, p_expected_revision integer, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
         ].includes(entry.object) &&
         entry.privilege === 'EXECUTE' &&
         entry.securityDefiner === true
