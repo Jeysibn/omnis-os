@@ -36,11 +36,21 @@ import {
   UpdateMilestoneSchema,
   type Milestone,
   type MilestoneListResponse,
+  ArchiveEpicSchema,
+  CreateEpicSchema,
+  EpicIdSchema,
+  EpicListQuerySchema,
+  EpicListResponseSchema,
+  EpicSchema,
+  UpdateEpicSchema,
+  type Epic,
+  type EpicListResponse,
 } from '@omnis/contracts';
 import {
   AgentLifecycleStoreError,
   DepartmentStoreError,
   MilestoneStoreError,
+  EpicStoreError,
   ProjectStoreError,
 } from '@omnis/db';
 
@@ -79,6 +89,20 @@ export type AuthorizerStore = {
           input: unknown,
           requestId: string,
         ): Promise<Milestone>;
+      }
+    | undefined;
+  projectEpics?:
+    | {
+        list(projectId: string, query: unknown): Promise<EpicListResponse>;
+        get(projectId: string, epicId: string): Promise<Epic | undefined>;
+        create(projectId: string, input: unknown, requestId: string): Promise<Epic>;
+        update(projectId: string, epicId: string, input: unknown, requestId: string): Promise<Epic>;
+        archive(
+          projectId: string,
+          epicId: string,
+          input: unknown,
+          requestId: string,
+        ): Promise<Epic>;
       }
     | undefined;
   agentLifecycle?:
@@ -433,6 +457,146 @@ export function createAuthorizerApp(input: {
     },
   );
 
+  app.get<{ Params: { projectId: string }; Querystring: { cursor?: string; limit?: string } }>(
+    '/internal/v1/projects/:projectId/epics',
+    async (request, reply) => {
+      const projectId = ProjectIdSchema.safeParse(request.params.projectId);
+      const query = EpicListQuerySchema.safeParse(request.query);
+      if (!projectId.success || !query.success)
+        return reply.code(400).send({
+          error: { code: 'invalid_input', message: 'Epic query is invalid.' },
+        });
+      try {
+        return EpicListResponseSchema.parse(
+          await requireProjectEpics(input.store).list(projectId.data, query.data),
+        );
+      } catch (error) {
+        return sendEpicStoreError(error, reply);
+      }
+    },
+  );
+
+  app.post<{ Params: { projectId: string } }>(
+    '/internal/v1/projects/:projectId/epics',
+    { bodyLimit: 16 * 1024 },
+    async (request, reply) => {
+      const projectId = ProjectIdSchema.safeParse(request.params.projectId);
+      const body = CreateEpicSchema.safeParse(request.body);
+      const requestId = request.headers['idempotency-key'];
+      if (
+        !projectId.success ||
+        !body.success ||
+        typeof requestId !== 'string' ||
+        !isUuid(requestId)
+      )
+        return reply.code(400).send({
+          error: {
+            code: 'invalid_input',
+            message: 'Epic input and Idempotency-Key are required.',
+          },
+        });
+      try {
+        return reply
+          .code(201)
+          .send(
+            EpicSchema.parse(
+              await requireProjectEpics(input.store).create(projectId.data, body.data, requestId),
+            ),
+          );
+      } catch (error) {
+        return sendEpicStoreError(error, reply);
+      }
+    },
+  );
+
+  app.get<{ Params: { projectId: string; epicId: string } }>(
+    '/internal/v1/projects/:projectId/epics/:epicId',
+    async (request, reply) => {
+      const projectId = ProjectIdSchema.safeParse(request.params.projectId);
+      const epicId = EpicIdSchema.safeParse(request.params.epicId);
+      if (!projectId.success || !epicId.success)
+        return reply.code(400).send({
+          error: { code: 'invalid_input', message: 'Epic identifier is invalid.' },
+        });
+      try {
+        const epic = await requireProjectEpics(input.store).get(projectId.data, epicId.data);
+        if (!epic)
+          return reply.code(404).send({
+            error: { code: 'not_found', message: 'Project or epic was not found.' },
+          });
+        return EpicSchema.parse(epic);
+      } catch (error) {
+        return sendEpicStoreError(error, reply);
+      }
+    },
+  );
+
+  app.patch<{ Params: { projectId: string; epicId: string } }>(
+    '/internal/v1/projects/:projectId/epics/:epicId',
+    { bodyLimit: 16 * 1024 },
+    async (request, reply) => {
+      const projectId = ProjectIdSchema.safeParse(request.params.projectId);
+      const epicId = EpicIdSchema.safeParse(request.params.epicId);
+      const body = UpdateEpicSchema.safeParse(request.body);
+      const requestId = request.headers['idempotency-key'];
+      if (
+        !projectId.success ||
+        !epicId.success ||
+        !body.success ||
+        typeof requestId !== 'string' ||
+        !isUuid(requestId)
+      )
+        return reply.code(400).send({
+          error: { code: 'invalid_input', message: 'Epic update input is invalid.' },
+        });
+      try {
+        return EpicSchema.parse(
+          await requireProjectEpics(input.store).update(
+            projectId.data,
+            epicId.data,
+            body.data,
+            requestId,
+          ),
+        );
+      } catch (error) {
+        return sendEpicStoreError(error, reply);
+      }
+    },
+  );
+
+  app.post<{ Params: { projectId: string; epicId: string } }>(
+    '/internal/v1/projects/:projectId/epics/:epicId/archive',
+    { bodyLimit: 16 * 1024 },
+    async (request, reply) => {
+      const projectId = ProjectIdSchema.safeParse(request.params.projectId);
+      const epicId = EpicIdSchema.safeParse(request.params.epicId);
+      const body = ArchiveEpicSchema.safeParse(request.body);
+      const requestId = request.headers['idempotency-key'];
+      if (
+        !projectId.success ||
+        !epicId.success ||
+        !body.success ||
+        typeof requestId !== 'string' ||
+        !isUuid(requestId)
+      )
+        return reply.code(400).send({
+          error: { code: 'invalid_input', message: 'Epic archive input is invalid.' },
+        });
+      try {
+        return EpicSchema.parse(
+          await requireProjectEpics(input.store).archive(
+            projectId.data,
+            epicId.data,
+            body.data,
+            requestId,
+          ),
+        );
+      } catch (error) {
+        return sendEpicStoreError(error, reply);
+      }
+    },
+  );
+
   app.get<{ Params: { agentId: string } }>(
     '/internal/v1/agents/:agentId/draft-profile',
     async (request, reply) => {
@@ -681,6 +845,16 @@ function requireProjectMilestones(store: AuthorizerStore) {
 
 function sendMilestoneStoreError(error: unknown, reply: FastifyReply) {
   if (!(error instanceof MilestoneStoreError)) throw error;
+  return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
+}
+
+function requireProjectEpics(store: AuthorizerStore) {
+  if (!store.projectEpics) throw new Error('Project epic store is unavailable.');
+  return store.projectEpics;
+}
+
+function sendEpicStoreError(error: unknown, reply: FastifyReply) {
+  if (!(error instanceof EpicStoreError)) throw error;
   return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
 }
 

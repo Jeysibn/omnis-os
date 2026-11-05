@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import type { Pool, PoolClient, QueryResultRow } from 'pg';
 import type {
   Department,
+  Epic,
+  EpicListResponse,
   Milestone,
   MilestoneListResponse,
   Project,
@@ -12,6 +14,7 @@ import { PostgresDepartmentManagementStore } from './department-management-store
 import type { PostgresAgentLifecycleStore } from './agent-lifecycle-store.ts';
 import type { PostgresProjectManagementStore } from './project-management-store.ts';
 import type { PostgresProjectMilestoneStore } from './project-milestone-store.ts';
+import type { PostgresProjectEpicStore } from './project-epic-store.ts';
 
 export type AuthorizationStatus = 'pending' | 'authorized' | 'denied' | 'revoked' | 'expired';
 export type RuntimeAuthorizationRecord = {
@@ -86,6 +89,7 @@ export class PostgresAuthorizationStore {
   readonly agentLifecycle: PostgresAgentLifecycleStore | undefined;
   readonly projectManagement: PostgresProjectManagementStore | undefined;
   readonly projectMilestones: PostgresProjectMilestoneStore | undefined;
+  readonly projectEpics: PostgresProjectEpicStore | undefined;
 
   constructor(
     runtime: Pool,
@@ -94,6 +98,7 @@ export class PostgresAuthorizationStore {
       agentLifecycle?: PostgresAgentLifecycleStore;
       projectManagement?: PostgresProjectManagementStore;
       projectMilestones?: PostgresProjectMilestoneStore;
+      projectEpics?: PostgresProjectEpicStore;
     } = {},
   ) {
     this.runtime = runtime;
@@ -102,6 +107,7 @@ export class PostgresAuthorizationStore {
     this.agentLifecycle = options.agentLifecycle;
     this.projectManagement = options.projectManagement;
     this.projectMilestones = options.projectMilestones;
+    this.projectEpics = options.projectEpics;
   }
 
   listProjects(): Promise<ProjectListResponse> {
@@ -154,6 +160,36 @@ export class PostgresAuthorizationStore {
     return this.requireProjectMilestones().archive(projectId, milestoneId, input, requestId);
   }
 
+  listProjectEpics(projectId: string, query: unknown): Promise<EpicListResponse> {
+    return this.requireProjectEpics().list(projectId, query);
+  }
+
+  getProjectEpic(projectId: string, epicId: string): Promise<Epic | undefined> {
+    return this.requireProjectEpics().get(projectId, epicId);
+  }
+
+  createProjectEpic(projectId: string, input: unknown, requestId: string): Promise<Epic> {
+    return this.requireProjectEpics().create(projectId, input, requestId);
+  }
+
+  updateProjectEpic(
+    projectId: string,
+    epicId: string,
+    input: unknown,
+    requestId: string,
+  ): Promise<Epic> {
+    return this.requireProjectEpics().update(projectId, epicId, input, requestId);
+  }
+
+  archiveProjectEpic(
+    projectId: string,
+    epicId: string,
+    input: unknown,
+    requestId: string,
+  ): Promise<Epic> {
+    return this.requireProjectEpics().archive(projectId, epicId, input, requestId);
+  }
+
   private requireProjectManagement(): PostgresProjectManagementStore {
     if (!this.projectManagement) throw new Error('Project management store is unavailable.');
     return this.projectManagement;
@@ -162,6 +198,11 @@ export class PostgresAuthorizationStore {
   private requireProjectMilestones(): PostgresProjectMilestoneStore {
     if (!this.projectMilestones) throw new Error('Project milestone store is unavailable.');
     return this.projectMilestones;
+  }
+
+  private requireProjectEpics(): PostgresProjectEpicStore {
+    if (!this.projectEpics) throw new Error('Project epic store is unavailable.');
+    return this.projectEpics;
   }
 
   listDepartments(includeArchived = false): Promise<{ departments: Department[]; total: number }> {

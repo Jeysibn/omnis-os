@@ -123,6 +123,85 @@ export const ProjectSchema = ProjectSummarySchema.extend({
 }).strict();
 export type Project = z.infer<typeof ProjectSchema>;
 
+export const EpicIdSchema = z.string().regex(/^epc_[0-9a-f]{32}$/);
+export const EpicStatusSchema = z.enum(['planned', 'in_progress', 'completed', 'archived']);
+export const EpicRevisionSchema = z.number().int().positive().safe();
+const EpicTextSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .refine((value) => !value.includes('\0'));
+
+export const CreateEpicSchema = z
+  .object({
+    title: EpicTextSchema.max(120),
+    description: z
+      .string()
+      .trim()
+      .max(2000)
+      .refine((value) => !value.includes('\0'))
+      .optional(),
+  })
+  .strict();
+export type CreateEpicInput = z.infer<typeof CreateEpicSchema>;
+
+export const UpdateEpicSchema = z
+  .object({
+    expectedRevision: EpicRevisionSchema,
+    title: EpicTextSchema.max(120).optional(),
+    description: z
+      .string()
+      .trim()
+      .max(2000)
+      .refine((value) => !value.includes('\0'))
+      .nullable()
+      .optional(),
+    status: z.enum(['planned', 'in_progress', 'completed']).optional(),
+  })
+  .strict()
+  .refine(
+    (epic) =>
+      epic.title !== undefined || epic.description !== undefined || epic.status !== undefined,
+    'At least one Epic field must be changed.',
+  );
+export type UpdateEpicInput = z.infer<typeof UpdateEpicSchema>;
+
+export const ArchiveEpicSchema = z.object({ expectedRevision: EpicRevisionSchema }).strict();
+export type ArchiveEpicInput = z.infer<typeof ArchiveEpicSchema>;
+
+export const EpicSchema = z
+  .object({
+    id: EpicIdSchema,
+    projectId: ProjectIdSchema,
+    title: z.string().min(1).max(120),
+    description: z.string().max(2000).nullable(),
+    status: EpicStatusSchema,
+    revision: EpicRevisionSchema,
+    archivedAt: z.string().datetime().nullable(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .strict()
+  .refine((epic) => (epic.status === 'archived') === (epic.archivedAt !== null));
+export type Epic = z.infer<typeof EpicSchema>;
+
+export const EpicListQuerySchema = z
+  .object({
+    cursor: z.string().min(1).max(1024).optional(),
+    limit: z
+      .union([
+        z
+          .string()
+          .regex(/^[1-9][0-9]*$/)
+          .transform(Number),
+        z.number().int(),
+      ])
+      .pipe(z.number().int().min(1).max(100))
+      .optional(),
+  })
+  .strict();
+export type EpicListQuery = z.infer<typeof EpicListQuerySchema>;
+
 export const MilestoneIdSchema = z.string().regex(/^mil_[0-9a-f]{32}$/);
 export const MilestoneStatusSchema = z.enum(['planned', 'in_progress', 'completed', 'archived']);
 export const MilestoneRevisionSchema = z.number().int().positive().safe();
@@ -275,6 +354,15 @@ export const MilestoneListResponseSchema = z
   .strict()
   .refine((response) => response.page.observedTotal >= response.milestones.length);
 export type MilestoneListResponse = z.infer<typeof MilestoneListResponseSchema>;
+
+export const EpicListResponseSchema = z
+  .object({
+    epics: z.array(EpicSchema).max(100),
+    page: ProjectWorkspacePageSchema,
+  })
+  .strict()
+  .refine((response) => response.page.observedTotal >= response.epics.length);
+export type EpicListResponse = z.infer<typeof EpicListResponseSchema>;
 
 export const ProjectWorkspaceTaskPageSchema = z
   .object({

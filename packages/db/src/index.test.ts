@@ -18,6 +18,8 @@ import {
   PostgresProjectManagementStore,
   PostgresProjectMilestoneStore,
   MilestoneStoreError,
+  PostgresProjectEpicStore,
+  EpicStoreError,
   ProjectStoreError,
   PostgresRunStore,
   StoreError,
@@ -80,7 +82,7 @@ const postgresSuite = describe(
         'GRANT SELECT, INSERT, UPDATE, DELETE ON omnis.test_queue_outbox TO omnis_runtime',
       );
       await adminPool!.query(
-        'TRUNCATE omnis.test_queue_outbox, omnis.task_project_management_idempotency, omnis.task_project_management_audit, omnis.project_milestone_management_audit, omnis.project_milestones, omnis.project_management_idempotency, omnis.project_management_audit, omnis.projects, omnis.agent_management_idempotency, omnis.agent_management_audit, omnis.agent_profile_drafts, omnis.department_management_audit, omnis.agent_profile_versions, omnis.agents, omnis.departments, omnis.mock_sandbox_launches, omnis.legacy_unscoped_runs, omnis.authorization_audit, omnis.runtime_authorizations, omnis.run_idempotency, omnis.run_events, omnis.runs, omnis.tasks',
+        'TRUNCATE omnis.test_queue_outbox, omnis.task_project_management_idempotency, omnis.task_project_management_audit, omnis.project_epic_management_audit, omnis.project_epics, omnis.project_milestone_management_audit, omnis.project_milestones, omnis.project_management_idempotency, omnis.project_management_audit, omnis.projects, omnis.agent_management_idempotency, omnis.agent_management_audit, omnis.agent_profile_drafts, omnis.department_management_audit, omnis.agent_profile_versions, omnis.agents, omnis.departments, omnis.mock_sandbox_launches, omnis.legacy_unscoped_runs, omnis.authorization_audit, omnis.runtime_authorizations, omnis.run_idempotency, omnis.run_events, omnis.runs, omnis.tasks',
       );
       await adminPool!.query('ALTER SEQUENCE omnis.task_id_seq RESTART WITH 1');
       await adminPool!.query('ALTER SEQUENCE omnis.run_id_seq RESTART WITH 1');
@@ -956,6 +958,171 @@ const postgresSuite = describe(
           [`mil_${randomUUID().replaceAll('-', '')}`, project.id, 'Unauthorized'],
         ),
       );
+    });
+
+    it('manages project Epics with scoped reads, revisions, retries, lifecycle, and isolated privileges', async () => {
+      const projects = new PostgresProjectManagementStore(authorizerPool!, Buffer.alloc(32, 23));
+      const epics = new PostgresProjectEpicStore(authorizerPool!, Buffer.alloc(32, 23));
+      const project = await projects.create(
+        { key: 'EPIC-V1', name: 'Epic test', objective: 'Exercise Epic lifecycle behavior.' },
+        randomUUID(),
+      );
+      assert.deepEqual(await epics.list(project.id), {
+        epics: [],
+        page: { observedTotal: 0, complete: true, nextCursor: null },
+      });
+      const requestId = randomUUID();
+      const input = { title: 'First epic', description: 'Synthetic scope only.' };
+      const [created, replay] = await Promise.all([
+        epics.create(project.id, input, requestId),
+        epics.create(project.id, input, requestId),
+      ]);
+      assert.deepEqual(replay, created);
+      assert.equal(created.status, 'planned');
+      assert.equal(created.revision, 1);
+      await assert.rejects(
+        epics.create(project.id, { title: 'Different request' }, requestId),
+        (error: unknown) => error instanceof EpicStoreError && error.code === 'conflict',
+      );
+      const inProgress = await epics.update(
+        project.id,
+        created.id,
+        { expectedRevision: 1, status: 'in_progress' },
+        randomUUID(),
+      );
+      const completed = await epics.update(
+        project.id,
+        created.id,
+        { expectedRevision: 2, status: 'completed' },
+        randomUUID(),
+      );
+      assert.equal(inProgress.status, 'in_progress');
+      assert.equal(completed.status, 'completed');
+      await assert.rejects(
+        epics.update(
+          project.id,
+          created.id,
+          { expectedRevision: 3, status: 'planned' },
+          randomUUID(),
+        ),
+        (error: unknown) => error instanceof EpicStoreError && error.code === 'invalid_transition',
+      );
+      const [a, b] = await Promise.allSettled([
+        epics.update(
+          project.id,
+          created.id,
+          { expectedRevision: 3, title: 'Edit A' },
+          randomUUID(),
+        ),
+        epics.update(
+          project.id,
+          created.id,
+          { expectedRevision: 3, title: 'Edit B' },
+          randomUUID(),
+        ),
+      ]);
+      assert.equal([a, b].filter((result) => result.status === 'fulfilled').length, 1);
+      assert.equal([a, b].filter((result) => result.status === 'rejected').length, 1);
+      const current = await epics.get(project.id, created.id);
+      assert.equal(current?.revision, 4);
+      assert.equal(await epics.get('prj_ffffffffffffffffffffffffffffffff', created.id), undefined);
+      const archived = await epics.archive(
+        project.id,
+        created.id,
+        { expectedRevision: 4 },
+        randomUUID(),
+      );
+      assert.equal(archived.status, 'archived');
+      assert.equal((await epics.get(project.id, created.id))?.id, created.id);
+      await assert.rejects(
+        epics.update(
+          project.id,
+          created.id,
+          { expectedRevision: 5, title: 'No edit' },
+          randomUUID(),
+        ),
+        (error: unknown) => error instanceof EpicStoreError && error.code === 'invalid_transition',
+      );
+      const audit = await adminPool!.query<{ action: string; record: Record<string, unknown> }>(
+        `SELECT action, to_jsonb(audit) AS record FROM omnis.project_epic_management_audit audit WHERE epic_id = $1`,
+        [created.id],
+      );
+      assert.deepEqual(audit.rows.map((row) => row.action).sort(), [
+        'archived',
+        'created',
+        'updated',
+        'updated',
+        'updated',
+      ]);
+      assert.ok(audit.rows.every((row) => !JSON.stringify(row.record).includes(input.description)));
+      const permissions = await adminPool!.query<{
+        runtime_select: boolean;
+        runtime_insert: boolean;
+        authorizer_select: boolean;
+        authorizer_insert: boolean;
+        runtime_create: boolean;
+        authorizer_create: boolean;
+        runtime_list: boolean;
+        authorizer_list: boolean;
+      }>(`
+        SELECT has_table_privilege('omnis_runtime','omnis.project_epics','SELECT') AS runtime_select,
+               has_table_privilege('omnis_runtime','omnis.project_epics','INSERT') AS runtime_insert,
+               has_table_privilege('omnis_authorizer','omnis.project_epics','SELECT') AS authorizer_select,
+               has_table_privilege('omnis_authorizer','omnis.project_epics','INSERT') AS authorizer_insert,
+               has_function_privilege('omnis_runtime','omnis.create_project_epic(text,text,text,text,uuid,integer,bytea)','EXECUTE') AS runtime_create,
+               has_function_privilege('omnis_authorizer','omnis.create_project_epic(text,text,text,text,uuid,integer,bytea)','EXECUTE') AS authorizer_create,
+               has_function_privilege('omnis_runtime','omnis.list_project_epics(text,timestamp with time zone,text,integer)','EXECUTE') AS runtime_list,
+               has_function_privilege('omnis_authorizer','omnis.list_project_epics(text,timestamp with time zone,text,integer)','EXECUTE') AS authorizer_list
+      `);
+      assert.deepEqual(permissions.rows[0], {
+        runtime_select: false,
+        runtime_insert: false,
+        authorizer_select: false,
+        authorizer_insert: false,
+        runtime_create: false,
+        authorizer_create: true,
+        runtime_list: false,
+        authorizer_list: true,
+      });
+      await assert.rejects(
+        launcherPool!.query(
+          'INSERT INTO omnis.project_epics(id, project_id, title) VALUES ($1,$2,$3)',
+          [`epc_${randomUUID().replaceAll('-', '')}`, project.id, 'Unauthorized'],
+        ),
+      );
+      const archivedProject = await projects.archive(
+        project.id,
+        { expectedRevision: 1 },
+        randomUUID(),
+      );
+      assert.equal(archivedProject.status, 'archived');
+      await assert.rejects(
+        epics.create(project.id, { title: 'Too late' }, randomUUID()),
+        (error: unknown) => error instanceof EpicStoreError && error.code === 'invalid_transition',
+      );
+      const racingProject = await projects.create(
+        {
+          key: 'EPIC-ARCHIVE-RACE',
+          name: 'Epic archive race',
+          objective: 'Serialize parent lifecycle.',
+        },
+        randomUUID(),
+      );
+      const parentRace = await Promise.allSettled([
+        epics.create(racingProject.id, { title: 'Race with archive' }, randomUUID()),
+        projects.archive(racingProject.id, { expectedRevision: 1 }, randomUUID()),
+      ]);
+      assert.equal(parentRace[1]?.status, 'fulfilled');
+      if (parentRace[0]?.status === 'fulfilled')
+        assert.equal(
+          (await epics.get(racingProject.id, parentRace[0].value.id))?.id,
+          parentRace[0].value.id,
+        );
+      else
+        assert.ok(
+          parentRace[0].reason instanceof EpicStoreError &&
+            parentRace[0].reason.code === 'invalid_transition',
+        );
     });
 
     it('serializes concurrent edits, replays exact retries, and archives without hiding history', async () => {
@@ -4347,6 +4514,7 @@ const postgresSuite = describe(
         await adminPool!.query(`
         TRUNCATE omnis.test_queue_outbox, omnis.task_project_management_idempotency,
           omnis.task_project_management_audit, omnis.project_management_idempotency,
+          omnis.project_epic_management_audit, omnis.project_epics,
           omnis.project_milestone_management_audit, omnis.project_milestones,
           omnis.project_management_audit, omnis.projects, omnis.agent_management_idempotency,
           omnis.agent_management_audit, omnis.agent_profile_drafts, omnis.department_management_audit,

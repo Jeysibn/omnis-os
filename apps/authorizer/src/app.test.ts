@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import type { Authorization, Department, Milestone, Project } from '@omnis/contracts';
+import type { Authorization, Department, Epic, Milestone, Project } from '@omnis/contracts';
 import { AgentLifecycleStoreError } from '@omnis/db';
 import { createAuthorizerApp, type AuthorizerStore } from './app.ts';
 
@@ -63,6 +63,17 @@ const milestone: Milestone = {
   description: null,
   status: 'planned',
   targetDate: null,
+  revision: 1,
+  archivedAt: null,
+  createdAt: '2026-11-05T00:00:00.000Z',
+  updatedAt: '2026-11-05T00:00:00.000Z',
+};
+const epic: Epic = {
+  id: 'epc_0123456789abcdef0123456789abcdef',
+  projectId: project.id,
+  title: 'First epic',
+  description: null,
+  status: 'planned',
   revision: 1,
   archivedAt: null,
   createdAt: '2026-11-05T00:00:00.000Z',
@@ -150,6 +161,27 @@ function makeStore() {
         return { ...milestone, status: 'archived', revision: 2, archivedAt: milestone.createdAt };
       },
     },
+    projectEpics: {
+      async list(id, query) {
+        calls.push({ method: 'listEpics', requestId: `${id}:${JSON.stringify(query)}` });
+        return { epics: [epic], page: { observedTotal: 1, complete: true, nextCursor: null } };
+      },
+      async get(projectId, epicId) {
+        return projectId === project.id && epicId === epic.id ? epic : undefined;
+      },
+      async create(projectId, _input, requestId) {
+        calls.push({ method: 'createEpic', requestId });
+        return { ...epic, projectId };
+      },
+      async update(_projectId, _epicId, _input, requestId) {
+        calls.push({ method: 'updateEpic', requestId });
+        return { ...epic, revision: 2 };
+      },
+      async archive(_projectId, _epicId, _input, requestId) {
+        calls.push({ method: 'archiveEpic', requestId });
+        return { ...epic, status: 'archived', revision: 2, archivedAt: epic.createdAt };
+      },
+    },
   };
   return { store, calls };
 }
@@ -208,6 +240,47 @@ describe('independent authorizer service boundary', () => {
         payload: { title: '   ' },
       });
       assert.equal(invalid.statusCode, 400);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('keeps Epic operations behind the service token and validates the internal contract', async () => {
+    const { store, calls } = makeStore();
+    const app = createAuthorizerApp({ store, serviceToken, checkDatabase: async () => undefined });
+    const headers = { 'x-omnis-authorizer-token': serviceToken };
+    try {
+      const denied = await app.inject({
+        method: 'GET',
+        url: `/internal/v1/projects/${project.id}/epics`,
+      });
+      assert.equal(denied.statusCode, 401);
+      const list = await app.inject({
+        method: 'GET',
+        url: `/internal/v1/projects/${project.id}/epics?limit=10`,
+        headers,
+      });
+      assert.equal(list.statusCode, 200);
+      assert.equal(list.json().epics[0].id, epic.id);
+      const create = await app.inject({
+        method: 'POST',
+        url: `/internal/v1/projects/${project.id}/epics`,
+        headers: { ...headers, 'idempotency-key': authorization.correlationId },
+        payload: { title: 'First epic' },
+      });
+      assert.equal(create.statusCode, 201);
+      assert.equal(create.json().id, epic.id);
+      assert.deepEqual(calls.at(-1), {
+        method: 'createEpic',
+        requestId: authorization.correlationId,
+      });
+      const malformed = await app.inject({
+        method: 'POST',
+        url: `/internal/v1/projects/${project.id}/epics`,
+        headers: { ...headers, 'idempotency-key': authorization.correlationId },
+        payload: { title: ' ' },
+      });
+      assert.equal(malformed.statusCode, 400);
     } finally {
       await app.close();
     }
