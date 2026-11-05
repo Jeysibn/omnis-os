@@ -1,8 +1,8 @@
 # Phase 1 — Connector Host-Boundary Feasibility
 
 **Assessment date:** 2026-11-05  
-**Repository baseline:** `origin/main` at `e0512609973bf24a8fd40f7da7731865fdc45377`
-**Readiness handoff:** PR #37, head `853ff8ae73b55efb1495734d56280bbd0df9382d` (merged)
+**Repository baseline:** `origin/main` at `28981f900f95a9673db35aeff5ceaff62f4fffe6`
+**Readiness handoff:** PR #37 reviewed head `853ff8ae73b55efb1495734d56280bbd0df9382d`; squash-merge commit `e0512609973bf24a8fd40f7da7731865fdc45377`
 **Scope:** Design and feasibility only. No provider authentication, inference, host provisioning, egress activation, or runtime change was performed.
 
 ## Decision
@@ -15,8 +15,8 @@ This blocks a real provider request, not further design or synthetic-only platfo
 
 ### Repository and active work
 
-- Latest fetched `origin/main` is `e0512609973bf24a8fd40f7da7731865fdc45377`.
-- PR #37 was merged at `853ff8ae73b55efb1495734d56280bbd0df9382d`; its readiness and Codex #3 handoff documents are included in the current main baseline.
+- Latest fetched `origin/main` for this remediation is `28981f900f95a9673db35aeff5ceaff62f4fffe6`.
+- PR #37's reviewed head was `853ff8ae73b55efb1495734d56280bbd0df9382d`; GitHub recorded its squash-merge commit as `e0512609973bf24a8fd40f7da7731865fdc45377`. Its readiness and Codex #3 handoff documents are included in the current main baseline.
 - PR #36 is the full-stack browser-to-PostgreSQL smoke test (`724f854a94f742b544171e35d067466443b34d37`); #31 is frontend work (`edf93d72cea4d7fd0f64c1c2c68fba885b1ccd2a`); #25 is frontend department work; #26 is local Compose PostgreSQL digest work. None changes the proposed new feasibility-document path. No application or infrastructure files were changed by this assessment.
 - The original worktree was already on `security/r1g5-host-authorizer-isolation`, behind its remote by two commits, with an unrelated untracked UI specification. It was left untouched. This document is in an isolated worktree based on current `origin/main`.
 
