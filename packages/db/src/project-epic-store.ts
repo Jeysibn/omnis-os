@@ -62,7 +62,8 @@ export class EpicStoreError extends Error {
 function mapDatabaseError(error: unknown): never {
   const code = (error as DbError)?.code;
   if (code === 'P0002') throw new EpicStoreError('not_found', 404);
-  if (code === '23505' || code === '40001') throw new EpicStoreError('conflict', 409);
+  if (code === '23505' || code === '40001' || code === 'P2002')
+    throw new EpicStoreError('conflict', 409);
   if (code === 'P0001') throw new EpicStoreError('invalid_transition', 409);
   if (code === '54000') throw new EpicStoreError('limit', 503);
   if (['22023', '22001', '23502', '23514', '22P02'].includes(code ?? ''))

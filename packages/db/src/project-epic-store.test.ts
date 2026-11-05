@@ -298,4 +298,23 @@ describe('project epic store boundary', () => {
       (error: unknown) => error instanceof EpicStoreError && error.code === 'invalid_input',
     );
   });
+
+  it('maps stale task association revisions to a safe conflict response', async () => {
+    const store = new PostgresProjectEpicStore(
+      fakePool(() => Object.assign(new Error('internal revision detail'), { code: 'P2002' })),
+      key,
+    );
+    await assert.rejects(
+      store.setTaskEpic(
+        taskId,
+        { expectedAssociationRevision: 1, epicId },
+        'b9d5fd0e-4681-4a41-90c0-50b120843aa5',
+      ),
+      (error: unknown) =>
+        error instanceof EpicStoreError &&
+        error.code === 'conflict' &&
+        error.statusCode === 409 &&
+        !error.message.includes('internal revision detail'),
+    );
+  });
 });
