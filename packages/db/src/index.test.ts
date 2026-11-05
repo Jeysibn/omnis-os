@@ -5095,6 +5095,7 @@ const postgresSuite = describe(
         },
         randomUUID(),
       );
+      assert.ok(task.associationRevision);
       // A pre-cutover run has no mission_events row. Its project/task/run filter
       // must still validate from the durable run→task→project relationship.
       const legacyRunId = `run-legacy-${randomUUID()}`;
@@ -5159,7 +5160,7 @@ const postgresSuite = describe(
       }
       const noOp = await store.setTaskProject(
         task.id,
-        { projectId: project.id, expectedAssociationRevision: 1 },
+        { projectId: project.id, expectedAssociationRevision: task.associationRevision },
         randomUUID(),
       );
       assert.equal(noOp.projectId, project.id);
@@ -5178,7 +5179,7 @@ const postgresSuite = describe(
       );
       await epics.setTaskEpic(
         task.id,
-        { epicId: epic.id, expectedAssociationRevision: 1 },
+        { epicId: epic.id, expectedAssociationRevision: task.associationRevision },
         randomUUID(),
       );
       const awakened = await waitForAssociation;
