@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import type { Authorization, Department, Project } from '@omnis/contracts';
+import type { Authorization, Department, Milestone, Project } from '@omnis/contracts';
 import { AgentLifecycleStoreError } from '@omnis/db';
 import { createAuthorizerApp, type AuthorizerStore } from './app.ts';
 
@@ -55,6 +55,18 @@ const projectSummary = {
   revision: project.revision,
   createdAt: project.createdAt,
   updatedAt: project.updatedAt,
+};
+const milestone: Milestone = {
+  id: 'mil_0123456789abcdef0123456789abcdef',
+  projectId: project.id,
+  title: 'First release',
+  description: null,
+  status: 'planned',
+  targetDate: null,
+  revision: 1,
+  archivedAt: null,
+  createdAt: '2026-11-05T00:00:00.000Z',
+  updatedAt: '2026-11-05T00:00:00.000Z',
 };
 
 function makeStore() {
@@ -114,6 +126,30 @@ function makeStore() {
       calls.push({ method: 'archiveProject', requestId });
       return { ...project, status: 'archived', revision: 2 };
     },
+    projectMilestones: {
+      async list(id, query) {
+        calls.push({ method: 'listMilestones', requestId: `${id}:${JSON.stringify(query)}` });
+        return {
+          milestones: [milestone],
+          page: { observedTotal: 1, complete: true, nextCursor: null },
+        };
+      },
+      async get(projectId, milestoneId) {
+        return projectId === project.id && milestoneId === milestone.id ? milestone : undefined;
+      },
+      async create(projectId, _input, requestId) {
+        calls.push({ method: 'createMilestone', requestId });
+        return { ...milestone, projectId };
+      },
+      async update(_projectId, _milestoneId, _input, requestId) {
+        calls.push({ method: 'updateMilestone', requestId });
+        return { ...milestone, revision: 2 };
+      },
+      async archive(_projectId, _milestoneId, _input, requestId) {
+        calls.push({ method: 'archiveMilestone', requestId });
+        return { ...milestone, status: 'archived', revision: 2, archivedAt: milestone.createdAt };
+      },
+    },
   };
   return { store, calls };
 }
@@ -131,6 +167,47 @@ describe('independent authorizer service boundary', () => {
       });
       assert.equal(response.statusCode, 401);
       assert.deepEqual(calls, []);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('keeps milestone operations behind the service token and validates internal contracts', async () => {
+    const { store, calls } = makeStore();
+    const app = createAuthorizerApp({ store, serviceToken, checkDatabase: async () => undefined });
+    const headers = { 'x-omnis-authorizer-token': serviceToken };
+    try {
+      const denied = await app.inject({
+        method: 'GET',
+        url: `/internal/v1/projects/${project.id}/milestones`,
+      });
+      assert.equal(denied.statusCode, 401);
+      const list = await app.inject({
+        method: 'GET',
+        url: `/internal/v1/projects/${project.id}/milestones?limit=10`,
+        headers,
+      });
+      assert.equal(list.statusCode, 200);
+      assert.equal(list.json().milestones[0].id, milestone.id);
+      const create = await app.inject({
+        method: 'POST',
+        url: `/internal/v1/projects/${project.id}/milestones`,
+        headers: { ...headers, 'idempotency-key': authorization.correlationId },
+        payload: { title: 'First release' },
+      });
+      assert.equal(create.statusCode, 201);
+      assert.equal(create.json().id, milestone.id);
+      assert.deepEqual(calls.at(-1), {
+        method: 'createMilestone',
+        requestId: authorization.correlationId,
+      });
+      const invalid = await app.inject({
+        method: 'POST',
+        url: `/internal/v1/projects/${project.id}/milestones`,
+        headers: { ...headers, 'idempotency-key': authorization.correlationId },
+        payload: { title: '   ' },
+      });
+      assert.equal(invalid.statusCode, 400);
     } finally {
       await app.close();
     }

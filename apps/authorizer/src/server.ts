@@ -1,4 +1,9 @@
-import { createPool, PostgresAuthorizationStore, PostgresProjectManagementStore } from '@omnis/db';
+import {
+  createPool,
+  PostgresAuthorizationStore,
+  PostgresProjectManagementStore,
+  PostgresProjectMilestoneStore,
+} from '@omnis/db';
 import { chmod, lstat, mkdir, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { createAuthorizerApp } from './app.ts';
@@ -17,6 +22,11 @@ const store = new PostgresAuthorizationStore(pool, pool, {
     env.agentIdempotencyKeyVersion,
   ),
   projectManagement: new PostgresProjectManagementStore(
+    pool,
+    env.agentIdempotencyKey,
+    env.agentIdempotencyKeyVersion,
+  ),
+  projectMilestones: new PostgresProjectMilestoneStore(
     pool,
     env.agentIdempotencyKey,
     env.agentIdempotencyKeyVersion,

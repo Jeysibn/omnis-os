@@ -1,10 +1,17 @@
 import { randomUUID } from 'node:crypto';
 import type { Pool, PoolClient, QueryResultRow } from 'pg';
-import type { Department, Project, ProjectListResponse } from '@omnis/contracts';
+import type {
+  Department,
+  Milestone,
+  MilestoneListResponse,
+  Project,
+  ProjectListResponse,
+} from '@omnis/contracts';
 import { inTransaction } from './database.ts';
 import { PostgresDepartmentManagementStore } from './department-management-store.ts';
 import type { PostgresAgentLifecycleStore } from './agent-lifecycle-store.ts';
 import type { PostgresProjectManagementStore } from './project-management-store.ts';
+import type { PostgresProjectMilestoneStore } from './project-milestone-store.ts';
 
 export type AuthorizationStatus = 'pending' | 'authorized' | 'denied' | 'revoked' | 'expired';
 export type RuntimeAuthorizationRecord = {
@@ -78,6 +85,7 @@ export class PostgresAuthorizationStore {
   private readonly departmentManagement: PostgresDepartmentManagementStore;
   readonly agentLifecycle: PostgresAgentLifecycleStore | undefined;
   readonly projectManagement: PostgresProjectManagementStore | undefined;
+  readonly projectMilestones: PostgresProjectMilestoneStore | undefined;
 
   constructor(
     runtime: Pool,
@@ -85,6 +93,7 @@ export class PostgresAuthorizationStore {
     options: {
       agentLifecycle?: PostgresAgentLifecycleStore;
       projectManagement?: PostgresProjectManagementStore;
+      projectMilestones?: PostgresProjectMilestoneStore;
     } = {},
   ) {
     this.runtime = runtime;
@@ -92,6 +101,7 @@ export class PostgresAuthorizationStore {
     this.departmentManagement = new PostgresDepartmentManagementStore(authorizer);
     this.agentLifecycle = options.agentLifecycle;
     this.projectManagement = options.projectManagement;
+    this.projectMilestones = options.projectMilestones;
   }
 
   listProjects(): Promise<ProjectListResponse> {
@@ -114,9 +124,44 @@ export class PostgresAuthorizationStore {
     return this.requireProjectManagement().archive(id, input, requestId);
   }
 
+  listProjectMilestones(projectId: string, query: unknown): Promise<MilestoneListResponse> {
+    return this.requireProjectMilestones().list(projectId, query);
+  }
+
+  getProjectMilestone(projectId: string, milestoneId: string): Promise<Milestone | undefined> {
+    return this.requireProjectMilestones().get(projectId, milestoneId);
+  }
+
+  createProjectMilestone(projectId: string, input: unknown, requestId: string): Promise<Milestone> {
+    return this.requireProjectMilestones().create(projectId, input, requestId);
+  }
+
+  updateProjectMilestone(
+    projectId: string,
+    milestoneId: string,
+    input: unknown,
+    requestId: string,
+  ): Promise<Milestone> {
+    return this.requireProjectMilestones().update(projectId, milestoneId, input, requestId);
+  }
+
+  archiveProjectMilestone(
+    projectId: string,
+    milestoneId: string,
+    input: unknown,
+    requestId: string,
+  ): Promise<Milestone> {
+    return this.requireProjectMilestones().archive(projectId, milestoneId, input, requestId);
+  }
+
   private requireProjectManagement(): PostgresProjectManagementStore {
     if (!this.projectManagement) throw new Error('Project management store is unavailable.');
     return this.projectManagement;
+  }
+
+  private requireProjectMilestones(): PostgresProjectMilestoneStore {
+    if (!this.projectMilestones) throw new Error('Project milestone store is unavailable.');
+    return this.projectMilestones;
   }
 
   listDepartments(includeArchived = false): Promise<{ departments: Department[]; total: number }> {

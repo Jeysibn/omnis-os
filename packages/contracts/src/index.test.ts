@@ -20,6 +20,11 @@ import {
   TaskSchema,
   UpdateProjectSchema,
   ArchiveProjectSchema,
+  CreateMilestoneSchema,
+  UpdateMilestoneSchema,
+  MilestoneListQuerySchema,
+  MilestoneSchema,
+  MilestoneListResponseSchema,
   ProjectListResponseSchema,
   ProjectWorkspaceQuerySchema,
   ProjectWorkspaceResponseSchema,
@@ -288,6 +293,63 @@ describe('project management contracts', () => {
     assert.equal(
       ArchiveProjectSchema.safeParse({ expectedRevision: 2, restore: true }).success,
       false,
+    );
+  });
+});
+
+describe('project milestone contracts', () => {
+  const milestone = {
+    id: 'mil_0123456789abcdef0123456789abcdef',
+    projectId: 'prj_0123456789abcdef0123456789abcdef',
+    title: 'Release candidate',
+    description: null,
+    status: 'planned',
+    targetDate: '2027-02-28',
+    revision: 1,
+    archivedAt: null,
+    createdAt: '2026-11-05T00:00:00.000Z',
+    updatedAt: '2026-11-05T00:00:00.000Z',
+  } as const;
+
+  it('validates bounded milestone input, date-only targets, and expected revisions', () => {
+    assert.deepEqual(CreateMilestoneSchema.parse({ title: '  Release candidate  ' }), {
+      title: 'Release candidate',
+    });
+    assert.equal(CreateMilestoneSchema.safeParse({ title: 'x', unexpected: true }).success, false);
+    assert.equal(CreateMilestoneSchema.safeParse({ title: '  ' }).success, false);
+    assert.equal(
+      CreateMilestoneSchema.safeParse({ title: 'Review', targetDate: '2027-02-29' }).success,
+      false,
+    );
+    assert.equal(
+      CreateMilestoneSchema.safeParse({ title: 'Review', targetDate: '0000-01-01' }).success,
+      false,
+    );
+    assert.equal(
+      UpdateMilestoneSchema.safeParse({ expectedRevision: 1, title: 'Updated' }).success,
+      true,
+    );
+    assert.equal(UpdateMilestoneSchema.safeParse({ expectedRevision: 1 }).success, false);
+    assert.equal(
+      UpdateMilestoneSchema.safeParse({ expectedRevision: 1, status: 'archived' }).success,
+      false,
+    );
+  });
+
+  it('validates milestone lifecycle response and bounded pagination contracts', () => {
+    assert.equal(MilestoneSchema.safeParse(milestone).success, true);
+    assert.equal(MilestoneSchema.safeParse({ ...milestone, status: 'archived' }).success, false);
+    assert.deepEqual(MilestoneListQuerySchema.parse({ cursor: 'signed', limit: '20' }), {
+      cursor: 'signed',
+      limit: 20,
+    });
+    assert.equal(MilestoneListQuerySchema.safeParse({ limit: '101' }).success, false);
+    assert.equal(
+      MilestoneListResponseSchema.safeParse({
+        milestones: [milestone],
+        page: { observedTotal: 1, complete: true, nextCursor: null },
+      }).success,
+      true,
     );
   });
 });
