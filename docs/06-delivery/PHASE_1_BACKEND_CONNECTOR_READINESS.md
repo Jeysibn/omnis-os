@@ -89,7 +89,9 @@ The fixture has no process-launch, network or credential API and keeps `RuntimeA
 
 ## Codex #3 platform dependency
 
-The requested `PHASE_1_CONNECTOR_HOST_BOUNDARY_FEASIBILITY.md` was not present in the inspected Codex #3 worktree at its observed commit. This backend change assumes no platform control has passed. Required future interface evidence includes dedicated service identity, authenticated IPC, broker-to-connector secret delivery, deny-by-default provider egress, OS-enforced no-tool confinement, resource/output limits, cancellation/crash semantics, and disposable-host negative tests. Codex #3 owns those controls; Codex #1 must not emulate them in backend code.
+Codex #3 completed the proposed host-boundary feasibility assessment in PR #38, `docs/06-delivery/PHASE_1_CONNECTOR_HOST_BOUNDARY_FEASIBILITY.md` (reviewed candidate `4582dafd7006f57cc528c94004319507398fffe6`; exact-head CI run `42050148855` passed). Its decision is **BLOCK for real-runtime readiness**: an independently proven host-enforced no-tool boundary is absent, and the proposed service identity, credential custody, egress, process/filesystem isolation, and lifecycle controls are not implemented or verified. An independent backend/security review of that document is **CONDITIONAL** pending correction of stale references to inactive Claude #1; that review does not lift the runtime block. PR #38 remains a separate platform-owned Draft PR, so its report is not yet part of `main`.
+
+No platform control is treated as passed by this backend change. Required future evidence includes dedicated service identity, authenticated IPC, broker-to-connector secret delivery, deny-by-default provider egress, OS-enforced no-tool confinement, resource/output limits, observed cancellation and crash/restart semantics, and disposable-host negative tests. Codex #3 owns those controls; Codex #1 must not emulate them in backend code.
 
 ## Review dispositions and remaining gates
 
