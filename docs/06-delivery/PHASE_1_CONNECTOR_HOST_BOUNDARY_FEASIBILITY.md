@@ -399,6 +399,15 @@ Passing mock-only CI does not close any provider execution gate.
 
 ## 11. Codex #1 implementation handoff
 
+### Four-agent governance
+
+- **Codex #1 — Backend and security:** owns backend implementation, authorization and admission, credential-broker contracts, revocation, replay resistance, and durable provider-submission state. Codex #1 coordinates a separate independent, read-only security reviewer subagent.
+- **Claude #2 — Frontend implementation:** owns application UI behavior, components, layout, accessibility, and frontend implementation.
+- **Codex #2 — Independent frontend QA:** reviews frontend behavior and accessibility, Playwright coverage, and regressions.
+- **Codex #3 — Platform engineering:** owns Docker/WSL design, CI/CD, infrastructure, reliability, integration-test infrastructure, and container isolation within separately approved scope.
+
+The security reviewer must be separate from the implementation being reviewed, including Codex #3 platform changes. The reviewer examines the exact commit and relevant test evidence, independently identifies blocking findings, and returns APPROVE, CONDITIONAL, or REQUEST CHANGES. The reviewer remains read-only and has no merge or deployment authority. Codex #1 may coordinate this review but cannot present its own implementation assessment or the mere use of a subagent as independent approval. The repository owner alone authorizes final merges and deployments.
+
 ### Backend/security contracts requiring Codex #1 ownership
 
 - Exact authenticated API operation that creates a connector request; no generic command or arbitrary app-server config.
