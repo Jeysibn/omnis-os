@@ -37,6 +37,16 @@ type FakeMode =
   | 'tool-request'
   | 'pending'
   | 'pending-unconfirmed-interrupt'
+  | 'pending-wrong-turn'
+  | 'pending-wrong-status'
+  | 'pending-malformed-ack'
+  | 'pending-invalid-ack'
+  | 'pending-wrong-response-id'
+  | 'pending-malformed-terminal'
+  | 'pending-invalid-terminal'
+  | 'pending-disconnect'
+  | 'pending-after-ack-disconnect'
+  | 'malformed-turn-frame'
   | 'failed'
   | 'crashed'
   | 'timeout';
@@ -71,11 +81,19 @@ export class FakeCodexAppServerProtocol {
     const id = ++this.nextId;
     const frame = JSON.stringify({ jsonrpc: '2.0', id, method, params });
     const frames = await this.exchange(frame);
+    if (frames.some((candidate) => !parseResponse(candidate) && !parseNotification(candidate))) {
+      throw new Error('Fake protocol returned a malformed frame.');
+    }
     const response = frames.map(parseResponse).find((candidate) => candidate?.id === id);
     if (!response) throw new Error('Fake protocol response did not match request id.');
     if (response.error) throw new Error('Fake app-server rejected the protocol request.');
+    if (response.result === undefined) throw new Error('Fake protocol response has no result.');
+    if (method === 'turn/interrupt' && this.mode === 'pending-after-ack-disconnect') {
+      await Promise.resolve();
+      throw new Error('Fake disconnect after acknowledgement.');
+    }
     return {
-      result: response.result ?? {},
+      result: response.result,
       notifications: frames
         .map(parseNotification)
         .filter((value): value is Notification => value !== null),
@@ -106,7 +124,13 @@ export class FakeCodexAppServerProtocol {
         if (signal.reason instanceof Error) reject(signal.reason);
       });
     }
-    const interrupted = await this.request('turn/interrupt', { threadId, turnId });
+    let interrupted: Awaited<ReturnType<FakeCodexAppServerProtocol['request']>>;
+    try {
+      interrupted = await this.request('turn/interrupt', { threadId, turnId });
+    } catch {
+      // Failure to parse a response or loss of the fake exchange cannot confirm termination.
+      throw new SandboxError('termination_failed');
+    }
     const terminal = interrupted.notifications.find((event) => event.method === 'turn/completed');
     if (
       Object.keys(interrupted.result).length !== 0 ||
@@ -154,16 +178,54 @@ export class FakeCodexAppServerProtocol {
         this.turnStartedResolve?.();
         this.turnStartedResolve = undefined;
         result = { turn: { id: this.turnId } };
+        if (this.mode === 'malformed-turn-frame') return [response(id, result), '{"jsonrpc":'];
         notifications = this.turnNotifications();
         break;
       case 'turn/interrupt':
         if (params.threadId !== this.threadId || params.turnId !== this.turnId)
           return [responseError(id, -32602, 'Unknown synthetic turn.')];
+        if (this.mode === 'pending-disconnect') {
+          // Model an asynchronous exchange failure, not an actual process or transport.
+          await Promise.resolve();
+          throw new Error('Fake disconnect before acknowledgement.');
+        }
+        if (this.mode === 'pending-malformed-ack')
+          return [
+            '{"jsonrpc":"2.0",',
+            JSON.stringify(
+              notification('turn/completed', { turnId: this.turnId, status: 'interrupted' }),
+            ),
+          ];
+        if (this.mode === 'pending-invalid-ack')
+          return [
+            JSON.stringify({ jsonrpc: '2.0', id }),
+            JSON.stringify(
+              notification('turn/completed', { turnId: this.turnId, status: 'interrupted' }),
+            ),
+          ];
+        if (this.mode === 'pending-wrong-response-id')
+          return [
+            response(id + 1, {}),
+            JSON.stringify(
+              notification('turn/completed', { turnId: this.turnId, status: 'interrupted' }),
+            ),
+          ];
+        if (this.mode === 'pending-malformed-terminal') return [response(id, {}), '{"jsonrpc":'];
+        if (this.mode === 'pending-invalid-terminal')
+          return [
+            response(id, {}),
+            JSON.stringify({ jsonrpc: '2.0', method: 'turn/completed', params: null }),
+          ];
         result = {};
         notifications =
           this.mode === 'pending-unconfirmed-interrupt'
             ? []
-            : [notification('turn/completed', { turnId: this.turnId, status: 'interrupted' })];
+            : [
+                notification('turn/completed', {
+                  turnId: this.mode === 'pending-wrong-turn' ? 'turn-other' : this.turnId,
+                  status: this.mode === 'pending-wrong-status' ? 'completed' : 'interrupted',
+                }),
+              ];
         break;
       default:
         return [responseError(id, -32601, 'Unsupported fake protocol method.')];
@@ -173,7 +235,7 @@ export class FakeCodexAppServerProtocol {
   }
 
   private turnNotifications(): Notification[] {
-    if (this.mode === 'pending' || this.mode === 'pending-unconfirmed-interrupt') return [];
+    if (this.mode.startsWith('pending')) return [];
     if (this.mode === 'crashed') throw new Error('Fake app-server process exited unexpectedly.');
     if (this.mode === 'timeout') throw new SandboxError('timed_out');
     if (this.mode === 'failed')

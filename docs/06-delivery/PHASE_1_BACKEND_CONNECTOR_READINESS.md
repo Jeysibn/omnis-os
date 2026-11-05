@@ -78,7 +78,7 @@ This is an integration contract proposal, not a runtime adapter enabled by this 
 4. **Tools:** Initial operation allows no tools. Backend must reject any tool/control event. Host policy must make shell, child process, file access, MCP, browser, arbitrary network and external writes impossible; app-server’s own settings are insufficient evidence by themselves.
 5. **Events:** Parse all frames against bounded schemas. Persist provider-origin events with explicit non-synthetic provenance, provider thread/turn IDs, deduplicated upstream event identity and deterministic sequence. Preserve actual failed/interrupted terminal status; no prose or tool output can grant authority.
 6. **Cancel/recovery:** Request provider interruption and distinguish request from observed terminal completion. If submission or termination outcome is unknown, transition to an explicit uncertain/interrupted state and require readback/reconciliation; never automatically issue another inference request.
-7. **Usage:** Accept only measured per-run provider fields. Account-level quota/usage does not map to a run. Missing metrics and monetary cost remain unknown; never estimate a subscription charge.
+7. **Usage (future contract):** Label usage `measured` only when supported by provider or other authoritative per-run measurement; label it `estimated` only when the estimate and its method are explicitly identified; otherwise use `unknown`. Account-level quota/usage does not establish a run's usage. An uncertain or interrupted submission is not automatically zero usage or confirmed unbilled. Never estimate a subscription charge. These reporting states are not implemented by this fixture.
 8. **Selection:** Any future real adapter stays disabled by default and cannot be selected by profile text, task content, environment discovery or an untrusted event. Enabling it requires a separately reviewed capability gate and an explicit owner-approved exact run.
 
 ## Synthetic harness
@@ -87,9 +87,13 @@ This is an integration contract proposal, not a runtime adapter enabled by this 
 
 The fixture has no process-launch, network or credential API and keeps `RuntimeAdapter.kind = 'mock'`, `synthetic = true`, and usage unknown. Worker startup still directly constructs the existing sandboxed mock adapter. The fake cannot be selected through runtime configuration and is not a Codex app-server conformance test. It does not alter schemas, migrations, database grants, authorization, event provenance, run admission or CI gates.
 
+Malformed frames fail the in-process fake exchange; a missing matching response or terminal notification fails the fake interruption rather than confirming it. Its synthetic asynchronous exchange failures model failure propagation only: they do not exercise a real process, stream transport, parser, or disconnect timing.
+
 ## Codex #3 platform dependency
 
 PR #38's host-boundary feasibility assessment is on main at squash commit `513ff457c8a1645e71db8f55ea643bd1e40b8b17`: `docs/06-delivery/PHASE_1_CONNECTOR_HOST_BOUNDARY_FEASIBILITY.md`. It selects the owner's Docker-on-WSL deployment target and retains **BLOCK for real-runtime readiness**. An independently proven host-enforced no-tool boundary, credential custody, admission, egress, process/filesystem isolation, and lifecycle controls remain unimplemented or unverified. Rootful Docker and the existing launcher remain part of the trusted computing base.
+
+Docker Compose on WSL2 Ubuntu remains the intended deployment target. A separate VM is an optional architecture requiring a separate owner decision; KVM and VMM prerequisites have not been verified for that target. A Docker container is not automatically equivalent to a VM isolation boundary, and missing required host-isolation controls must fail closed.
 
 No platform control is treated as passed by this backend change. Required future evidence includes dedicated service identity, authenticated IPC, broker-mediated provider requests without credential delivery to the sandbox, deny-by-default provider egress, OS-enforced no-tool confinement, resource/output limits, observed cancellation and crash/restart semantics, and disposable-host negative tests. Codex #3 owns the platform controls; Codex #1 owns the authorization and broker contracts.
 

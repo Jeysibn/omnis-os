@@ -464,6 +464,23 @@ describe('durable mock run coordinator', () => {
     );
   });
 
+  it(
+    'fails a malformed fake turn frame without completing or waiting for cancellation',
+    { timeout: 2_000 },
+    async () => {
+      const adapter = new FakeCodexAppServerRuntimeAdapter({ mode: 'malformed-turn-frame' });
+      const { coordinator, state } = lifecycleHarness(adapter);
+      await coordinator.handleQueueJob({ runId: lifecycleRun.id });
+      assert.equal(state.completedOutput, undefined);
+      assert.equal(state.cancelled, false);
+      assert.equal(state.interrupted, false);
+      assert.equal(
+        state.failureMessage,
+        'The mock runtime failed inside its isolated execution environment.',
+      );
+    },
+  );
+
   it('turns worker cancellation into a correlated fake app-server interrupt', async () => {
     const adapter = new FakeCodexAppServerRuntimeAdapter({ mode: 'pending' });
     const { coordinator, state } = lifecycleHarness(adapter);
@@ -482,6 +499,7 @@ describe('durable mock run coordinator', () => {
     ]);
     assert.equal(state.cancelled, true);
     assert.equal(state.interrupted, false);
+    assert.equal(state.completedOutput, undefined);
   });
 
   it('does not treat an interrupt acknowledgement as proof of terminal cancellation', async () => {
@@ -496,6 +514,37 @@ describe('durable mock run coordinator', () => {
     assert.equal(state.cancelled, false);
     assert.equal(state.interrupted, true);
   });
+
+  for (const mode of [
+    'pending-wrong-turn',
+    'pending-wrong-status',
+    'pending-malformed-ack',
+    'pending-invalid-ack',
+    'pending-wrong-response-id',
+    'pending-malformed-terminal',
+    'pending-invalid-terminal',
+    'pending-disconnect',
+    'pending-after-ack-disconnect',
+  ] as const) {
+    it(`does not confirm fake cancellation for ${mode}`, { timeout: 2_000 }, async () => {
+      const adapter = new FakeCodexAppServerRuntimeAdapter({ mode });
+      const { coordinator, state } = lifecycleHarness(adapter);
+      const execution = coordinator.handleQueueJob({ runId: lifecycleRun.id });
+      await adapter.protocol.waitUntilTurnStarted();
+      await coordinator.stopRun(lifecycleRun.id);
+      await execution;
+
+      assert.equal(adapter.protocol.methods.at(-1), 'turn/interrupt');
+      assert.equal(state.cancelled, false);
+      assert.equal(state.interrupted, true);
+      assert.equal(state.completedOutput, undefined);
+      assert.equal(state.failureMessage, undefined);
+      assert.equal(
+        state.interruptionMessage,
+        'The sandbox stop could not be confirmed. The run was interrupted for safety.',
+      );
+    });
+  }
 
   it('maps fake app-server errors and crashes to a safe synthetic failure', async () => {
     for (const mode of ['failed', 'crashed'] as const) {
