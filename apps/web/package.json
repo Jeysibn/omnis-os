@@ -6,7 +6,8 @@
     "dev": "vite --host 127.0.0.1 --port 5173",
     "build": "vite build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:e2e:integration": "playwright test --config playwright.integration.config.ts"
   },
   "dependencies": {
     "@omnis/contracts": "workspace:*",
