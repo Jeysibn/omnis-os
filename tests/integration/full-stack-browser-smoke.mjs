@@ -1,12 +1,11 @@
 import { spawn } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { setTimeout as delay } from 'node:timers/promises';
 import {
+  buildBrowserEnvironment,
   freePort,
   startMockServices,
   stopProcess,
-  withoutDatabaseSecrets,
 } from './support/mock-services.mjs';
 
 const diagnosticsPath = process.env.OMNIS_TEST_DIAGNOSTICS_PATH;
@@ -27,28 +26,19 @@ try {
   stages.push('postgres-migration');
   const frontendPort = await freePort();
   const frontendOrigin = `http://127.0.0.1:${frontendPort}`;
-  services = await startMockServices({ origin: frontendOrigin, reservedPorts: [frontendPort] });
+  services = await startMockServices({
+    origin: frontendOrigin,
+    reservedPorts: [frontendPort],
+  });
   if (interrupted) throw new Error('The full-stack smoke was interrupted during service startup.');
   stages.push('api-worker-authorizer-launcher-ready');
 
-  const browserEnvironment = withoutDatabaseSecrets(process.env);
-  const forbiddenBrowserEnvironment = [
-    'OMNIS_TEST_DATABASE_URL',
-    'OMNIS_TEST_MIGRATION_DATABASE_URL',
-    'OMNIS_TEST_ADMIN_DATABASE_URL',
-    'OMNIS_TEST_AUTHORIZER_DATABASE_URL',
-    'OMNIS_TEST_LAUNCHER_DATABASE_URL',
-    'OMNIS_API_AUTHORIZER_TOKEN',
-    'OMNIS_OWNER_PASSWORD_HASH',
-    'OMNIS_SESSION_SECRET',
-    'OMNIS_INTERNAL_TOKEN',
-  ];
-  if (forbiddenBrowserEnvironment.some((name) => name in browserEnvironment)) {
-    throw new Error('Sensitive service configuration reached the browser test process.');
-  }
-  browserEnvironment.OMNIS_TEST_API_PROXY_TARGET = services.apiUrl;
-  browserEnvironment.OMNIS_TEST_FRONTEND_ORIGIN = frontendOrigin;
-  browserEnvironment.OMNIS_TEST_FRONTEND_PORT = String(frontendPort);
+  const browserEnvironment = buildBrowserEnvironment(process.env, {
+    apiTarget: services.apiUrl,
+    frontendOrigin,
+    frontendPort,
+    ownerPassword: services.password,
+  });
 
   browserRunner = spawn('pnpm', ['--filter', '@omnis/web', 'test:e2e:integration'], {
     cwd: new URL('../../', import.meta.url),
@@ -92,30 +82,47 @@ async function waitForBrowserRunner(child, timeoutMs) {
     timer = setTimeout(() => resolve({ timedOut: true }), timeoutMs);
   });
   const exited = new Promise((resolve) => {
-    child.once('error', (error) => resolve({ error }));
+    child.once('error', () => resolve({ error: true }));
     child.once('exit', (code, signal) => resolve({ code, signal }));
   });
   const result = await Promise.race([exited, timeout]);
   clearTimeout(timer);
-  if (result.error) throw result.error;
+  if (result.error) throw new Error('The Playwright browser test process failed to start.');
   return result;
 }
 
 async function stopBrowserRunner(child) {
-  if (!child || child.exitCode !== null || child.killed) return;
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
   if (process.platform !== 'win32' && child.pid) {
     try {
       process.kill(-child.pid, 'SIGTERM');
     } catch {}
-    await Promise.race([new Promise((resolve) => child.once('exit', resolve)), delay(1_500)]);
-    if (child.exitCode === null) {
+    if (!(await waitForExit(child, 1_500))) {
       try {
         process.kill(-child.pid, 'SIGKILL');
       } catch {}
+      if (!(await waitForExit(child, 1_500))) {
+        throw new Error('The Playwright test process group did not stop after forced termination.');
+      }
     }
     return;
   }
   await stopProcess(child);
+}
+
+function waitForExit(child, timeoutMs) {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const onExit = () => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+    const timer = setTimeout(() => {
+      child.removeListener('exit', onExit);
+      resolve(false);
+    }, timeoutMs);
+    child.once('exit', onExit);
+  });
 }
 
 async function writeSafeDiagnostics(path, details) {

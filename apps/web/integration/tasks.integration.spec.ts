@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test } from '@playwright/test';
 
-const ownerPassword = 'test-owner-password-2026';
+const ownerPassword = process.env.OMNIS_TEST_OWNER_PASSWORD;
 const frontendOrigin = process.env.OMNIS_TEST_FRONTEND_ORIGIN;
 const taskDetail = 'Verify that a synthetic task persists through the owner Tasks page and reload.';
 
 if (!frontendOrigin) throw new Error('The integration frontend Origin is not configured.');
+if (!ownerPassword) throw new Error('The disposable owner password is not configured.');
 
 test('owner creates an unassigned task that persists after reload', async ({ page }) => {
   const taskTitle = `Full-stack browser smoke ${randomUUID()}`;

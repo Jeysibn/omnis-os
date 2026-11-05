@@ -195,7 +195,7 @@ try {
     ).rowCount,
     0,
   );
-  authorizer = startAuthorizer(authorizerEnvPath);
+  authorizer = await startAuthorizer(authorizerEnvPath);
   await waitForAuthorizer(authorizerSocket, authorizer);
 
   const runHeaders = {
@@ -207,7 +207,7 @@ try {
   };
   const authorization = await authorizeTask(baseUrl, ownerCookie, ownerCsrf, task.id);
   await stopProcess(authorizer);
-  authorizer = startAuthorizer(authorizerEnvPath);
+  authorizer = await startAuthorizer(authorizerEnvPath);
   await waitForAuthorizer(authorizerSocket, authorizer);
   const persistedReplay = await fetch(`${baseUrl}/api/v1/authorizations`, {
     method: 'POST',
@@ -273,7 +273,7 @@ try {
   assert.equal(unauthorizedStop.status, 401);
 
   await stopProcess(api);
-  api = startApi(apiEnvPath);
+  api = await startApi(apiEnvPath);
   await waitForHealth(
     baseUrl,
     `http://127.0.0.1:${workerPort}`,
@@ -383,7 +383,7 @@ try {
   assert.equal(api.capturedLogs.includes(canary), false);
 
   await stopProcess(worker);
-  worker = startWorker(workerEnvPath);
+  worker = await startWorker(workerEnvPath);
   await waitForHealth(
     baseUrl,
     `http://127.0.0.1:${workerPort}`,
@@ -437,7 +437,7 @@ try {
   const interruptedRun = await interruptedAdmission.json();
   await waitForRunStatus(baseUrl, interruptedRun.id, 'running', ownerCookie, worker, api);
   await stopProcess(worker);
-  worker = startWorker(workerEnvPath);
+  worker = await startWorker(workerEnvPath);
   await waitForHealth(
     baseUrl,
     `http://127.0.0.1:${workerPort}`,
@@ -488,7 +488,7 @@ try {
     await waitForRunStatus(baseUrl, crashedWorkerRun.id, 'running', ownerCookie, worker, api);
     await waitForSandboxContainer(crashedWorkerRun.id);
     await killProcessAbruptly(worker);
-    worker = startWorker(workerEnvPath);
+    worker = await startWorker(workerEnvPath);
     await waitForHealth(
       baseUrl,
       `http://127.0.0.1:${workerPort}`,
@@ -891,7 +891,7 @@ async function testDatabaseAvailabilityLoss({
   }
 
   await waitForPostgresContainer(container);
-  if (worker.exitCode !== null) worker = startWorker(workerEnvPath);
+  if (worker.exitCode !== null) worker = await startWorker(workerEnvPath);
   await waitForHealth(baseUrl, workerUrl, internalToken, worker, api, authorizerSocket, authorizer);
   const startedAt = Date.now();
   let recoveryResponse;

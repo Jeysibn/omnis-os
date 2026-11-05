@@ -22,7 +22,7 @@
     "sandbox:image:pull": "docker pull node@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85",
     "integration:mock": "node --experimental-strip-types tests/integration/mock-run.mjs",
     "integration:recovery": "OMNIS_RECOVERY_INTEGRATION=1 node --experimental-strip-types tests/integration/mock-run.mjs",
-    "integration:browser-smoke": "node --experimental-strip-types tests/integration/full-stack-browser-smoke.mjs",
+    "integration:browser-smoke": "node --test tests/integration/support/mock-services.test.mjs && node --experimental-strip-types tests/integration/full-stack-browser-smoke.mjs && node --experimental-strip-types tests/integration/queue-startup-guard.mjs",
     "integration:legacy-upgrade": "node --experimental-strip-types tests/integration/legacy-upgrade.mjs",
     "integration:backup-restore": "node --experimental-strip-types tests/integration/backup-restore-ci.mjs",
     "db:backup": "node --env-file=.env.db-admin scripts/db-recovery/backup.mjs",

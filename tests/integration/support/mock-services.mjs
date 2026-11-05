@@ -14,16 +14,21 @@ const scrypt = promisify(scryptCallback);
 export const testOwnerPassword = 'test-owner-password-2026';
 
 export async function startMockServices({ origin, requireAuditPool = false, reservedPorts = [] }) {
-  const databaseUrl = requiredDatabaseUrl('OMNIS_TEST_DATABASE_URL', 'omnis_runtime');
-  const migrationUrl = requiredDatabaseUrl('OMNIS_TEST_MIGRATION_DATABASE_URL', 'omnis_migrator');
-  const authorizerUrl = requiredDatabaseUrl(
-    'OMNIS_TEST_AUTHORIZER_DATABASE_URL',
-    'omnis_authorizer',
-  );
-  const launcherUrl = requiredDatabaseUrl('OMNIS_TEST_LAUNCHER_DATABASE_URL', 'omnis_launcher');
-  const adminAuditUrl = requireAuditPool ? process.env.OMNIS_TEST_ADMIN_DATABASE_URL : undefined;
-  if (requireAuditPool && (!adminAuditUrl || urlUsername(adminAuditUrl) !== 'omnis')) {
-    throw new Error('Set OMNIS_TEST_ADMIN_DATABASE_URL to the disposable test administrator URL.');
+  const databaseConfig = validateTestDatabaseConfiguration(process.env, {
+    requireAdmin: requireAuditPool,
+  });
+  const {
+    urls: {
+      OMNIS_TEST_DATABASE_URL: databaseUrl,
+      OMNIS_TEST_MIGRATION_DATABASE_URL: migrationUrl,
+      OMNIS_TEST_AUTHORIZER_DATABASE_URL: authorizerUrl,
+      OMNIS_TEST_LAUNCHER_DATABASE_URL: launcherUrl,
+      OMNIS_TEST_ADMIN_DATABASE_URL: adminAuditUrl,
+    },
+  } = databaseConfig;
+  const queueName = process.env.OMNIS_QUEUE_NAME ?? 'omnis-mock-run';
+  if (!/^[a-z][a-z0-9_-]{2,63}$/.test(queueName)) {
+    throw new Error('The disposable worker queue name is invalid.');
   }
 
   const parsedOrigin = parseLoopbackOrigin(origin);
@@ -38,6 +43,17 @@ export async function startMockServices({ origin, requireAuditPool = false, rese
   });
   if (migration.error || migration.status !== 0) {
     throw new Error('Disposable PostgreSQL migrations did not complete successfully.');
+  }
+
+  const queueGuardPool = createPool({
+    connectionString: databaseUrl,
+    max: 1,
+    application_name: 'omnis-test-queue-safety-check',
+  });
+  try {
+    await assertNoExecutableWork(queueGuardPool, queueName);
+  } finally {
+    await queueGuardPool.end();
   }
 
   const tempDirectory = await mkdtemp(join(tmpdir(), 'omnis-os-test-services-'));
@@ -119,7 +135,7 @@ export async function startMockServices({ origin, requireAuditPool = false, rese
   let launcher;
   let api;
   let cleanupPromise;
-  const startWorker = () => {
+  const startWorker = async () => {
     const env = withoutDatabaseSecrets(process.env);
     delete env.OMNIS_TEST_DATABASE_URL;
     delete env.OMNIS_TEST_MIGRATION_DATABASE_URL;
@@ -131,19 +147,19 @@ export async function startMockServices({ origin, requireAuditPool = false, rese
     }
     return startService('apps/worker', workerEnvPath, env);
   };
-  const startApi = () => {
+  const startApi = async () => {
     const env = withoutDatabaseSecrets(process.env);
     delete env[canaryName];
     return startService('apps/api', apiEnvPath, env);
   };
-  const startAuthorizer = () => {
+  const startAuthorizer = async () => {
     const env = withoutDatabaseSecrets(process.env);
     delete env.OMNIS_TEST_DATABASE_URL;
     delete env.OMNIS_TEST_MIGRATION_DATABASE_URL;
     delete env.OMNIS_TEST_ADMIN_DATABASE_URL;
     return startService('apps/authorizer', authorizerEnvPath, env);
   };
-  const startLauncher = () =>
+  const startLauncher = async () =>
     startService('apps/sandbox-launcher', launcherEnvPath, withoutDatabaseSecrets(process.env));
   const cleanup = (processes = {}) => {
     cleanupPromise ??= (async () => {
@@ -176,10 +192,14 @@ export async function startMockServices({ origin, requireAuditPool = false, rese
         application_name: 'omnis-canary-check',
       });
     }
-    worker = startWorker();
-    authorizer = startAuthorizer();
-    launcher = startLauncher();
-    api = startApi();
+    const started = await startServicesWithCleanup(
+      [startWorker, startAuthorizer, startLauncher, startApi],
+      async (children) => {
+        [worker, authorizer, launcher, api] = children;
+        await cleanup({ worker, authorizer, launcher, api });
+      },
+    );
+    [worker, authorizer, launcher, api] = started;
     const apiUrl = `http://127.0.0.1:${apiPort}`;
     const workerUrl = `http://127.0.0.1:${workerPort}`;
     await waitForHealth({
@@ -249,7 +269,176 @@ export async function startMockServices({ origin, requireAuditPool = false, rese
       cleanup,
     };
   } catch (error) {
-    await cleanup();
+    try {
+      await cleanup();
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        'Mock service startup failed and cleanup was incomplete.',
+      );
+    }
+    throw error;
+  }
+}
+
+export function validateTestDatabaseConfiguration(environment, { requireAdmin = false } = {}) {
+  const definitions = [
+    ['OMNIS_TEST_DATABASE_URL', 'omnis_runtime', true],
+    ['OMNIS_TEST_MIGRATION_DATABASE_URL', 'omnis_migrator', true],
+    ['OMNIS_TEST_AUTHORIZER_DATABASE_URL', 'omnis_authorizer', true],
+    ['OMNIS_TEST_LAUNCHER_DATABASE_URL', 'omnis_launcher', true],
+    ['OMNIS_TEST_ADMIN_DATABASE_URL', 'omnis', requireAdmin],
+  ];
+  const urls = {};
+  const parsedUrls = [];
+
+  for (const [name, username, required] of definitions) {
+    const value = environment[name];
+    if (!value) {
+      if (required) throw new Error(`${name} must be configured for the disposable test database.`);
+      continue;
+    }
+    const parsed = parseTestDatabaseUrl(name, value, username);
+    urls[name] = value;
+    parsedUrls.push({ name, ...parsed });
+  }
+
+  const intended = parsedUrls.find(({ name }) => name === 'OMNIS_TEST_DATABASE_URL');
+  if (!intended?.isTestDatabase) {
+    throw new Error('OMNIS_TEST_DATABASE_URL must name a disposable test database.');
+  }
+  if (
+    parsedUrls.some(
+      ({ databaseName, host, port }) =>
+        databaseName !== intended.databaseName || host !== intended.host || port !== intended.port,
+    )
+  ) {
+    throw new Error(
+      'All configured database URLs must target the same disposable test database and local PostgreSQL endpoint.',
+    );
+  }
+
+  return {
+    urls,
+    databaseName: intended.databaseName,
+    host: intended.host,
+    port: intended.port,
+  };
+}
+
+function parseTestDatabaseUrl(name, value, expectedUsername) {
+  if (/%(?![0-9a-fA-F]{2})/.test(value)) {
+    throw new Error(`${name} uses an unsupported PostgreSQL URL form.`);
+  }
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(`${name} is not a valid PostgreSQL connection URL.`);
+  }
+  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  const pathname = parsed.pathname;
+  const databaseName = pathname.startsWith('/') ? pathname.slice(1) : '';
+  const isLoopback = host === '127.0.0.1' || host === '::1';
+  const port = parsed.port ? Number(parsed.port) : 5432;
+  if (
+    parsed.protocol !== 'postgresql:' ||
+    parsed.username !== expectedUsername ||
+    !parsed.password ||
+    parsed.search ||
+    parsed.hash ||
+    !/^[A-Za-z0-9_-]+$/.test(databaseName) ||
+    !isLoopback ||
+    !Number.isInteger(port) ||
+    port < 1 ||
+    port > 65_535
+  ) {
+    throw new Error(
+      `${name} must use a supported PostgreSQL URL, the expected restricted role, and a loopback PostgreSQL endpoint.`,
+    );
+  }
+  return {
+    databaseName,
+    host,
+    port,
+    isTestDatabase: /(?:^|[_-])test(?:s)?$/i.test(databaseName),
+  };
+}
+
+export function buildBrowserEnvironment(
+  source,
+  { apiTarget, frontendOrigin, frontendPort, ownerPassword },
+) {
+  const allowed = [
+    'PATH',
+    'HOME',
+    'TMPDIR',
+    'TMP',
+    'TEMP',
+    'LANG',
+    'LC_ALL',
+    'CI',
+    'PLAYWRIGHT_BROWSERS_PATH',
+  ];
+  const environment = {};
+  for (const name of allowed) {
+    if (typeof source[name] === 'string' && source[name].length > 0) {
+      environment[name] = source[name];
+    }
+  }
+  if (!environment.PATH || !environment.HOME) {
+    throw new Error('The isolated browser runner requires PATH and HOME.');
+  }
+  if (!apiTarget || !frontendOrigin || !Number.isInteger(frontendPort) || !ownerPassword) {
+    throw new Error('The isolated browser runner is missing required test configuration.');
+  }
+  Object.assign(environment, {
+    NPM_CONFIG_USERCONFIG: '/dev/null',
+    NPM_CONFIG_GLOBALCONFIG: '/dev/null',
+    OMNIS_TEST_API_PROXY_TARGET: apiTarget,
+    OMNIS_TEST_FRONTEND_ORIGIN: frontendOrigin,
+    OMNIS_TEST_FRONTEND_PORT: String(frontendPort),
+    OMNIS_TEST_OWNER_PASSWORD: ownerPassword,
+  });
+  return environment;
+}
+
+export async function assertNoExecutableWork(pool, queueName = 'omnis-mock-run') {
+  let result;
+  try {
+    result = await pool.query(
+      `SELECT
+         (SELECT count(*)::int FROM omnis.runs
+          WHERE status IN ('queued', 'running', 'stopping', 'unknown')) AS active_runs,
+         (SELECT count(*)::int FROM pgboss.job
+          WHERE name = $1 AND state IN ('created', 'retry', 'active')) AS queued_jobs`,
+      [queueName],
+    );
+  } catch {
+    throw new Error('Could not verify that the disposable test database has no executable work.');
+  }
+  const row = result.rows[0];
+  if (!row || Number(row.active_runs) !== 0 || Number(row.queued_jobs) !== 0) {
+    throw new Error(
+      'The disposable test database contains existing executable work; refusing to start the worker.',
+    );
+  }
+}
+
+export async function startServicesWithCleanup(starters, cleanup) {
+  const started = [];
+  try {
+    for (const start of starters) started.push(await start());
+    return started;
+  } catch (error) {
+    try {
+      await cleanup(started);
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        'A required test service failed to start and cleanup was incomplete.',
+      );
+    }
     throw error;
   }
 }
@@ -309,14 +498,17 @@ export async function freePort(excluded = new Set()) {
 }
 
 export async function stopProcess(child) {
-  if (!child || child.exitCode !== null || child.killed) return;
+  if (!child || child.spawned === false || child.exitCode !== null || child.signalCode !== null) {
+    return;
+  }
+  const exited = waitForExit(child, 1_500);
   child.kill('SIGTERM');
-  await Promise.race([
-    new Promise((resolve) => child.once('exit', resolve)),
-    delay(1500).then(() => {
-      if (child.exitCode === null) child.kill('SIGKILL');
-    }),
-  ]);
+  if (!(await exited)) {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    if (!(await waitForExit(child, 1_500))) {
+      throw new Error('A disposable test service did not exit after forced termination.');
+    }
+  }
 }
 
 export function socketRequest(socketPath, requestPath, init = {}) {
@@ -388,8 +580,8 @@ function parseLoopbackOrigin(value) {
   return parsed;
 }
 
-function startService(appDirectory, envFile, env) {
-  const child = spawn(
+async function startService(appDirectory, envFile, env) {
+  const child = await startManagedProcess(
     process.execPath,
     ['--experimental-strip-types', `--env-file=${envFile}`, 'src/server.ts'],
     {
@@ -407,6 +599,51 @@ function startService(appDirectory, envFile, env) {
   return child;
 }
 
+export async function startManagedProcess(command, args, options = {}) {
+  let child;
+  try {
+    child = spawn(command, args, options);
+  } catch {
+    throw new Error('A required disposable test service failed to start.');
+  }
+  child.spawned = false;
+  await new Promise((resolve, reject) => {
+    let settled = false;
+    const onSpawn = () => {
+      child.spawned = true;
+      settled = true;
+      resolve();
+    };
+    const onError = () => {
+      child.spawnError = true;
+      child.removeListener('spawn', onSpawn);
+      if (!settled) {
+        settled = true;
+        reject(new Error('A required disposable test service failed to start.'));
+      }
+    };
+    child.once('spawn', onSpawn);
+    child.once('error', onError);
+  });
+  child.spawnError ??= false;
+  return child;
+}
+
+function waitForExit(child, timeoutMs) {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const onExit = () => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+    const timer = setTimeout(() => {
+      child.removeListener('exit', onExit);
+      resolve(false);
+    }, timeoutMs);
+    child.once('exit', onExit);
+  });
+}
+
 async function waitForHealth({
   apiUrl,
   workerUrl,
@@ -421,6 +658,13 @@ async function waitForHealth({
   const startedAt = Date.now();
   let health = { api: false, worker: false, authorizer: false, launcher: false };
   while (Date.now() - startedAt < 8_000) {
+    const failedService = [
+      ['worker', workerProcess],
+      ['api', apiProcess],
+      ['authorizer', authorizerProcess],
+      ['launcher', launcherProcess],
+    ].find(([, child]) => child.spawnError);
+    if (failedService) throw new Error(`The mock ${failedService[0]} failed to spawn.`);
     if (
       workerProcess.exitCode !== null ||
       apiProcess.exitCode !== null ||
