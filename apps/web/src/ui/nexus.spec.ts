@@ -1173,3 +1173,27 @@ test('hidden tabs hold no stream; showing the tab replays missed events without 
   expect(await eventIds(page, 'run-a')).toEqual(['run-a:1', 'run-a:2', 'run-a:3']);
   expect((await fake.stats(page)).instances['run-a']).toBe(base + 1);
 });
+
+test('an exhausted stream is not restarted when the followed set changes; only Refresh restarts it', async ({
+  page,
+}) => {
+  const charlie = run('run-c', 't4', 'Charlie mission', 'running', min(10), min(4));
+  await installFakeEventSource(
+    page,
+    Object.fromEntries([alpha, bravo, charlie].map((r) => [r.id, defaultRunEvents(r)])),
+  );
+  const api = await open(page, { runs: [alpha, bravo] });
+  await expect(statusText(page)).toHaveText(LIVE_2);
+  const base = (await fake.stats(page)).instances['run-a']!;
+  api.setRuns([alpha, bravo, charlie]); // the exhaustion-triggered refresh now returns a new run
+  await fake.setDown(page, 'run-a', true);
+  await fake.drop(page, 'run-a');
+  await expect(statusText(page)).toHaveText(
+    'Partially connected: 2 of 3 unfinished runs live, 1 stopped after retries. Loaded history is kept.',
+  );
+  await expect(nodesOf(page, 'run-c')).toHaveCount(2); // the followed set did change
+  await page.waitForTimeout(300);
+  const stats = await fake.stats(page);
+  expect(stats.instances['run-a']).toBe(base); // run-a was not silently recreated
+  expect(stats.errors['run-a']).toBe(5);
+});
