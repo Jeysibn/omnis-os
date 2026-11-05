@@ -10,6 +10,19 @@ const epicId = 'epc_0123456789abcdef0123456789abcdef';
 const createdAt = '2026-11-05T00:00:00.123456Z';
 const at = '2026-11-05T00:00:00.000000Z';
 const key = Buffer.alloc(32, 12);
+const taskId = 'task-0001';
+
+function workspaceTask(id: string, timestamp: string, latestRun: unknown = null) {
+  return {
+    id,
+    title: `Task ${id}`,
+    status: 'open',
+    createdAt: timestamp,
+    projectId,
+    associationRevision: 2,
+    latestRun,
+  };
+}
 
 function epic(id: string, timestamp = createdAt, project = projectId) {
   return {
@@ -181,5 +194,108 @@ describe('project epic store boundary', () => {
       (error: unknown) => error instanceof EpicStoreError && error.code === 'invalid_cursor',
     );
     assert.deepEqual(calls, []);
+  });
+
+  it('lists Epic tasks with bounded ordering and a cursor bound to both project and Epic', async () => {
+    const calls: Array<{ query: string; values?: unknown[] }> = [];
+    const store = new PostgresProjectEpicStore(
+      fakePool(
+        () => ({
+          tasks: [
+            workspaceTask(taskId, createdAt, {
+              id: 'run-0003',
+              status: 'cancelled',
+              createdAt,
+              updatedAt: at,
+            }),
+            workspaceTask('task-0002', '2026-11-04T23:59:59.999999Z'),
+          ],
+          observedTotal: 2,
+        }),
+        calls,
+      ),
+      key,
+    );
+    const first = await store.listTasks(projectId, epicId, { limit: 1 });
+    assert.deepEqual(
+      first.tasks.map((task) => task.id),
+      [taskId],
+    );
+    assert.equal(first.tasks[0]?.latestRun?.status, 'cancelled');
+    assert.equal(first.page.observedTotal, 2);
+    assert.equal(first.page.complete, false);
+    assert.ok(first.page.nextCursor);
+    assert.equal(calls[0]!.query, 'SELECT omnis.list_project_epic_tasks($1,$2,$3,$4,$5) AS result');
+    assert.deepEqual(calls[0]!.values, [projectId, epicId, null, null, 1]);
+
+    await store.listTasks(projectId, epicId, { limit: 1, cursor: first.page.nextCursor! });
+    assert.equal(calls[1]!.values?.[0], projectId);
+    assert.equal(calls[1]!.values?.[1], epicId);
+    assert.equal(calls[1]!.values?.[2], createdAt);
+    assert.equal(calls[1]!.values?.[3], taskId);
+    await assert.rejects(
+      store.listTasks(otherProjectId, epicId, { cursor: first.page.nextCursor! }),
+      (error: unknown) => error instanceof EpicStoreError && error.code === 'invalid_cursor',
+    );
+    await assert.rejects(
+      store.listTasks(projectId, 'epc_ffffffffffffffffffffffffffffffff', {
+        cursor: first.page.nextCursor!,
+      }),
+      (error: unknown) => error instanceof EpicStoreError && error.code === 'invalid_cursor',
+    );
+    await assert.rejects(
+      store.listTasks(projectId, epicId, { cursor: `${first.page.nextCursor!.slice(0, -1)}x` }),
+      (error: unknown) => error instanceof EpicStoreError && error.code === 'invalid_cursor',
+    );
+    assert.equal(calls.length, 2);
+  });
+
+  it('validates task association reads and idempotent assignment receipts', async () => {
+    const calls: Array<{ query: string; values?: unknown[] }> = [];
+    const association = {
+      taskId,
+      projectId,
+      epicId,
+      associationRevision: 3,
+    };
+    const store = new PostgresProjectEpicStore(
+      fakePool((_query, values) => {
+        calls.push({ query: 'query', ...(values === undefined ? {} : { values }) });
+        return association;
+      }, calls),
+      key,
+    );
+    const result = await store.setTaskEpic(
+      taskId,
+      { expectedAssociationRevision: 2, epicId },
+      'b9d5fd0e-4681-4a41-90c0-50b120843aa5',
+    );
+    assert.deepEqual(result, association);
+    assert.match(calls[0]!.query, /omnis\.set_task_epic\(\$1/);
+    assert.deepEqual(calls[0]!.values?.slice(0, 4), [
+      taskId,
+      2,
+      epicId,
+      'b9d5fd0e-4681-4a41-90c0-50b120843aa5',
+    ]);
+
+    const readStore = new PostgresProjectEpicStore(
+      fakePool(() => ({
+        taskId,
+        projectId,
+        epic: epic(epicId, createdAt, projectId),
+        associationRevision: 3,
+      })),
+      key,
+    );
+    assert.equal((await readStore.getTaskEpic(taskId))?.epic?.id, epicId);
+    await assert.rejects(
+      store.setTaskEpic(
+        'bad\0task',
+        { expectedAssociationRevision: 1, epicId: null },
+        'b9d5fd0e-4681-4a41-90c0-50b120843aa5',
+      ),
+      (error: unknown) => error instanceof EpicStoreError && error.code === 'invalid_input',
+    );
   });
 });

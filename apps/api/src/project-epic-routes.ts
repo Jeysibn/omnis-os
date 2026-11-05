@@ -7,6 +7,8 @@ import {
   EpicListResponseSchema,
   EpicSchema,
   ProjectIdSchema,
+  ProjectWorkspaceQuerySchema,
+  ProjectWorkspaceTaskPageSchema,
   UpdateEpicSchema,
 } from '@omnis/contracts';
 import { requireMutationProtection, requireOwner } from './auth.ts';
@@ -122,6 +124,32 @@ export function registerProjectEpicRoutes(
         `/internal/v1/projects/${encodeURIComponent(projectId.data)}/epics/${encodeURIComponent(epicId.data)}`,
         {},
         (value) => EpicSchema.parse(value),
+      );
+    },
+  );
+
+  app.get<{
+    Params: { projectId: string; epicId: string };
+    Querystring: { cursor?: string; limit?: string };
+  }>(
+    '/api/v1/projects/:projectId/epics/:epicId/tasks',
+    { preHandler: requireOwner, errorHandler: epicErrorHandler },
+    async (httpRequest, reply) => {
+      const projectId = ProjectIdSchema.safeParse(httpRequest.params.projectId);
+      const epicId = EpicIdSchema.safeParse(httpRequest.params.epicId);
+      const query = ProjectWorkspaceQuerySchema.safeParse(httpRequest.query);
+      if (!projectId.success || !epicId.success || !query.success)
+        return reply.code(422).send({
+          error: { code: 'invalid_input', message: 'Epic task query is invalid.' },
+        });
+      const params = new URLSearchParams();
+      if (query.data.cursor) params.set('cursor', query.data.cursor);
+      if (query.data.limit !== undefined) params.set('limit', String(query.data.limit));
+      const suffix = params.size ? `?${params.toString()}` : '';
+      return request(
+        `/internal/v1/projects/${encodeURIComponent(projectId.data)}/epics/${encodeURIComponent(epicId.data)}/tasks${suffix}`,
+        {},
+        (value) => ProjectWorkspaceTaskPageSchema.parse(value),
       );
     },
   );

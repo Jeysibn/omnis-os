@@ -25,6 +25,12 @@ import {
   ProjectSchema,
   type Project,
   type ProjectListResponse,
+  ProjectWorkspaceQuerySchema,
+  ProjectWorkspaceTaskPageSchema,
+  SetTaskEpicSchema,
+  TaskEpicAssociationSchema,
+  TaskEpicResponseSchema,
+  TaskIdSchema,
   UpdateProjectSchema,
   ArchiveProjectSchema,
   ArchiveMilestoneSchema,
@@ -45,6 +51,9 @@ import {
   UpdateEpicSchema,
   type Epic,
   type EpicListResponse,
+  type ProjectWorkspaceTaskPage,
+  type TaskEpicAssociation,
+  type TaskEpicResponse,
 } from '@omnis/contracts';
 import {
   AgentLifecycleStoreError,
@@ -103,6 +112,17 @@ export type AuthorizerStore = {
           input: unknown,
           requestId: string,
         ): Promise<Epic>;
+        listTasks(
+          projectId: string,
+          epicId: string,
+          query: unknown,
+        ): Promise<ProjectWorkspaceTaskPage>;
+        getTaskEpic(taskId: string): Promise<TaskEpicResponse | undefined>;
+        setTaskEpic(
+          taskId: string,
+          input: unknown,
+          requestId: string,
+        ): Promise<TaskEpicAssociation>;
       }
     | undefined;
   agentLifecycle?:
@@ -525,6 +545,71 @@ export function createAuthorizerApp(input: {
             error: { code: 'not_found', message: 'Project or epic was not found.' },
           });
         return EpicSchema.parse(epic);
+      } catch (error) {
+        return sendEpicStoreError(error, reply);
+      }
+    },
+  );
+
+  app.get<{
+    Params: { projectId: string; epicId: string };
+    Querystring: { cursor?: string; limit?: string };
+  }>('/internal/v1/projects/:projectId/epics/:epicId/tasks', async (request, reply) => {
+    const projectId = ProjectIdSchema.safeParse(request.params.projectId);
+    const epicId = EpicIdSchema.safeParse(request.params.epicId);
+    const query = ProjectWorkspaceQuerySchema.safeParse(request.query);
+    if (!projectId.success || !epicId.success || !query.success)
+      return reply.code(400).send({
+        error: { code: 'invalid_input', message: 'Epic task query is invalid.' },
+      });
+    try {
+      return ProjectWorkspaceTaskPageSchema.parse(
+        await requireProjectEpics(input.store).listTasks(projectId.data, epicId.data, query.data),
+      );
+    } catch (error) {
+      return sendEpicStoreError(error, reply);
+    }
+  });
+
+  app.get<{ Params: { taskId: string } }>(
+    '/internal/v1/tasks/:taskId/epic',
+    async (request, reply) => {
+      const taskId = TaskIdSchema.safeParse(request.params.taskId);
+      if (!taskId.success)
+        return reply.code(400).send({
+          error: { code: 'invalid_input', message: 'Task identifier is invalid.' },
+        });
+      try {
+        const association = await requireProjectEpics(input.store).getTaskEpic(taskId.data);
+        if (!association)
+          return reply.code(404).send({
+            error: { code: 'not_found', message: 'Task was not found.' },
+          });
+        return TaskEpicResponseSchema.parse(association);
+      } catch (error) {
+        return sendEpicStoreError(error, reply);
+      }
+    },
+  );
+
+  app.put<{ Params: { taskId: string } }>(
+    '/internal/v1/tasks/:taskId/epic',
+    { bodyLimit: 4 * 1024 },
+    async (request, reply) => {
+      const taskId = TaskIdSchema.safeParse(request.params.taskId);
+      const body = SetTaskEpicSchema.safeParse(request.body);
+      const requestId = request.headers['idempotency-key'];
+      if (!taskId.success || !body.success || typeof requestId !== 'string' || !isUuid(requestId))
+        return reply.code(400).send({
+          error: {
+            code: 'invalid_input',
+            message: 'Task Epic input and Idempotency-Key are required.',
+          },
+        });
+      try {
+        return TaskEpicAssociationSchema.parse(
+          await requireProjectEpics(input.store).setTaskEpic(taskId.data, body.data, requestId),
+        );
       } catch (error) {
         return sendEpicStoreError(error, reply);
       }

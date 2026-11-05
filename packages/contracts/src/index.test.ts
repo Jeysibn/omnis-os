@@ -31,6 +31,10 @@ import {
   EpicSchema,
   EpicListQuerySchema,
   EpicListResponseSchema,
+  SetTaskEpicSchema,
+  TaskEpicAssociationSchema,
+  TaskEpicResponseSchema,
+  ProjectEpicTaskPageSchema,
   ProjectListResponseSchema,
   ProjectWorkspaceQuerySchema,
   ProjectWorkspaceResponseSchema,
@@ -87,6 +91,85 @@ describe('project epic management contracts', () => {
     assert.equal(
       EpicListResponseSchema.safeParse({
         epics: [epic],
+        page: { observedTotal: 1, complete: false, nextCursor: null },
+      }).success,
+      false,
+    );
+  });
+});
+
+describe('Epic-to-task association contracts', () => {
+  const projectId = 'prj_0123456789abcdef0123456789abcdef';
+  const epic = {
+    id: 'epc_0123456789abcdef0123456789abcdef',
+    projectId,
+    title: 'Secure launch',
+    description: null,
+    status: 'archived',
+    revision: 2,
+    archivedAt: '2026-11-06T01:00:00.000Z',
+    createdAt: '2026-11-06T00:00:00.000Z',
+    updatedAt: '2026-11-06T01:00:00.000Z',
+  } as const;
+
+  it('validates assignment, unlink, and owner-facing Epic lookup shapes', () => {
+    assert.equal(
+      SetTaskEpicSchema.safeParse({ expectedAssociationRevision: 1, epicId: epic.id }).success,
+      true,
+    );
+    assert.equal(
+      SetTaskEpicSchema.safeParse({ expectedAssociationRevision: 2, epicId: null }).success,
+      true,
+    );
+    assert.equal(
+      SetTaskEpicSchema.safeParse({ expectedAssociationRevision: 0, epicId: null }).success,
+      false,
+    );
+    assert.equal(
+      SetTaskEpicSchema.safeParse({ expectedAssociationRevision: 1, epicId: epic.id, extra: true })
+        .success,
+      false,
+    );
+    assert.equal(
+      TaskEpicAssociationSchema.safeParse({
+        taskId: 'task-001',
+        projectId,
+        epicId: epic.id,
+        associationRevision: 3,
+      }).success,
+      true,
+    );
+    assert.equal(
+      TaskEpicResponseSchema.safeParse({
+        taskId: 'task-001',
+        projectId,
+        epic,
+        associationRevision: 3,
+      }).success,
+      true,
+    );
+    assert.equal(
+      TaskEpicResponseSchema.safeParse({
+        taskId: 'task-001',
+        projectId: 'prj_ffffffffffffffffffffffffffffffff',
+        epic,
+        associationRevision: 3,
+      }).success,
+      false,
+    );
+  });
+
+  it('uses the existing bounded complete task-page response for Epic listings', () => {
+    assert.deepEqual(
+      ProjectEpicTaskPageSchema.parse({
+        tasks: [],
+        page: { observedTotal: 0, complete: true, nextCursor: null },
+      }),
+      { tasks: [], page: { observedTotal: 0, complete: true, nextCursor: null } },
+    );
+    assert.equal(
+      ProjectEpicTaskPageSchema.safeParse({
+        tasks: [],
         page: { observedTotal: 1, complete: false, nextCursor: null },
       }).success,
       false,

@@ -82,7 +82,7 @@ const postgresSuite = describe(
         'GRANT SELECT, INSERT, UPDATE, DELETE ON omnis.test_queue_outbox TO omnis_runtime',
       );
       await adminPool!.query(
-        'TRUNCATE omnis.test_queue_outbox, omnis.task_project_management_idempotency, omnis.task_project_management_audit, omnis.project_epic_management_audit, omnis.project_epics, omnis.project_milestone_management_audit, omnis.project_milestones, omnis.project_management_idempotency, omnis.project_management_audit, omnis.projects, omnis.agent_management_idempotency, omnis.agent_management_audit, omnis.agent_profile_drafts, omnis.department_management_audit, omnis.agent_profile_versions, omnis.agents, omnis.departments, omnis.mock_sandbox_launches, omnis.legacy_unscoped_runs, omnis.authorization_audit, omnis.runtime_authorizations, omnis.run_idempotency, omnis.run_events, omnis.runs, omnis.tasks',
+        'TRUNCATE omnis.test_queue_outbox, omnis.task_project_management_idempotency, omnis.task_epic_management_audit, omnis.task_epic_associations, omnis.task_project_management_audit, omnis.project_epic_management_audit, omnis.project_epics, omnis.project_milestone_management_audit, omnis.project_milestones, omnis.project_management_idempotency, omnis.project_management_audit, omnis.projects, omnis.agent_management_idempotency, omnis.agent_management_audit, omnis.agent_profile_drafts, omnis.department_management_audit, omnis.agent_profile_versions, omnis.agents, omnis.departments, omnis.mock_sandbox_launches, omnis.legacy_unscoped_runs, omnis.authorization_audit, omnis.runtime_authorizations, omnis.run_idempotency, omnis.run_events, omnis.runs, omnis.tasks',
       );
       await adminPool!.query('ALTER SEQUENCE omnis.task_id_seq RESTART WITH 1');
       await adminPool!.query('ALTER SEQUENCE omnis.run_id_seq RESTART WITH 1');
@@ -1126,6 +1126,408 @@ const postgresSuite = describe(
           (await epics.get(racingProject.id, parentRace[0].value.id))?.id,
           parentRace[0].value.id,
         );
+      else
+        assert.ok(
+          parentRace[0].reason instanceof EpicStoreError &&
+            parentRace[0].reason.code === 'invalid_transition',
+        );
+    });
+
+    it('associates tasks with same-project Epics without exposing the relation to runtime', async () => {
+      const projects = new PostgresProjectManagementStore(authorizerPool!, Buffer.alloc(32, 23));
+      const epics = new PostgresProjectEpicStore(authorizerPool!, Buffer.alloc(32, 23));
+      const project = await projects.create(
+        {
+          key: 'EPIC-TASKS',
+          name: 'Epic task association',
+          objective: 'Test current task grouping.',
+        },
+        randomUUID(),
+      );
+      const otherProject = await projects.create(
+        {
+          key: 'EPIC-TASK-OTHER',
+          name: 'Other project',
+          objective: 'Test cross-project rejection.',
+        },
+        randomUUID(),
+      );
+      const firstEpic = await epics.create(project.id, { title: 'Current work' }, randomUUID());
+      const secondEpic = await epics.create(project.id, { title: 'Later work' }, randomUUID());
+      const thirdEpic = await epics.create(project.id, { title: 'Parallel work' }, randomUUID());
+      const foreignEpic = await epics.create(
+        otherProject.id,
+        { title: 'Foreign work' },
+        randomUUID(),
+      );
+      const archivedTarget = await epics.create(
+        project.id,
+        { title: 'Archived target' },
+        randomUUID(),
+      );
+      await epics.archive(project.id, archivedTarget.id, { expectedRevision: 1 }, randomUUID());
+      const firstTask = await store.createTask(
+        {
+          title: 'Associate first',
+          detail: 'First task in the current project.',
+          projectId: project.id,
+        },
+        randomUUID(),
+      );
+      const secondTask = await store.createTask(
+        {
+          title: 'Associate second',
+          detail: 'Second task in the current project.',
+          projectId: project.id,
+        },
+        randomUUID(),
+      );
+      const legacyTask = await store.createTask({
+        title: 'Legacy task',
+        detail: 'This task has no project and must stay unassigned.',
+      });
+      assert.equal((await epics.getTaskEpic(legacyTask.id))?.epic, null);
+
+      const requestId = randomUUID();
+      const input = { expectedAssociationRevision: 1, epicId: firstEpic.id };
+      const [assigned, replay] = await Promise.all([
+        epics.setTaskEpic(firstTask.id, input, requestId),
+        epics.setTaskEpic(firstTask.id, input, requestId),
+      ]);
+      assert.deepEqual(replay, assigned);
+      assert.equal(assigned.associationRevision, 2);
+      assert.equal(assigned.epicId, firstEpic.id);
+      await assert.rejects(
+        epics.setTaskEpic(
+          firstTask.id,
+          { expectedAssociationRevision: 2, epicId: secondEpic.id },
+          requestId,
+        ),
+        (error: unknown) => error instanceof EpicStoreError && error.code === 'conflict',
+      );
+      const concurrent = await Promise.allSettled([
+        epics.setTaskEpic(
+          secondTask.id,
+          { expectedAssociationRevision: 1, epicId: secondEpic.id },
+          randomUUID(),
+        ),
+        epics.setTaskEpic(
+          secondTask.id,
+          { expectedAssociationRevision: 1, epicId: thirdEpic.id },
+          randomUUID(),
+        ),
+      ]);
+      assert.equal(concurrent.filter((result) => result.status === 'fulfilled').length, 1);
+      assert.equal(concurrent.filter((result) => result.status === 'rejected').length, 1);
+
+      const paginationTask = await store.createTask(
+        {
+          title: 'Second Epic task',
+          detail: 'This task validates deterministic Epic pagination.',
+          projectId: project.id,
+        },
+        randomUUID(),
+      );
+      await epics.setTaskEpic(
+        paginationTask.id,
+        { expectedAssociationRevision: 1, epicId: firstEpic.id },
+        randomUUID(),
+      );
+
+      const firstPage = await epics.listTasks(project.id, firstEpic.id, { limit: 1 });
+      assert.equal(firstPage.tasks.length, 1);
+      assert.equal(firstPage.page.observedTotal, 2);
+      assert.equal(firstPage.page.complete, false);
+      const secondPage = await epics.listTasks(project.id, firstEpic.id, {
+        limit: 1,
+        cursor: firstPage.page.nextCursor!,
+      });
+      assert.equal(secondPage.tasks.length, 1);
+      assert.equal(secondPage.page.complete, true);
+      await assert.rejects(
+        epics.listTasks(otherProject.id, firstEpic.id),
+        (error: unknown) => error instanceof EpicStoreError && error.code === 'not_found',
+      );
+      await assert.rejects(
+        epics.setTaskEpic(
+          firstTask.id,
+          { expectedAssociationRevision: 2, epicId: foreignEpic.id },
+          randomUUID(),
+        ),
+        (error: unknown) => error instanceof EpicStoreError && error.code === 'not_found',
+      );
+      const archivedTargetTask = await store.createTask(
+        {
+          title: 'Archived target',
+          detail: 'Archived Epics cannot receive task assignments.',
+          projectId: project.id,
+        },
+        randomUUID(),
+      );
+      await assert.rejects(
+        epics.setTaskEpic(
+          archivedTargetTask.id,
+          { expectedAssociationRevision: 1, epicId: archivedTarget.id },
+          randomUUID(),
+        ),
+        (error: unknown) => error instanceof EpicStoreError && error.code === 'invalid_transition',
+      );
+      await assert.rejects(
+        epics.setTaskEpic(
+          legacyTask.id,
+          { expectedAssociationRevision: 1, epicId: firstEpic.id },
+          randomUUID(),
+        ),
+        (error: unknown) => error instanceof EpicStoreError && error.code === 'invalid_transition',
+      );
+
+      const runTask = await store.createTask(
+        {
+          title: 'Task with history',
+          detail: 'Epic changes must preserve existing run history.',
+          projectId: project.id,
+        },
+        randomUUID(),
+      );
+      const admitted = await admit(
+        runTask.id,
+        key('epic-task-existing-run'),
+        async (tx, { runId }) => {
+          await tx.executeSql('INSERT INTO omnis.test_queue_outbox (run_id) VALUES ($1)', [runId]);
+          return `job-${runId}`;
+        },
+      );
+      const linkedAfterRun = await epics.setTaskEpic(
+        runTask.id,
+        { expectedAssociationRevision: 1, epicId: secondEpic.id },
+        randomUUID(),
+      );
+      assert.equal(linkedAfterRun.associationRevision, 2);
+      assert.equal((await store.getRun(admitted.run.id))?.id, admitted.run.id);
+      const archivedEpic = await epics.archive(
+        project.id,
+        secondEpic.id,
+        { expectedRevision: 1 },
+        randomUUID(),
+      );
+      assert.equal(archivedEpic.status, 'archived');
+      assert.equal((await epics.getTaskEpic(runTask.id))?.epic?.status, 'archived');
+      assert.ok(
+        (await epics.listTasks(project.id, secondEpic.id)).tasks.some(
+          (task) => task.id === runTask.id,
+        ),
+      );
+      const runClaim = await store.beginExecution(admitted.run.id, 'epic-association-worker', 30);
+      assert.equal(runClaim.started, true);
+      await store.completeRun(
+        admitted.run.id,
+        'epic-association-worker',
+        runClaim.generation,
+        'Synthetic history retained.',
+      );
+      const admittedAfterEpicArchive = await admit(
+        runTask.id,
+        key('run-after-epic-archive'),
+        async (tx, { runId }) => {
+          await tx.executeSql('INSERT INTO omnis.test_queue_outbox (run_id) VALUES ($1)', [runId]);
+          return `job-${runId}`;
+        },
+      );
+      assert.equal(admittedAfterEpicArchive.created, true);
+      assert.equal(admittedAfterEpicArchive.run.status, 'queued');
+      const unlinkedArchived = await epics.setTaskEpic(
+        runTask.id,
+        { expectedAssociationRevision: 2, epicId: null },
+        randomUUID(),
+      );
+      assert.equal(unlinkedArchived.epicId, null);
+      assert.equal((await store.getRun(admitted.run.id))?.id, admitted.run.id);
+
+      const movable = await store.createTask(
+        {
+          title: 'Move after unlink',
+          detail: 'Project moves require an explicit Epic unlink.',
+          projectId: project.id,
+        },
+        randomUUID(),
+      );
+      const movableLink = await epics.setTaskEpic(
+        movable.id,
+        { expectedAssociationRevision: 1, epicId: firstEpic.id },
+        randomUUID(),
+      );
+      await assert.rejects(
+        store.setTaskProject(
+          movable.id,
+          {
+            expectedAssociationRevision: movableLink.associationRevision,
+            projectId: otherProject.id,
+          },
+          randomUUID(),
+        ),
+        (error: unknown) => error instanceof StoreError && error.code === 'conflict',
+      );
+      const unlinked = await epics.setTaskEpic(
+        movable.id,
+        { expectedAssociationRevision: movableLink.associationRevision, epicId: null },
+        randomUUID(),
+      );
+      assert.equal(unlinked.associationRevision, movableLink.associationRevision + 1);
+      assert.equal(
+        (
+          await store.setTaskProject(
+            movable.id,
+            {
+              expectedAssociationRevision: unlinked.associationRevision,
+              projectId: otherProject.id,
+            },
+            randomUUID(),
+          )
+        ).projectId,
+        otherProject.id,
+      );
+
+      const projectEpicRaceTask = await store.createTask(
+        {
+          title: 'Project and Epic race',
+          detail: 'Project moves and Epic links serialize on the task.',
+          projectId: project.id,
+        },
+        randomUUID(),
+      );
+      const projectEpicRace = await Promise.allSettled([
+        store.setTaskProject(
+          projectEpicRaceTask.id,
+          { expectedAssociationRevision: 1, projectId: otherProject.id },
+          randomUUID(),
+        ),
+        epics.setTaskEpic(
+          projectEpicRaceTask.id,
+          { expectedAssociationRevision: 1, epicId: firstEpic.id },
+          randomUUID(),
+        ),
+      ]);
+      assert.equal(projectEpicRace.filter((result) => result.status === 'fulfilled').length, 1);
+      const projectEpicRaceState = await epics.getTaskEpic(projectEpicRaceTask.id);
+      assert.ok(projectEpicRaceState);
+      if (projectEpicRaceState.epic)
+        assert.equal(projectEpicRaceState.projectId, projectEpicRaceState.epic.projectId);
+      else assert.equal(projectEpicRaceState.projectId, otherProject.id);
+
+      const epicArchiveRace = await epics.create(
+        project.id,
+        { title: 'Archive and assignment race' },
+        randomUUID(),
+      );
+      const epicArchiveRaceTask = await store.createTask(
+        {
+          title: 'Archive race task',
+          detail: 'Epic archival and assignment serialize on the Epic.',
+          projectId: project.id,
+        },
+        randomUUID(),
+      );
+      const epicRace = await Promise.allSettled([
+        epics.setTaskEpic(
+          epicArchiveRaceTask.id,
+          { expectedAssociationRevision: 1, epicId: epicArchiveRace.id },
+          randomUUID(),
+        ),
+        epics.archive(project.id, epicArchiveRace.id, { expectedRevision: 1 }, randomUUID()),
+      ]);
+      assert.equal(epicRace[1]?.status, 'fulfilled');
+      if (epicRace[0]?.status === 'fulfilled')
+        assert.equal((await epics.getTaskEpic(epicArchiveRaceTask.id))?.epic?.status, 'archived');
+      else
+        assert.ok(
+          epicRace[0].reason instanceof EpicStoreError &&
+            epicRace[0].reason.code === 'invalid_transition',
+        );
+
+      const audit = await adminPool!.query<{ action: string; record: Record<string, unknown> }>(
+        'SELECT action, to_jsonb(audit) AS record FROM omnis.task_epic_management_audit WHERE task_id = $1',
+        [firstTask.id],
+      );
+      assert.deepEqual(
+        audit.rows.map((row) => row.action),
+        ['assigned'],
+      );
+      assert.ok(
+        audit.rows.every((row) =>
+          Object.keys(row.record).every((field) => !/title|detail|description/i.test(field)),
+        ),
+      );
+
+      const permissions = await adminPool!.query<{
+        runtime_relation_select: boolean;
+        runtime_relation_insert: boolean;
+        authorizer_relation_select: boolean;
+        authorizer_relation_insert: boolean;
+        runtime_mutation_function: boolean;
+        authorizer_mutation_function: boolean;
+      }>(`
+        SELECT has_table_privilege('omnis_runtime','omnis.task_epic_associations','SELECT') AS runtime_relation_select,
+               has_table_privilege('omnis_runtime','omnis.task_epic_associations','INSERT') AS runtime_relation_insert,
+               has_table_privilege('omnis_authorizer','omnis.task_epic_associations','SELECT') AS authorizer_relation_select,
+               has_table_privilege('omnis_authorizer','omnis.task_epic_associations','INSERT') AS authorizer_relation_insert,
+               has_function_privilege('omnis_runtime','omnis.set_task_epic(text,integer,text,uuid,bytea)','EXECUTE') AS runtime_mutation_function,
+               has_function_privilege('omnis_authorizer','omnis.set_task_epic(text,integer,text,uuid,bytea)','EXECUTE') AS authorizer_mutation_function
+      `);
+      assert.deepEqual(permissions.rows[0], {
+        runtime_relation_select: false,
+        runtime_relation_insert: false,
+        authorizer_relation_select: false,
+        authorizer_relation_insert: false,
+        runtime_mutation_function: false,
+        authorizer_mutation_function: true,
+      });
+      await assert.rejects(
+        pool!.query('SELECT * FROM omnis.task_epic_associations'),
+        /permission denied/,
+      );
+      await assert.rejects(
+        pool!.query('SELECT omnis.set_task_epic($1,$2,$3,$4,$5)', [
+          firstTask.id,
+          2,
+          null,
+          randomUUID(),
+          Buffer.alloc(32),
+        ]),
+        /permission denied/,
+      );
+
+      const parentRaceProject = await projects.create(
+        {
+          key: 'EPIC-TASK-RACE',
+          name: 'Parent race',
+          objective: 'Serialize association and archive.',
+        },
+        randomUUID(),
+      );
+      const parentRaceEpic = await epics.create(
+        parentRaceProject.id,
+        { title: 'Race task' },
+        randomUUID(),
+      );
+      const parentRaceTask = await store.createTask(
+        {
+          title: 'Race association',
+          detail: 'Association must serialize with project archive.',
+          projectId: parentRaceProject.id,
+        },
+        randomUUID(),
+      );
+      const parentRace = await Promise.allSettled([
+        epics.setTaskEpic(
+          parentRaceTask.id,
+          { expectedAssociationRevision: 1, epicId: parentRaceEpic.id },
+          randomUUID(),
+        ),
+        projects.archive(parentRaceProject.id, { expectedRevision: 1 }, randomUUID()),
+      ]);
+      assert.equal(parentRace[1]?.status, 'fulfilled');
+      if (parentRace[0]?.status === 'fulfilled')
+        assert.equal((await epics.getTaskEpic(parentRaceTask.id))?.epic?.id, parentRaceEpic.id);
       else
         assert.ok(
           parentRace[0].reason instanceof EpicStoreError &&
@@ -4521,6 +4923,7 @@ const postgresSuite = describe(
         assertTestDatabase(databaseUrl);
         await adminPool!.query(`
         TRUNCATE omnis.test_queue_outbox, omnis.task_project_management_idempotency,
+          omnis.task_epic_management_audit, omnis.task_epic_associations,
           omnis.task_project_management_audit, omnis.project_management_idempotency,
           omnis.project_epic_management_audit, omnis.project_epics,
           omnis.project_milestone_management_audit, omnis.project_milestones,

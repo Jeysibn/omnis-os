@@ -202,6 +202,7 @@ try {
     '0017_task_project_admission',
     '0018_project_milestones',
     '0019_project_epics',
+    '0020_epic_task_association',
   ]);
   assert.equal(afterUpgrade.unsafeRunStates, 3);
   assert.equal(
@@ -686,7 +687,7 @@ async function verifyPost0005ProvenanceUpgrade() {
       "SELECT id, length(checksum) AS checksum_length FROM omnis.schema_migrations WHERE id LIKE '00%' ORDER BY id",
     );
     assert.deepEqual(migrationRows.rows.at(-1), {
-      id: '0019_project_epics',
+      id: '0020_epic_task_association',
       checksum_length: 64,
     });
   } finally {

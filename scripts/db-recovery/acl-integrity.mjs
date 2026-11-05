@@ -325,6 +325,9 @@ export function assertRuntimeAclPolicy(snapshot) {
           'create_project_epic(p_id text, p_project_id text, p_title text, p_description text, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
           'update_project_epic(p_project_id text, p_id text, p_expected_revision integer, p_title text, p_description text, p_description_supplied boolean, p_status text, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
           'archive_project_epic(p_project_id text, p_id text, p_expected_revision integer, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
+          'get_task_epic(p_task_id text)',
+          'list_project_epic_tasks(p_project_id text, p_epic_id text, p_after_created_at timestamp with time zone, p_after_task_id text, p_limit integer)',
+          'set_task_epic(p_task_id text, p_expected_association_revision integer, p_epic_id text, p_request_id uuid, p_fingerprint bytea)',
         ].includes(entry.object) &&
         entry.privilege === 'EXECUTE' &&
         entry.securityDefiner === true
