@@ -41,7 +41,7 @@ WSL systemd services do not keep a distro alive after WSL shutdown. Windows/WSL 
 
 ## 2. Docker-first WSL2 topology
 
-The owner-selected target is Docker Compose on the existing WSL2 Ubuntu distro. This is the preferred application deployment direction, not a claim that the repository is already containerized. No real connector container or Compose stack is implemented by this assessment. A separately managed container remains an optional stronger boundary if the Docker-on-WSL threat model cannot be accepted; it is not a deployment prerequisite.
+The owner-selected target is Docker Compose on the existing WSL2 Ubuntu distro. This is the preferred application deployment direction, not a claim that the repository is already containerized. No real connector container or Compose stack is implemented by this assessment. A separately managed VM remains an optional stronger boundary if the Docker-on-WSL threat model cannot be accepted; it is not a deployment prerequisite.
 
 ```mermaid
 flowchart TB
