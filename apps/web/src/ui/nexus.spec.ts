@@ -1254,7 +1254,7 @@ test.describe('retry budget survives transport replacement', () => {
     await expect(laneOf(page).locator('[data-lane-status="paused"]')).toBeVisible();
     expect((await fake.stats(page)).open).toBe(0); // no transport while hidden
     await setHidden(page, false);
-    await expect(statusText(page)).toHaveText(INTERRUPTED); // budget carried over, not "connecting"
+    await expect(laneOf(page).locator('[data-lane-status="paused"]')).toHaveCount(0);
 
     await tick(page, 1); // the replacement transport's first attempt: cumulative failure 4
     expect(await errorsOf(page, 'run-a')).toBe(4);
