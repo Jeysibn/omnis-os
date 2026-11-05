@@ -1,0 +1,71 @@
+# Phase 1 Real-Run Readiness and Runtime Gate
+
+**Assessment date:** 2026-11-05
+**Reviewed base:** `7bb6e9d3a79e749b5dfaf63561bb442fde188d9b`
+**Main CI:** [run 42035209557](https://github.com/Jeysibn/omnis-os/actions/runs/42035209557) — passed on the reviewed base
+**Decision:** No real runtime is approved by this assessment. Keep provider execution disabled.
+
+This is a source-and-evidence review of the current main tree. Mock integration, disposable-host CI, and local CLI sign-in do not establish real-provider safety or authorize a provider request.
+
+## Phase 1 gate matrix
+
+| Gate | Status | Evidence on reviewed main | Remaining work / dependency |
+|---|---|---|---|
+| AO-101–AO-106 — foundation and mock adapter | **VERIFIED for mock scope** | Main contains the pnpm workspace, strict TypeScript/contracts, owner session and CSRF, PostgreSQL persistence, Agent Profiles/departments, project/task/run data, and the `RuntimeAdapter`/mock implementation. The current CI run passed core checks and build. `packages/runtime-adapters/src/index.ts` still declares only `kind: 'mock'`. | No foundation rebuild. Keep this result scoped to the existing single-owner synthetic path. |
+| AO-107 — authorized real runtime adapter | **BLOCKED** | Runtime contracts and SQL persist only mock/synthetic activity (see [source gates](#source-level-runtime-gates)). No provider credential broker, provider-scoped authorization operation, or connector egress policy exists. | Provider usage/policy decision; supported app-owned OAuth consent; credential-broker and connector identity; enforceable tool-free execution; narrow egress; independent review. |
+| AO-108–AO-109 — durable execution and events | **VERIFIED for mock scope** | PostgreSQL-backed queue admission, idempotency, leases, recovery, persisted event sequencing and SSE replay exist. The current main CI passed checks, recovery, legacy upgrade and backup/restore. `docs/07-governance/evidence/R1_G1_PERSISTENCE.md` and `R1_G3_CI_RECOVERY.md` record scope and limitations. | Extend only after the real provider operation contract is approved. A provider request must not be retried automatically after uncertain delivery. |
+| AO-110 — minimum functional UI | **PARTIAL** | Main web app supports owner sign-in, task creation, synthetic run approval, event/run inspection, cancellation, and reload. The Agent Directory is read-only in this release (`apps/web/src/ui/App.tsx` page description). The Playwright job passes, but that does not mean a real-run journey exists. | Minimum profile selection/run-origin labeling and truthful real-vs-mock provenance; inspect open frontend PRs #31 and #25 before any shared-file integration. |
+| AO-111 — tool policy, approvals, cancellation, audit | **PARTIAL** | One-time owner approval, task scoping, mock authorization, cancellation, audit and recovery are implemented for `mock.execute`. No provider-specific operation, real-runtime approval receipt, deny-all tool policy, or independently enforced provider-operation revocation exists. | Separate owner approval bound to provider/runtime/model, task/profile snapshot, prompt, tool set, expiry, output/network limits and exact operation; fail-closed revocation and provenance. |
+| AO-112 — truthful usage | **PARTIAL** | Mock reports usage as unknown. Run schema/database checks currently require unknown usage. No provider token/usage event ingestion or actual-charge reporting exists. | Provider-specific measurement mapping; represent unavailable/unknown honestly; never infer charges from API-equivalent value. |
+| AO-113 — end-to-end integration/security acceptance | **BLOCKED** | Existing end-to-end CI exercises a synthetic mock request only. No real provider request has been authorized or performed. | Complete approved adapter and UI path, independent security review, exact-head CI, then separate owner authorization for one exact synthetic-content provider run and reviewable evidence. |
+| G4-3 — host/process/credential isolation | **PARTIAL** | PR #11 evidence and current source document separate API/authorizer/worker/launcher identities in the disposable systemd test, but the rootful Docker launcher remains root-equivalent. Per-decision signatures, stronger replay protection and coordinated token rotation are still open. See [R1-G5 evidence](../07-governance/evidence/R1_G5_HOST_ISOLATION.md). | Codex #3 must validate the real connector service boundary; launcher remains outside the provider connector's authority. Close the owner-assertion/replay/rotation requirements before provider authorization. |
+| R1-G5 — host authorizer isolation | **PARTIAL** | Current main retains the restricted launcher and trusted-code controls. Disposable Ubuntu systemd CI proves the tested mock flow only; it is not assurance for a real connector, production, or homelab. | Separate connector identity and secret delivery, no Docker/authorizer socket access, bounded outbound provider egress, protected code, fail-closed service/restart behavior, independent verification on the intended host class. ADR-0011 remains Proposed. |
+
+### Source-level runtime gates
+
+- `packages/runtime-adapters/src/index.ts:3-5` types the adapter kind as only `'mock'`.
+- `packages/db/migrations/0001_initial.sql:14-23,43-54` constrains runs to `runtime_kind = 'mock'`, `synthetic IS TRUE`, unknown usage, and events with `source = 'mock'` and `synthetic IS TRUE`.
+- `packages/contracts/src/index.ts` keeps run, event, and authorization contracts synthetic/mock-only.
+- `apps/worker/src/run-coordinator.ts` admits only an owner authorization for `runtimeId === 'mock'` and `mock.execute`, then checks the same authorization before execution.
+- `packages/db/migrations/0011_authorized_mock_sandbox_launch.sql` grants the Docker-capable launcher one constrained mock launch. This is not a generic provider connector or safe place to store provider credentials.
+
+These are deliberate fail-closed constraints. Do not relax them as part of a documentation or compatibility change.
+
+## Installed runtime assessment
+
+Inventory was limited to version/status/help commands. No OAuth store was read, no native credential was extracted, no provider endpoint was contacted, and no inference was sent.
+
+| Runtime | Current local observation | Integration and policy evidence | Disposition |
+|---|---|---|---|
+| Hermes Agent | v0.22.2 (`2026.9.24`); its local `--help` shows an API server/gateway and multiple provider/auth features. No run/capability smoke was attempted. | Hermes documents that its API server creates a server-side agent with the configured toolset and gives it the full API-server toolset, including terminal commands. The preset omits only some tools; it does not establish a model-only boundary. ([API server](https://hermes-agent.nousresearch.com/docs/user-guide/features/api-server), [toolsets](https://hermes-agent.nousresearch.com/docs/reference/toolsets-reference)) | **Not selected.** A bearer key is authentication, not tool restriction. Hermes remains blocked unless a zero-tool, isolated deployment can be independently demonstrated. Do not use Hermes OAuth proxy features or route subscription tokens through a third-party proxy. |
+| Codex CLI/app-server | CLI 0.166.0; local CLI reports “Logged in using ChatGPT.” No app-server run was started and these local credentials were not inspected or reused. | OpenAI documents Sign in with ChatGPT plan use for open-source and locally hosted clients through app-specific OAuth registration and user consent; app stores and refreshes its own credentials. Codex app-server supports streamed turn events and interruption but can execute local shell/MCP tools; the SIWC preview has request limitations and requires `store:false`, streaming, and token refresh. ([SIWC overview](https://developers.openai.com/siwc/token-sharing-open-source), [app-server](https://developers.openai.com/siwc/token-sharing-open-source/codex-app-server), [preview limits](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)) | **Preferred candidate for the next feasibility spike; not selected/approved.** Requires Omnis-owned registration and owner consent, confirmed entitlement/policy for the exact request, an enforceable no-tool policy (not prompt-only), isolated connector and credential broker, verified refresh/revocation, and measured/unavailable usage behavior. Existing CLI login is not Omnis consent. |
+| Claude Code | CLI 2.1.318. A pre-existing local Team sign-in is noted in the prior sanitized inventory; this task did not inspect its credential store or invoke the CLI for inference. | CLI supports non-interactive `-p` and streaming output, and exposes tools/permission modes. Those flags do not establish safe unattended execution or Team plan authorization for this product. Anthropic policy/terms and the applicable Team/Agent SDK automation mode have not been approved for Omnis. ([CLI reference](https://docs.anthropic.com/en/docs/claude-code/cli-usage), [commercial terms](https://www.anthropic.com/legal)) | **Blocked; keep background Claude disabled.** Obtain applicable owner/legal policy review and independently verify an isolated, non-bypassable no-tool mode before reconsidering. |
+
+Codex app-server is the most promising candidate only because its vendor documents an OAuth consent flow for open-source/local apps and a streamable application integration. This is not a selection or authorization. The SIWC flow is optional and plan usage may draw on shared account limits; no “free” or no-cost guarantee is made. The next spike must establish whether the exact installed app-server can be made to run a single text-only turn without executing any local tool, and must not send a model request until separately approved.
+
+## Required security closure before any provider call
+
+1. **Provider policy and consent:** Record the selected runtime/version/model, applicable terms, OAuth client registration, account/workspace eligibility, plan-usage disclosure, retention/data controls, and the owner’s explicit consent to use Omnis OS. Never reuse a CLI’s native OAuth store.
+2. **Authorization:** Add a provider-specific, single-run operation and approval receipt bound to the exact runtime/model, immutable profile version, project/task, prompt or prompt digest, allowed tools (empty for first run), output/time limits, expiry, and idempotency ID. Sign/bind the API-to-authorizer decision; prevent replay; exercise key rotation and revocation. Failure or uncertainty must deny/stop and require authenticated readback, not a fresh inference retry.
+3. **Credential custody:** Implement an independently reviewed broker that holds SIWC refresh credentials outside Omnis PostgreSQL, events, logs, artifacts, task workspaces, worker env and launcher env. Deliver only the minimum short-lived access token to the isolated connector child using an OS-protected channel; scrub crash reports and diagnostics.
+4. **Host boundary:** Connector has its own unprivileged OS identity, root-owned executable/dependencies, isolated home and temporary workspace, no Docker/launcher/authorizer sockets or database credentials, no access to developer home, and bounded provider-only egress. A failure of policy check, broker, isolation, egress enforcement or revocation fails closed.
+5. **Tool-free guarantee:** Prove with negative tests and host controls that a model tool call cannot spawn shell, access files, MCP, browser, network destinations, or mutate anything. Do not rely on system prompt, a prompt to “not use tools,” CLI UI settings, or the model’s compliance.
+6. **Durable truthful events:** Add non-synthetic provider provenance with external run/session mapping, deduplicated streaming events, terminal reconciliation, bounded output, cancellation, and recovery that never duplicates an uncertain provider submission. Preserve mock-only tests and migrations.
+7. **Usage and acceptance:** Parse vendor-reported usage if exposed; otherwise store `unavailable`/`unknown`. Do not invent costs. Validate the run via the approved synthetic task, refresh/restart recovery, cancellation, audit, credential canaries, and exact-head CI.
+
+The first provider request itself remains a separate approval gate. It must identify the exact provider, runtime, version, model, prompt, isolated environment, limits, tool policy, and usage/cost disclosure. This readiness PR authorizes no provider call.
+
+## Shortest safe next steps
+
+1. Codex #3 completes the [host/connector feasibility handoff](CODEX_3_PHASE_1_CONNECTOR_BOUNDARY_HANDOFF.md) and returns evidence for the proposed service identity, secret channel, egress and isolation on a disposable environment.
+2. Codex #1 performs a Codex app-server no-tool feasibility design using stubs/local protocol fixtures only; no user token and no inference. Confirm SIWC registration/policy requirements with the owner before implementing auth.
+3. Independent reviewer re-checks the resulting provider-scoped authorization and credential path before executable provider code is added.
+4. Implement one disabled-by-default adapter and deterministic provider-stub tests only after those reviews pass. Keep `mock` the default and add a database/API flag that cannot be enabled by profile content.
+5. Run full exact-head CI and independent implementation review. Then prepare a separate owner packet for one real synthetic request; do not send it until the owner authorizes that exact request.
+
+## Review and scope
+
+- Architecture checkpoint: **BLOCK** for a real-runtime adapter on this baseline. The reviewer approved documentation-only readiness work and a Codex #3 handoff.
+- No executable provider integration, schema relaxation, CI change, frontend change, or provider inference is part of this increment.
+- Keep **G4-3: Partially Fixed** and **R1-G5: Partially Complete**. ADR-0010 and ADR-0011 remain Proposed.
+- Current open workstreams inspected: PR #25 and #31 are frontend; PR #36 and #26 are platform/integration/tooling. No files from those workstreams are changed by this assessment.
