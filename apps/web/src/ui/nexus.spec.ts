@@ -1,6 +1,7 @@
 import AxeBuilder from '@axe-core/playwright';
 import { mkdirSync } from 'node:fs';
 import { expect, test, type Page } from '@playwright/test';
+import type { Run } from '@omnis/contracts';
 import {
   buildConstellation,
   hashString,
@@ -1196,4 +1197,351 @@ test('an exhausted stream is not restarted when the followed set changes; only R
   const stats = await fake.stats(page);
   expect(stats.instances['run-a']).toBe(base); // run-a was not silently recreated
   expect(stats.errors['run-a']).toBe(5);
+});
+
+// ------------------------------------------------------------ retry budget lifecycle (frozen clock)
+const setHidden = (page: Page, hidden: boolean) =>
+  page.evaluate((value) => {
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => value });
+    document.dispatchEvent(new Event('visibilitychange'));
+  }, hidden);
+
+/**
+ * Opens the screen under a controlled clock that is then frozen, so every timer in the app and
+ * in the fake EventSource only advances through `tick`. Failures are counted exactly.
+ */
+async function openFrozen(page: Page, runs: Run[], histories: Run[] = runs) {
+  await page.clock.install({ time: new Date('2026-11-03T03:00:00Z') });
+  await installFakeEventSource(
+    page,
+    Object.fromEntries(histories.map((r) => [r.id, defaultRunEvents(r)])),
+  );
+  const api = await open(page, { runs });
+  await page.clock.pauseAt(new Date('2026-11-03T03:01:00Z'));
+  return api;
+}
+const tick = (page: Page, ms: number) => page.clock.runFor(ms);
+const errorsOf = async (page: Page, id: string) => (await fake.stats(page)).errors[id] ?? 0;
+const instancesOf = async (page: Page, id: string) => (await fake.stats(page)).instances[id] ?? 0;
+const INTERRUPTED = 'Connection interrupted. Reconnecting; loaded history is kept.';
+const EXHAUSTED_1 =
+  'Retry limit reached for 1 run. Live updates stopped; loaded history is kept. Use Refresh to retry.';
+const LIVE_1 = 'Live: receiving updates for the unfinished run.';
+
+/** Starts an outage on one run and spends `n` failures (the drop is failure 1). */
+async function fail(page: Page, id: string, n: number) {
+  await fake.setDown(page, id, true);
+  await fake.drop(page, id);
+  for (let i = 1; i < n; i++) await tick(page, 20);
+}
+/** Brings the server back and lets the browser's own retry reconnect. */
+async function recover(page: Page, id: string) {
+  await fake.setDown(page, id, false);
+  await tick(page, 20);
+}
+
+test.describe('retry budget survives transport replacement', () => {
+  test('three failures, hide, show, two more failures: exhausts on the fifth cumulative failure', async ({
+    page,
+  }) => {
+    await openFrozen(page, [alpha]);
+    await expect(statusText(page)).toHaveText(LIVE_1);
+    await fail(page, 'run-a', 3);
+    expect(await errorsOf(page, 'run-a')).toBe(3);
+    await expect(statusText(page)).toHaveText(INTERRUPTED);
+
+    await setHidden(page, true);
+    await expect(laneOf(page).locator('[data-lane-status="paused"]')).toBeVisible();
+    expect((await fake.stats(page)).open).toBe(0); // no transport while hidden
+    await setHidden(page, false);
+    await expect(statusText(page)).toHaveText(INTERRUPTED); // budget carried over, not "connecting"
+
+    await tick(page, 1); // the replacement transport's first attempt: cumulative failure 4
+    expect(await errorsOf(page, 'run-a')).toBe(4);
+    await expect(statusText(page)).toHaveText(INTERRUPTED);
+    await tick(page, 20); // cumulative failure 5
+    expect(await errorsOf(page, 'run-a')).toBe(5);
+    await expect(statusText(page)).toHaveText(EXHAUSTED_1);
+  });
+
+  test('an exhausted stream stays exhausted through hide and show', async ({ page }) => {
+    await openFrozen(page, [alpha]);
+    await expect(statusText(page)).toHaveText(LIVE_1);
+    await fail(page, 'run-a', 5);
+    await expect(statusText(page)).toHaveText(EXHAUSTED_1);
+    const before = await instancesOf(page, 'run-a');
+    await setHidden(page, true);
+    await setHidden(page, false);
+    await tick(page, 200);
+    expect(await instancesOf(page, 'run-a')).toBe(before); // no new connection
+    expect(await errorsOf(page, 'run-a')).toBe(5);
+    await expect(statusText(page)).toHaveText(EXHAUSTED_1);
+    // only an explicit Refresh restarts it
+    await fake.setDown(page, 'run-a', false);
+    await page.getByRole('button', { name: 'Refresh data' }).dispatchEvent('click');
+    await tick(page, 20);
+    await expect(statusText(page)).toHaveText(LIVE_1);
+    expect(await instancesOf(page, 'run-a')).toBe(before + 1);
+  });
+
+  test('exact fifth-failure boundary', async ({ page }) => {
+    await openFrozen(page, [alpha]);
+    await expect(statusText(page)).toHaveText(LIVE_1);
+    await fail(page, 'run-a', 4);
+    expect(await errorsOf(page, 'run-a')).toBe(4);
+    await expect(statusText(page)).toHaveText(INTERRUPTED); // four failures: still trying
+    await tick(page, 20);
+    await expect(statusText(page)).toHaveText(EXHAUSTED_1); // the fifth ends it
+  });
+
+  test('the disconnection deadline: just before, exactly at, and after 30 s', async ({ page }) => {
+    await openFrozen(page, [alpha]);
+    await expect(statusText(page)).toHaveText(LIVE_1);
+    await fake.setHang(page, 'run-a', true); // later attempts never answer: one error, then silence
+    await fail(page, 'run-a', 1);
+    await expect(statusText(page)).toHaveText(INTERRUPTED);
+    await tick(page, 29_999);
+    await expect(statusText(page)).toHaveText(INTERRUPTED); // just before
+    await tick(page, 1);
+    await expect(statusText(page)).toHaveText(EXHAUSTED_1); // exactly at the deadline
+    expect((await fake.stats(page)).open).toBe(0);
+  });
+
+  test('past the deadline in one step is exhausted', async ({ page }) => {
+    await openFrozen(page, [alpha]);
+    await expect(statusText(page)).toHaveText(LIVE_1);
+    await fake.setHang(page, 'run-a', true);
+    await fail(page, 'run-a', 1);
+    await tick(page, 30_001);
+    await expect(statusText(page)).toHaveText(EXHAUSTED_1);
+  });
+
+  test('time in a hidden tab is not counted: the deadline resumes with what was left', async ({
+    page,
+  }) => {
+    await openFrozen(page, [alpha]);
+    await expect(statusText(page)).toHaveText(LIVE_1);
+    await fake.setHang(page, 'run-a', true);
+    await fail(page, 'run-a', 1);
+    await tick(page, 10_000); // 10 s of the 30 s used
+    await setHidden(page, true);
+    await expect(laneOf(page).locator('[data-lane-status="paused"]')).toBeVisible();
+    await tick(page, 600_000); // ten minutes hidden
+    await setHidden(page, false);
+    await expect(statusText(page)).toHaveText(INTERRUPTED); // not restarted at 30 s, not expired
+    await tick(page, 19_999);
+    await expect(statusText(page)).toHaveText(INTERRUPTED);
+    await tick(page, 1); // the remaining 20 s, exactly
+    await expect(statusText(page)).toHaveText(EXHAUSTED_1);
+  });
+
+  test('app-managed CLOSED retries back off 1/2/4/8 s and then stop', async ({ page }) => {
+    test.setTimeout(60_000);
+    await openFrozen(page, [alpha]);
+    await expect(statusText(page)).toHaveText(LIVE_1);
+    const base = await instancesOf(page, 'run-a');
+    await fake.setHardFail(page, 'run-a', true); // refused: the browser gives up (CLOSED)
+    await fail(page, 'run-a', 1);
+    const at = async (ms: number, instances: number, errors: number) => {
+      await tick(page, ms);
+      expect(await instancesOf(page, 'run-a')).toBe(base + instances);
+      expect(await errorsOf(page, 'run-a')).toBe(errors);
+    };
+    // A re-created transport answers one millisecond after it is created (error k+1), and the
+    // backoff for failure k is 1000 * 2^(k-1) ms measured from that failure.
+    await at(999, 0, 1);
+    await at(1, 1, 1); // backoff 1 s: transport re-created
+    await at(1, 1, 2); // and it fails: second failure
+    await at(1999, 1, 2); // 2 s backoff, not yet
+    await at(1, 2, 2); // re-created
+    await at(1, 2, 3);
+    await at(3999, 2, 3); // 4 s backoff
+    await at(1, 3, 3);
+    await at(1, 3, 4);
+    await at(7999, 3, 4); // 8 s backoff
+    await at(1, 4, 4);
+    await at(1, 4, 5); // the fifth failure
+    await expect(statusText(page)).toHaveText(EXHAUSTED_1);
+    await at(10_000, 4, 5); // nothing is retried afterwards (longer than the largest backoff)
+  });
+
+  test('unmounting with a retry pending cancels it', async ({ page }) => {
+    await openFrozen(page, [alpha]);
+    await expect(statusText(page)).toHaveText(LIVE_1);
+    await fake.setHardFail(page, 'run-a', true);
+    await fail(page, 'run-a', 1); // app retry timer (1 s) now pending
+    await page.getByRole('link', { name: 'Tasks' }).click();
+    await expect(laneOf(page)).toHaveCount(0);
+    const settled = await fake.stats(page);
+    await tick(page, 120_000);
+    const later = await fake.stats(page);
+    expect(later.created).toBe(settled.created); // no EventSource appeared after unmount
+    expect(later.open).toBe(0);
+    expect(later.errors).toEqual(settled.errors);
+  });
+
+  test('a terminal event cancels the failure deadline', async ({ page }) => {
+    await openFrozen(page, [alpha]);
+    await expect(statusText(page)).toHaveText(LIVE_1);
+    await fail(page, 'run-a', 1);
+    await recover(page, 'run-a');
+    await fake.publish(page, 'run-a', runEvent('run-a', 3, 'run.completed', min(9)));
+    await tick(page, 35_000); // past the 30 s window; a heavier fast-forward starves the renderer
+    await expect(laneOf(page).locator('[data-lane-status="exhausted"]')).toHaveCount(0);
+    expect(await errorsOf(page, 'run-a')).toBe(1);
+  });
+});
+
+test.describe('what resets the retry budget', () => {
+  test('a new validated event resets it', async ({ page }) => {
+    await openFrozen(page, [alpha]);
+    await expect(statusText(page)).toHaveText(LIVE_1);
+    await fail(page, 'run-a', 3);
+    await recover(page, 'run-a');
+    await fake.publish(page, 'run-a', runEvent('run-a', 3, 'run.stop_requested', min(8)));
+    await expect(nodesOf(page, 'run-a')).toHaveCount(3);
+    await fail(page, 'run-a', 4); // a fresh budget: four more failures are survivable
+    await expect(statusText(page)).toHaveText(INTERRUPTED);
+    await tick(page, 20);
+    await expect(statusText(page)).toHaveText(EXHAUSTED_1);
+  });
+
+  test('a duplicate replay is not progress', async ({ page }) => {
+    await openFrozen(page, [alpha]);
+    await expect(statusText(page)).toHaveText(LIVE_1);
+    await fail(page, 'run-a', 3);
+    await recover(page, 'run-a');
+    await fake.publish(page, 'run-a', runEvent('run-a', 2, 'run.started', min(5))); // already seen
+    await expect(nodesOf(page, 'run-a')).toHaveCount(2);
+    await fail(page, 'run-a', 2); // cumulative: 3 + 2
+    await expect(statusText(page)).toHaveText(EXHAUSTED_1);
+  });
+
+  test('ten continuous seconds open resets it', async ({ page }) => {
+    await openFrozen(page, [alpha]);
+    await expect(statusText(page)).toHaveText(LIVE_1);
+    await fail(page, 'run-a', 3);
+    await recover(page, 'run-a');
+    await tick(page, 10_000);
+    await fail(page, 'run-a', 4);
+    await expect(statusText(page)).toHaveText(INTERRUPTED);
+    await tick(page, 20);
+    await expect(statusText(page)).toHaveText(EXHAUSTED_1);
+  });
+
+  test('a connection that flaps before ten seconds does not reset it', async ({ page }) => {
+    await openFrozen(page, [alpha]);
+    await expect(statusText(page)).toHaveText(LIVE_1);
+    await fail(page, 'run-a', 3);
+    await recover(page, 'run-a');
+    await tick(page, 9_999); // one millisecond short of stable
+    await fail(page, 'run-a', 2); // cumulative: 3 + 2
+    await expect(statusText(page)).toHaveText(EXHAUSTED_1);
+  });
+
+  test('repeated open/close cycles without progress eventually exhaust', async ({ page }) => {
+    await openFrozen(page, [alpha]);
+    await expect(statusText(page)).toHaveText(LIVE_1);
+    for (let i = 0; i < 4; i++) {
+      await fake.drop(page, 'run-a'); // the server accepts every reconnect, then drops again
+      await tick(page, 20);
+      await expect(statusText(page)).toHaveText(LIVE_1);
+    }
+    await fake.drop(page, 'run-a'); // the fifth drop
+    await expect(statusText(page)).toHaveText(EXHAUSTED_1);
+  });
+
+  test('budgets are independent per run', async ({ page }) => {
+    await openFrozen(page, [alpha, bravo]);
+    await expect(statusText(page)).toHaveText(LIVE_2);
+    for (const id of ['run-a', 'run-b']) await fake.setDown(page, id, true);
+    await fake.drop(page, 'run-a');
+    await fake.drop(page, 'run-b');
+    await tick(page, 40); // both have failed three times
+    await fake.setDown(page, 'run-b', false);
+    await tick(page, 20); // run-b recovers; run-a fails a fourth time
+    await tick(page, 20); // run-a's fifth
+    await expect(statusText(page)).toHaveText(
+      'Partially connected: 1 of 2 unfinished runs live, 1 stopped after retries. Loaded history is kept.',
+    );
+    expect(await errorsOf(page, 'run-a')).toBe(5);
+    expect(await errorsOf(page, 'run-b')).toBe(3); // run-a's failures were not charged to run-b
+    await fake.setDown(page, 'run-b', true);
+    await fake.drop(page, 'run-b'); // run-b's own fourth failure
+    await tick(page, 20); // its fifth
+    await expect(statusText(page)).toHaveText(
+      'Retry limit reached for 2 runs. Live updates stopped; loaded history is kept. Use Refresh to retry.',
+    );
+  });
+});
+
+test.describe('retry state outlives followed-set eviction', () => {
+  const dayRun = (id: string, updated: number) =>
+    run(id, `t-${id}`, `Mission ${id}`, 'running', min(updated), min(1));
+  const a = dayRun('run-a', 2); // oldest: the first to be evicted
+  const b = dayRun('run-b', 3);
+  const c = dayRun('run-c', 4);
+  const d = dayRun('run-d', 5);
+  const e = dayRun('run-e', 30); // newest: displaces run-a once present
+
+  test('an exhausted run is not reconnected when it is evicted and later returns', async ({
+    page,
+  }) => {
+    const api = await openFrozen(page, [a, b, c, d], [a, b, c, d, e]);
+    await expect(laneOf(page).getByText(/Following 4 of 4 runs/)).toBeVisible();
+    api.setRuns([a, b, c, d, e]); // the refresh after exhaustion will return a fifth run
+    await fail(page, 'run-a', 5);
+    // genuinely evicted: five runs exist, only four are followed, and run-a is not one of them
+    await expect(laneOf(page).getByText(/Following 4 of 5 runs/)).toBeVisible();
+    await expect(nodesOf(page, 'run-a')).toHaveCount(0);
+    await tick(page, 5); // run-e's new transport answers
+    await expect(nodesOf(page, 'run-e')).toHaveCount(2);
+    const instances = await instancesOf(page, 'run-a');
+
+    api.setRuns([a, b, c, d]); // run-e is gone; run-a is eligible again
+    await fake.publish(page, 'run-d', runEvent('run-d', 3, 'run.completed', min(40))); // triggers a refresh
+    await expect(laneOf(page).getByText(/Following 4 of 4 runs/)).toBeVisible();
+    await tick(page, 500);
+    expect(await instancesOf(page, 'run-a')).toBe(instances); // no EventSource for run-a
+    await expect(statusText(page)).toContainText('1 stopped after retries');
+
+    await fake.setDown(page, 'run-a', false);
+    await page.getByRole('button', { name: 'Refresh data' }).dispatchEvent('click');
+    await tick(page, 20);
+    expect(await instancesOf(page, 'run-a')).toBe(instances + 1); // Refresh permits it
+  });
+
+  test('a partly spent budget survives temporary eviction', async ({ page }) => {
+    const api = await openFrozen(page, [a, b, c, d], [a, b, c, d, e]);
+    await expect(laneOf(page).getByText(/Following 4 of 4 runs/)).toBeVisible();
+    await fail(page, 'run-a', 3);
+    expect(await errorsOf(page, 'run-a')).toBe(3);
+
+    api.setRuns([a, b, c, d, e]);
+    await fake.publish(page, 'run-d', runEvent('run-d', 3, 'run.completed', min(40)));
+    await expect(laneOf(page).getByText(/Following 4 of 5 runs/)).toBeVisible();
+    await expect(nodesOf(page, 'run-a')).toHaveCount(0); // evicted
+    await tick(page, 200);
+    expect(await errorsOf(page, 'run-a')).toBe(3); // an evicted run makes no attempts
+
+    api.setRuns([a, b, c, d]);
+    await fake.publish(page, 'run-c', runEvent('run-c', 3, 'run.completed', min(41)));
+    await expect(laneOf(page).getByText(/Following 4 of 4 runs/)).toBeVisible();
+    await tick(page, 1); // re-entry: the first attempt is cumulative failure 4
+    expect(await errorsOf(page, 'run-a')).toBe(4);
+    await tick(page, 20); // cumulative failure 5
+    expect(await errorsOf(page, 'run-a')).toBe(5);
+    await expect(statusText(page)).toContainText('1 stopped after retries');
+  });
+
+  test('a run that fails while another is evicted does not charge the other', async ({ page }) => {
+    const api = await openFrozen(page, [a, b, c, d], [a, b, c, d, e]);
+    await expect(laneOf(page).getByText(/Following 4 of 4 runs/)).toBeVisible();
+    await fail(page, 'run-b', 2);
+    api.setRuns([a, b, c, d, e]);
+    await fake.publish(page, 'run-d', runEvent('run-d', 3, 'run.completed', min(40)));
+    await expect(laneOf(page).getByText(/Following 4 of 5 runs/)).toBeVisible();
+    expect(await errorsOf(page, 'run-a')).toBe(0);
+    expect(await errorsOf(page, 'run-c')).toBe(0);
+  });
 });
