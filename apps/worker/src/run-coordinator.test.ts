@@ -484,6 +484,19 @@ describe('durable mock run coordinator', () => {
     assert.equal(state.interrupted, false);
   });
 
+  it('does not treat an interrupt acknowledgement as proof of terminal cancellation', async () => {
+    const adapter = new FakeCodexAppServerRuntimeAdapter({ mode: 'pending-unconfirmed-interrupt' });
+    const { coordinator, state } = lifecycleHarness(adapter);
+
+    const execution = coordinator.handleQueueJob({ runId: lifecycleRun.id });
+    await adapter.protocol.waitUntilTurnStarted();
+    await coordinator.stopRun(lifecycleRun.id);
+    await execution;
+
+    assert.equal(state.cancelled, false);
+    assert.equal(state.interrupted, true);
+  });
+
   it('maps fake app-server errors and crashes to a safe synthetic failure', async () => {
     for (const mode of ['failed', 'crashed'] as const) {
       const adapter = new FakeCodexAppServerRuntimeAdapter({ mode });

@@ -32,7 +32,14 @@ const NotificationSchema = z
   })
   .strict();
 
-type FakeMode = 'complete' | 'tool-request' | 'pending' | 'failed' | 'crashed' | 'timeout';
+type FakeMode =
+  | 'complete'
+  | 'tool-request'
+  | 'pending'
+  | 'pending-unconfirmed-interrupt'
+  | 'failed'
+  | 'crashed'
+  | 'timeout';
 type Notification = z.infer<typeof NotificationSchema>;
 
 /** In-process protocol fixture. It has no child-process, network, or credential interface. */
@@ -100,7 +107,14 @@ export class FakeCodexAppServerProtocol {
       });
     }
     const interrupted = await this.request('turn/interrupt', { threadId, turnId });
-    if (interrupted.result.interrupted !== true) throw new SandboxError('termination_failed');
+    const terminal = interrupted.notifications.find((event) => event.method === 'turn/completed');
+    if (
+      Object.keys(interrupted.result).length !== 0 ||
+      terminal?.params.turnId !== turnId ||
+      terminal.params.status !== 'interrupted'
+    ) {
+      throw new SandboxError('termination_failed');
+    }
     throw new SandboxError('cancelled');
   }
 
@@ -145,10 +159,11 @@ export class FakeCodexAppServerProtocol {
       case 'turn/interrupt':
         if (params.threadId !== this.threadId || params.turnId !== this.turnId)
           return [responseError(id, -32602, 'Unknown synthetic turn.')];
-        result = { interrupted: true };
-        notifications = [
-          notification('turn/completed', { turnId: this.turnId, status: 'interrupted' }),
-        ];
+        result = {};
+        notifications =
+          this.mode === 'pending-unconfirmed-interrupt'
+            ? []
+            : [notification('turn/completed', { turnId: this.turnId, status: 'interrupted' })];
         break;
       default:
         return [responseError(id, -32601, 'Unsupported fake protocol method.')];
@@ -158,7 +173,7 @@ export class FakeCodexAppServerProtocol {
   }
 
   private turnNotifications(): Notification[] {
-    if (this.mode === 'pending') return [];
+    if (this.mode === 'pending' || this.mode === 'pending-unconfirmed-interrupt') return [];
     if (this.mode === 'crashed') throw new Error('Fake app-server process exited unexpectedly.');
     if (this.mode === 'timeout') throw new SandboxError('timed_out');
     if (this.mode === 'failed')
