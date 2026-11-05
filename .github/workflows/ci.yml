@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   frontend-browser:
     runs-on: ubuntu-24.04
@@ -37,7 +41,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  checks:
+  checks-core:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     services:
@@ -86,11 +90,8 @@ jobs:
           OMNIS_AUTHORIZER_DB_PASSWORD: omnis_authorizer_test_password_2026
           OMNIS_LAUNCHER_DB_PASSWORD: omnis_launcher_test_password_2026
       - run: pnpm check
-      - run: pnpm build
-      - run: pnpm integration:legacy-upgrade
-      - run: pnpm integration:recovery
-      - name: Verify disposable PostgreSQL backup and restore
-        run: pnpm integration:backup-restore
+      - name: Build the production frontend bundle
+        run: pnpm --filter @omnis/web build
       - name: Verify host cleanup, packaging, and required CI checks
         run: node --test scripts/host-security/*.test.mjs
       - name: Verify host isolation in disposable systemd deployment
@@ -102,3 +103,89 @@ jobs:
           OMNIS_AUTHORIZER_DB_PASSWORD: omnis_authorizer_test_password_2026
           OMNIS_LAUNCHER_DB_PASSWORD: omnis_launcher_test_password_2026
         run: OMNIS_TEST_NODE_EXECUTABLE="$(command -v node)" sudo --preserve-env=CI,GITHUB_ACTIONS,RUNNER_OS,RUNNER_ENVIRONMENT,OMNIS_HOST_ISOLATION_TEST,OMNIS_SYSTEMD_VERIFICATION_REQUIRED,OMNIS_TEST_NODE_EXECUTABLE,OMNIS_RUNTIME_DB_PASSWORD,OMNIS_AUTHORIZER_DB_PASSWORD,OMNIS_LAUNCHER_DB_PASSWORD,OMNIS_TEST_MIGRATION_DATABASE_URL,OMNIS_TEST_DATABASE_URL,OMNIS_TEST_AUTHORIZER_DATABASE_URL,OMNIS_TEST_LAUNCHER_DATABASE_URL bash scripts/host-security/verify-disposable-systemd-deployment.sh
+
+  database-integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [legacy-upgrade, recovery]
+    services:
+      postgres:
+        image: postgres:17.6-alpine@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94
+        env:
+          POSTGRES_USER: omnis
+          POSTGRES_PASSWORD: omnis_test_password
+          POSTGRES_DB: omnis_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U omnis -d omnis_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    env:
+      OMNIS_TEST_ADMIN_DATABASE_URL: postgresql://omnis:omnis_test_password@127.0.0.1:5432/omnis_test
+      OMNIS_TEST_MIGRATION_DATABASE_URL: postgresql://omnis_migrator:omnis_migration_test_password_2026@127.0.0.1:5432/omnis_test
+      OMNIS_TEST_DATABASE_URL: postgresql://omnis_runtime:omnis_runtime_test_password_2026@127.0.0.1:5432/omnis_test
+      OMNIS_TEST_AUTHORIZER_DATABASE_URL: postgresql://omnis_authorizer:omnis_authorizer_test_password_2026@127.0.0.1:5432/omnis_test
+      OMNIS_TEST_LAUNCHER_DATABASE_URL: postgresql://omnis_launcher:omnis_launcher_test_password_2026@127.0.0.1:5432/omnis_test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 12.16.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.22.1
+          cache: pnpm
+      - run: docker pull node@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85
+      - run: pnpm install --frozen-lockfile
+      - name: Provision restricted PostgreSQL roles
+        run: node --experimental-strip-types packages/db/src/provision.ts
+        env:
+          OMNIS_ADMIN_DATABASE_URL: postgresql://omnis:omnis_test_password@127.0.0.1:5432/omnis_test
+          OMNIS_MIGRATION_DB_PASSWORD: omnis_migration_test_password_2026
+          OMNIS_RUNTIME_DB_PASSWORD: omnis_runtime_test_password_2026
+          OMNIS_AUTHORIZER_DB_PASSWORD: omnis_authorizer_test_password_2026
+          OMNIS_LAUNCHER_DB_PASSWORD: omnis_launcher_test_password_2026
+      - name: Run ${{ matrix.suite }} integration test
+        run: pnpm integration:${{ matrix.suite }}
+
+  backup-restore:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 12.16.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.22.1
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Verify disposable PostgreSQL backup and restore
+        run: pnpm integration:backup-restore
+
+  checks:
+    if: ${{ always() }}
+    needs: [checks-core, database-integration, backup-restore]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every quality job to pass
+        env:
+          CORE_RESULT: ${{ needs.checks-core.result }}
+          DATABASE_RESULT: ${{ needs.database-integration.result }}
+          BACKUP_RESTORE_RESULT: ${{ needs.backup-restore.result }}
+        run: |
+          if [[ "$CORE_RESULT" != "success" || "$DATABASE_RESULT" != "success" || "$BACKUP_RESTORE_RESULT" != "success" ]]; then
+            echo "CI quality jobs did not all pass: core=$CORE_RESULT database=$DATABASE_RESULT backup_restore=$BACKUP_RESTORE_RESULT"
+            exit 1
+          fi
