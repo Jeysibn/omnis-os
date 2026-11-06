@@ -48,6 +48,7 @@ export function registerSyntheticTaskRunRoute(
         : undefined;
       if (
         !profile?.success ||
+        task.id !== request.params.taskId ||
         task.status === 'completed' ||
         profile.data.agentId !== parsed.data.request.agentId ||
         profile.data.versionNo !== parsed.data.request.profileVersion ||

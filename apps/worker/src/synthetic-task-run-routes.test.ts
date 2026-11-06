@@ -69,6 +69,7 @@ function createApp(
     throwBroker?: boolean;
     authenticated?: boolean;
     profileVersion?: number;
+    taskIdOverride?: string;
   } = {},
 ) {
   const app = Fastify();
@@ -81,7 +82,10 @@ function createApp(
     },
     enabled: options.enabled ?? true,
     store: {
-      getTask: async () => (options.taskExists === false ? undefined : (task as Task)),
+      getTask: async () =>
+        options.taskExists === false
+          ? undefined
+          : ({ ...task, id: options.taskIdOverride ?? task.id } as Task),
     } as never,
     profiles: {
       getVersion: async () =>
@@ -208,6 +212,19 @@ describe('worker synthetic task broker dispatch', () => {
 
   it('rejects a changed immutable profile version before broker dispatch', async () => {
     const { app, getCalled } = createApp({ profileVersion: 2 });
+    const response = await app.inject({
+      method: 'POST',
+      url: `/internal/v1/tasks/${taskId}/synthetic-runs`,
+      headers: { 'idempotency-key': requestId },
+      payload: input,
+    });
+    assert.equal(response.statusCode, 409);
+    assert.equal(getCalled(), 0);
+    await app.close();
+  });
+
+  it('rejects a persisted task with an unexpected identity before broker dispatch', async () => {
+    const { app, getCalled } = createApp({ taskIdOverride: 'task-foreign' });
     const response = await app.inject({
       method: 'POST',
       url: `/internal/v1/tasks/${taskId}/synthetic-runs`,

@@ -102,6 +102,8 @@ export function registerConnectorAuthorizationRoutes(
         !task?.success ||
         !project?.success ||
         !profile?.success ||
+        task.data.id !== binding.taskId ||
+        project.data.id !== binding.projectId ||
         task.data.status === 'completed' ||
         project.data.status !== 'active' ||
         task.data.projectId !== binding.projectId ||

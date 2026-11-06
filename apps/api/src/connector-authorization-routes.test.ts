@@ -242,6 +242,28 @@ describe('connector authorization API routes', () => {
     }
   });
 
+  it('rejects persisted task or project records with unexpected identities', async () => {
+    for (const context of [
+      { task: { ...task, id: 'task-foreign' }, project, profile },
+      { task, project: { ...project, id: `prj_${'b'.repeat(32)}` }, profile },
+    ]) {
+      const calls: Array<{ path: string; init: RequestInit }> = [];
+      const app = createTestApp(calls, context);
+      try {
+        const response = await app.inject({
+          method: 'POST',
+          url: '/api/v1/connector-authorizations',
+          headers: { ...ownerHeaders, 'idempotency-key': randomUUID() },
+          payload: input,
+        });
+        assert.equal(response.statusCode, 409);
+        assert.equal(calls.length, 0);
+      } finally {
+        await app.close();
+      }
+    }
+  });
+
   it('requires explicit digest confirmation for approval and forwards revocation separately', async () => {
     const calls: Array<{ path: string; init: RequestInit }> = [];
     const app = createTestApp(calls);
