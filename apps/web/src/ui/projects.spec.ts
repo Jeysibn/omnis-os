@@ -493,7 +493,7 @@ test.describe('create project', () => {
     await fillCreate(page, 'AO-9', 'Nine', 'Nine things.');
     await page.getByRole('button', { name: 'Create project' }).click();
     await expect(page.getByRole('alert')).toContainText(
-      'The result was unknown, but the project list now shows a project with this key and the name Nine. It was probably created. Open it to confirm the objective.',
+      "The result was unknown. The project list shows a project with this key, the name Nine and this priority. We couldn't confirm whether this request created it. Open it to check.",
     );
     expect(api.posts()).toHaveLength(1);
     await expect(page.getByRole('button', { name: 'Create project' })).toBeDisabled();
@@ -533,7 +533,9 @@ test.describe('create project', () => {
     await open(page, '#projects/new');
     await fillCreate(page, 'AO-11', 'Eleven', 'Eleven things.');
     await page.getByRole('button', { name: 'Create project' }).click();
-    await expect(page.getByRole('alert')).toContainText('It was probably created.');
+    await expect(page.getByRole('alert')).toContainText(
+      "We couldn't confirm whether this request created it.",
+    );
     await expect(page.getByRole('alert')).not.toContainText('not applied');
   });
 
@@ -663,7 +665,7 @@ test.describe('edit project', () => {
     await page.getByLabel('Name', { exact: true }).fill('Too late');
     await page.getByRole('button', { name: 'Save changes' }).click();
     await expect(page.getByRole('alert')).toHaveText(
-      "The server rejected the change: this project is archived, so it can't be changed.",
+      "The project is currently archived, so it can't be changed. The server reported a conflict, and it can't be determined whether this request or something else archived it.",
     );
     await expect(page.getByLabel('Name', { exact: true })).toHaveValue('Too late');
     await expect(page.getByRole('button', { name: 'Save changes' })).toBeDisabled();
@@ -676,7 +678,7 @@ test.describe('edit project', () => {
     await expect(page.getByRole('button', { name: 'Save changes' })).toHaveCount(0);
   });
 
-  test('a lost response that was saved is recognised and not applied twice', async ({
+  test('a lost response whose values now match is reported as observed, not as saved by this request', async ({
     page,
     api,
   }) => {
@@ -687,7 +689,7 @@ test.describe('edit project', () => {
     await page.getByRole('button', { name: 'Save changes' }).click();
     await expect(page.getByRole('heading', { level: 2, name: 'Alpha two' })).toBeVisible();
     await expect(status(page)).toHaveText(
-      'The result was unknown, but the project now shows your changes at revision 2. They were saved.',
+      "The project currently has the requested values. We couldn't confirm whether this request saved them.",
     );
     expect(api.patches()).toHaveLength(1);
     expect(api.stored(alpha.id)?.revision).toBe(2);
@@ -824,7 +826,7 @@ test.describe('archive project', () => {
     await trigger(page).click();
     await dialog(page).getByRole('button', { name: 'Archive project' }).click();
     await expect(page.getByRole('alert')).toHaveText(
-      "The server rejected the change: this project is archived, so it can't be changed.",
+      "The project is currently archived, so it can't be changed. The server reported a conflict, and it can't be determined whether this request or something else archived it.",
     );
     await expect(
       page.getByText('This project is archived and read-only. There is no restore action.'),
@@ -855,7 +857,7 @@ test.describe('archive project', () => {
     await trigger(page).click();
     await dialog(page).getByRole('button', { name: 'Archive project' }).click();
     await expect(status(page)).toHaveText(
-      'The result was unknown, but the project is now archived. It is read-only, and there is no restore action.',
+      "The result was unknown. The project is now archived, and it is read-only with no restore action. We couldn't confirm whether this request archived it.",
     );
     expect(api.archives()).toHaveLength(1);
   });
@@ -1089,6 +1091,27 @@ test.describe('responsive containment and accessibility', () => {
       ),
     );
     expect(durations.every((name) => name === 'none')).toBe(true);
+  });
+
+  test('workspace link styling is scoped to the workspace', async ({ page, api }) => {
+    api.configure({ projects: [alpha] });
+    await open(page, '#tasks'); // the Projects stylesheet is in the bundle but must not reach here
+    const outside = await page.evaluate(() => {
+      document.body.insertAdjacentHTML(
+        'beforeend',
+        '<table class="nx-table" id="probe"><tbody><tr><td><a href="#x">link</a></td></tr></tbody></table>',
+      );
+      return getComputedStyle(document.querySelector('#probe a')!).textUnderlineOffset;
+    });
+    expect(outside, 'a .nx-table link outside the workspace keeps the browser default').toBe(
+      'auto',
+    );
+    await open(page);
+    await expect(table(page, 'Projects')).toBeVisible();
+    const inside = await page
+      .getByRole('link', { name: 'Alpha rollout' })
+      .evaluate((el) => getComputedStyle(el).textUnderlineOffset);
+    expect(inside).toBe('2px');
   });
 
   test('colours come from the NEXUS tokens and the page is unchanged elsewhere', async ({

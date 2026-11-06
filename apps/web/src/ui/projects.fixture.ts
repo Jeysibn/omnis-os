@@ -26,6 +26,14 @@ export const stamp = '2026-11-03T10:00:00.000Z';
 export const later = '2026-11-04T08:30:00.000Z';
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+/**
+ * The backend maps duplicate keys, stale revisions and idempotency-key reuse to the same
+ * `conflict` code and the same message (packages/db project-management-store.ts), so a fixture
+ * conflict must never carry a cause-specific message.
+ */
+export const CONFLICT_MESSAGE =
+  'A project with this key already exists or the idempotency key was reused.';
+
 export const pid = (n: number) => `prj_${n.toString(16).padStart(32, '0')}`;
 
 export function proj(n: number, overrides: Partial<Project> = {}): Project {
@@ -120,7 +128,7 @@ export function createApi(page: Page) {
         return {
           status: 409,
           code: 'conflict',
-          message: 'A project with this key already exists.',
+          message: CONFLICT_MESSAGE,
         };
       if (projects.length >= 500)
         return {
@@ -150,7 +158,7 @@ export function createApi(page: Page) {
     if (kind === 'update') {
       const input = UpdateProjectSchema.parse(body);
       if (input.expectedRevision !== current.revision)
-        return { status: 409, code: 'conflict', message: 'The project revision is stale.' };
+        return { status: 409, code: 'conflict', message: CONFLICT_MESSAGE };
       const next = ProjectSchema.parse({
         ...current,
         ...(input.name === undefined ? {} : { name: input.name }),
@@ -164,7 +172,7 @@ export function createApi(page: Page) {
     }
     const input = ArchiveProjectSchema.parse(body);
     if (input.expectedRevision !== current.revision)
-      return { status: 409, code: 'conflict', message: 'The project revision is stale.' };
+      return { status: 409, code: 'conflict', message: CONFLICT_MESSAGE };
     const next = ProjectSchema.parse({
       ...current,
       status: 'archived',
@@ -216,7 +224,7 @@ export function createApi(page: Page) {
       outcome =
         prior.signature === signature
           ? prior.outcome
-          : { status: 409, code: 'conflict', message: 'The idempotency key was reused.' };
+          : { status: 409, code: 'conflict', message: CONFLICT_MESSAGE };
     } else {
       outcome = apply(queue, id, body);
       if (outcome.status < 300) receipts.set(idem, { signature, outcome });

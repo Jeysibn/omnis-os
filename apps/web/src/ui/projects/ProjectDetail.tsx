@@ -26,7 +26,13 @@ import {
   TaskStatusBadge,
   useFocusOnArrival,
 } from './parts.js';
-import { analyse, type Conclusion, type Observation, type RecoveryAction } from './recovery.js';
+import {
+  analyse,
+  analyseConflict,
+  type Conclusion,
+  type Observation,
+  type RecoveryAction,
+} from './recovery.js';
 import { editProjectHash, projectsHash } from './route.js';
 
 type Props = {
@@ -196,23 +202,34 @@ export function ProjectDetail({
         error({ key: 'rejected.csrf' });
       } else if (failure.status === 404) error({ key: 'rejected.notFound' });
       else if (failure.status === 422) error({ key: 'rejected.invalidInput' });
-      else if (failure.code === 'invalid_transition' || failure.code === 'conflict') {
-        // Read why: already archived, or changed since this page was loaded.
+      else if (failure.status === 409) {
+        // A 409 does not say why (stale revision, already archived and key reuse share one code),
+        // so read the authoritative state and describe only what it shows.
+        let observation: Observation;
         try {
-          const latest = await fetchProject(projectId);
-          if (!mounted.current) return;
-          replaceRef.current(latest);
-          error({
-            key: latest.status === 'archived' ? 'rejected.archived' : 'rejected.archive.stale',
-          });
+          observation = { kind: 'project', project: await fetchProject(projectId) };
         } catch (readCause) {
           if (readCause instanceof ApiRequestError && readCause.status === 401) {
             unauthorizedRef.current(readCause);
             return;
           }
-          if (mounted.current) error({ key: 'rejected.readbackFailed' });
+          observation =
+            readCause instanceof ApiRequestError && readCause.status === 404
+              ? { kind: 'absent' }
+              : { kind: 'failed' };
         }
-      } else error({ key: 'rejected.readbackFailed' });
+        if (!mounted.current) return;
+        const conclusion = analyseConflict(
+          { kind: 'archive', id: projectId, expectedRevision },
+          observation,
+        );
+        if (conclusion.project) replaceRef.current(conclusion.project);
+        error(conclusion.message);
+      } else {
+        // Any other definitive status is not expected from archive; do not guess.
+        intent.current.markUncertain();
+        if (mounted.current) await recheck(expectedRevision);
+      }
     } finally {
       inflight.current = false;
       if (mounted.current) setBusy((value) => (value === 'archive' ? null : value));

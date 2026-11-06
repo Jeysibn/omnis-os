@@ -101,7 +101,12 @@ export function analyse(op: Op, observation: Observation): Conclusion {
   const project = observation.project;
   if (kind === 'archive') {
     if (project.status === 'archived')
-      return { ...base, message: { key: 'unknown.archive.applied' }, settled: true, project };
+      return {
+        ...base,
+        message: { key: 'unknown.archive.observedArchived' },
+        settled: true,
+        project,
+      };
     if (project.revision === op.expectedRevision)
       return {
         ...base,
@@ -125,13 +130,10 @@ export function analyse(op: Op, observation: Observation): Conclusion {
     (requested.name === undefined || project.name === requested.name) &&
     (requested.objective === undefined || project.objective === requested.objective) &&
     (requested.priority === undefined || project.priority === requested.priority);
+  // Matching values at the next revision are observed state, not proof that this request wrote
+  // them: another session can make the identical change. The message says so.
   if (project.revision === op.expectedRevision + 1 && matches)
-    return {
-      ...base,
-      message: { key: 'unknown.edit.applied', params: { revision: project.revision } },
-      settled: true,
-      project,
-    };
+    return { ...base, message: { key: 'unknown.edit.matching' }, settled: true, project };
   if (project.revision === op.expectedRevision)
     return {
       ...base,
@@ -144,6 +146,77 @@ export function analyse(op: Op, observation: Observation): Conclusion {
     message: { key: 'unknown.edit.changed' },
     actions: ['loadLatest', 'keepEdits', 'checkAgain'],
     blocking: true,
+    project,
+  };
+}
+
+/**
+ * Turns one read-only recheck after a definitive 409 into a message. A 409 does not say why: the
+ * backend uses one `conflict` code and message for a duplicate key, a stale revision and reuse of
+ * an idempotency key. So this states only what the authoritative readback shows, and never turns
+ * a matching key or name into proof about the request that was rejected.
+ */
+export function analyseConflict(op: Op, observation: Observation): Conclusion {
+  const open = { ...base, blocking: false };
+  if (op.kind === 'create') {
+    if (observation.kind !== 'list')
+      return {
+        ...open,
+        message: { key: 'conflict.create.readbackFailed' },
+        actions: ['checkAgain'],
+      };
+    const row = observation.list.projects.find((item) => item.key === op.key);
+    if (row)
+      return {
+        ...open,
+        message: { key: 'conflict.create.keyInUse', params: { key: row.key, name: row.name } },
+        actions: ['checkAgain'],
+        keyProblem: true,
+      };
+    return { ...open, message: { key: 'conflict.create.noMatch' }, actions: ['checkAgain'] };
+  }
+
+  const edit = op.kind === 'edit';
+  if (observation.kind === 'absent')
+    return {
+      ...base,
+      message: { key: 'rejected.notFound' },
+      actions: ['checkAgain'],
+      blocking: edit,
+    };
+  if (observation.kind !== 'project')
+    return {
+      ...open,
+      message: { key: edit ? 'conflict.edit.readbackFailed' : 'conflict.archive.readbackFailed' },
+      actions: edit ? ['checkAgain'] : [],
+      blocking: edit,
+    };
+  const project = observation.project;
+  if (project.status === 'archived')
+    return {
+      ...base,
+      message: { key: 'conflict.observedArchived' },
+      blocking: edit,
+      project,
+    };
+  // Only a revision different from the expected one shows that the project changed.
+  if (project.revision !== op.expectedRevision)
+    return edit
+      ? {
+          ...base,
+          message: { key: 'rejected.edit.stale' },
+          actions: ['loadLatest', 'keepEdits'],
+          blocking: true,
+          project,
+        }
+      : { ...base, message: { key: 'rejected.archive.stale' }, project };
+  return {
+    ...open,
+    message: {
+      key: edit ? 'conflict.edit.sameRevision' : 'conflict.archive.sameRevision',
+      params: { revision: project.revision },
+    },
+    actions: edit ? ['checkAgain'] : [],
     project,
   };
 }
