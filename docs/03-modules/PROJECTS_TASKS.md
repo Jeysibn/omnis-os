@@ -4,6 +4,8 @@
 
 Project is a container for a goal and delivery evidence. Core entities: `Project`, `Milestone`, `Epic`, `Task`, `Dependency`, `Deliverable`, `Project Team`, `Workspace`, `Project Knowledge Scope` and `Budget`.
 
+The backend V1 Epic contract is in `PROJECT_EPICS_API_V1.md`. Epics are owner-managed, project-scoped planning records; their lifecycle is not inferred from task or run activity. Epic-to-task and Epic-to-milestone associations are deferred.
+
 Each project has key, objective, scope/non-goals, priority, lifecycle (`proposed, active, paused, completed, archived`), attached repo refs, milestones, assigned agents, human approval policies, and evidence-backed progress. Progress is based on accepted tasks/milestones, not agent confidence.
 
 ### Planned views
@@ -29,6 +31,8 @@ Each project has key, objective, scope/non-goals, priority, lifecycle (`proposed
 6. Resolved profile version, skills snapshots, workspace and idempotency key persisted.
 7. Job admitted. Browser immediately receives receipt and can reconnect later.
 
+The current mock-only AO-105 slice associates tasks with projects through a nullable `tasks.project_id` foreign key. Existing tasks remain unassigned without backfill. Only an archived project blocks new task association and run admission; legacy unassigned tasks remain admissible. The database run-insert guard locks the associated project through the admission transaction, so a concurrent archive and admission serialize. A run admitted before archival remains queued/runnable and recoverable; archival does not cancel or rewrite run history. Tasks cannot be reassigned after any run or runtime authorization exists.
+
 ### Execution
 
 Worker claims job, starts allowed adapter, streams sanitized status, tool events and usage, stores artifact IDs/checksums, reconciles terminal status, then submits result for automated tests/human review. Worker must not claim `completed` based solely on output text.
@@ -52,4 +56,4 @@ Worker claims job, starts allowed adapter, streams sanitized status, tool events
 - Two concurrent `POST .../runs` requests using same idempotency key create one canonical run.
 - Cyclic task dependency is rejected.
 - A reviewed write action cannot be changed after authorization by editing arguments.
-- Archiving a project preserves its audit history and prevents new runs unless reopened.
+- Archiving a project preserves its audit history and prevents new run admissions for associated tasks. Project Lifecycle V1 keeps archived projects visible in reads and adds no restore or cascade behavior. Already admitted work and exact idempotent retries remain readable and recoverable.

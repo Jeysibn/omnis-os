@@ -1,129 +1,39 @@
 import assert from 'node:assert/strict';
-import { createHash, randomBytes, randomUUID, scrypt as scryptCallback } from 'node:crypto';
-import { spawn, spawnSync } from 'node:child_process';
-import { createServer } from 'node:net';
-import { request as httpRequest } from 'node:http';
-import { mkdtemp, readFile, readdir, unlink, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { promisify } from 'node:util';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { readFile, readdir } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
-import { createPool } from '../../packages/db/src/index.ts';
+import {
+  socketRequest,
+  startMockServices,
+  stopProcess,
+  testOwnerPassword as password,
+} from './support/mock-services.mjs';
 
-const scrypt = promisify(scryptCallback);
-const password = 'test-owner-password-2026';
 const origin = 'http://127.0.0.1:5173';
-const databaseUrl = process.env.OMNIS_TEST_DATABASE_URL;
-const migrationUrl = process.env.OMNIS_TEST_MIGRATION_DATABASE_URL;
-const authorizerUrl = process.env.OMNIS_TEST_AUTHORIZER_DATABASE_URL;
-const launcherUrl = process.env.OMNIS_TEST_LAUNCHER_DATABASE_URL;
-const adminAuditUrl = process.env.OMNIS_TEST_ADMIN_DATABASE_URL;
-if (!databaseUrl)
-  throw new Error('Set OMNIS_TEST_DATABASE_URL to a disposable PostgreSQL database.');
-if (!migrationUrl)
-  throw new Error(
-    'Set OMNIS_TEST_MIGRATION_DATABASE_URL to a disposable migration-role connection.',
-  );
-if (!authorizerUrl || new URL(authorizerUrl).username !== 'omnis_authorizer')
-  throw new Error('Set OMNIS_TEST_AUTHORIZER_DATABASE_URL to the restricted authorization role.');
-if (!launcherUrl || new URL(launcherUrl).username !== 'omnis_launcher')
-  throw new Error('Set OMNIS_TEST_LAUNCHER_DATABASE_URL to the restricted sandbox launcher role.');
-if (!adminAuditUrl || new URL(adminAuditUrl).username !== 'omnis')
-  throw new Error('Set OMNIS_TEST_ADMIN_DATABASE_URL to the disposable test administrator URL.');
-if (!/(?:^|[_-])test(?:s)?$/i.test(new URL(databaseUrl).pathname.slice(1))) {
-  throw new Error('OMNIS_TEST_DATABASE_URL must point to a database ending in test or tests.');
-}
-if (new URL(databaseUrl).username !== 'omnis_runtime') {
-  throw new Error('OMNIS_TEST_DATABASE_URL must use the restricted omnis_runtime role.');
-}
-if (new URL(migrationUrl).username !== 'omnis_migrator') {
-  throw new Error('OMNIS_TEST_MIGRATION_DATABASE_URL must use omnis_migrator.');
-}
-const migration = spawnSync(process.execPath, ['--experimental-strip-types', 'src/migrate.ts'], {
-  cwd: new URL('../../apps/worker/', import.meta.url),
-  env: { ...withoutDatabaseSecrets(process.env), OMNIS_MIGRATION_DATABASE_URL: migrationUrl },
-  encoding: 'utf8',
-});
-if (migration.error || migration.status !== 0) {
-  throw new Error(
-    `Disposable PostgreSQL migrations failed (exit ${migration.status ?? 'unknown'}).`,
-  );
-}
-const tempDirectory = await mkdtemp(join(tmpdir(), 'omnis-os-mock-smoke-'));
-const workerEnvPath = join(tempDirectory, 'worker.env');
-const apiEnvPath = join(tempDirectory, 'api.env');
-const authorizerEnvPath = join(tempDirectory, 'authorizer.env');
-const launcherEnvPath = join(tempDirectory, 'sandbox-launcher.env');
-const canaryName = `OMNIS_DUMMY_PROVIDER_SECRET_${randomBytes(12).toString('hex')}`;
-const canary = `OMNIS_SYNTHETIC_CANARY_${randomBytes(24).toString('hex')}`;
-const auditPool = createPool({
-  connectionString: adminAuditUrl,
-  max: 1,
-  application_name: 'omnis-canary-check',
-});
-const apiPort = await freePort();
-const workerPort = await freePort(new Set([apiPort]));
-const authorizerSocket = join(tempDirectory, 'authorizer.sock');
-const launcherSocket = join(tempDirectory, 'launcher.sock');
-const salt = randomBytes(16);
-const internalToken = randomBytes(48).toString('hex');
-const authorizerToken = randomBytes(48).toString('hex');
-const passwordHash = (await scrypt(password, salt, 64)).toString('hex');
-const sharedEnvLines = [
-  `OMNIS_OWNER_PASSWORD_HASH=${salt.toString('hex')}:${passwordHash}`,
-  `OMNIS_SESSION_SECRET=${randomBytes(48).toString('hex')}`,
-  `OMNIS_INTERNAL_TOKEN=${internalToken}`,
-  `OMNIS_API_AUTHORIZER_TOKEN=${authorizerToken}`,
-  `OMNIS_API_HOST=127.0.0.1`,
-  `OMNIS_API_PORT=${apiPort}`,
-  `OMNIS_WORKER_HOST=127.0.0.1`,
-  `OMNIS_WORKER_PORT=${workerPort}`,
-  `OMNIS_AUTHORIZER_SOCKET=${authorizerSocket}`,
-  `OMNIS_ALLOWED_ORIGIN=${origin}`,
-  'OMNIS_SECURE_COOKIES=false',
-];
-await writeFile(apiEnvPath, `${sharedEnvLines.join('\n')}\n`, { mode: 0o600 });
-await writeFile(
+const services = await startMockServices({ origin, requireAuditPool: true });
+const {
+  apiPort,
+  workerPort,
+  authorizerSocket,
+  launcherSocket,
   workerEnvPath,
-  `${[
-    ...sharedEnvLines.filter(
-      (line) =>
-        !/^(?:OMNIS_API_AUTHORIZER_TOKEN|OMNIS_OWNER_PASSWORD_HASH|OMNIS_SESSION_SECRET|OMNIS_ALLOWED_ORIGIN|OMNIS_SECURE_COOKIES)=/.test(
-          line,
-        ),
-    ),
-    `OMNIS_DATABASE_URL=${databaseUrl}`,
-    `OMNIS_SANDBOX_LAUNCHER_SOCKET=${launcherSocket}`,
-  ].join('\n')}\n`,
-  { mode: 0o600 },
-);
-await writeFile(
+  apiEnvPath,
   authorizerEnvPath,
-  [
-    `OMNIS_API_AUTHORIZER_TOKEN=${authorizerToken}`,
-    `OMNIS_AGENT_IDEMPOTENCY_KEY=${randomBytes(32).toString('hex')}`,
-    'OMNIS_AGENT_IDEMPOTENCY_KEY_VERSION=1',
-    `OMNIS_AUTHORIZER_DATABASE_URL=${authorizerUrl}`,
-    `OMNIS_AUTHORIZER_SOCKET=${authorizerSocket}`,
-    'OMNIS_AUTHORIZER_SOCKET_MODE=600',
-  ].join('\n') + '\n',
-  { mode: 0o600 },
-);
-await writeFile(
   launcherEnvPath,
-  [
-    `OMNIS_LAUNCHER_DATABASE_URL=${launcherUrl}`,
-    `OMNIS_SANDBOX_LAUNCHER_SOCKET=${launcherSocket}`,
-    'OMNIS_SANDBOX_LAUNCHER_SOCKET_MODE=600',
-    `OMNIS_SANDBOX_WORKSPACE_ROOT=${join(tempDirectory, 'workspaces')}`,
-  ].join('\n') + '\n',
-  { mode: 0o600 },
-);
-
-let worker = startWorker(workerEnvPath);
-let authorizer = startAuthorizer(authorizerEnvPath);
-let launcher = startLauncher(launcherEnvPath);
-let api = startApi(apiEnvPath);
+  canaryName,
+  canary,
+  internalToken,
+  launcherUrl,
+  auditPool,
+  startWorker,
+  startApi,
+  startAuthorizer,
+  startLauncher,
+  waitForHealth,
+  waitForAuthorizer,
+} = services;
+let { worker, authorizer, launcher, api } = services;
 
 try {
   const baseUrl = `http://127.0.0.1:${apiPort}`;
@@ -285,7 +195,7 @@ try {
     ).rowCount,
     0,
   );
-  authorizer = startAuthorizer(authorizerEnvPath);
+  authorizer = await startAuthorizer(authorizerEnvPath);
   await waitForAuthorizer(authorizerSocket, authorizer);
 
   const runHeaders = {
@@ -297,7 +207,7 @@ try {
   };
   const authorization = await authorizeTask(baseUrl, ownerCookie, ownerCsrf, task.id);
   await stopProcess(authorizer);
-  authorizer = startAuthorizer(authorizerEnvPath);
+  authorizer = await startAuthorizer(authorizerEnvPath);
   await waitForAuthorizer(authorizerSocket, authorizer);
   const persistedReplay = await fetch(`${baseUrl}/api/v1/authorizations`, {
     method: 'POST',
@@ -363,7 +273,7 @@ try {
   assert.equal(unauthorizedStop.status, 401);
 
   await stopProcess(api);
-  api = startApi(apiEnvPath);
+  api = await startApi(apiEnvPath);
   await waitForHealth(
     baseUrl,
     `http://127.0.0.1:${workerPort}`,
@@ -473,7 +383,7 @@ try {
   assert.equal(api.capturedLogs.includes(canary), false);
 
   await stopProcess(worker);
-  worker = startWorker(workerEnvPath);
+  worker = await startWorker(workerEnvPath);
   await waitForHealth(
     baseUrl,
     `http://127.0.0.1:${workerPort}`,
@@ -527,7 +437,7 @@ try {
   const interruptedRun = await interruptedAdmission.json();
   await waitForRunStatus(baseUrl, interruptedRun.id, 'running', ownerCookie, worker, api);
   await stopProcess(worker);
-  worker = startWorker(workerEnvPath);
+  worker = await startWorker(workerEnvPath);
   await waitForHealth(
     baseUrl,
     `http://127.0.0.1:${workerPort}`,
@@ -578,7 +488,7 @@ try {
     await waitForRunStatus(baseUrl, crashedWorkerRun.id, 'running', ownerCookie, worker, api);
     await waitForSandboxContainer(crashedWorkerRun.id);
     await killProcessAbruptly(worker);
-    worker = startWorker(workerEnvPath);
+    worker = await startWorker(workerEnvPath);
     await waitForHealth(
       baseUrl,
       `http://127.0.0.1:${workerPort}`,
@@ -640,221 +550,13 @@ try {
       : 'PostgreSQL-backed mock lifecycle passed: auth/CSRF, task, idempotent admission, durable SSE replay, cancellation, API/worker restarts, and interrupted-run non-replay.',
   );
 } finally {
-  await stopProcess(api);
-  await stopProcess(worker);
-  await stopProcess(launcher);
-  await stopProcess(authorizer);
-  await auditPool.end();
-  await unlink(apiEnvPath).catch(() => undefined);
-  await unlink(workerEnvPath).catch(() => undefined);
-  await unlink(authorizerEnvPath).catch(() => undefined);
-  await unlink(launcherEnvPath).catch(() => undefined);
-}
-
-function startWorker(envFile) {
-  const env = withoutDatabaseSecrets(process.env);
-  delete env.OMNIS_TEST_DATABASE_URL;
-  delete env.OMNIS_TEST_MIGRATION_DATABASE_URL;
-  delete env.OMNIS_TEST_ADMIN_DATABASE_URL;
-  env[canaryName] = canary;
-  if (process.env.OMNIS_RECOVERY_INTEGRATION === '1') {
-    env.NODE_ENV = 'test';
-    env.OMNIS_MOCK_TEST_DELAY_MS = '1000';
-  }
-  const child = spawn(
-    process.execPath,
-    ['--experimental-strip-types', `--env-file=${envFile}`, 'src/server.ts'],
-    {
-      cwd: new URL('../../apps/worker/', import.meta.url),
-      env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    },
-  );
-  return captureProcessOutput(child);
-}
-
-function withoutDatabaseSecrets(environment) {
-  const clean = { ...environment };
-  for (const key of [
-    'OMNIS_DB_PASSWORD',
-    'OMNIS_RUNTIME_DB_PASSWORD',
-    'OMNIS_AUTHORIZER_DB_PASSWORD',
-    'OMNIS_LAUNCHER_DB_PASSWORD',
-    'OMNIS_LAUNCHER_DATABASE_URL',
-    'OMNIS_API_AUTHORIZER_TOKEN',
-    'OMNIS_OWNER_PASSWORD_HASH',
-    'OMNIS_SESSION_SECRET',
-    'OMNIS_INTERNAL_TOKEN',
-    'OMNIS_ALLOWED_ORIGIN',
-    'OMNIS_SECURE_COOKIES',
-    'OMNIS_DATABASE_URL',
-    'OMNIS_TEST_DATABASE_URL',
-    'OMNIS_ADMIN_DATABASE_URL',
-    'OMNIS_MIGRATION_DATABASE_URL',
-    'OMNIS_MIGRATION_DB_PASSWORD',
-    'OMNIS_TEST_ADMIN_DATABASE_URL',
-    'OMNIS_TEST_MIGRATION_DATABASE_URL',
-    'OMNIS_TEST_AUTHORIZER_DATABASE_URL',
-    'OMNIS_TEST_LAUNCHER_DATABASE_URL',
-  ])
-    delete clean[key];
-  return clean;
-}
-
-function startApi(envFile) {
-  const env = withoutDatabaseSecrets(process.env);
-  delete env[canaryName];
-  const child = spawn(
-    process.execPath,
-    ['--experimental-strip-types', `--env-file=${envFile}`, 'src/server.ts'],
-    {
-      cwd: new URL('../../apps/api/', import.meta.url),
-      env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    },
-  );
-  return captureProcessOutput(child);
-}
-
-function startAuthorizer(envFile) {
-  const env = withoutDatabaseSecrets(process.env);
-  delete env.OMNIS_TEST_DATABASE_URL;
-  delete env.OMNIS_TEST_MIGRATION_DATABASE_URL;
-  delete env.OMNIS_TEST_ADMIN_DATABASE_URL;
-  const child = spawn(
-    process.execPath,
-    ['--experimental-strip-types', `--env-file=${envFile}`, 'src/server.ts'],
-    {
-      cwd: new URL('../../apps/authorizer/', import.meta.url),
-      env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    },
-  );
-  return captureProcessOutput(child);
-}
-
-function startLauncher(envFile) {
-  const env = withoutDatabaseSecrets(process.env);
-  const child = spawn(
-    process.execPath,
-    ['--experimental-strip-types', `--env-file=${envFile}`, 'src/server.ts'],
-    {
-      cwd: new URL('../../apps/sandbox-launcher/', import.meta.url),
-      env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    },
-  );
-  return captureProcessOutput(child);
-}
-
-function captureProcessOutput(child) {
-  child.capturedLogs = '';
-  for (const stream of [child.stdout, child.stderr]) {
-    stream?.on('data', (chunk) => {
-      child.capturedLogs = `${child.capturedLogs}${chunk.toString('utf8')}`.slice(-262_144);
-      if (process.env.OMNIS_TEST_DEBUG === '1') process.stderr.write(chunk);
-    });
-  }
-  return child;
-}
-
-async function freePort(excluded = new Set()) {
-  while (true) {
-    const server = createServer();
-    await new Promise((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(0, '127.0.0.1', resolve);
-    });
-    const address = server.address();
-    if (!address || typeof address === 'string')
-      throw new Error('Could not reserve an ephemeral port.');
-    const { port } = address;
-    await new Promise((resolve, reject) =>
-      server.close((error) => (error ? reject(error) : resolve())),
-    );
-    if (!excluded.has(port)) return port;
-  }
+  await services.cleanup({ api, worker, launcher, authorizer });
 }
 
 function cookieValue(response) {
   const cookie = response.headers.get('set-cookie')?.split(';', 1)[0];
   assert.ok(cookie, 'Expected the API to set its local owner session cookie.');
   return cookie;
-}
-
-async function waitForHealth(
-  apiUrl,
-  workerUrl,
-  internalToken,
-  workerProcess,
-  apiProcess,
-  authorizerSocketPath,
-  authorizerProcess,
-) {
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < 8000) {
-    if (
-      workerProcess.exitCode !== null ||
-      apiProcess.exitCode !== null ||
-      authorizerProcess.exitCode !== null ||
-      launcher.exitCode !== null
-    ) {
-      throw new Error('The mock API, worker, or authorizer exited before becoming healthy.');
-    }
-    try {
-      const [apiHealth, workerHealth, authorizerHealth, launcherHealth] = await Promise.all([
-        fetch(`${apiUrl}/api/v1/health`),
-        fetch(`${workerUrl}/internal/v1/health`, {
-          headers: { 'x-omnis-internal-token': internalToken },
-        }),
-        socketRequest(authorizerSocketPath, '/internal/v1/health'),
-        socketRequest(launcherSocket, '/health'),
-      ]);
-      if (apiHealth.ok && workerHealth.ok && authorizerHealth.ok && launcherHealth.ok) return;
-    } catch {
-      await delay(80);
-    }
-  }
-  throw new Error('The mock API did not become healthy within eight seconds.');
-}
-
-async function waitForAuthorizer(authorizerSocketPath, authorizerProcess) {
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < 8_000) {
-    if (authorizerProcess.exitCode !== null) {
-      throw new Error('The mock authorizer exited before becoming healthy.');
-    }
-    try {
-      if ((await socketRequest(authorizerSocketPath, '/internal/v1/health')).ok) return;
-    } catch {
-      await delay(80);
-    }
-  }
-  throw new Error('The mock authorizer did not become healthy within eight seconds.');
-}
-
-function socketRequest(socketPath, requestPath, init = {}) {
-  return new Promise((resolve, reject) => {
-    const req = httpRequest(
-      {
-        socketPath,
-        path: requestPath,
-        method: init.method ?? 'GET',
-        headers: init.headers ?? {},
-      },
-      (res) => {
-        let body = '';
-        res.setEncoding('utf8');
-        res.on('data', (chunk) => {
-          body += chunk;
-        });
-        res.once('end', () => resolve(new Response(body, { status: res.statusCode ?? 503 })));
-      },
-    );
-    req.once('error', reject);
-    req.setTimeout(3_000, () => req.destroy(new Error('unix_socket_request_timeout')));
-    req.end(init.body);
-  });
 }
 
 async function readAll(body) {
@@ -1189,7 +891,7 @@ async function testDatabaseAvailabilityLoss({
   }
 
   await waitForPostgresContainer(container);
-  if (worker.exitCode !== null) worker = startWorker(workerEnvPath);
+  if (worker.exitCode !== null) worker = await startWorker(workerEnvPath);
   await waitForHealth(baseUrl, workerUrl, internalToken, worker, api, authorizerSocket, authorizer);
   const startedAt = Date.now();
   let recoveryResponse;
@@ -1248,15 +950,4 @@ async function waitForPostgresContainer(container) {
     await delay(200);
   }
   throw new Error('The disposable PostgreSQL test container did not recover healthy.');
-}
-
-async function stopProcess(child) {
-  if (child.exitCode !== null || child.killed) return;
-  child.kill('SIGTERM');
-  await Promise.race([
-    new Promise((resolve) => child.once('exit', resolve)),
-    delay(1500).then(() => {
-      if (child.exitCode === null) child.kill('SIGKILL');
-    }),
-  ]);
 }

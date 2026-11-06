@@ -8,7 +8,27 @@ R1-G1 provides PostgreSQL-backed tasks, runs, results, cancellation, ordered eve
 
 ## Development
 
-The workspace uses pnpm 12.16.1 and the committed lockfile. The current gate uses a React/Vite/Tailwind web app, a Fastify API, a loopback-only worker boundary, PostgreSQL as the task/run/event source of truth, and pg-boss for durable mock admission. All model runtimes remain disabled.
+The project supports Node.js `>=24.0.0`; CI currently uses Node.js `24.22.1`. The root `.nvmrc` selects that CI version for local development without narrowing the package engine requirement. The workspace uses pnpm `12.16.1` and the committed lockfile. The current gate uses a React/Vite/Tailwind web app, a Fastify API, a loopback-only worker boundary, PostgreSQL as the task/run/event source of truth, and pg-boss for durable mock admission. All model runtimes remain disabled.
+
+On WSL Ubuntu or Linux, use [nvm](https://github.com/nvm-sh/nvm#installing-and-updating), which reads `.nvmrc` with `nvm install` and `nvm use`. If nvm is not installed, install it in the Linux shell, then select and verify the project version:
+
+```sh
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.8/install.sh | bash
+source ~/.bashrc
+cd /path/to/omnis-os
+nvm install
+nvm use
+node --version # v24.22.1
+```
+
+Install the repository's pnpm version for the active Node.js installation if needed:
+
+```sh
+npm install --global pnpm@12.16.1
+pnpm --version # 12.16.1
+```
+
+The `.nvmrc` is a local version-selection convention; other environments may use any Node.js version accepted by `package.json`.
 
 ```sh
 pnpm install --frozen-lockfile

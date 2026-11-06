@@ -15,20 +15,420 @@ export type RunStatus = z.infer<typeof RunStatusSchema>;
 export const TaskStatusSchema = z.enum(['open', 'in_progress', 'completed']);
 export type TaskStatus = z.infer<typeof TaskStatusSchema>;
 
+export const ProjectIdSchema = z.string().regex(/^prj_[0-9a-f]{32}$/);
+export const TaskIdSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .refine((value) => !value.includes('\0'));
+
 export const TaskSchema = z.object({
   id: z.string().min(1),
   title: z.string().min(1).max(120),
   detail: z.string().max(2000),
   status: TaskStatusSchema,
   createdAt: z.string().datetime(),
+  projectId: ProjectIdSchema.nullable().optional(),
+  associationRevision: z.number().int().positive().safe().optional(),
 });
 export type Task = z.infer<typeof TaskSchema>;
 
 export const CreateTaskSchema = z.object({
   title: z.string().trim().min(3).max(120),
   detail: z.string().trim().min(10).max(2000),
+  projectId: ProjectIdSchema.nullable().optional(),
 });
 export type CreateTaskInput = z.infer<typeof CreateTaskSchema>;
+
+export const SetTaskProjectSchema = z
+  .object({
+    projectId: ProjectIdSchema.nullable(),
+    expectedAssociationRevision: z.number().int().positive().safe(),
+  })
+  .strict();
+export type SetTaskProjectInput = z.infer<typeof SetTaskProjectSchema>;
+
+export const ProjectStatusSchema = z.enum([
+  'proposed',
+  'active',
+  'paused',
+  'completed',
+  'archived',
+]);
+export const ProjectPrioritySchema = z.enum(['low', 'normal', 'high', 'urgent']);
+export const ProjectRevisionSchema = z.number().int().positive().safe();
+export const CreateProjectSchema = z
+  .object({
+    key: z
+      .string()
+      .trim()
+      .min(2)
+      .max(32)
+      .regex(/^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*$/),
+    name: z.string().trim().min(1).max(120),
+    objective: z.string().trim().min(1).max(4000),
+    priority: ProjectPrioritySchema.default('normal'),
+  })
+  .strict()
+  .refine(
+    (project) =>
+      !project.key.includes('\0') &&
+      !project.name.includes('\0') &&
+      !project.objective.includes('\0'),
+    'Project text cannot contain NUL characters.',
+  );
+export type CreateProjectInput = z.infer<typeof CreateProjectSchema>;
+
+export const UpdateProjectSchema = z
+  .object({
+    expectedRevision: ProjectRevisionSchema,
+    name: z.string().trim().min(1).max(120).optional(),
+    objective: z.string().trim().min(1).max(4000).optional(),
+    priority: ProjectPrioritySchema.optional(),
+  })
+  .strict()
+  .refine(
+    (project) =>
+      project.name !== undefined ||
+      project.objective !== undefined ||
+      project.priority !== undefined,
+    'At least one project field must be changed.',
+  )
+  .refine(
+    (project) => !project.name?.includes('\0') && !project.objective?.includes('\0'),
+    'Project text cannot contain NUL characters.',
+  );
+export type UpdateProjectInput = z.infer<typeof UpdateProjectSchema>;
+
+export const ArchiveProjectSchema = z.object({ expectedRevision: ProjectRevisionSchema }).strict();
+export type ArchiveProjectInput = z.infer<typeof ArchiveProjectSchema>;
+
+export const ProjectSummarySchema = z
+  .object({
+    id: ProjectIdSchema,
+    ownerId: z.literal('owner'),
+    key: z.string().min(2).max(32),
+    name: z.string().min(1).max(120),
+    status: ProjectStatusSchema,
+    priority: ProjectPrioritySchema,
+    revision: ProjectRevisionSchema,
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .strict();
+export type ProjectSummary = z.infer<typeof ProjectSummarySchema>;
+
+export const ProjectSchema = ProjectSummarySchema.extend({
+  objective: z.string().min(1).max(4000),
+}).strict();
+export type Project = z.infer<typeof ProjectSchema>;
+
+export const EpicIdSchema = z.string().regex(/^epc_[0-9a-f]{32}$/);
+export const EpicStatusSchema = z.enum(['planned', 'in_progress', 'completed', 'archived']);
+export const EpicRevisionSchema = z.number().int().positive().safe();
+const EpicTextSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .refine((value) => !value.includes('\0'));
+
+export const CreateEpicSchema = z
+  .object({
+    title: EpicTextSchema.max(120),
+    description: z
+      .string()
+      .trim()
+      .max(2000)
+      .refine((value) => !value.includes('\0'))
+      .optional(),
+  })
+  .strict();
+export type CreateEpicInput = z.infer<typeof CreateEpicSchema>;
+
+export const UpdateEpicSchema = z
+  .object({
+    expectedRevision: EpicRevisionSchema,
+    title: EpicTextSchema.max(120).optional(),
+    description: z
+      .string()
+      .trim()
+      .max(2000)
+      .refine((value) => !value.includes('\0'))
+      .nullable()
+      .optional(),
+    status: z.enum(['planned', 'in_progress', 'completed']).optional(),
+  })
+  .strict()
+  .refine(
+    (epic) =>
+      epic.title !== undefined || epic.description !== undefined || epic.status !== undefined,
+    'At least one Epic field must be changed.',
+  );
+export type UpdateEpicInput = z.infer<typeof UpdateEpicSchema>;
+
+export const ArchiveEpicSchema = z.object({ expectedRevision: EpicRevisionSchema }).strict();
+export type ArchiveEpicInput = z.infer<typeof ArchiveEpicSchema>;
+
+export const EpicSchema = z
+  .object({
+    id: EpicIdSchema,
+    projectId: ProjectIdSchema,
+    title: z.string().min(1).max(120),
+    description: z.string().max(2000).nullable(),
+    status: EpicStatusSchema,
+    revision: EpicRevisionSchema,
+    archivedAt: z.string().datetime().nullable(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .strict()
+  .refine((epic) => (epic.status === 'archived') === (epic.archivedAt !== null));
+export type Epic = z.infer<typeof EpicSchema>;
+
+export const SetTaskEpicSchema = z
+  .object({
+    expectedAssociationRevision: z.number().int().positive().safe(),
+    epicId: EpicIdSchema.nullable(),
+  })
+  .strict();
+export type SetTaskEpicInput = z.infer<typeof SetTaskEpicSchema>;
+
+export const TaskEpicAssociationSchema = z
+  .object({
+    taskId: TaskIdSchema,
+    projectId: ProjectIdSchema.nullable(),
+    epicId: EpicIdSchema.nullable(),
+    associationRevision: z.number().int().positive().safe(),
+  })
+  .strict();
+export type TaskEpicAssociation = z.infer<typeof TaskEpicAssociationSchema>;
+
+export const EpicListQuerySchema = z
+  .object({
+    cursor: z.string().min(1).max(1024).optional(),
+    limit: z
+      .union([
+        z
+          .string()
+          .regex(/^[1-9][0-9]*$/)
+          .transform(Number),
+        z.number().int(),
+      ])
+      .pipe(z.number().int().min(1).max(100))
+      .optional(),
+  })
+  .strict();
+export type EpicListQuery = z.infer<typeof EpicListQuerySchema>;
+
+export const MilestoneIdSchema = z.string().regex(/^mil_[0-9a-f]{32}$/);
+export const MilestoneStatusSchema = z.enum(['planned', 'in_progress', 'completed', 'archived']);
+export const MilestoneRevisionSchema = z.number().int().positive().safe();
+export const MilestoneTargetDateSchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/)
+  .refine((value) => {
+    if (value.startsWith('0000-')) return false;
+    const parsed = new Date(`${value}T00:00:00.000Z`);
+    return !Number.isNaN(parsed.valueOf()) && parsed.toISOString().slice(0, 10) === value;
+  }, 'Target date must be a valid calendar date.');
+
+const MilestoneTextSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .refine((value) => !value.includes('\0'));
+
+export const CreateMilestoneSchema = z
+  .object({
+    title: MilestoneTextSchema.max(120),
+    description: z
+      .string()
+      .trim()
+      .max(2000)
+      .refine((value) => !value.includes('\0'))
+      .optional(),
+    targetDate: MilestoneTargetDateSchema.nullable().optional(),
+  })
+  .strict();
+export type CreateMilestoneInput = z.infer<typeof CreateMilestoneSchema>;
+
+export const UpdateMilestoneSchema = z
+  .object({
+    expectedRevision: MilestoneRevisionSchema,
+    title: MilestoneTextSchema.max(120).optional(),
+    description: z
+      .string()
+      .trim()
+      .max(2000)
+      .refine((value) => !value.includes('\0'))
+      .nullable()
+      .optional(),
+    targetDate: MilestoneTargetDateSchema.nullable().optional(),
+    status: z.enum(['planned', 'in_progress', 'completed']).optional(),
+  })
+  .strict()
+  .refine(
+    (milestone) =>
+      milestone.title !== undefined ||
+      milestone.description !== undefined ||
+      milestone.targetDate !== undefined ||
+      milestone.status !== undefined,
+    'At least one milestone field must be changed.',
+  );
+export type UpdateMilestoneInput = z.infer<typeof UpdateMilestoneSchema>;
+
+export const ArchiveMilestoneSchema = z
+  .object({ expectedRevision: MilestoneRevisionSchema })
+  .strict();
+export type ArchiveMilestoneInput = z.infer<typeof ArchiveMilestoneSchema>;
+
+export const MilestoneSchema = z
+  .object({
+    id: MilestoneIdSchema,
+    projectId: ProjectIdSchema,
+    title: z.string().min(1).max(120),
+    description: z.string().max(2000).nullable(),
+    status: MilestoneStatusSchema,
+    targetDate: MilestoneTargetDateSchema.nullable(),
+    revision: MilestoneRevisionSchema,
+    archivedAt: z.string().datetime().nullable(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .strict()
+  .refine((milestone) => (milestone.status === 'archived') === (milestone.archivedAt !== null));
+export type Milestone = z.infer<typeof MilestoneSchema>;
+
+export const MilestoneListQuerySchema = z
+  .object({
+    cursor: z.string().min(1).max(1024).optional(),
+    limit: z
+      .union([
+        z
+          .string()
+          .regex(/^[1-9][0-9]*$/)
+          .transform(Number),
+        z.number().int(),
+      ])
+      .pipe(z.number().int().min(1).max(100))
+      .optional(),
+  })
+  .strict();
+export type MilestoneListQuery = z.infer<typeof MilestoneListQuerySchema>;
+
+export const ProjectWorkspaceQuerySchema = z
+  .object({
+    cursor: z.string().min(1).max(1024).optional(),
+    limit: z
+      .union([
+        z
+          .string()
+          .regex(/^[1-9][0-9]*$/)
+          .transform(Number),
+        z.number().int(),
+      ])
+      .pipe(z.number().int().min(1).max(100))
+      .optional(),
+  })
+  .strict();
+export type ProjectWorkspaceQuery = z.infer<typeof ProjectWorkspaceQuerySchema>;
+
+export const ProjectWorkspaceTaskSummarySchema = z
+  .object({
+    id: TaskIdSchema,
+    title: z.string().min(1).max(120),
+    status: TaskStatusSchema,
+    createdAt: z.string().datetime(),
+    projectId: ProjectIdSchema,
+    associationRevision: z.number().int().positive().safe(),
+    latestRun: z
+      .object({
+        id: z.string().min(1),
+        status: RunStatusSchema,
+        createdAt: z.string().datetime(),
+        updatedAt: z.string().datetime(),
+      })
+      .strict()
+      .nullable(),
+  })
+  .strict();
+export type ProjectWorkspaceTaskSummary = z.infer<typeof ProjectWorkspaceTaskSummarySchema>;
+
+export const TaskEpicResponseSchema = z
+  .object({
+    taskId: TaskIdSchema,
+    projectId: ProjectIdSchema.nullable(),
+    epic: EpicSchema.nullable(),
+    associationRevision: z.number().int().positive().safe(),
+  })
+  .strict()
+  .refine((response) => response.epic === null || response.epic.projectId === response.projectId);
+export type TaskEpicResponse = z.infer<typeof TaskEpicResponseSchema>;
+
+export const ProjectWorkspacePageSchema = z
+  .object({
+    observedTotal: z.number().int().nonnegative().safe(),
+    complete: z.boolean(),
+    nextCursor: z.string().min(1).max(1024).nullable(),
+  })
+  .strict()
+  .refine((page) => page.complete === (page.nextCursor === null));
+export type ProjectWorkspacePage = z.infer<typeof ProjectWorkspacePageSchema>;
+
+export const MilestoneListResponseSchema = z
+  .object({
+    milestones: z.array(MilestoneSchema).max(100),
+    page: ProjectWorkspacePageSchema,
+  })
+  .strict()
+  .refine((response) => response.page.observedTotal >= response.milestones.length);
+export type MilestoneListResponse = z.infer<typeof MilestoneListResponseSchema>;
+
+export const EpicListResponseSchema = z
+  .object({
+    epics: z.array(EpicSchema).max(100),
+    page: ProjectWorkspacePageSchema,
+  })
+  .strict()
+  .refine((response) => response.page.observedTotal >= response.epics.length);
+export type EpicListResponse = z.infer<typeof EpicListResponseSchema>;
+
+export const ProjectWorkspaceTaskPageSchema = z
+  .object({
+    tasks: z.array(ProjectWorkspaceTaskSummarySchema).max(100),
+    page: ProjectWorkspacePageSchema,
+  })
+  .strict()
+  .refine((result) => result.page.observedTotal >= result.tasks.length);
+export type ProjectWorkspaceTaskPage = z.infer<typeof ProjectWorkspaceTaskPageSchema>;
+
+export const ProjectEpicTaskPageSchema = ProjectWorkspaceTaskPageSchema;
+export type ProjectEpicTaskPage = z.infer<typeof ProjectEpicTaskPageSchema>;
+
+export const ProjectWorkspaceResponseSchema = z
+  .object({
+    project: ProjectSchema,
+    tasks: z.array(ProjectWorkspaceTaskSummarySchema).max(100),
+    page: ProjectWorkspacePageSchema,
+  })
+  .strict()
+  .refine((result) => result.page.observedTotal >= result.tasks.length);
+export type ProjectWorkspaceResponse = z.infer<typeof ProjectWorkspaceResponseSchema>;
+
+export const ProjectListResponseSchema = z
+  .object({
+    projects: z.array(ProjectSummarySchema).max(500),
+    total: z.number().int().nonnegative(),
+    complete: z.literal(true),
+  })
+  .strict()
+  .refine(
+    (result) =>
+      result.total === result.projects.length &&
+      new Set(result.projects.map((project) => project.id)).size === result.projects.length &&
+      new Set(result.projects.map((project) => project.key)).size === result.projects.length,
+  );
+export type ProjectListResponse = z.infer<typeof ProjectListResponseSchema>;
 
 export const UsageSchema = z.object({
   quality: z.literal('unknown'),

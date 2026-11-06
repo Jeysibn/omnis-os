@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import type { Authorization, Department } from '@omnis/contracts';
+import type { Authorization, Department, Epic, Milestone, Project } from '@omnis/contracts';
 import { AgentLifecycleStoreError } from '@omnis/db';
 import { createAuthorizerApp, type AuthorizerStore } from './app.ts';
 
@@ -32,6 +32,52 @@ const department: Department = {
   archivedAt: null,
   createdAt: '2026-11-04T00:00:00.000Z',
   updatedAt: '2026-11-04T00:00:00.000Z',
+};
+const project: Project = {
+  id: 'prj_0123456789abcdef0123456789abcdef',
+  ownerId: 'owner',
+  key: 'OMNIS-OS',
+  name: 'Omnis OS',
+  objective: 'Synthetic project fixture.',
+  status: 'proposed',
+  priority: 'normal',
+  revision: 1,
+  createdAt: '2026-11-04T00:00:00.000Z',
+  updatedAt: '2026-11-04T00:00:00.000Z',
+};
+const projectSummary = {
+  id: project.id,
+  ownerId: project.ownerId,
+  key: project.key,
+  name: project.name,
+  status: project.status,
+  priority: project.priority,
+  revision: project.revision,
+  createdAt: project.createdAt,
+  updatedAt: project.updatedAt,
+};
+const milestone: Milestone = {
+  id: 'mil_0123456789abcdef0123456789abcdef',
+  projectId: project.id,
+  title: 'First release',
+  description: null,
+  status: 'planned',
+  targetDate: null,
+  revision: 1,
+  archivedAt: null,
+  createdAt: '2026-11-05T00:00:00.000Z',
+  updatedAt: '2026-11-05T00:00:00.000Z',
+};
+const epic: Epic = {
+  id: 'epc_0123456789abcdef0123456789abcdef',
+  projectId: project.id,
+  title: 'First epic',
+  description: null,
+  status: 'planned',
+  revision: 1,
+  archivedAt: null,
+  createdAt: '2026-11-05T00:00:00.000Z',
+  updatedAt: '2026-11-05T00:00:00.000Z',
 };
 
 function makeStore() {
@@ -73,6 +119,89 @@ function makeStore() {
       calls.push({ method: 'archiveDepartment', requestId });
       return { ...department, archivedAt: '2026-11-04T01:00:00.000Z' };
     },
+    async listProjects() {
+      return { projects: [projectSummary], total: 1, complete: true };
+    },
+    async getProject(id) {
+      return id === project.id ? project : undefined;
+    },
+    async createProject(_input, requestId) {
+      calls.push({ method: 'createProject', requestId });
+      return project;
+    },
+    async updateProject(_id, _input, requestId) {
+      calls.push({ method: 'updateProject', requestId });
+      return { ...project, name: 'Updated name', revision: 2 };
+    },
+    async archiveProject(_id, _input, requestId) {
+      calls.push({ method: 'archiveProject', requestId });
+      return { ...project, status: 'archived', revision: 2 };
+    },
+    projectMilestones: {
+      async list(id, query) {
+        calls.push({ method: 'listMilestones', requestId: `${id}:${JSON.stringify(query)}` });
+        return {
+          milestones: [milestone],
+          page: { observedTotal: 1, complete: true, nextCursor: null },
+        };
+      },
+      async get(projectId, milestoneId) {
+        return projectId === project.id && milestoneId === milestone.id ? milestone : undefined;
+      },
+      async create(projectId, _input, requestId) {
+        calls.push({ method: 'createMilestone', requestId });
+        return { ...milestone, projectId };
+      },
+      async update(_projectId, _milestoneId, _input, requestId) {
+        calls.push({ method: 'updateMilestone', requestId });
+        return { ...milestone, revision: 2 };
+      },
+      async archive(_projectId, _milestoneId, _input, requestId) {
+        calls.push({ method: 'archiveMilestone', requestId });
+        return { ...milestone, status: 'archived', revision: 2, archivedAt: milestone.createdAt };
+      },
+    },
+    projectEpics: {
+      async list(id, query) {
+        calls.push({ method: 'listEpics', requestId: `${id}:${JSON.stringify(query)}` });
+        return { epics: [epic], page: { observedTotal: 1, complete: true, nextCursor: null } };
+      },
+      async get(projectId, epicId) {
+        return projectId === project.id && epicId === epic.id ? epic : undefined;
+      },
+      async create(projectId, _input, requestId) {
+        calls.push({ method: 'createEpic', requestId });
+        return { ...epic, projectId };
+      },
+      async update(_projectId, _epicId, _input, requestId) {
+        calls.push({ method: 'updateEpic', requestId });
+        return { ...epic, revision: 2 };
+      },
+      async archive(_projectId, _epicId, _input, requestId) {
+        calls.push({ method: 'archiveEpic', requestId });
+        return { ...epic, status: 'archived', revision: 2, archivedAt: epic.createdAt };
+      },
+      async listTasks(projectId, epicId, query) {
+        calls.push({
+          method: 'listEpicTasks',
+          requestId: `${projectId}:${epicId}:${JSON.stringify(query)}`,
+        });
+        return { tasks: [], page: { observedTotal: 0, complete: true, nextCursor: null } };
+      },
+      async getTaskEpic(taskId) {
+        calls.push({ method: 'getTaskEpic', requestId: taskId });
+        return {
+          taskId,
+          projectId: project.id,
+          epic,
+          associationRevision: 2,
+        };
+      },
+      async setTaskEpic(taskId, _input, requestId) {
+        calls.push({ method: 'setTaskEpic', requestId });
+        return { taskId, projectId: project.id, epicId: epic.id, associationRevision: 3 };
+      },
+    },
   };
   return { store, calls };
 }
@@ -90,6 +219,226 @@ describe('independent authorizer service boundary', () => {
       });
       assert.equal(response.statusCode, 401);
       assert.deepEqual(calls, []);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('keeps milestone operations behind the service token and validates internal contracts', async () => {
+    const { store, calls } = makeStore();
+    const app = createAuthorizerApp({ store, serviceToken, checkDatabase: async () => undefined });
+    const headers = { 'x-omnis-authorizer-token': serviceToken };
+    try {
+      const denied = await app.inject({
+        method: 'GET',
+        url: `/internal/v1/projects/${project.id}/milestones`,
+      });
+      assert.equal(denied.statusCode, 401);
+      const list = await app.inject({
+        method: 'GET',
+        url: `/internal/v1/projects/${project.id}/milestones?limit=10`,
+        headers,
+      });
+      assert.equal(list.statusCode, 200);
+      assert.equal(list.json().milestones[0].id, milestone.id);
+      const create = await app.inject({
+        method: 'POST',
+        url: `/internal/v1/projects/${project.id}/milestones`,
+        headers: { ...headers, 'idempotency-key': authorization.correlationId },
+        payload: { title: 'First release' },
+      });
+      assert.equal(create.statusCode, 201);
+      assert.equal(create.json().id, milestone.id);
+      assert.deepEqual(calls.at(-1), {
+        method: 'createMilestone',
+        requestId: authorization.correlationId,
+      });
+      const invalid = await app.inject({
+        method: 'POST',
+        url: `/internal/v1/projects/${project.id}/milestones`,
+        headers: { ...headers, 'idempotency-key': authorization.correlationId },
+        payload: { title: '   ' },
+      });
+      assert.equal(invalid.statusCode, 400);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('keeps Epic operations behind the service token and validates the internal contract', async () => {
+    const { store, calls } = makeStore();
+    const app = createAuthorizerApp({ store, serviceToken, checkDatabase: async () => undefined });
+    const headers = { 'x-omnis-authorizer-token': serviceToken };
+    try {
+      const denied = await app.inject({
+        method: 'GET',
+        url: `/internal/v1/projects/${project.id}/epics`,
+      });
+      assert.equal(denied.statusCode, 401);
+      const list = await app.inject({
+        method: 'GET',
+        url: `/internal/v1/projects/${project.id}/epics?limit=10`,
+        headers,
+      });
+      assert.equal(list.statusCode, 200);
+      assert.equal(list.json().epics[0].id, epic.id);
+      const create = await app.inject({
+        method: 'POST',
+        url: `/internal/v1/projects/${project.id}/epics`,
+        headers: { ...headers, 'idempotency-key': authorization.correlationId },
+        payload: { title: 'First epic' },
+      });
+      assert.equal(create.statusCode, 201);
+      assert.equal(create.json().id, epic.id);
+      assert.deepEqual(calls.at(-1), {
+        method: 'createEpic',
+        requestId: authorization.correlationId,
+      });
+      const malformed = await app.inject({
+        method: 'POST',
+        url: `/internal/v1/projects/${project.id}/epics`,
+        headers: { ...headers, 'idempotency-key': authorization.correlationId },
+        payload: { title: ' ' },
+      });
+      assert.equal(malformed.statusCode, 400);
+      const taskPage = await app.inject({
+        method: 'GET',
+        url: `/internal/v1/projects/${project.id}/epics/${epic.id}/tasks?limit=5`,
+        headers,
+      });
+      assert.equal(taskPage.statusCode, 200);
+      assert.deepEqual(taskPage.json().tasks, []);
+      const taskEpic = await app.inject({
+        method: 'GET',
+        url: '/internal/v1/tasks/task-0001/epic',
+        headers,
+      });
+      assert.equal(taskEpic.statusCode, 200);
+      assert.equal(taskEpic.json().epic.id, epic.id);
+      const assigned = await app.inject({
+        method: 'PUT',
+        url: '/internal/v1/tasks/task-0001/epic',
+        headers: { ...headers, 'idempotency-key': authorization.correlationId },
+        payload: { expectedAssociationRevision: 2, epicId: epic.id },
+      });
+      assert.equal(assigned.statusCode, 200);
+      assert.equal(assigned.json().associationRevision, 3);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('keeps project reads and idempotent creation behind the authorizer service token', async () => {
+    const { store, calls } = makeStore();
+    const app = createAuthorizerApp({ store, serviceToken, checkDatabase: async () => undefined });
+    try {
+      const denied = await app.inject({ method: 'GET', url: '/internal/v1/projects' });
+      assert.equal(denied.statusCode, 401);
+      const headers = { 'x-omnis-authorizer-token': serviceToken };
+      const list = await app.inject({ method: 'GET', url: '/internal/v1/projects', headers });
+      assert.equal(list.statusCode, 200);
+      assert.equal(list.json().complete, true);
+      const missing = await app.inject({
+        method: 'GET',
+        url: '/internal/v1/projects/prj_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        headers,
+      });
+      assert.equal(missing.statusCode, 404);
+      const created = await app.inject({
+        method: 'POST',
+        url: '/internal/v1/projects',
+        headers: { ...headers, 'idempotency-key': '3a167582-1dc3-48a4-a69f-8b1fe0c58ee2' },
+        payload: { key: 'OMNIS-OS', name: 'Omnis OS', objective: 'Synthetic project.' },
+      });
+      assert.equal(created.statusCode, 201);
+      assert.equal(
+        calls.some((call) => call.method === 'createProject' && !!call.requestId),
+        true,
+      );
+      const requestId = '1208f993-29f8-40ee-9d56-c2cbe4f63100';
+      const updated = await app.inject({
+        method: 'PATCH',
+        url: `/internal/v1/projects/${project.id}`,
+        headers: { ...headers, 'idempotency-key': requestId },
+        payload: { expectedRevision: 1, name: 'Updated name' },
+      });
+      assert.equal(updated.statusCode, 200);
+      assert.equal(updated.json().revision, 2);
+      assert.equal(calls.at(-1)?.method, 'updateProject');
+      const archived = await app.inject({
+        method: 'POST',
+        url: `/internal/v1/projects/${project.id}/archive`,
+        headers: { ...headers, 'idempotency-key': '2208f993-29f8-40ee-9d56-c2cbe4f63102' },
+        payload: { expectedRevision: 1 },
+      });
+      assert.equal(archived.statusCode, 200);
+      assert.equal(archived.json().status, 'archived');
+      assert.equal(calls.at(-1)?.method, 'archiveProject');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('does not expose uncertain project write failures or rejected input details', async () => {
+    const { store } = makeStore();
+    const failingStore: AuthorizerStore = {
+      ...store,
+      async createProject() {
+        throw new Error('synthetic-private-value-must-not-leak');
+      },
+    };
+    const app = createAuthorizerApp({
+      store: failingStore,
+      serviceToken,
+      checkDatabase: async () => undefined,
+    });
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/internal/v1/projects',
+        headers: {
+          'x-omnis-authorizer-token': serviceToken,
+          'idempotency-key': '3a167582-1dc3-48a4-a69f-8b1fe0c58ee2',
+        },
+        payload: { key: 'SAFE', name: 'Safe name', objective: 'A safe description.' },
+      });
+      assert.equal(response.statusCode, 503);
+      assert.equal(response.json().error.code, 'project_outcome_unknown');
+      assert.doesNotMatch(response.body, /synthetic-private-value-must-not-leak/);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('returns definite safe 400 and 413 errors for malformed or oversized project requests', async () => {
+    const { store, calls } = makeStore();
+    const app = createAuthorizerApp({ store, serviceToken, checkDatabase: async () => undefined });
+    const headers = {
+      'x-omnis-authorizer-token': serviceToken,
+      'idempotency-key': '3a167582-1dc3-48a4-a69f-8b1fe0c58ee2',
+      'content-type': 'application/json',
+    };
+    try {
+      const malformed = await app.inject({
+        method: 'POST',
+        url: '/internal/v1/projects',
+        headers,
+        payload: '{',
+      });
+      assert.equal(malformed.statusCode, 400);
+      assert.equal(malformed.json().error.code, 'invalid_input');
+      const oversized = await app.inject({
+        method: 'POST',
+        url: '/internal/v1/projects',
+        headers,
+        payload: JSON.stringify({ key: 'SAFE', name: 'Safe', objective: 'x'.repeat(40_000) }),
+      });
+      assert.equal(oversized.statusCode, 413);
+      assert.equal(oversized.json().error.code, 'payload_too_large');
+      assert.equal(
+        calls.some((call) => call.method === 'createProject'),
+        false,
+      );
     } finally {
       await app.close();
     }

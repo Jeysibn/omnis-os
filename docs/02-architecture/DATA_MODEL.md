@@ -16,6 +16,8 @@ Migration source: `packages/db/migrations/0001_initial.sql`. PostgreSQL is autho
     PROJECTS ||--o{ MILESTONES : tracks
     PROJECTS ||--o{ EPICS : organizes
     PROJECTS ||--o{ TASKS : contains
+    TASKS ||--o| TASK_EPIC_ASSOCIATIONS : classified
+    EPICS ||--o{ TASK_EPIC_ASSOCIATIONS : groups
     TASKS ||--o{ RUNS : attempts
     RUNS ||--o{ RUN_EVENTS : records
     RUNS ||--o{ ARTIFACTS : yields
@@ -48,9 +50,9 @@ Migration source: `packages/db/migrations/0001_initial.sql`. PostgreSQL is autho
 ### Projects & work
 
 - `projects(id, owner_id, key UNIQUE, name, objective_md, status, priority, budget_policy_id NULL, created_at)`.
-- `milestones(id, project_id, title, due_at NULL, status, acceptance_md)`.
-- `epics(id, project_id, milestone_id NULL, title, status)`.
-- `tasks(id, project_id, epic_id NULL, milestone_id NULL, parent_task_id NULL, assignee_agent_id NULL, title, objective_md, acceptance_md, status, priority, due_at NULL)`.
+- `project_milestones(id, project_id, title, description NULL, target_date NULL, status, revision, archived_at NULL, created_at, updated_at)`. A milestone belongs to one project; milestone target dates are date-only, and all event timestamps are UTC `timestamptz`.
+- `project_epics(id, project_id, title, description NULL, status, revision, archived_at NULL, created_at, updated_at)`. V1 Epics are project-scoped and do not calculate task progress; see `docs/03-modules/PROJECT_EPICS_API_V1.md`.
+- `tasks(id, project_id NULL, association_revision, title, detail, status, created_at)`. `task_epic_associations(task_id PRIMARY KEY, project_id, epic_id, updated_at)` stores the optional current Epic membership separately from `tasks`. Composite foreign keys require both the task and Epic to belong to that same project. No Epic association is added to runtime-visible task columns. See `docs/03-modules/PROJECT_EPIC_TASK_ASSOCIATION_API_V1.md`.
 - `task_dependencies(task_id, depends_on_task_id, kind)`, UNIQUE on pair, cycle prevention in domain logic.
 - `workspaces(id, project_id, relative_path, storage_ref, read_policy, write_policy, status)`; paths must resolve in permitted root.
 - `runs(id, task_id, agent_id, profile_version_id, runtime_connection_id, workspace_id, external_run_id NULL, idempotency_key, execution_generation, status, started_at NULL, terminal_at NULL, terminal_reason NULL, verification_status, requested_by)`.
@@ -104,6 +106,10 @@ Migration source: `packages/db/migrations/0001_initial.sql`. PostgreSQL is autho
 8. `cost_entries` actual charges and API-equivalent reference estimates are never summed into the same 'actual spend' KPI.
 9. Archive/soft-delete an agent without cascading destruction of past runs, reviews, billing and audit logs.
 10. Restrict all file references to immutable object IDs or canonical reviewed paths.
+
+### Implemented task/project relationship
+
+Migration `0017_task_project_admission.sql` adds nullable `tasks.project_id` with a restrictive project foreign key and a positive `association_revision`. Existing tasks remain unassigned; there is no synthetic project backfill. Task association changes are recorded in append-only metadata-only audit rows and use idempotency receipts. A task can be assigned or reassigned only before any run or runtime authorization exists. The current mock admission path rejects new runs when the associated project is archived, using a database trigger that holds task/project row locks through transaction commit. Already-admitted runs are not cancelled. `omnis_runtime` receives no project-table access or direct task-project mutation grants; task creation and association updates go through two tightly scoped `SECURITY DEFINER` functions.
 
 ## DB reliability / migration practices
 

@@ -146,7 +146,6 @@ try {
         'unsafeRunStates', (SELECT count(*) FROM omnis.runs
           WHERE status IN ('queued', 'running', 'stopping', 'unknown')),
         'recordFingerprints', json_build_object(
-          'tasks', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(t)::text), ':' ORDER BY t.id), '')) FROM omnis.tasks t),
           'runs', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(r)::text), ':' ORDER BY r.id), '')) FROM omnis.runs r),
           'events', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(e)::text), ':' ORDER BY e.run_id, e.sequence), '')) FROM omnis.run_events e),
           'idempotency', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(i)::text), ':' ORDER BY i.idempotency_key), '')) FROM omnis.run_idempotency i)
@@ -154,6 +153,7 @@ try {
       )
     `)
   ).rows[0].json_build_object;
+  const beforeTaskCoreFingerprint = await taskCoreFingerprint(databaseAdminPool);
   assert.equal(beforeUpgrade.tasks, 3);
   assert.equal(beforeUpgrade.runs, 3);
   assert.equal(beforeUpgrade.events, 3);
@@ -177,6 +177,11 @@ try {
   for (const [table, fingerprint] of Object.entries(beforeUpgrade.recordFingerprints)) {
     assert.equal(afterUpgrade.recordFingerprints[table], fingerprint);
   }
+  assert.equal(
+    await taskCoreFingerprint(databaseAdminPool),
+    beforeTaskCoreFingerprint,
+    'the migration may add task columns but must preserve pre-existing task fields',
+  );
   assert.deepEqual(afterUpgrade.migrations, [
     '0001_initial',
     '0002_runtime_grants',
@@ -192,6 +197,12 @@ try {
     '0012_agent_profiles',
     '0013_department_management',
     '0014_agent_profile_lifecycle',
+    '0015_project_management',
+    '0016_project_lifecycle',
+    '0017_task_project_admission',
+    '0018_project_milestones',
+    '0019_project_epics',
+    '0020_epic_task_association',
   ]);
   assert.equal(afterUpgrade.unsafeRunStates, 3);
   assert.equal(
@@ -604,23 +615,28 @@ async function verifyPost0005ProvenanceUpgrade() {
     }
 
     const runtimeStore = new PostgresRunStore(stagedRuntime);
-    const modernTask = await runtimeStore.createTask({
-      title: 'Modern grantless task',
-      detail: 'Must not be classified as pre-authorization data.',
-    });
+    // This staged database intentionally stops before the current task-write
+    // function migration. Create the post-0005 fixture using the legacy runtime
+    // table grant so the current store is only used after `migrate()` below.
+    const modernTask = await stagedRuntime.query(
+      `INSERT INTO omnis.tasks (id, title, detail)
+       VALUES ('task-' || lpad(nextval('omnis.task_id_seq')::text, 4, '0'),
+         'Modern grantless task', 'Must not be classified as pre-authorization data.')
+       RETURNING id`,
+    );
     const modernRun = await stagedRuntime.query(
       `
       INSERT INTO omnis.runs (id, task_id, task_title)
       VALUES ('run-' || lpad(nextval('omnis.run_id_seq')::text, 4, '0'), $1, $2)
       RETURNING id
       `,
-      [modernTask.id, 'Modern grantless task'],
+      [modernTask.rows[0].id, 'Modern grantless task'],
     );
     await assert.rejects(
       stagedRuntime.query(
         `INSERT INTO omnis.runs (id, task_id, task_title, created_at)
          VALUES ('run-forged-date', $1, $2, '2000-01-01T00:00:00Z')`,
-        [modernTask.id, 'Backdated run'],
+        [modernTask.rows[0].id, 'Backdated run'],
       ),
       /permission denied/i,
     );
@@ -671,7 +687,7 @@ async function verifyPost0005ProvenanceUpgrade() {
       "SELECT id, length(checksum) AS checksum_length FROM omnis.schema_migrations WHERE id LIKE '00%' ORDER BY id",
     );
     assert.deepEqual(migrationRows.rows.at(-1), {
-      id: '0014_agent_profile_lifecycle',
+      id: '0020_epic_task_association',
       checksum_length: 64,
     });
   } finally {
@@ -684,6 +700,22 @@ async function verifyPost0005ProvenanceUpgrade() {
       await clusterAdminPool.query(`DROP DATABASE ${quoteIdentifier(stagedName)}`);
     }
   }
+}
+
+async function taskCoreFingerprint(pool) {
+  return (
+    await pool.query(`
+      SELECT md5(COALESCE(string_agg(
+        md5(jsonb_build_object(
+          'id', task.id,
+          'title', task.title,
+          'detail', task.detail,
+          'status', task.status,
+          'created_at', task.created_at
+        )::text), ':' ORDER BY task.id), '')) AS fingerprint
+      FROM omnis.tasks AS task
+    `)
+  ).rows[0].fingerprint;
 }
 
 async function removeLegacyWorktree() {

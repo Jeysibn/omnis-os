@@ -4,7 +4,6 @@ import {
   AuthorizationDecisionSchema,
   CreateAuthorizationSchema,
   CreateRunSchema,
-  CreateTaskSchema,
   RunEventSchema,
 } from '@omnis/contracts';
 import {
@@ -21,11 +20,15 @@ import { AuthThrottle } from './auth-throttle.ts';
 import { registerAgentReadRoutes } from './agent-routes.ts';
 import { registerAgentManagementRoutes } from './agent-management-routes.ts';
 import { registerDepartmentRoutes } from './department-routes.ts';
+import { registerProjectRoutes } from './project-routes.ts';
+import { registerProjectMilestoneRoutes } from './project-milestone-routes.ts';
+import { registerProjectEpicRoutes } from './project-epic-routes.ts';
+import { registerProjectWorkspaceRoutes } from './project-workspace-routes.ts';
+import { registerTaskEpicRoutes } from './task-epic-routes.ts';
+import { registerTaskRoutes } from './task-routes.ts';
 import {
   parseRun,
   parseRunList,
-  parseTask,
-  parseTaskList,
   workerEventStream,
   workerRequest,
   WorkerRequestError,
@@ -200,27 +203,12 @@ app.get('/api/v1/me', { preHandler: requireOwner }, async () => ({
 registerAgentReadRoutes(app);
 registerAgentManagementRoutes(app);
 registerDepartmentRoutes(app);
-
-app.get('/api/v1/tasks', { preHandler: requireOwner }, async () =>
-  workerRequest('/internal/v1/tasks', {}, parseTaskList),
-);
-app.post(
-  '/api/v1/tasks',
-  { preHandler: [requireOwner, requireMutationProtection] },
-  async (request, reply) => {
-    const parsed = CreateTaskSchema.safeParse(request.body);
-    if (!parsed.success)
-      return reply
-        .code(400)
-        .send({ error: { code: 'invalid_input', message: 'Enter a title and task detail.' } });
-    const task = await workerRequest(
-      '/internal/v1/tasks',
-      { method: 'POST', body: JSON.stringify(parsed.data) },
-      parseTask,
-    );
-    return reply.code(201).send(task);
-  },
-);
+registerProjectRoutes(app);
+registerProjectMilestoneRoutes(app);
+registerProjectEpicRoutes(app);
+registerProjectWorkspaceRoutes(app);
+registerTaskEpicRoutes(app);
+registerTaskRoutes(app);
 app.get('/api/v1/runs', { preHandler: requireOwner }, async () =>
   workerRequest('/internal/v1/runs', {}, parseRunList),
 );

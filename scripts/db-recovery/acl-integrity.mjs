@@ -107,7 +107,7 @@ const applicationReadTables = new Set([
   'agent_profile_versions',
 ]);
 const applicationColumnPrivileges = new Map([
-  ['tasks', new Set(['INSERT:id', 'INSERT:title', 'INSERT:detail', 'UPDATE:status'])],
+  ['tasks', new Set(['UPDATE:status'])],
   [
     'runs',
     new Set([
@@ -149,9 +149,14 @@ const approvedSecurityDefinerRoutineArities = new Map([
   ['append_runtime_admission_denial', 3],
   ['append_runtime_authorization_audit', 3],
 ]);
+const approvedTaskProjectRoutines = new Set([
+  'create_task(p_title text, p_detail text, p_project_id text, p_request_id uuid, p_fingerprint bytea)',
+  'set_task_project(p_task_id text, p_expected_association_revision integer, p_project_id text, p_request_id uuid, p_fingerprint bytea)',
+]);
 
 function isApprovedRuntimeSecurityDefiner(entry) {
   if (entry.objectType !== 'routine' || entry.schema !== 'omnis') return false;
+  if (approvedTaskProjectRoutines.has(entry.object)) return true;
   const match = /^([a-z_][a-z0-9_]*)\((.*)\)$/.exec(entry.object);
   if (!match) return false;
   const arity = approvedSecurityDefinerRoutineArities.get(match[1]);
@@ -236,6 +241,16 @@ export function restoreAclSnapshotsMatch(source, restored) {
           entry.objectType === 'database' &&
           entry.privilege === 'CONNECT' &&
           deferredDatabaseConnectGrantees.has(entry.grantee)
+        ) &&
+        // pg_restore --no-owner recreates this sequence as omnis_migrator.
+        // Its intrinsic owner privileges replace explicit owner ACL entries
+        // that pg_dump omits from the archive.
+        !(
+          entry.objectType === 'sequence' &&
+          entry.schema === 'omnis' &&
+          entry.object === 'task_id_seq' &&
+          entry.grantee === 'omnis_migrator' &&
+          ['SELECT', 'UPDATE'].includes(entry.privilege)
         ),
     );
   return (
@@ -295,6 +310,24 @@ export function assertRuntimeAclPolicy(snapshot) {
           'save_agent_profile_draft(p_agent_id text, p_expected_revision bigint, p_base_version_no integer, p_profile jsonb, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
           'publish_agent_profile(p_agent_id text, p_expected_version_no integer, p_expected_revision bigint, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
           'archive_agent(p_agent_id text, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
+          'create_project(p_id text, p_key text, p_name text, p_objective text, p_priority text, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
+          'list_projects()',
+          'get_project(p_id text)',
+          'update_project(p_id text, p_expected_revision integer, p_name text, p_objective text, p_priority text, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
+          'archive_project(p_id text, p_expected_revision integer, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
+          'list_project_milestones(p_project_id text, p_after_created_at timestamp with time zone, p_after_id text, p_limit integer)',
+          'get_project_milestone(p_project_id text, p_id text)',
+          'create_project_milestone(p_id text, p_project_id text, p_title text, p_description text, p_target_date date, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
+          'update_project_milestone(p_project_id text, p_id text, p_expected_revision integer, p_title text, p_description text, p_description_supplied boolean, p_target_date date, p_target_date_supplied boolean, p_status text, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
+          'archive_project_milestone(p_project_id text, p_id text, p_expected_revision integer, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
+          'list_project_epics(p_project_id text, p_after_created_at timestamp with time zone, p_after_id text, p_limit integer)',
+          'get_project_epic(p_project_id text, p_id text)',
+          'create_project_epic(p_id text, p_project_id text, p_title text, p_description text, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
+          'update_project_epic(p_project_id text, p_id text, p_expected_revision integer, p_title text, p_description text, p_description_supplied boolean, p_status text, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
+          'archive_project_epic(p_project_id text, p_id text, p_expected_revision integer, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
+          'get_task_epic(p_task_id text)',
+          'list_project_epic_tasks(p_project_id text, p_epic_id text, p_after_created_at timestamp with time zone, p_after_task_id text, p_limit integer)',
+          'set_task_epic(p_task_id text, p_expected_association_revision integer, p_epic_id text, p_request_id uuid, p_fingerprint bytea)',
         ].includes(entry.object) &&
         entry.privilege === 'EXECUTE' &&
         entry.securityDefiner === true
@@ -465,7 +498,7 @@ export function assertRuntimeAclPolicy(snapshot) {
     if (
       entry.objectType === 'sequence' &&
       entry.schema === 'omnis' &&
-      ['task_id_seq', 'run_id_seq'].includes(entry.object) &&
+      entry.object === 'run_id_seq' &&
       ['USAGE', 'SELECT'].includes(entry.privilege)
     ) {
       continue;
