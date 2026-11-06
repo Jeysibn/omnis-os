@@ -6,6 +6,7 @@ import {
   CreateRunSchema,
   RunEventSchema,
 } from '@omnis/contracts';
+import { syntheticTaskRunTestMode } from '@omnis/contracts/synthetic-task-run';
 import {
   isOwnerPasswordValid,
   requireMutationProtection,
@@ -27,6 +28,7 @@ import { registerProjectWorkspaceRoutes } from './project-workspace-routes.ts';
 import { registerTaskEpicRoutes } from './task-epic-routes.ts';
 import { registerTaskRoutes } from './task-routes.ts';
 import { registerConnectorAuthorizationRoutes } from './connector-authorization-routes.ts';
+import { registerSyntheticTaskRunRoutes } from './synthetic-task-run-routes.ts';
 import {
   parseRun,
   parseRunList,
@@ -39,6 +41,7 @@ const app = Fastify({
   trustProxy: false,
   logger: { redact: ['req.headers.cookie', 'res.headers.set-cookie', 'req.headers.x-omnis-csrf'] },
 });
+const syntheticBrokerTestMode = syntheticTaskRunTestMode(process.env);
 // Memory-backed sessions are limited to this single-owner local mock gate. Durable session storage is a later gate.
 const sessions = new LocalSessionStore(env.sessionSecret, env.secureCookies);
 const authThrottle = new AuthThrottle();
@@ -211,6 +214,11 @@ registerProjectWorkspaceRoutes(app);
 registerTaskEpicRoutes(app);
 registerTaskRoutes(app);
 registerConnectorAuthorizationRoutes(app, { requireOwner, requireMutationProtection });
+registerSyntheticTaskRunRoutes(app, {
+  requireOwner,
+  requireMutationProtection,
+  enabled: syntheticBrokerTestMode,
+});
 app.get('/api/v1/runs', { preHandler: requireOwner }, async () =>
   workerRequest('/internal/v1/runs', {}, parseRunList),
 );

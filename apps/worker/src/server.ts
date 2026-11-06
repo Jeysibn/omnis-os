@@ -10,6 +10,7 @@ import {
   SetTaskProjectSchema,
   TaskIdSchema,
 } from '@omnis/contracts';
+import { syntheticTaskRunTestMode } from '@omnis/contracts/synthetic-task-run';
 import { PgBoss } from 'pg-boss';
 import {
   createPool,
@@ -24,6 +25,8 @@ import { CoordinatorError, queueName, RunCoordinator } from './run-coordinator.t
 import { SandboxedMockRuntimeAdapter } from './sandboxed-mock-runtime.ts';
 import { UnixMockSandboxLauncherClient } from './sandbox-launcher-client.ts';
 import { streamPersistedRunEvents } from './reliable-event-stream.ts';
+import { SyntheticBrokerClient } from './synthetic-broker-client.ts';
+import { registerSyntheticTaskRunRoute } from './synthetic-task-run-routes.ts';
 
 const host = process.env.OMNIS_WORKER_HOST ?? '127.0.0.1';
 const port = Number(process.env.OMNIS_WORKER_PORT ?? 4101);
@@ -63,6 +66,7 @@ const boss = new PgBoss({
   createSchema: false,
 });
 const app = Fastify({ logger: { redact: ['req.headers.x-omnis-internal-token'] } });
+const syntheticBrokerTestMode = syntheticTaskRunTestMode(process.env);
 boss.on('error', (error) => {
   app.log.error({ errorType: error.name }, 'Durable queue reported an error.');
 });
@@ -109,6 +113,20 @@ app.addHook('preHandler', async (request, reply) => {
       .code(401)
       .send({ error: { code: 'unauthorized', message: 'Internal worker authentication failed.' } });
 });
+
+if (syntheticBrokerTestMode) {
+  const brokerSocket = process.env.OMNIS_SYNTHETIC_BROKER_SOCKET;
+  const brokerToken = process.env.OMNIS_SYNTHETIC_BROKER_TEST_TOKEN;
+  if (!brokerSocket || !brokerToken) {
+    throw new Error('Synthetic broker test IPC requires its socket and disposable test token.');
+  }
+  registerSyntheticTaskRunRoute(app, {
+    authenticate: async () => {},
+    enabled: true,
+    store,
+    broker: new SyntheticBrokerClient(brokerSocket, brokerToken),
+  });
+}
 
 app.get('/internal/v1/health', async () => ({
   status: 'ok',

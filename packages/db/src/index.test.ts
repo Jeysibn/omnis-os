@@ -259,6 +259,16 @@ const postgresSuite = describe(
         },
       });
       assert.equal(completed.status, 'completed');
+      const durableExecution = await brokerStore.getExecutionForAuthorization(pending.id);
+      assert.equal(durableExecution?.attempt.id, completed.id);
+      assert.equal(durableExecution?.attempt.responseText, 'Synthetic response fixture.');
+      assert.deepEqual(durableExecution?.usage, {
+        kind: 'measured',
+        source: 'synthetic-provider',
+        inputUnits: 5,
+        outputUnits: 8,
+        billingExposure: 'synthetic-only',
+      });
       assert.equal(
         (await brokerStore.listBrokerRecoveryCandidates(10, null)).some(
           (candidate) => candidate.id === completed.id,

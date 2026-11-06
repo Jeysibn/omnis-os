@@ -6,12 +6,13 @@
     ".": "./src/index.ts",
     "./connector-authorization": "./src/connector-authorization.ts",
     "./connector-broker": "./src/connector-broker.ts",
-    "./broker-ipc": "./src/broker-ipc.ts"
+    "./broker-ipc": "./src/broker-ipc.ts",
+    "./synthetic-task-run": "./src/synthetic-task-run.ts"
   },
   "scripts": {
     "build": "pnpm typecheck",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --experimental-strip-types --test src/index.test.ts src/connector-authorization.test.ts src/connector-broker.test.ts src/broker-ipc.test.ts"
+    "test": "node --experimental-strip-types --test src/index.test.ts src/connector-authorization.test.ts src/connector-broker.test.ts src/broker-ipc.test.ts src/synthetic-task-run.test.ts"
   },
   "dependencies": {
     "zod": "4.6.7"
