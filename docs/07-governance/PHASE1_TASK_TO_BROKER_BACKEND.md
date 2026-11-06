@@ -6,6 +6,9 @@ not authorize provider credentials, real inference, deployment, or production ru
 ## Verified integration surface
 
 - Current main at implementation start: `a89982c9af5c1107d5156b2ad53fd4d603de929b`.
+- PR #49 merged during this work as `b2490501395a3e53fb0f97fc6ab3914a3300fa56`; the backend
+  branch incorporates it with a normal merge commit. Its Docker boundary harness does not add a
+  broker endpoint or change the backend authorization contract.
 - PR #49 is Draft (`test/disposable-docker-boundary`, head
   `d350a2450549c715ab562354f21b129f306ae1f9`) and currently changes only the disposable Docker
   boundary CI harness, its evidence, and the CI/package command. It does not provide a broker
