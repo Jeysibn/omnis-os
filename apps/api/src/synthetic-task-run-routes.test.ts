@@ -328,6 +328,44 @@ describe('owner synthetic task run routes', () => {
     await app.close();
   });
 
+  it('rejects worker response identity mismatches before recovering correlation', async () => {
+    const { app } = createApp({
+      onWorker: () => ({
+        version: 'omnis.synthetic-task-run.v1',
+        taskId: 'task-other',
+        authorizationId: '99999999-9999-4999-8999-999999999999',
+        requestId: '88888888-8888-4888-8888-888888888888',
+        attemptId: '44444444-4444-4444-8444-444444444444',
+        status: 'unknown',
+        submitted: true,
+        usage: { kind: 'unknown', reason: 'submission_uncertain', billingExposure: 'unknown' },
+      }),
+      executionOverride: {
+        version: 'omnis.synthetic-task-run.v1',
+        taskId,
+        attempt: {
+          id: '44444444-4444-4444-8444-444444444444',
+          authorizationId,
+          requestId,
+          status: 'unknown',
+          synthetic: true,
+          createdAt: '2026-11-07T00:00:00.000Z',
+          submissionStartedAt: '2026-11-07T00:00:01.000Z',
+        },
+        usage: { kind: 'unknown', reason: 'submission_uncertain', billingExposure: 'unknown' },
+      },
+    });
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/v1/tasks/${taskId}/synthetic-runs`,
+      headers: { 'idempotency-key': requestId },
+      payload: { authorizationId, request: binding, renderedRequest },
+    });
+    assert.equal(response.statusCode, 503);
+    assert.equal(response.json().error.code, 'synthetic_broker_identity_unknown');
+    await app.close();
+  });
+
   it('does not return a broker result that disagrees with the durable authorizer attempt', async () => {
     const { app } = createApp({
       onWorker: () => ({

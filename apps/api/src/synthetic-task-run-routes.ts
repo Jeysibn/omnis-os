@@ -106,6 +106,18 @@ export function registerSyntheticTaskRunRoutes(
         });
       }
       if (
+        result.taskId !== taskId ||
+        result.authorizationId !== authorizationId ||
+        result.requestId !== requestId
+      ) {
+        return reply.code(503).send({
+          error: {
+            code: 'synthetic_broker_identity_unknown',
+            message: 'The synthetic broker response did not match the authorized task request.',
+          },
+        });
+      }
+      if (
         result.correlationId !== undefined &&
         result.correlationId !== authorization.correlationId
       ) {
