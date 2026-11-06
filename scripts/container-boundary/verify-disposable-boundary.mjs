@@ -42,7 +42,7 @@ if (socketPath) {
     socket.setEncoding('utf8');
     socket.on('data', (chunk) => { response += chunk; });
     let connected = false;
-    socket.once('connect', () => { connected = true; socket.write('probe'); });
+    socket.once('connect', () => { connected = true; socket.end('probe'); });
     socket.once('end', () => {
       socket.destroy();
       resolve({ kind: 'connected', response });
@@ -138,6 +138,7 @@ if (process.env.OMNIS_PROBE_IDENTITY === '1') {
 `;
 
 const activeServers = new Set();
+const serverSockets = new WeakMap();
 let signalReceived = false;
 
 function docker(args, options = {}) {
@@ -230,9 +231,12 @@ function createSocketDirectory(path, owner, group) {
 }
 
 async function openSyntheticSocket(path, owner, group) {
-  // The synthetic server responds on accept so the client probe verifies the
-  // connect permission itself without relying on request framing or timing.
-  const server = net.createServer((socket) => socket.end('ok'));
+  const sockets = new Set();
+  const server = net.createServer((socket) => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
+    socket.once('data', () => socket.end('ok'));
+  });
   await new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(path, resolve);
@@ -240,6 +244,7 @@ async function openSyntheticSocket(path, owner, group) {
   chownSync(path, owner, group);
   chmodSync(path, 0o660);
   activeServers.add(server);
+  serverSockets.set(server, sockets);
   const info = lstatSync(path);
   assert.equal(info.isSocket(), true);
   assert.equal(info.uid, owner);
@@ -256,7 +261,7 @@ async function verifyHostSocketPositiveControl(path) {
     socket.on('data', (chunk) => {
       text += chunk;
     });
-    socket.once('connect', () => socket.write('probe'));
+    socket.once('connect', () => socket.end('probe'));
     socket.once('end', () => {
       socket.destroy();
       resolve(text);
@@ -276,9 +281,31 @@ async function verifyHostSocketPositiveControl(path) {
 async function closeSyntheticSocket(server, path) {
   if (server) {
     activeServers.delete(server);
-    await new Promise((resolve) => server.close(resolve));
+    const sockets = serverSockets.get(server) ?? new Set();
+    let forcedClose;
+    const close = new Promise((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+      forcedClose = setTimeout(() => {
+        for (const socket of sockets) socket.destroy();
+      }, 1000);
+    });
+    let timeout;
+    try {
+      await Promise.race([
+        close,
+        new Promise((_, reject) => {
+          timeout = setTimeout(
+            () => reject(new Error('synthetic socket shutdown timed out')),
+            5000,
+          );
+        }),
+      ]);
+    } finally {
+      clearTimeout(forcedClose);
+      clearTimeout(timeout);
+    }
   }
-  rmSync(path, { force: true });
+  if (path) rmSync(path, { force: true });
 }
 
 function socketMount(source, target) {
@@ -751,7 +778,7 @@ function verifyCleanupOnSyntheticFailure() {
 
 async function cleanup() {
   for (const server of activeServers) {
-    await new Promise((resolve) => server.close(resolve));
+    await closeSyntheticSocket(server);
   }
   activeServers.clear();
   cleanupOwnedResources();
