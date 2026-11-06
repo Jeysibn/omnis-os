@@ -62,9 +62,15 @@ The Responses cancel endpoint only cancels background responses, while SIWC
 preview rejects the `background` field, so provider-confirmed cancellation is
 not available in this candidate flow.
 
-OpenAI documents API-key authentication as standard usage-based API billing,
-separate from ChatGPT Plan usage; plan credits must not be inferred from API
-token prices. Do not silently fall back to an API key if SIWC is unavailable.
+OpenAI API-key requests use API Platform billing, separate from signed-in
+ChatGPT/Codex plan usage. OpenAI currently documents a separately claimed API
+credit benefit for eligible ChatGPT Pro and Business subscription owners. The
+benefit is linked to an API organization, is subject to API terms and limits,
+and does not increase ChatGPT or signed-in Codex usage limits. Eligibility,
+credit balance, and activation must be confirmed by the owner; no credit or
+subscription entitlement is assumed. Any use of the API-key path still needs
+an explicit owner decision about the API organization, budget, and billing
+source. Do not silently fall back to an API key if SIWC is unavailable.
 Anthropic's current Claude Code legal documentation says developers building
 applications should use API-key authentication and may not intermediate
 Claude.ai subscription OAuth credentials for end users. Claude's API-key route
@@ -92,6 +98,8 @@ Official sources checked on 2026-11-07:
 - [SIWC preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)
 - [Self-hosted VMs with SIWC](https://developers.openai.com/siwc/token-sharing-open-source/self-hosted-vms)
 - [OpenAI API authentication](https://developers.openai.com/api/reference/overview)
+- [OpenAI API credits for ChatGPT subscribers](https://developers.openai.com/api/docs/guides/chatgpt-api-credits)
+- [OpenAI API pricing](https://developers.openai.com/api/docs/pricing)
 - [SIWC Models and inference](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference)
 - [SIWC preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)
 - [Responses API cancellation](https://developers.openai.com/api/reference/resources/responses/methods/cancel)
