@@ -1,0 +1,46 @@
+[Unit]
+Description=Omnis OS isolated synthetic connector broker
+After=omnis-authorizer.service omnis-broker-peer-gateway.service docker.service
+Requires=omnis-authorizer.service omnis-broker-peer-gateway.service
+
+[Service]
+Type=simple
+User=omnis-synthetic-broker
+Group=omnis-synthetic-broker
+RuntimeDirectory=omnis-synthetic-broker
+RuntimeDirectoryMode=0750
+SupplementaryGroups=omnis-broker-ingress-socket
+EnvironmentFile=/etc/omnis/synthetic-broker.env
+Environment=OMNIS_BROKER_SOCKET=/run/omnis-synthetic-broker/broker.sock
+Environment=OMNIS_BROKER_AUTHORIZER_SOCKET=/run/omnis-broker-gateway/authorizer.sock
+WorkingDirectory=/opt/omnis-os/apps/synthetic-broker
+ExecStart=/usr/bin/node --permission --allow-fs-read=/opt/omnis-os/apps/synthetic-broker --allow-fs-read=/opt/omnis-os/packages/contracts --allow-fs-read=/run/omnis-synthetic-broker --allow-fs-read=/etc/omnis/broker-caller.token --allow-fs-read=/etc/omnis/broker-authorizer.token --allow-fs-read=/etc/omnis/synthetic-provider.token --allow-fs-write=/run/omnis-synthetic-broker --experimental-strip-types src/server.ts
+ExecStartPost=/opt/omnis-os/scripts/host-security/set-service-socket-group.sh broker
+Restart=on-failure
+RestartSec=2
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressAllow=172.29.87.10/32
+IPAddressDeny=any
+SystemCallArchitectures=native
+CPUQuota=50%
+MemoryMax=384M
+TasksMax=64
+LimitNOFILE=128
+LimitFSIZE=1M
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

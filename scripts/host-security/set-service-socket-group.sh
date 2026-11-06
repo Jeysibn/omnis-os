@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
-  echo "Specify only the fixed service name: authorizer or launcher." >&2
+  echo "Specify only the fixed service name: authorizer, authorizer-broker, broker, or launcher." >&2
   exit 2
 fi
 
@@ -12,13 +12,30 @@ case "$1" in
     expected_group=omnis-authorizer-socket
     socket=/run/omnis-authorizer/authorizer.sock
     ;;
+  authorizer-broker)
+    if [[ -z "${OMNIS_BROKER_AUTHORIZER_SOCKET:-}" ]]; then
+      exit 0
+    fi
+    if [[ "$OMNIS_BROKER_AUTHORIZER_SOCKET" != /run/omnis-broker-authorizer/broker.sock ]]; then
+      echo "The broker authorizer socket path is outside the reviewed platform contract." >&2
+      exit 1
+    fi
+    expected_user=omnis-authorizer
+    expected_group=omnis-broker-gateway-socket
+    socket=/run/omnis-broker-authorizer/broker.sock
+    ;;
+  broker)
+    expected_user=omnis-synthetic-broker
+    expected_group=omnis-broker-ingress-socket
+    socket=/run/omnis-synthetic-broker/broker.sock
+    ;;
   launcher)
     expected_user=omnis-launcher
     expected_group=omnis-launcher-socket
     socket=/run/omnis-sandbox/launcher.sock
     ;;
   *)
-    echo "Unknown service; only the fixed authorizer and launcher sockets are supported." >&2
+    echo "Unknown service; only the fixed authorizer, authorizer-broker, broker, and launcher sockets are supported." >&2
     exit 2
     ;;
 esac
