@@ -1,0 +1,427 @@
+/*
+ * OMNIS NEXUS design system — tokens and component styles.
+ *
+ * Everything is scoped under `.nx-theme` (or a `.nx-*` class), so importing this file changes no
+ * existing screen. Raw palette values live in one place, the :root block below. Semantic roles
+ * (status, text, surface, focus) are defined from the palette; components use only the roles.
+ * Fonts are system fallbacks. The named families are used only when already installed locally;
+ * nothing is fetched from a CDN.
+ */
+:root {
+  /* Palette (docs/04-design/OMNIS_NEXUS_UI_UX_SPEC_V2.md §3) */
+  --nx-void: #060c0e;
+  --nx-slate: #101c20;
+  --nx-slate-raised: #162629;
+  --nx-edge: #28433e;
+  --nx-jade: #91f2cd;
+  --nx-amber: #f0bd76;
+  --nx-frost: #eaf4ee;
+  --nx-blue: #648df6;
+  --nx-red: #ff8a8a;
+
+  /* Text roles. All pass 4.5:1 on void and slate (checked by design.spec.ts). */
+  --nx-text: var(--nx-frost);
+  --nx-text-muted: #a3b8b0;
+  --nx-text-quiet: #8fa69e;
+
+  /* Semantic status roles: meaning, never decoration. Each is always paired with a text label. */
+  --nx-status-ok: var(--nx-jade);
+  --nx-status-attention: var(--nx-amber);
+  --nx-status-danger: var(--nx-red);
+  --nx-status-info: #9db8ff;
+  --nx-status-neutral: var(--nx-text-muted);
+
+  /* Surfaces, borders, focus */
+  --nx-surface-page: var(--nx-void);
+  --nx-surface-panel: var(--nx-slate);
+  --nx-surface-raised: var(--nx-slate-raised);
+  --nx-border: var(--nx-edge);
+  /* Control boundaries need 3:1 against the page; the decorative edge hairline is under 2:1. */
+  --nx-border-control: #5b7c72;
+  --nx-focus: var(--nx-blue);
+
+  /* Typography */
+  --nx-font-display:
+    'Space Grotesk', Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --nx-font-sans: Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --nx-font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* Spacing, radii, touch size */
+  --nx-space-1: 4px;
+  --nx-space-2: 8px;
+  --nx-space-3: 12px;
+  --nx-space-4: 16px;
+  --nx-space-5: 24px;
+  --nx-space-6: 32px;
+  --nx-radius-sm: 4px;
+  --nx-radius: 8px;
+  --nx-control-height: 40px;
+
+  /* Motion: short and purposeful. Reduced to nothing under prefers-reduced-motion below. */
+  --nx-motion-fast: 120ms;
+  --nx-motion: 200ms;
+  --nx-ease: cubic-bezier(0.2, 0, 0, 1);
+}
+
+.nx-theme {
+  min-height: 100dvh;
+  color: var(--nx-text);
+  background: var(--nx-surface-page);
+  font-family: var(--nx-font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+}
+.nx-theme *,
+.nx-theme *::before,
+.nx-theme *::after {
+  box-sizing: border-box;
+}
+.nx-theme :where(h1, h2, h3, p, dl, dd, ul, ol, figure) {
+  margin: 0;
+  padding: 0;
+}
+.nx-theme :where(ul, ol) {
+  list-style: none;
+}
+.nx-theme :focus-visible {
+  outline: 2px solid var(--nx-focus);
+  outline-offset: 2px;
+}
+
+/* Typography */
+.nx-label {
+  font-family: var(--nx-font-mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--nx-text-quiet);
+}
+.nx-mono {
+  font-family: var(--nx-font-mono);
+  font-size: 12px;
+}
+.nx-muted {
+  color: var(--nx-text-muted);
+}
+.nx-break {
+  overflow-wrap: anywhere;
+}
+
+/* Page container and header */
+.nx-container {
+  width: 100%;
+  max-width: 1280px;
+  margin-inline: auto;
+  padding: var(--nx-space-5) var(--nx-space-4);
+  display: grid;
+  gap: var(--nx-space-5);
+  min-width: 0;
+}
+@media (min-width: 720px) {
+  .nx-container {
+    padding-inline: var(--nx-space-6);
+  }
+}
+.nx-page-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--nx-space-3) var(--nx-space-5);
+  padding-bottom: var(--nx-space-4);
+  border-bottom: 1px solid var(--nx-border);
+}
+.nx-page-header__text {
+  display: grid;
+  gap: var(--nx-space-1);
+  min-width: 0;
+}
+.nx-page-header h1 {
+  font-family: var(--nx-font-display);
+  font-size: clamp(22px, 4vw, 30px);
+  font-weight: 600;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+.nx-page-header__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--nx-space-2);
+}
+
+/* Buttons and controls */
+.nx-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--nx-space-2);
+  min-height: var(--nx-control-height);
+  padding: 0 var(--nx-space-4);
+  border: 1px solid var(--nx-border-control);
+  border-radius: var(--nx-radius);
+  color: var(--nx-text);
+  background: var(--nx-surface-raised);
+  font: inherit;
+  font-weight: 600;
+  line-height: 1.2;
+  cursor: pointer;
+  transition:
+    background-color var(--nx-motion-fast) var(--nx-ease),
+    border-color var(--nx-motion-fast) var(--nx-ease);
+}
+.nx-button:hover:not(:disabled, [aria-disabled='true']) {
+  border-color: var(--nx-jade);
+}
+.nx-button[data-variant='primary'] {
+  color: var(--nx-void);
+  background: var(--nx-jade);
+  border-color: var(--nx-jade);
+}
+.nx-button[data-variant='primary']:hover:not(:disabled, [aria-disabled='true']) {
+  background: #b4f7de;
+}
+.nx-button[data-variant='ghost'] {
+  background: transparent;
+  border-color: transparent;
+}
+.nx-button[data-variant='danger'] {
+  color: var(--nx-status-danger);
+  border-color: var(--nx-status-danger);
+  background: transparent;
+}
+.nx-button:disabled,
+.nx-button[aria-disabled='true'] {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.nx-button[aria-busy='true'] {
+  cursor: progress;
+}
+
+/* Form fields */
+.nx-field {
+  display: grid;
+  gap: var(--nx-space-1);
+  min-width: 0;
+}
+.nx-field__label {
+  font-weight: 600;
+}
+.nx-field__hint {
+  color: var(--nx-text-muted);
+  font-size: 13px;
+}
+.nx-field__error {
+  color: var(--nx-status-danger);
+  font-size: 13px;
+}
+.nx-input {
+  width: 100%;
+  min-height: var(--nx-control-height);
+  padding: var(--nx-space-2) var(--nx-space-3);
+  border: 1px solid var(--nx-border-control);
+  border-radius: var(--nx-radius);
+  color: var(--nx-text);
+  background: var(--nx-surface-page);
+  font: inherit;
+  caret-color: var(--nx-jade);
+}
+.nx-input[aria-invalid='true'] {
+  border-color: var(--nx-status-danger);
+}
+.nx-input::placeholder {
+  color: var(--nx-text-quiet);
+}
+
+/* Panels and information groups */
+.nx-panel {
+  display: grid;
+  gap: var(--nx-space-4);
+  align-content: start;
+  padding: var(--nx-space-4);
+  border: 1px solid var(--nx-border);
+  border-radius: var(--nx-radius);
+  background: var(--nx-surface-panel);
+  min-width: 0;
+}
+.nx-panel__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--nx-space-2) var(--nx-space-4);
+}
+.nx-panel__head h2 {
+  font-size: 16px;
+  font-weight: 600;
+}
+.nx-info {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr));
+  gap: var(--nx-space-4);
+}
+.nx-info > div {
+  display: grid;
+  gap: var(--nx-space-1);
+  min-width: 0;
+}
+.nx-info dd {
+  overflow-wrap: anywhere;
+}
+
+/* Status indicator: a shape plus a text label, so meaning never depends on colour alone. */
+.nx-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--nx-space-2);
+  padding: 2px var(--nx-space-3);
+  border: 1px solid currentcolor;
+  border-radius: 999px;
+  font-family: var(--nx-font-mono);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.nx-status::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  background: currentcolor;
+  border-radius: 50%;
+}
+.nx-status[data-tone='attention']::before {
+  border-radius: 0;
+  transform: rotate(45deg);
+}
+.nx-status[data-tone='danger']::before {
+  border-radius: 1px;
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+}
+.nx-status[data-tone='unknown']::before {
+  background: transparent;
+  border: 2px solid currentcolor;
+}
+.nx-status[data-tone='ok'] {
+  color: var(--nx-status-ok);
+}
+.nx-status[data-tone='attention'] {
+  color: var(--nx-status-attention);
+}
+.nx-status[data-tone='danger'] {
+  color: var(--nx-status-danger);
+}
+.nx-status[data-tone='info'] {
+  color: var(--nx-status-info);
+}
+.nx-status[data-tone='neutral'],
+.nx-status[data-tone='unknown'] {
+  color: var(--nx-status-neutral);
+}
+
+/* Filters and tables */
+.nx-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--nx-space-3);
+  align-items: flex-end;
+}
+.nx-filters > .nx-field {
+  flex: 1 1 200px;
+}
+.nx-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--nx-border);
+  border-radius: var(--nx-radius);
+}
+.nx-table-wrap:focus-visible {
+  outline-offset: -2px;
+}
+.nx-table {
+  width: 100%;
+  min-width: 480px;
+  border-collapse: collapse;
+}
+.nx-table caption {
+  padding: var(--nx-space-3) var(--nx-space-4);
+  text-align: left;
+  color: var(--nx-text-muted);
+}
+.nx-table th,
+.nx-table td {
+  padding: var(--nx-space-3) var(--nx-space-4);
+  text-align: left;
+  vertical-align: top;
+  border-top: 1px solid var(--nx-border);
+}
+.nx-table th {
+  font-family: var(--nx-font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--nx-text-quiet);
+}
+
+/* Loading, empty, error and confirmation states */
+.nx-state {
+  display: grid;
+  gap: var(--nx-space-2);
+  justify-items: start;
+  padding: var(--nx-space-5);
+  border: 1px dashed var(--nx-border);
+  border-radius: var(--nx-radius);
+}
+.nx-state[data-kind='error'] {
+  border: 1px solid var(--nx-status-danger);
+}
+.nx-state__title {
+  font-weight: 600;
+}
+.nx-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--nx-border);
+  border-top-color: var(--nx-jade);
+  border-radius: 50%;
+  animation: nx-spin 900ms linear infinite;
+}
+@keyframes nx-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.nx-dialog {
+  width: min(480px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  padding: var(--nx-space-5);
+  border: 1px solid var(--nx-border);
+  border-radius: var(--nx-radius);
+  color: var(--nx-text);
+  background: var(--nx-surface-panel);
+  overflow: auto;
+}
+.nx-dialog::backdrop {
+  background: rgb(6 12 14 / 0.78);
+}
+.nx-dialog__body {
+  display: grid;
+  gap: var(--nx-space-3);
+}
+.nx-dialog__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--nx-space-2);
+  margin-top: var(--nx-space-2);
+}
+
+/* Reduced motion: nothing animates or transitions; the spinner becomes a static ring. */
+@media (prefers-reduced-motion: reduce) {
+  .nx-theme *,
+  .nx-theme *::before,
+  .nx-theme *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}
