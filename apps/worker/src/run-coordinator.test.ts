@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { Run, Task } from '@omnis/contracts';
-import type { PostgresRunStore } from '@omnis/db';
+import { StoreError, type PostgresRunStore } from '@omnis/db';
 import { MockRuntimeAdapter, type RuntimeAdapter } from '@omnis/runtime-adapters';
 import { CoordinatorError, RunCoordinator } from './run-coordinator.ts';
 import { SandboxError } from '@omnis/runtime-adapters/sandbox-error';
+import { FakeCodexAppServerRuntimeAdapter } from './test-support/fake-codex-app-server.ts';
 
 const authId = '11111111-1111-4111-8111-111111111111';
 const authorizationRecord = {
@@ -48,6 +49,74 @@ function testCoordinator(
 }
 
 describe('durable mock run coordinator', () => {
+  it('validates and forwards bounded project workspace reads without touching run state', async () => {
+    const calls: Array<{ projectId: string; query: unknown }> = [];
+    const coordinator = testCoordinator(
+      {
+        listProjectWorkspaceTasks: async (projectId: string, query: unknown) => {
+          calls.push({ projectId, query });
+          return {
+            tasks: [],
+            page: { observedTotal: 0, complete: true, nextCursor: null },
+          };
+        },
+      } as unknown as PostgresRunStore,
+      { send: async () => null, findJobs: async () => [] },
+      new MockRuntimeAdapter(),
+    );
+    const projectId = `prj_${'a'.repeat(32)}`;
+    assert.deepEqual(await coordinator.listProjectWorkspaceTasks(projectId, { limit: '25' }), {
+      tasks: [],
+      page: { observedTotal: 0, complete: true, nextCursor: null },
+    });
+    assert.deepEqual(calls, [{ projectId, query: { limit: 25 } }]);
+    await assert.rejects(
+      coordinator.listProjectWorkspaceTasks(projectId, { limit: '101' }),
+      (error: unknown) =>
+        error instanceof CoordinatorError &&
+        error.statusCode === 422 &&
+        error.code === 'invalid_input',
+    );
+  });
+
+  it('translates archived-project admission failures into a stable conflict', async () => {
+    const denials: string[] = [];
+    const coordinator = testCoordinator(
+      {
+        admitRun: async () => {
+          throw new StoreError(
+            'project_archived',
+            'Archived-project task associations cannot be changed or admitted to run.',
+            409,
+          );
+        },
+      } as unknown as PostgresRunStore,
+      { send: async () => 'job', findJobs: async () => [] },
+      new MockRuntimeAdapter(),
+      undefined,
+      {
+        ...defaultAuthorizationStore,
+        recordEnforcementDenied: async (
+          _authorizationId: string,
+          _taskId: string,
+          reason: string,
+        ) => {
+          denials.push(reason);
+        },
+      },
+    );
+    await assert.rejects(
+      coordinator.startRun('task-0001', 'idempotency-key-0001', authId),
+      (error: unknown) =>
+        error instanceof CoordinatorError &&
+        error.code === 'project_archived' &&
+        error.statusCode === 409 &&
+        error.message ===
+          'Archived-project task associations cannot be changed or admitted to run.',
+    );
+    assert.deepEqual(denials, ['project_archived']);
+  });
+
   it('rejects admission without independent Omnis authorization', async () => {
     let admissions = 0;
     const coordinator = testCoordinator(
@@ -357,6 +426,171 @@ describe('durable mock run coordinator', () => {
     assert.equal(state.failureMessage, undefined);
   });
 
+  it('exercises the worker adapter boundary with a credential-free fake app-server stream', async () => {
+    const adapter = new FakeCodexAppServerRuntimeAdapter();
+    const { coordinator, state } = lifecycleHarness(adapter);
+
+    await coordinator.handleQueueJob({ runId: lifecycleRun.id });
+
+    assert.equal(adapter.kind, 'mock');
+    assert.equal(adapter.discoverCapabilities().synthetic, true);
+    assert.equal(state.completedOutput, 'Synthetic app-server result.');
+    assert.deepEqual(state.outputEvents, [
+      'Synthetic app-server delta 1.',
+      'Synthetic app-server delta 2.',
+    ]);
+    assert.deepEqual(adapter.protocol.methods, [
+      'initialize',
+      'initialized',
+      'thread/start',
+      'turn/start',
+    ]);
+    assert.equal(adapter.protocol.transport, 'in-process');
+    assert.equal(adapter.protocol.usesCredentials, false);
+    assert.equal(adapter.protocol.launchesNativeProcess, false);
+  });
+
+  it('rejects tool requests from the fake protocol without emitting them as run authority', async () => {
+    const adapter = new FakeCodexAppServerRuntimeAdapter({ mode: 'tool-request' });
+    const { coordinator, state } = lifecycleHarness(adapter);
+
+    await coordinator.handleQueueJob({ runId: lifecycleRun.id });
+
+    assert.equal(state.completedOutput, undefined);
+    assert.deepEqual(state.outputEvents, []);
+    assert.equal(
+      state.failureMessage,
+      'The mock runtime failed inside its isolated execution environment.',
+    );
+  });
+
+  it(
+    'fails a malformed fake turn frame without completing or waiting for cancellation',
+    { timeout: 2_000 },
+    async () => {
+      const adapter = new FakeCodexAppServerRuntimeAdapter({ mode: 'malformed-turn-frame' });
+      const { coordinator, state } = lifecycleHarness(adapter);
+      await coordinator.handleQueueJob({ runId: lifecycleRun.id });
+      assert.equal(state.completedOutput, undefined);
+      assert.equal(state.cancelled, false);
+      assert.equal(state.interrupted, false);
+      assert.equal(
+        state.failureMessage,
+        'The mock runtime failed inside its isolated execution environment.',
+      );
+    },
+  );
+
+  it('turns worker cancellation into a correlated fake app-server interrupt', async () => {
+    const adapter = new FakeCodexAppServerRuntimeAdapter({ mode: 'pending' });
+    const { coordinator, state } = lifecycleHarness(adapter);
+
+    const execution = coordinator.handleQueueJob({ runId: lifecycleRun.id });
+    await adapter.protocol.waitUntilTurnStarted();
+    await coordinator.stopRun(lifecycleRun.id);
+    await execution;
+
+    assert.deepEqual(adapter.protocol.methods, [
+      'initialize',
+      'initialized',
+      'thread/start',
+      'turn/start',
+      'turn/interrupt',
+    ]);
+    assert.equal(state.cancelled, true);
+    assert.equal(state.interrupted, false);
+    assert.equal(state.completedOutput, undefined);
+  });
+
+  it('does not treat an interrupt acknowledgement as proof of terminal cancellation', async () => {
+    const adapter = new FakeCodexAppServerRuntimeAdapter({ mode: 'pending-unconfirmed-interrupt' });
+    const { coordinator, state } = lifecycleHarness(adapter);
+
+    const execution = coordinator.handleQueueJob({ runId: lifecycleRun.id });
+    await adapter.protocol.waitUntilTurnStarted();
+    await coordinator.stopRun(lifecycleRun.id);
+    await execution;
+
+    assert.equal(state.cancelled, false);
+    assert.equal(state.interrupted, true);
+  });
+
+  for (const mode of [
+    'pending-wrong-turn',
+    'pending-wrong-status',
+    'pending-malformed-ack',
+    'pending-invalid-ack',
+    'pending-wrong-response-id',
+    'pending-malformed-terminal',
+    'pending-invalid-terminal',
+    'pending-disconnect',
+    'pending-after-ack-disconnect',
+  ] as const) {
+    it(`does not confirm fake cancellation for ${mode}`, { timeout: 2_000 }, async () => {
+      const adapter = new FakeCodexAppServerRuntimeAdapter({ mode });
+      const { coordinator, state } = lifecycleHarness(adapter);
+      const execution = coordinator.handleQueueJob({ runId: lifecycleRun.id });
+      await adapter.protocol.waitUntilTurnStarted();
+      await coordinator.stopRun(lifecycleRun.id);
+      await execution;
+
+      assert.equal(adapter.protocol.methods.at(-1), 'turn/interrupt');
+      assert.equal(state.cancelled, false);
+      assert.equal(state.interrupted, true);
+      assert.equal(state.completedOutput, undefined);
+      assert.equal(state.failureMessage, undefined);
+      assert.equal(
+        state.interruptionMessage,
+        'The sandbox stop could not be confirmed. The run was interrupted for safety.',
+      );
+    });
+  }
+
+  it('maps fake app-server errors and crashes to a safe synthetic failure', async () => {
+    for (const mode of ['failed', 'crashed'] as const) {
+      const adapter = new FakeCodexAppServerRuntimeAdapter({ mode });
+      const { coordinator, state } = lifecycleHarness(adapter);
+
+      await coordinator.handleQueueJob({ runId: lifecycleRun.id });
+
+      assert.equal(state.completedOutput, undefined);
+      assert.equal(
+        state.failureMessage,
+        'The mock runtime failed inside its isolated execution environment.',
+      );
+    }
+  });
+
+  it('keeps fake app-server timeout behavior bounded and synthetic', async () => {
+    const adapter = new FakeCodexAppServerRuntimeAdapter({ mode: 'timeout' });
+    const { coordinator, state } = lifecycleHarness(adapter);
+
+    await coordinator.handleQueueJob({ runId: lifecycleRun.id });
+
+    assert.equal(state.completedOutput, undefined);
+    assert.equal(state.failureMessage, 'The sandbox execution exceeded its time limit.');
+  });
+
+  it('rejects unsupported tool methods and oversized protocol frames', async () => {
+    const adapter = new FakeCodexAppServerRuntimeAdapter();
+
+    await assert.rejects(adapter.protocol.request('command/exec'), /rejected/);
+    await assert.rejects(
+      adapter.protocol.request('initialize', { padding: 'x'.repeat(20_000) }),
+      /input bound/,
+    );
+  });
+
+  it('rejects provider-style control and credential-bearing protocol requests', async () => {
+    const adapter = new FakeCodexAppServerRuntimeAdapter();
+
+    await assert.rejects(
+      adapter.protocol.request('account/login/start', { credential: 'synthetic-canary' }),
+      /rejected/,
+    );
+    assert.deepEqual(adapter.protocol.methods, ['account/login/start']);
+  });
+
   it('passes PostgreSQL active leases to sandbox orphan recovery after reconciliation', async () => {
     let resolvedCandidates: readonly string[] = [];
     const store = {
@@ -505,6 +739,7 @@ function lifecycleHarness(runtime: RuntimeAdapter): {
   state: {
     completedOutput?: string;
     failureMessage?: string;
+    outputEvents: string[];
     cancelled: boolean;
     interrupted: boolean;
     interruptionMessage?: string;
@@ -513,19 +748,29 @@ function lifecycleHarness(runtime: RuntimeAdapter): {
   const state: {
     completedOutput?: string;
     failureMessage?: string;
+    outputEvents: string[];
     cancelled: boolean;
     interrupted: boolean;
     interruptionMessage?: string;
   } = {
     cancelled: false,
     interrupted: false,
+    outputEvents: [],
   };
   const store = {
     getRun: async () => ({ ...lifecycleRun, status: 'queued' as const }),
     beginExecution: async () => ({ run: lifecycleRun, started: true, generation: 1, events: [] }),
     getTask: async () => lifecycleTask,
     renewLease: async () => 'renewed' as const,
-    appendOutput: async () => undefined,
+    appendOutput: async (
+      _runId: string,
+      _workerId: string,
+      _generation: number,
+      message: string,
+    ) => {
+      state.outputEvents.push(message);
+      return undefined;
+    },
     completeRun: async (_runId: string, _workerId: string, _generation: number, output: string) => {
       state.completedOutput = output;
       return { run: { ...lifecycleRun, status: 'completed' as const }, events: [] };

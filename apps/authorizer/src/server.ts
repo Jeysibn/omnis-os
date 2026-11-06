@@ -1,4 +1,11 @@
-import { createPool, PostgresAuthorizationStore } from '@omnis/db';
+import {
+  createPool,
+  PostgresAuthorizationStore,
+  PostgresProjectManagementStore,
+  PostgresProjectMilestoneStore,
+  PostgresProjectEpicStore,
+  PostgresConnectorAuthorizationStore,
+} from '@omnis/db';
 import { chmod, lstat, mkdir, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { createAuthorizerApp } from './app.ts';
@@ -16,11 +23,28 @@ const store = new PostgresAuthorizationStore(pool, pool, {
     env.agentIdempotencyKey,
     env.agentIdempotencyKeyVersion,
   ),
+  projectManagement: new PostgresProjectManagementStore(
+    pool,
+    env.agentIdempotencyKey,
+    env.agentIdempotencyKeyVersion,
+  ),
+  projectMilestones: new PostgresProjectMilestoneStore(
+    pool,
+    env.agentIdempotencyKey,
+    env.agentIdempotencyKeyVersion,
+  ),
+  projectEpics: new PostgresProjectEpicStore(
+    pool,
+    env.agentIdempotencyKey,
+    env.agentIdempotencyKeyVersion,
+  ),
 });
+const connectorStore = new PostgresConnectorAuthorizationStore(pool);
 await store.recordExpiredAuthorizations();
 
 const app = createAuthorizerApp({
   store,
+  connectorStore,
   serviceToken: env.serviceToken,
   checkDatabase: async () => {
     await pool.query('SELECT 1');

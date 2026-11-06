@@ -12,10 +12,21 @@ export {
   PostgresDepartmentManagementStore,
 } from './department-management-store.ts';
 export type { DepartmentStoreErrorCode } from './department-management-store.ts';
+export { ProjectStoreError, PostgresProjectManagementStore } from './project-management-store.ts';
+export type { ProjectStoreErrorCode } from './project-management-store.ts';
+export { MilestoneStoreError, PostgresProjectMilestoneStore } from './project-milestone-store.ts';
+export type { MilestoneStoreErrorCode } from './project-milestone-store.ts';
+export { EpicStoreError, PostgresProjectEpicStore } from './project-epic-store.ts';
+export type { EpicStoreErrorCode } from './project-epic-store.ts';
 export {
   PostgresAuthorizationStore,
   PostgresRuntimeAuthorizationReader,
 } from './authorization-store.ts';
+export {
+  ConnectorAuthorizationStoreError,
+  PostgresConnectorAuthorizationStore,
+} from './connector-authorization-store.ts';
+export type { ConnectorAuthorizationStoreErrorCode } from './connector-authorization-store.ts';
 export type {
   RuntimeAuthorizationRecord,
   RuntimeAuthorizationReader,

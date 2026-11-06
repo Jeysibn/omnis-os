@@ -18,7 +18,6 @@ import {
   FolderKanban,
   ListChecks,
   LockKeyhole,
-  LogOut,
   Play,
   Plus,
   ShieldCheck,
@@ -39,6 +38,7 @@ import {
 import { ApiRequestError, request } from './api.js';
 import { AgentsWorkspace } from './agents/AgentsWorkspace.js';
 import { DepartmentsWorkspace } from './departments/DepartmentsWorkspace.js';
+import { AppHeader } from './shell/AppHeader.js';
 
 type Owner = { id: string; displayName: string };
 type Page = 'command-center' | 'tasks' | 'runs' | 'agents' | 'departments';
@@ -812,38 +812,13 @@ function App() {
       <a className="skip-link" href="#main-content" onClick={skipToMain}>
         Skip to main content
       </a>
-      <header className="topbar">
-        <Brand />
-        <nav className="primary-nav" aria-label="Primary navigation">
-          {navItems.map((item) => (
-            <a
-              key={item.id}
-              href={`#${item.id}`}
-              aria-current={page === item.id ? 'page' : undefined}
-              className={page === item.id ? 'nav-active' : ''}
-            >
-              <item.icon size={16} />
-              <span>{item.label}</span>
-            </a>
-          ))}
-        </nav>
-        <div className="topbar-actions">
-          <div className="owner-chip">
-            <span className="owner-avatar" aria-hidden="true">
-              {owner.displayName.slice(0, 1)}
-            </span>
-            <span>{owner.displayName}</span>
-          </div>
-          <button
-            className="icon-button"
-            onClick={() => void signOut()}
-            aria-label="Sign out"
-            title="Sign out"
-          >
-            <LogOut size={17} />
-          </button>
-        </div>
-      </header>
+      <AppHeader
+        brand={<Brand />}
+        items={navItems}
+        activeId={page}
+        ownerName={owner.displayName}
+        onSignOut={() => void signOut()}
+      />
       <main id="main-content" className="main-content" tabIndex={-1}>
         <section className="page-heading">
           <div>

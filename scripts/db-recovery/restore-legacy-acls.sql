@@ -19,7 +19,6 @@ ALTER DEFAULT PRIVILEGES FOR ROLE omnis_migrator IN SCHEMA pgboss
 
 GRANT SELECT ON omnis.tasks, omnis.runs, omnis.run_events, omnis.run_idempotency
   TO omnis_runtime;
-GRANT INSERT (id, title, detail) ON omnis.tasks TO omnis_runtime;
 GRANT UPDATE (status) ON omnis.tasks TO omnis_runtime;
 GRANT INSERT (id, task_id, task_title) ON omnis.runs TO omnis_runtime;
 GRANT UPDATE (
@@ -180,7 +179,140 @@ BEGIN
   END IF;
 END
 $agent_lifecycle_acl$;
-GRANT USAGE, SELECT ON SEQUENCE omnis.task_id_seq, omnis.run_id_seq TO omnis_runtime;
+
+DO $project_management_acl$
+BEGIN
+  IF pg_catalog.to_regclass('omnis.projects') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON omnis.projects, omnis.project_management_audit, omnis.project_management_idempotency FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.create_project(text,text,text,text,text,uuid,integer,bytea)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.create_project(text,text,text,text,text,uuid,integer,bytea) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.create_project(text,text,text,text,text,uuid,integer,bytea) TO omnis_authorizer';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.list_projects()') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.list_projects() FROM PUBLIC, omnis_runtime, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.list_projects() TO omnis_authorizer';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.get_project(text)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.get_project(text) FROM PUBLIC, omnis_runtime, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.get_project(text) TO omnis_authorizer';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.update_project(text,integer,text,text,text,uuid,integer,bytea)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.update_project(text, integer, text, text, text, uuid, integer, bytea) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.update_project(text, integer, text, text, text, uuid, integer, bytea) TO omnis_authorizer';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.archive_project(text,integer,uuid,integer,bytea)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.archive_project(text, integer, uuid, integer, bytea) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.archive_project(text, integer, uuid, integer, bytea) TO omnis_authorizer';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.reject_project_audit_mutation()') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.reject_project_audit_mutation() FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+END
+$project_management_acl$;
+DO $project_milestone_acl$
+BEGIN
+  IF pg_catalog.to_regclass('omnis.project_milestones') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON omnis.project_milestones, omnis.project_milestone_management_audit FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.reject_project_milestone_audit_mutation()') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.reject_project_milestone_audit_mutation() FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.list_project_milestones(text,timestamptz,text,integer)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.list_project_milestones(text,timestamptz,text,integer) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.list_project_milestones(text,timestamptz,text,integer) TO omnis_authorizer';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.get_project_milestone(text,text)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.get_project_milestone(text,text) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.get_project_milestone(text,text) TO omnis_authorizer';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.create_project_milestone(text,text,text,text,date,uuid,integer,bytea)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.create_project_milestone(text,text,text,text,date,uuid,integer,bytea) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.create_project_milestone(text,text,text,text,date,uuid,integer,bytea) TO omnis_authorizer';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.update_project_milestone(text,text,integer,text,text,boolean,date,boolean,text,uuid,integer,bytea)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.update_project_milestone(text,text,integer,text,text,boolean,date,boolean,text,uuid,integer,bytea) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.update_project_milestone(text,text,integer,text,text,boolean,date,boolean,text,uuid,integer,bytea) TO omnis_authorizer';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.archive_project_milestone(text,text,integer,uuid,integer,bytea)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.archive_project_milestone(text,text,integer,uuid,integer,bytea) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.archive_project_milestone(text,text,integer,uuid,integer,bytea) TO omnis_authorizer';
+  END IF;
+END
+$project_milestone_acl$;
+DO $project_epic_acl$
+BEGIN
+  IF pg_catalog.to_regclass('omnis.project_epics') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON omnis.project_epics, omnis.project_epic_management_audit FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.reject_project_epic_audit_mutation()') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.reject_project_epic_audit_mutation() FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.list_project_epics(text,timestamptz,text,integer)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.list_project_epics(text,timestamptz,text,integer) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.list_project_epics(text,timestamptz,text,integer) TO omnis_authorizer';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.get_project_epic(text,text)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.get_project_epic(text,text) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.get_project_epic(text,text) TO omnis_authorizer';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.create_project_epic(text,text,text,text,uuid,integer,bytea)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.create_project_epic(text,text,text,text,uuid,integer,bytea) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.create_project_epic(text,text,text,text,uuid,integer,bytea) TO omnis_authorizer';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.update_project_epic(text,text,integer,text,text,boolean,text,uuid,integer,bytea)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.update_project_epic(text,text,integer,text,text,boolean,text,uuid,integer,bytea) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.update_project_epic(text,text,integer,text,text,boolean,text,uuid,integer,bytea) TO omnis_authorizer';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.archive_project_epic(text,text,integer,uuid,integer,bytea)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.archive_project_epic(text,text,integer,uuid,integer,bytea) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.archive_project_epic(text,text,integer,uuid,integer,bytea) TO omnis_authorizer';
+  END IF;
+  IF pg_catalog.to_regclass('omnis.task_epic_associations') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON omnis.task_epic_associations FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+  IF pg_catalog.to_regclass('omnis.task_epic_management_audit') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON omnis.task_epic_management_audit FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.reject_task_epic_audit_mutation()') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.reject_task_epic_audit_mutation() FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.get_task_epic(text)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.get_task_epic(text) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.get_task_epic(text) TO omnis_authorizer';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.list_project_epic_tasks(text,text,timestamptz,text,integer)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.list_project_epic_tasks(text,text,timestamptz,text,integer) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.list_project_epic_tasks(text,text,timestamptz,text,integer) TO omnis_authorizer';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.set_task_epic(text,integer,text,uuid,bytea)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.set_task_epic(text,integer,text,uuid,bytea) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.set_task_epic(text,integer,text,uuid,bytea) TO omnis_authorizer';
+  END IF;
+END
+$project_epic_acl$;
+GRANT USAGE, SELECT ON SEQUENCE omnis.run_id_seq TO omnis_runtime;
+DO $task_project_acl$
+BEGIN
+  IF pg_catalog.to_regprocedure('omnis.create_task(text,text,text,uuid,bytea)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.create_task(text, text, text, uuid, bytea) FROM PUBLIC, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.create_task(text, text, text, uuid, bytea) TO omnis_runtime';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.set_task_project(text,integer,text,uuid,bytea)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.set_task_project(text, integer, text, uuid, bytea) FROM PUBLIC, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.set_task_project(text, integer, text, uuid, bytea) TO omnis_runtime';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.enforce_task_project_run_admission()') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.enforce_task_project_run_admission() FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.reject_task_project_audit_mutation()') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.reject_task_project_audit_mutation() FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+END
+$task_project_acl$;
+REVOKE ALL ON TABLE omnis.task_project_management_audit,
+  omnis.task_project_management_idempotency FROM PUBLIC, omnis_runtime,
+  omnis_authorizer, omnis_launcher;
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA pgboss TO omnis_runtime;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA pgboss TO omnis_runtime;

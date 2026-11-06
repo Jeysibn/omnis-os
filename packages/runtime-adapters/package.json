@@ -2,11 +2,17 @@
   "name": "@omnis/runtime-adapters",
   "private": true,
   "type": "module",
-  "exports": { ".": "./src/index.ts", "./sandbox-error": "./src/sandbox-error.ts" },
+  "exports": {
+    ".": "./src/index.ts",
+    "./sandbox-error": "./src/sandbox-error.ts",
+    "./synthetic-broker": "./src/synthetic-broker.ts"
+  },
   "scripts": {
     "build": "pnpm typecheck",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --experimental-strip-types --test src/index.test.ts"
+    "test": "node --experimental-strip-types --test src/index.test.ts src/synthetic-broker.test.ts"
   },
-  "dependencies": { "@omnis/contracts": "workspace:*" }
+  "dependencies": {
+    "@omnis/contracts": "workspace:*"
+  }
 }
