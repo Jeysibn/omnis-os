@@ -41,13 +41,17 @@ if (socketPath) {
     let response = '';
     socket.setEncoding('utf8');
     socket.on('data', (chunk) => { response += chunk; });
-    socket.once('connect', () => socket.end('probe'));
+    let connected = false;
+    socket.once('connect', () => { connected = true; socket.write('probe'); });
     socket.once('end', () => resolve({ kind: 'connected', response }));
-    socket.once('error', (error) => resolve({ kind: 'error', code: error.code }));
-    setTimeout(() => { socket.destroy(); resolve({ kind: 'error', code: 'ETIMEDOUT' }); }, 2000).unref();
+    socket.once('error', (error) => resolve({ kind: 'error', code: error.code, connected }));
+    setTimeout(() => { socket.destroy(); resolve({ kind: 'error', code: 'ETIMEDOUT', connected, response }); }, 2000).unref();
   });
   process.stdout.write(JSON.stringify(result));
-  if (process.env.OMNIS_EXPECT_SOCKET === 'allow') assert.deepEqual(result, { kind: 'connected', response: 'ok' });
+  if (process.env.OMNIS_EXPECT_SOCKET === 'allow') {
+    assert.equal(result.kind, 'connected');
+    assert.equal(result.response, 'ok');
+  }
   else if (process.env.OMNIS_EXPECT_SOCKET === 'deny') {
     assert.equal(result.kind, 'error');
     if (process.env.OMNIS_EXPECT_SOCKET_ERROR) assert.equal(result.code, process.env.OMNIS_EXPECT_SOCKET_ERROR);
@@ -238,6 +242,25 @@ async function openSyntheticSocket(path, owner, group) {
   return server;
 }
 
+async function verifyHostSocketPositiveControl(path) {
+  const response = await new Promise((resolve, reject) => {
+    const socket = net.createConnection(path);
+    let text = '';
+    socket.setEncoding('utf8');
+    socket.on('data', (chunk) => {
+      text += chunk;
+    });
+    socket.once('connect', () => socket.write('probe'));
+    socket.once('end', () => resolve(text));
+    socket.once('error', reject);
+    setTimeout(() => {
+      socket.destroy();
+      reject(new Error('synthetic host socket positive control timed out'));
+    }, 2000).unref();
+  });
+  assert.equal(response, 'ok');
+}
+
 async function closeSyntheticSocket(server, path) {
   if (server) {
     activeServers.delete(server);
@@ -306,6 +329,7 @@ async function verifySocketBoundaries() {
     40003,
     launcherGid,
   );
+  await verifyHostSocketPositiveControl(join(apiSocketDir, 'authorizer.sock'));
   const apiContainer = `${resourcePrefix}-api-socket`;
   const workerContainer = `${resourcePrefix}-worker-socket`;
   const apiMount = socketMount(apiSocketDir, '/run/omnis-authorizer');
@@ -511,7 +535,7 @@ function verifyApplicationImageFailsClosed(image, expectedMessage) {
 function verifyRuntimeImageRestrictions() {
   for (const [image, name, modules] of [
     [apiImage, 'api-runtime-probe', ['fastify']],
-    [workerImage, 'worker-runtime-probe', ['fastify', 'pg', 'pg-boss']],
+    [workerImage, 'worker-runtime-probe', ['fastify', 'pg-boss']],
   ]) {
     const id = createOwned([
       'create',
