@@ -341,6 +341,12 @@ export function assertRuntimeAclPolicy(snapshot) {
         ((entry.object === 'authorization_audit' &&
           ['SELECT', 'INSERT'].includes(entry.privilege)) ||
           (entry.object === 'runtime_authorizations' && entry.privilege === 'SELECT') ||
+          (entry.object === 'connector_authorizations' &&
+            ['SELECT', 'INSERT'].includes(entry.privilege)) ||
+          (entry.object === 'connector_execution_attempts' &&
+            ['SELECT', 'INSERT'].includes(entry.privilege)) ||
+          (entry.object === 'connector_authorization_audit' &&
+            ['SELECT', 'INSERT'].includes(entry.privilege)) ||
           (entry.object === 'departments' && entry.privilege === 'SELECT'))
       )
         continue;
@@ -400,6 +406,24 @@ export function assertRuntimeAclPolicy(snapshot) {
         entry.object === 'runtime_authorizations' &&
         entry.privilege === 'UPDATE' &&
         ['status', 'decided_at', 'decided_by', 'revoked_at', 'revoked_by'].includes(entry.column)
+      )
+        continue;
+      if (
+        entry.objectType === 'column' &&
+        entry.schema === 'omnis' &&
+        entry.object === 'connector_authorizations' &&
+        entry.privilege === 'UPDATE' &&
+        [
+          'status',
+          'consented_at',
+          'decided_at',
+          'decided_by',
+          'revoked_at',
+          'revoked_by',
+          'revocation_generation',
+          'consumed_at',
+          'consumed_request_id',
+        ].includes(entry.column)
       )
         continue;
       throw new Error(
