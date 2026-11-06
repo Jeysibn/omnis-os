@@ -119,9 +119,14 @@ function DirectoryScreen({
   const [state, retry] = useAgentResource('directory', fetchDirectory, onUnauthorized);
   return (
     <>
-      <h2 ref={headingRef} tabIndex={-1}>
-        Agent directory
-      </h2>
+      <div className="agents-head-row">
+        <h2 ref={headingRef} tabIndex={-1}>
+          Agent directory
+        </h2>
+        <a className="secondary-button agents-manage" href="#departments">
+          Manage departments
+        </a>
+      </div>
       {state.status === 'loading' && <Loading resource="agents" />}
       {state.status === 'error' && (
         <ErrorState resource="Agents" error={state.error} onRetry={retry} />
