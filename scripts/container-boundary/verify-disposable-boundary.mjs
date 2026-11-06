@@ -43,8 +43,14 @@ if (socketPath) {
     socket.on('data', (chunk) => { response += chunk; });
     let connected = false;
     socket.once('connect', () => { connected = true; socket.write('probe'); });
-    socket.once('end', () => resolve({ kind: 'connected', response }));
-    socket.once('error', (error) => resolve({ kind: 'error', code: error.code, connected }));
+    socket.once('end', () => {
+      socket.destroy();
+      resolve({ kind: 'connected', response });
+    });
+    socket.once('error', (error) => {
+      socket.destroy();
+      resolve({ kind: 'error', code: error.code, connected });
+    });
     setTimeout(() => { socket.destroy(); resolve({ kind: 'error', code: 'ETIMEDOUT', connected, response }); }, 2000).unref();
   });
   process.stdout.write(JSON.stringify(result));
@@ -251,8 +257,14 @@ async function verifyHostSocketPositiveControl(path) {
       text += chunk;
     });
     socket.once('connect', () => socket.write('probe'));
-    socket.once('end', () => resolve(text));
-    socket.once('error', reject);
+    socket.once('end', () => {
+      socket.destroy();
+      resolve(text);
+    });
+    socket.once('error', (error) => {
+      socket.destroy();
+      reject(error);
+    });
     setTimeout(() => {
       socket.destroy();
       reject(new Error('synthetic host socket positive control timed out'));
