@@ -1,0 +1,11 @@
+# Application image packaging
+
+API and worker images retain Node 24.22.1, pnpm 12.16.1, their pinned base digest, non-root UID/GID 10001, and their existing `src/server.ts` entrypoint. Local package exports and development commands are unchanged.
+
+After `pnpm deploy --prod --legacy`, the build stage uses the repository's existing TypeScript compiler to emit JavaScript for the deployed internal workspace dependencies. It rewrites relative TypeScript extensions and deployed package exports, and removes the deployed TypeScript sources. This covers contracts, db, policy, and runtime-adapters transitively. The original workspace source and manifests are not modified. Only production dependencies and the compiled deployment tree reach the final image; the compiler stays in the build stage.
+
+This approach avoids changing shared development exports (compiling the source packages globally) or adding a bundler, runtime loader, or alternate source-resolution scheme. Existing package type checks run before deployment; the fixture regression checks transitive and subpath exports using Node with native type stripping disabled.
+
+The existing `container-images` CI job starts the actual final images without credentials or networking and requires their specific missing-configuration errors. A loader error or arbitrary nonzero exit fails the test. A separate process verifies the configured runtime UID/GID. These checks establish module loading and fail-closed configuration validation, not full application readiness: positive startup still requires separately approved database and host-service integration. The web image remains a static asset bundle.
+
+No Compose services, host socket mounts, Docker authority, provider connectivity, or deployment are introduced. Target WSL Docker, socket ownership/restart behavior, networking, and resource controls still need separately authorized verification.
