@@ -108,7 +108,9 @@ if (process.env.OMNIS_PROBE_TMP === '1') {
   fs.unlinkSync('/tmp/omnis-boundary-tmp-probe');
 }
 if (process.env.OMNIS_PROBE_NETWORK === 'positive') {
-  const response = await fetch('http://local-positive:45678/health', { signal: AbortSignal.timeout(3000) });
+  const host = process.env.OMNIS_POSITIVE_NETWORK_HOST ?? 'local-positive';
+  const port = process.env.OMNIS_POSITIVE_NETWORK_PORT ?? '45678';
+  const response = await fetch('http://' + host + ':' + port + '/health', { signal: AbortSignal.timeout(3000) });
   assert.equal(response.status, 200);
   assert.equal(await response.text(), 'ok');
   process.stdout.write('network-positive-ok');
@@ -758,11 +760,22 @@ async function verifyNetworkIsolation() {
     workerImage,
     '--input-type=module',
     '-e',
-    "const s=await import('node:http').then(({createServer})=>createServer((_,r)=>r.end('isolated')));s.listen(45679,'0.0.0.0');setInterval(()=>{},1000)",
+    "const s=await import('node:http').then(({createServer})=>createServer((_,r)=>r.end('ok')));s.listen(45679,'0.0.0.0');setInterval(()=>{},1000)",
   ]);
   const separateService = inspectContainer(separateId);
   const separateIp = separateService.NetworkSettings.Networks[separateNetwork].IPAddress;
   assert.ok(separateIp);
+  const separateNetworkPositive = probeContainer({
+    image: workerImage,
+    name: `${resourcePrefix}-separate-network-positive-probe`,
+    network: separateNetwork,
+    environment: {
+      OMNIS_PROBE_NETWORK: 'positive',
+      OMNIS_POSITIVE_NETWORK_HOST: 'isolated-service',
+      OMNIS_POSITIVE_NETWORK_PORT: '45679',
+    },
+  });
+  assert.ok(separateNetworkPositive.includes('ok'), 'separate-network positive control failed');
   const crossDenied = probeContainer({
     image: workerImage,
     name: `${resourcePrefix}-cross-network-probe`,
