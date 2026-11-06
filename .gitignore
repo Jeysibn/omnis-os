@@ -12,3 +12,5 @@ apps/web/playwright-report/
 *.log
 .DS_Store
 *:Zone.Identifier
+__pycache__/
+!.env.synthetic-broker.example
