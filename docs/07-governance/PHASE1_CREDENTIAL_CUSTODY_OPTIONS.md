@@ -66,11 +66,12 @@ OpenAI API-key requests use API Platform billing, separate from signed-in
 ChatGPT/Codex plan usage. OpenAI currently documents a separately claimed API
 credit benefit for eligible ChatGPT Pro and Business subscription owners. The
 benefit is linked to an API organization, is subject to API terms and limits,
-and does not increase ChatGPT or signed-in Codex usage limits. Eligibility,
-credit balance, and activation must be confirmed by the owner; no credit or
-subscription entitlement is assumed. Any use of the API-key path still needs
-an explicit owner decision about the API organization, budget, and billing
-source. Do not silently fall back to an API key if SIWC is unavailable.
+does not increase ChatGPT or signed-in Codex usage limits, and does not cover
+Codex usage through API keys. Eligibility, credit balance, and activation must
+be confirmed by the owner; no credit or subscription entitlement is assumed.
+Any use of the API-key path still needs an explicit owner decision about the
+API organization, budget, and billing source. Do not silently fall back to an
+API key if SIWC is unavailable.
 Anthropic's current Claude Code legal documentation says developers building
 applications should use API-key authentication and may not intermediate
 Claude.ai subscription OAuth credentials for end users. Claude's API-key route
