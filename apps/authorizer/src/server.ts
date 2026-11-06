@@ -9,6 +9,11 @@ import {
 import { chmod, lstat, mkdir, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { createAuthorizerApp } from './app.ts';
+import { createBrokerAuthorizerIpcApp } from './broker-ipc-app.ts';
+import {
+  createAuthorizerDecisionSigner,
+  loadAuthorizerDecisionSigningKey,
+} from './decision-signing-key.ts';
 import { env } from './env.ts';
 import { PostgresAgentLifecycleStore } from '@omnis/db';
 
@@ -39,7 +44,18 @@ const store = new PostgresAuthorizationStore(pool, pool, {
     env.agentIdempotencyKeyVersion,
   ),
 });
-const connectorStore = new PostgresConnectorAuthorizationStore(pool);
+const signingKey = env.decisionSigningKeyFile
+  ? await loadAuthorizerDecisionSigningKey({
+      filePath: env.decisionSigningKeyFile,
+      keyId: env.decisionSigningKeyId!,
+      notBefore: env.decisionSigningKeyNotBefore!,
+      notAfter: env.decisionSigningKeyNotAfter!,
+    })
+  : undefined;
+const connectorStore = new PostgresConnectorAuthorizationStore(
+  pool,
+  signingKey ? { signDecision: createAuthorizerDecisionSigner(signingKey) } : {},
+);
 await store.recordExpiredAuthorizations();
 
 const app = createAuthorizerApp({
@@ -50,6 +66,13 @@ const app = createAuthorizerApp({
     await pool.query('SELECT 1');
   },
 });
+const brokerApp = env.brokerSocketPath
+  ? createBrokerAuthorizerIpcApp({
+      store: connectorStore,
+      brokerServiceToken: env.brokerServiceToken!,
+      apiServiceToken: env.serviceToken,
+    })
+  : undefined;
 const expiryTimer = setInterval(() => {
   void store.recordExpiredAuthorizations().catch((error: unknown) => {
     app.log.error(
@@ -66,30 +89,31 @@ app.addHook('onClose', async () => {
   await rm(env.socketPath, { force: true });
 });
 
-await mkdir(path.dirname(env.socketPath), { recursive: true, mode: 0o750 });
-const existingSocket = await lstat(env.socketPath).catch((error: NodeJS.ErrnoException) => {
-  if (error.code === 'ENOENT') return undefined;
-  throw error;
-});
-if (existingSocket) {
-  if (!existingSocket.isSocket() || existingSocket.uid !== (process.getuid?.() ?? -1)) {
-    throw new Error('Refusing to replace an unowned or non-socket authorizer path.');
-  }
-  await rm(env.socketPath);
+if (brokerApp && env.brokerSocketPath) {
+  brokerApp.addHook('onClose', async () => {
+    await rm(env.brokerSocketPath!, { force: true });
+  });
 }
-await app.listen({ path: env.socketPath });
+
 const socketMode = Number.parseInt(process.env.OMNIS_AUTHORIZER_SOCKET_MODE ?? '600', 8);
 if (![0o600, 0o660].includes(socketMode))
   throw new Error('Authorizer socket mode must be 600 or 660.');
-await chmod(env.socketPath, socketMode);
+await listenOnOwnedSocket(app, env.socketPath, socketMode);
 app.log.info('Omnis OS authorizer ready on its Unix socket');
+if (brokerApp && env.brokerSocketPath) {
+  await listenOnOwnedSocket(brokerApp, env.brokerSocketPath, env.brokerSocketMode);
+  app.log.info('Omnis OS synthetic broker authorizer IPC ready on its separate Unix socket');
+}
 
 let shutdownStarted = false;
 const shutdown = (signal: NodeJS.Signals) => {
   if (shutdownStarted) return;
   shutdownStarted = true;
   app.log.info({ signal }, 'Closing the Omnis OS authorizer.');
-  void app.close().catch((error: unknown) => {
+  void (async () => {
+    await brokerApp?.close();
+    await app.close();
+  })().catch((error: unknown) => {
     app.log.error(
       { errorType: error instanceof Error ? error.name : 'unknown' },
       'The authorizer did not close cleanly.',
@@ -99,3 +123,23 @@ const shutdown = (signal: NodeJS.Signals) => {
 };
 process.once('SIGTERM', shutdown);
 process.once('SIGINT', shutdown);
+
+async function listenOnOwnedSocket(
+  target: typeof app,
+  socketPath: string,
+  mode: number,
+): Promise<void> {
+  await mkdir(path.dirname(socketPath), { recursive: true, mode: 0o750 });
+  const existingSocket = await lstat(socketPath).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return undefined;
+    throw error;
+  });
+  if (existingSocket) {
+    if (!existingSocket.isSocket() || existingSocket.uid !== (process.getuid?.() ?? -1)) {
+      throw new Error('Refusing to replace an unowned or non-socket authorizer path.');
+    }
+    await rm(socketPath);
+  }
+  await target.listen({ path: socketPath });
+  await chmod(socketPath, mode);
+}

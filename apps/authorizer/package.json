@@ -6,7 +6,7 @@
     "dev": "node --watch --experimental-strip-types --env-file=../../.env.authorizer src/server.ts",
     "build": "pnpm typecheck",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --experimental-strip-types --test src/app.test.ts"
+    "test": "node --experimental-strip-types --test src/app.test.ts src/broker-ipc-app.test.ts src/decision-signing-key.test.ts"
   },
   "dependencies": {
     "@omnis/contracts": "workspace:*",
