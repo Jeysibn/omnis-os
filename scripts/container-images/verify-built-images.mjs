@@ -39,6 +39,14 @@ for (const expected of images) {
     throw new Error(`${expected.name} has an unexpected startup command.`);
   }
   if (
+    !expected.command &&
+    (image.Config.Cmd || image.Config.Entrypoint || image.Config.ExposedPorts)
+  ) {
+    throw new Error(
+      `${expected.name} must remain a static-asset image without a server command or ports.`,
+    );
+  }
+  if (
     JSON.stringify(image.Config.Env ?? []).match(/(OMNIS_|DATABASE_URL|PASSWORD|TOKEN|SECRET)/i)
   ) {
     throw new Error(
@@ -69,9 +77,13 @@ try {
     }
   }
 
-  const containerId = execFileSync('docker', ['create', 'omnis-web-assets:ci'], {
-    encoding: 'utf8',
-  }).trim();
+  const containerId = execFileSync(
+    'docker',
+    ['create', '--entrypoint', '/__inspection_only__', 'omnis-web-assets:ci'],
+    {
+      encoding: 'utf8',
+    },
+  ).trim();
   try {
     execFileSync('docker', [
       'cp',
