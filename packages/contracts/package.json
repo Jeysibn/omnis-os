@@ -5,12 +5,13 @@
   "exports": {
     ".": "./src/index.ts",
     "./connector-authorization": "./src/connector-authorization.ts",
-    "./connector-broker": "./src/connector-broker.ts"
+    "./connector-broker": "./src/connector-broker.ts",
+    "./broker-ipc": "./src/broker-ipc.ts"
   },
   "scripts": {
     "build": "pnpm typecheck",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --experimental-strip-types --test src/index.test.ts src/connector-authorization.test.ts src/connector-broker.test.ts"
+    "test": "node --experimental-strip-types --test src/index.test.ts src/connector-authorization.test.ts src/connector-broker.test.ts src/broker-ipc.test.ts"
   },
   "dependencies": {
     "zod": "4.6.7"

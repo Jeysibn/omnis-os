@@ -163,6 +163,10 @@ const postgresSuite = describe(
         fixture.request,
         attemptRequestId,
       );
+      assert.deepEqual(
+        (await brokerStore.listBrokerRecoveryCandidates(10, null)).map((candidate) => candidate.id),
+        [admission.attempt.id],
+      );
       const verified = verifyConnectorDecisionEnvelope(admission.envelope, [
         {
           keyId: signingKey.keyId,
@@ -195,6 +199,12 @@ const postgresSuite = describe(
         fixture.renderedRequest,
       );
       assert.equal(submitting.status, 'submitting');
+      assert.equal(
+        (await brokerStore.listBrokerRecoveryCandidates(10, null)).find(
+          (candidate) => candidate.id === submitting.id,
+        )?.status,
+        'submitting',
+      );
       const credentialCanary = 'SYNTHETIC-CREDENTIAL-CANARY-DO-NOT-LOG';
       await assert.rejects(
         brokerStore.recordSyntheticProviderEvent(admission.attempt.id, {
@@ -249,6 +259,12 @@ const postgresSuite = describe(
         },
       });
       assert.equal(completed.status, 'completed');
+      assert.equal(
+        (await brokerStore.listBrokerRecoveryCandidates(10, null)).some(
+          (candidate) => candidate.id === completed.id,
+        ),
+        false,
+      );
       assert.equal(completed.responseText, 'Synthetic response fixture.');
       await assert.rejects(
         brokerStore.beginSyntheticSubmission(
