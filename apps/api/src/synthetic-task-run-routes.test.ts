@@ -63,6 +63,8 @@ function createApp(input: {
   ownerAllowed?: boolean;
   mutationAllowed?: boolean;
   consumed?: boolean;
+  throwWorker?: boolean;
+  executionOverride?: unknown;
 }) {
   const app = Fastify();
   const calls: string[] = [];
@@ -87,7 +89,7 @@ function createApp(input: {
         return { ...grant, status: 'revoked' } as TResult;
       }
       if (path.endsWith('/execution')) {
-        return {
+        return (input.executionOverride ?? {
           version: 'omnis.synthetic-task-run.v1',
           taskId,
           attempt: {
@@ -97,10 +99,11 @@ function createApp(input: {
             status: 'completed',
             synthetic: true,
             createdAt: '2026-11-07T00:00:00.000Z',
+            submissionStartedAt: '2026-11-07T00:00:01.000Z',
             responseText: 'Synthetic response',
           },
           usage: { kind: 'unknown', reason: 'not_reported', billingExposure: 'unknown' },
-        } as TResult;
+        }) as TResult;
       }
       return (
         input.authorized === false
@@ -112,6 +115,7 @@ function createApp(input: {
     },
     forwardWorker: async <TResult>(_path: string, init: RequestInit): Promise<TResult> => {
       calls.push('worker');
+      if (input.throwWorker) throw new Error('worker outcome unavailable');
       return (input.onWorker?.(JSON.parse(String(init.body))) ?? {
         version: 'omnis.synthetic-task-run.v1',
         taskId,
@@ -183,6 +187,7 @@ describe('owner synthetic task run routes', () => {
     assert.deepEqual(calls, [
       `authorizer:/internal/v1/connector-authorizations/${authorizationId}`,
       'worker',
+      `authorizer:/internal/v1/connector-authorizations/${authorizationId}/execution`,
     ]);
     assert.equal(workerPayload?.requestId, requestId);
     assert.equal(workerPayload?.renderedRequest, renderedRequest);
@@ -223,6 +228,23 @@ describe('owner synthetic task run routes', () => {
     await app.close();
   });
 
+  it('reports an uncertain worker outcome without retrying or inventing completion', async () => {
+    const { app, calls } = createApp({ throwWorker: true });
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/v1/tasks/${taskId}/synthetic-runs`,
+      headers: { 'idempotency-key': requestId },
+      payload: { authorizationId, request: binding, renderedRequest },
+    });
+    assert.equal(response.statusCode, 503);
+    assert.equal(response.json().error.code, 'synthetic_worker_outcome_unknown');
+    assert.deepEqual(calls, [
+      `authorizer:/internal/v1/connector-authorizations/${authorizationId}`,
+      'worker',
+    ]);
+    await app.close();
+  });
+
   it('fails closed when the broker response correlation differs from the approved grant', async () => {
     const { app } = createApp({
       onWorker: () => ({
@@ -245,6 +267,38 @@ describe('owner synthetic task run routes', () => {
     });
     assert.equal(response.statusCode, 503);
     assert.equal(response.json().error.code, 'synthetic_broker_correlation_unknown');
+    await app.close();
+  });
+
+  it('does not return a broker result that disagrees with the durable authorizer attempt', async () => {
+    const { app } = createApp({
+      onWorker: () => ({
+        version: 'omnis.synthetic-task-run.v1',
+        taskId,
+        authorizationId,
+        requestId,
+        correlationId: grant.correlationId,
+        attemptId: '99999999-9999-4999-8999-999999999999',
+        status: 'completed',
+        submitted: true,
+        usage: {
+          kind: 'measured',
+          source: 'synthetic-provider',
+          inputUnits: 1,
+          outputUnits: 1,
+          billingExposure: 'synthetic-only',
+        },
+        responseText: 'forged completion',
+      }),
+    });
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/v1/tasks/${taskId}/synthetic-runs`,
+      headers: { 'idempotency-key': requestId },
+      payload: { authorizationId, request: binding, renderedRequest },
+    });
+    assert.equal(response.statusCode, 503);
+    assert.equal(response.json().error.code, 'synthetic_broker_state_mismatch');
     await app.close();
   });
 

@@ -83,15 +83,26 @@ export function registerSyntheticTaskRunRoutes(
           },
         });
       }
-      const result = await toWorker(
-        `/internal/v1/tasks/${encodeURIComponent(taskId)}/synthetic-runs`,
-        {
-          method: 'POST',
-          headers: { 'idempotency-key': requestId },
-          body: JSON.stringify(body.data),
-        },
-        (value) => SyntheticTaskRunResponseSchema.parse(value),
-      );
+      let result: ReturnType<typeof SyntheticTaskRunResponseSchema.parse>;
+      try {
+        result = await toWorker(
+          `/internal/v1/tasks/${encodeURIComponent(taskId)}/synthetic-runs`,
+          {
+            method: 'POST',
+            headers: { 'idempotency-key': requestId },
+            body: JSON.stringify(body.data),
+          },
+          (value) => SyntheticTaskRunResponseSchema.parse(value),
+        );
+      } catch {
+        return reply.code(503).send({
+          error: {
+            code: 'synthetic_worker_outcome_unknown',
+            message:
+              'The worker did not confirm the execution outcome. Read the durable execution status before retrying.',
+          },
+        });
+      }
       if (result.correlationId !== authorization.correlationId) {
         return reply.code(503).send({
           error: {
@@ -100,7 +111,41 @@ export function registerSyntheticTaskRunRoutes(
           },
         });
       }
-      return reply.send(result);
+      let execution: ReturnType<typeof SyntheticTaskRunDetailSchema.parse>;
+      try {
+        execution = await toAuthorizer(
+          `/internal/v1/connector-authorizations/${encodeURIComponent(authorizationId)}/execution`,
+          {},
+          (value) => SyntheticTaskRunDetailSchema.parse(value),
+        );
+      } catch {
+        return reply.code(503).send({
+          error: {
+            code: 'synthetic_execution_state_unknown',
+            message:
+              'The durable execution state could not be confirmed. Read the execution status before retrying.',
+          },
+        });
+      }
+      const attempt = execution.attempt;
+      if (
+        execution.taskId !== taskId ||
+        attempt.authorizationId !== authorizationId ||
+        attempt.requestId !== requestId ||
+        attempt.id !== result.attemptId ||
+        attempt.status !== result.status ||
+        Boolean(attempt.submissionStartedAt) !== result.submitted ||
+        (attempt.responseText ?? undefined) !== result.responseText
+      ) {
+        return reply.code(503).send({
+          error: {
+            code: 'synthetic_broker_state_mismatch',
+            message:
+              'The broker result did not match durable execution state. Read the execution status before retrying.',
+          },
+        });
+      }
+      return reply.send({ ...result, usage: execution.usage });
     },
   );
 
