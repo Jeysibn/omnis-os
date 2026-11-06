@@ -271,11 +271,38 @@ const keysOnScreen = (page: Page) =>
     .locator('[data-message-key]')
     .evaluateAll((nodes) => nodes.map((node) => node.getAttribute('data-message-key')));
 
+/**
+ * Independently anchored wording for every rejected rename message. These literals are typed
+ * here on purpose and never derived from the production catalog: a copy change in
+ * `messages.ts` must fail these tests until the expectation is reviewed and updated by hand.
+ */
+const csrfCopy = 'Your secure session needs refreshing. The change was not applied. Try again.';
+const invalidInputCopy =
+  'The server rejected these values. Check the name and slug, and remove anything that looks like a credential or secret.';
+const renameCopy: Partial<Record<MessageKey, string>> = {
+  'rejected.rename.csrf': csrfCopy,
+  'rejected.rename.invalidInput': invalidInputCopy,
+  'rejected.rename.notFound': "The server reports that this department doesn't exist.",
+  'rejected.rename.readbackFailed':
+    "The server rejected the rename. Omnis OS couldn't check why. The slug may already be in use, or the department may be archived.",
+  'rejected.rename.absent':
+    "The server rejected the rename, and this department doesn't appear in the latest list.",
+  'rejected.rename.archived':
+    "The server rejected the rename. The department currently appears as archived, so it can't be changed.",
+  'rejected.rename.conflictOtherSlug':
+    'Another department currently uses this slug (an archived department keeps its slug). Choose a different slug.',
+  'rejected.rename.inconclusive':
+    "The server rejected the rename, but the latest list doesn't show why. Something may have changed in between. Reload and try again.",
+};
+/** Literal wording for rejected rename keys; every other key still reads from the catalog. */
+const expectedText = (key: MessageKey, params: MessageParams = {}) =>
+  renameCopy[key] ?? messageText({ key, params });
+
 /** Asserts the catalog key, then the exact catalogued text, inside one scope. */
 /** A field error carries its catalog key on the error element itself. */
 const expectField = (page: Page, key: MessageKey, params: MessageParams = {}) =>
   expect(page.locator(`.dept-field-error[data-message-key="${key}"]`)).toHaveText(
-    messageText({ key, params }),
+    expectedText(key, params),
   );
 
 async function expectMessage(
@@ -286,7 +313,7 @@ async function expectMessage(
 ) {
   const element = scope.locator(`[data-message-key="${key}"]`);
   await expect(element).toHaveCount(1);
-  await expect(element).toHaveText(`${prefix}${messageText({ key, params })}`);
+  await expect(element).toHaveText(`${prefix}${expectedText(key, params)}`);
 }
 const expectStatus = (page: Page, key: MessageKey, params?: MessageParams) =>
   expectMessage(statusRegion(page), key, params);
@@ -362,6 +389,13 @@ async function expectNoSeriousAxeViolations(page: Page) {
 }
 
 test.describe('Message catalog', () => {
+  test('rejected rename copy matches the independently anchored wording', () => {
+    const keys = Object.keys(catalog).filter((key) => key.startsWith('rejected.rename.'));
+    expect(keys.sort()).toEqual(Object.keys(renameCopy).sort());
+    for (const key of keys)
+      expect(messageText({ key: key as MessageKey }), key).toBe(renameCopy[key as MessageKey]);
+  });
+
   test('every entry declares claims that its evidence level permits (7.8)', () => {
     for (const [key, entry] of Object.entries(catalog)) {
       expect(entry.claims.length, key).toBeGreaterThan(0);
