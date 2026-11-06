@@ -294,10 +294,15 @@ export class PostgresConnectorAuthorizationStore {
         occurred_at: Date | string;
       }
     >(
-      `SELECT attempt_id, sequence, event_type, outcome, revocation_generation, occurred_at
-         FROM omnis.connector_authorization_audit
-        WHERE authorization_id = $1 AND attempt_id IS NOT NULL AND sequence > $2
-        ORDER BY sequence ASC
+      `SELECT audit.attempt_id, audit.sequence, audit.event_type, audit.outcome,
+              audit.revocation_generation, audit.occurred_at
+         FROM omnis.connector_authorization_audit AS audit
+         JOIN omnis.connector_execution_attempts AS attempt
+           ON attempt.id = audit.attempt_id
+          AND attempt.authorization_id = audit.authorization_id
+        WHERE audit.authorization_id = $1 AND audit.attempt_id IS NOT NULL
+          AND audit.sequence > $2
+        ORDER BY audit.sequence ASC
         LIMIT $3`,
       [authorizationId, afterSequence, limit + 1],
     );
