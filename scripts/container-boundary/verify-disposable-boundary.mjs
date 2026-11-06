@@ -110,10 +110,33 @@ if (process.env.OMNIS_PROBE_TMP === '1') {
 if (process.env.OMNIS_PROBE_NETWORK === 'positive') {
   const host = process.env.OMNIS_POSITIVE_NETWORK_HOST ?? 'local-positive';
   const port = process.env.OMNIS_POSITIVE_NETWORK_PORT ?? '45678';
-  const response = await fetch('http://' + host + ':' + port + '/health', { signal: AbortSignal.timeout(3000) });
+  const deadline = Date.now() + 5000;
+  let response;
+  let lastError;
+  while (Date.now() < deadline) {
+    try {
+      response = await fetch('http://' + host + ':' + port + '/health', { signal: AbortSignal.timeout(1000) });
+      break;
+    } catch (error) {
+      lastError = error;
+      if (!['ECONNREFUSED', 'EAI_AGAIN', 'ENOTFOUND'].includes(error.cause?.code)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+  if (!response) throw lastError ?? new Error('positive network readiness timed out');
   assert.equal(response.status, 200);
   assert.equal(await response.text(), 'ok');
   process.stdout.write('network-positive-ok');
+}
+if (process.env.OMNIS_PROBE_NETWORK === 'external-positive') {
+  const result = await new Promise((resolve) => {
+    const socket = net.createConnection({ host: '1.1.1.1', port: 443 });
+    socket.once('connect', () => { socket.destroy(); resolve('connected'); });
+    socket.once('error', (error) => resolve(error.code));
+    setTimeout(() => { socket.destroy(); resolve('ETIMEDOUT'); }, 3000).unref();
+  });
+  assert.equal(result, 'connected', 'normal bridge did not reach the external egress positive control');
+  process.stdout.write('external-egress-positive-ok');
 }
 if (process.env.OMNIS_PROBE_NETWORK === 'external-denial') {
   const result = await new Promise((resolve) => {
@@ -691,6 +714,15 @@ async function verifyNetworkIsolation() {
   const separateConfig = JSON.parse(docker(['network', 'inspect', separateNetwork]))[0];
   assert.equal(positiveConfig.Internal, true);
   assert.equal(separateConfig.Internal, true);
+
+  const bridgeConfig = JSON.parse(docker(['network', 'inspect', 'bridge']))[0];
+  assert.equal(bridgeConfig.Internal, false);
+  const externalPositive = probeContainer({
+    name: `${resourcePrefix}-external-egress-positive`,
+    network: 'bridge',
+    environment: { OMNIS_PROBE_NETWORK: 'external-positive' },
+  });
+  assert.ok(externalPositive.includes('external-egress-positive-ok'));
 
   const serviceId = createOwned([
     'run',
