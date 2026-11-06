@@ -22,6 +22,11 @@ export {
   PostgresAuthorizationStore,
   PostgresRuntimeAuthorizationReader,
 } from './authorization-store.ts';
+export {
+  ConnectorAuthorizationStoreError,
+  PostgresConnectorAuthorizationStore,
+} from './connector-authorization-store.ts';
+export type { ConnectorAuthorizationStoreErrorCode } from './connector-authorization-store.ts';
 export type {
   RuntimeAuthorizationRecord,
   RuntimeAuthorizationReader,

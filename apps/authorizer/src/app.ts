@@ -55,6 +55,8 @@ import {
   type TaskEpicAssociation,
   type TaskEpicResponse,
 } from '@omnis/contracts';
+import type { ConnectorAuthorizerStore } from './connector-authorization-routes.ts';
+import { registerConnectorAuthorizationRoutes } from './connector-authorization-routes.ts';
 import {
   AgentLifecycleStoreError,
   DepartmentStoreError,
@@ -141,6 +143,7 @@ export type AuthorizerStore = {
 
 export function createAuthorizerApp(input: {
   store: AuthorizerStore;
+  connectorStore?: ConnectorAuthorizerStore;
   serviceToken: string;
   checkDatabase: () => Promise<void>;
 }): FastifyInstance {
@@ -854,6 +857,8 @@ export function createAuthorizerApp(input: {
     },
   );
 
+  if (input.connectorStore) registerConnectorAuthorizationRoutes(app, input.connectorStore);
+
   app.setErrorHandler((error, request, reply) => {
     app.log.error(
       { errorType: error instanceof Error ? error.name : 'unknown' },
@@ -877,7 +882,9 @@ export function createAuthorizerApp(input: {
       });
     }
     const decisionOutcomeUnknown =
-      request.method !== 'GET' && request.url.startsWith('/internal/v1/authorizations');
+      request.method !== 'GET' &&
+      (request.url.startsWith('/internal/v1/authorizations') ||
+        request.url.startsWith('/internal/v1/connector-authorizations'));
     const departmentOutcomeUnknown =
       request.method !== 'GET' && request.url.startsWith('/internal/v1/departments');
     const agentOutcomeUnknown =

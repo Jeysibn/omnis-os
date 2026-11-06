@@ -147,4 +147,44 @@ describe('authorizer transport outcome handling', () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+
+  it('classifies an invalid connector authorization response as an unknown outcome', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'omnis-authorizer-client-'));
+    const socketPath = path.join(directory, 'authorizer.sock');
+    const server = createServer((_request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end('{"unexpected":true}');
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(socketPath, resolve);
+      });
+      env.authorizerSocket = socketPath;
+      await assert.rejects(
+        authorizerRequest(
+          '/internal/v1/connector-authorizations',
+          {
+            method: 'POST',
+            headers: { 'idempotency-key': '3a167582-1dc3-48a4-a69f-8b1fe0c58ee2' },
+            body: '{}',
+          },
+          (value) => {
+            if (typeof value !== 'object' || value === null || !('id' in value)) {
+              throw new Error('invalid synthetic response');
+            }
+            return value;
+          },
+        ),
+        (error: unknown) => {
+          assert.ok(error instanceof AuthorizerRequestError);
+          assert.equal(error.body.error.code, 'connector_authorization_outcome_unknown');
+          return true;
+        },
+      );
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 });

@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import type { Authorization, Department, Epic, Milestone, Project } from '@omnis/contracts';
 import { AgentLifecycleStoreError } from '@omnis/db';
 import { createAuthorizerApp, type AuthorizerStore } from './app.ts';
+import type { ConnectorAuthorizerStore } from './connector-authorization-routes.ts';
 
 const serviceToken = 'synthetic-authorizer-service-token-'.padEnd(64, 'x');
 const authorization: Authorization = {
@@ -219,6 +220,57 @@ describe('independent authorizer service boundary', () => {
       });
       assert.equal(response.statusCode, 401);
       assert.deepEqual(calls, []);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('keeps connector grants behind the service token and rejects caller-supplied identity', async () => {
+    const { store } = makeStore();
+    let connectorCalls = 0;
+    const connectorStore: ConnectorAuthorizerStore = {
+      async request() {
+        connectorCalls += 1;
+        throw new Error('invalid requests must not reach the grant store');
+      },
+      async get() {
+        connectorCalls += 1;
+        return undefined;
+      },
+      async decide() {
+        connectorCalls += 1;
+        throw new Error('invalid requests must not reach the grant store');
+      },
+      async revoke() {
+        connectorCalls += 1;
+        throw new Error('invalid requests must not reach the grant store');
+      },
+    };
+    const app = createAuthorizerApp({
+      store,
+      connectorStore,
+      serviceToken,
+      checkDatabase: async () => undefined,
+    });
+    try {
+      const unauthenticated = await app.inject({
+        method: 'POST',
+        url: '/internal/v1/connector-authorizations',
+        headers: { 'idempotency-key': '3a167582-1dc3-48a4-a69f-8b1fe0c58ee2' },
+        payload: { connectorId: 'synthetic.codex.fixture', actor: 'owner' },
+      });
+      assert.equal(unauthenticated.statusCode, 401);
+      const callerSuppliedIdentity = await app.inject({
+        method: 'POST',
+        url: '/internal/v1/connector-authorizations',
+        headers: {
+          'x-omnis-authorizer-token': serviceToken,
+          'idempotency-key': '3a167582-1dc3-48a4-a69f-8b1fe0c58ee2',
+        },
+        payload: { connectorId: 'synthetic.codex.fixture', actor: 'owner' },
+      });
+      assert.equal(callerSuppliedIdentity.statusCode, 400);
+      assert.equal(connectorCalls, 0);
     } finally {
       await app.close();
     }
