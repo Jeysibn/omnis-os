@@ -154,6 +154,26 @@ try {
     archivePath,
   );
 
+  if (manifest.format === 'postgres-custom-acl-v1') {
+    // pg_restore recreates routines with PostgreSQL's default PUBLIC EXECUTE
+    // unless an ACL entry explicitly carries the revoke. Reassert this exact
+    // security-definer function's migration boundary before validating ACLs.
+    await dockerOutput([
+      ...composeArgs,
+      'exec',
+      '-T',
+      'postgres',
+      'psql',
+      '-X',
+      '--no-psqlrc',
+      '--set=ON_ERROR_STOP=1',
+      '--username=omnis',
+      `--dbname=${targetDatabase}`,
+      '--command',
+      `REVOKE ALL ON FUNCTION omnis.validate_connector_authorization_context(text, integer, text, integer, text, integer) FROM PUBLIC;`,
+    ]);
+  }
+
   if (manifest.format === 'postgres-custom') {
     await dockerFromFile(
       [
