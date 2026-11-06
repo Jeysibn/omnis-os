@@ -426,6 +426,15 @@ export function assertRuntimeAclPolicy(snapshot) {
         ].includes(entry.column)
       )
         continue;
+      if (
+        entry.objectType === 'routine' &&
+        entry.schema === 'omnis' &&
+        entry.object ===
+          'validate_connector_authorization_context(p_project_id text, p_project_revision integer, p_task_id text, p_task_revision integer, p_agent_id text, p_profile_version integer)' &&
+        entry.privilege === 'EXECUTE' &&
+        entry.securityDefiner === true
+      )
+        continue;
       throw new Error(
         `Authorizer ACL ${entry.privilege} is prohibited on ${entry.schema}.${entry.object}.`,
       );

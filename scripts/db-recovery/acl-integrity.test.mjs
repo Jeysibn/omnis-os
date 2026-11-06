@@ -329,6 +329,15 @@ describe('post-restore PostgreSQL ACL integrity', () => {
       acl('table', 'omnis', 'connector_execution_attempts', 'INSERT', null, 'omnis_authorizer'),
       acl('table', 'omnis', 'connector_authorization_audit', 'SELECT', null, 'omnis_authorizer'),
       acl('table', 'omnis', 'connector_authorization_audit', 'INSERT', null, 'omnis_authorizer'),
+      acl(
+        'routine',
+        'omnis',
+        'validate_connector_authorization_context(p_project_id text, p_project_revision integer, p_task_id text, p_task_revision integer, p_agent_id text, p_profile_version integer)',
+        'EXECUTE',
+        null,
+        'omnis_authorizer',
+        true,
+      ),
       ...[
         'status',
         'consented_at',
@@ -441,6 +450,22 @@ describe('post-restore PostgreSQL ACL integrity', () => {
           acl('table', 'omnis', 'connector_authorizations', 'DELETE', null, 'omnis_authorizer'),
         ]),
       /Authorizer ACL DELETE is prohibited/,
+    );
+    assert.throws(
+      () =>
+        assertRuntimeAclPolicy([
+          ...allowed,
+          acl(
+            'routine',
+            'omnis',
+            'unreviewed_authorizer_function()',
+            'EXECUTE',
+            null,
+            'omnis_authorizer',
+            true,
+          ),
+        ]),
+      /Authorizer ACL EXECUTE is prohibited/,
     );
     assert.throws(
       () =>
