@@ -88,6 +88,7 @@ if (process.env.OMNIS_PROBE_NETWORK === 'positive') {
   const response = await fetch('http://local-positive:45678/health', { signal: AbortSignal.timeout(3000) });
   assert.equal(response.status, 200);
   assert.equal(await response.text(), 'ok');
+  process.stdout.write('network-positive-ok');
 }
 if (process.env.OMNIS_PROBE_NETWORK === 'external-denial') {
   const result = await new Promise((resolve) => {
