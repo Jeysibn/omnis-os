@@ -826,14 +826,16 @@ const postgresSuite = describe(
         store.beginSyntheticBrokerRun(runId, 'synthetic-worker', 30),
         store.beginSyntheticBrokerRun(runId, 'duplicate-worker', 30),
       ]);
-      assert.equal(started.started, true);
-      assert.equal(duplicateStart.started, false);
+      assert.notEqual(started.started, duplicateStart.started);
+      const lease = started.started
+        ? { workerId: 'synthetic-worker', generation: started.generation }
+        : { workerId: 'duplicate-worker', generation: duplicateStart.generation };
       await fixture.authorizations.revoke(grant.id, 'owner');
       await store.requestSyntheticBrokerStop(runId, grant.id);
       const unknown = await store.finishSyntheticBrokerRun(
         runId,
-        'synthetic-worker',
-        started.generation,
+        lease.workerId,
+        lease.generation,
         { attemptId: randomUUID(), status: 'unknown' },
       );
       assert.equal(unknown.run.status, 'unknown');
@@ -878,7 +880,7 @@ const postgresSuite = describe(
         store.finishSyntheticBrokerRun(runId, 'old-worker', claim.generation, {
           status: 'unknown',
         }),
-        /no longer owns this synthetic Run/i,
+        /lost its Run lease/i,
       );
       const events = await store.reconcileExpiredRuns();
       assert.equal((await store.getRun(runId))?.status, 'unknown');
