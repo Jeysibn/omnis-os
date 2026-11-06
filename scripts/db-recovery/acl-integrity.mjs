@@ -114,6 +114,11 @@ const applicationColumnPrivileges = new Map([
       'INSERT:id',
       'INSERT:task_id',
       'INSERT:task_title',
+      'INSERT:connector_authorization_id',
+      'INSERT:connector_request_id',
+      'INSERT:connector_correlation_id',
+      'INSERT:connector_request_binding',
+      'UPDATE:connector_attempt_id',
       ...[
         'status',
         'execution_generation',
