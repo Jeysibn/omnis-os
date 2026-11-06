@@ -1328,6 +1328,12 @@ test('approval dialog stays centered and contained at desktop, tablet, mobile, a
     { width: 320, height: 700 },
   ]) {
     await page.setViewportSize(viewport);
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        ),
+    ); // let the header settle between inline links and the menu before measuring
     if (!(await page.getByRole('dialog').isVisible())) await openApproval(page);
     const box = await page.getByRole('dialog').boundingBox();
     expect(box).not.toBeNull();
@@ -1350,6 +1356,22 @@ test('approval dialog stays centered and contained at desktop, tablet, mobile, a
   ).toBeFocused();
 });
 
+/** Follows a primary link, opening the navigation menu first when the header has collapsed. */
+async function goTo(page: Page, name: 'Command Center' | 'Tasks' | 'Runs' | 'Agents') {
+  // A viewport change is followed by the header deciding between inline links and the menu.
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+  const menu = page.getByRole('button', { name: 'Navigation menu' });
+  if (await menu.isVisible()) {
+    if ((await menu.getAttribute('aria-expanded')) !== 'true') await menu.click();
+  }
+  await page.getByRole('link', { name, exact: true }).click();
+}
+
 test('axe reports no serious or critical violations on key routes at all target widths', async ({
   page,
   api,
@@ -1358,7 +1380,7 @@ test('axe reports no serious or critical violations on key routes at all target 
   api.configure();
   await openWorkspace(page);
   await openTaskComposer(page);
-  await page.getByRole('link', { name: 'Command Center' }).click();
+  await goTo(page, 'Command Center');
   for (const viewport of [
     { width: 1440, height: 900 },
     { width: 820, height: 1180 },
@@ -1367,14 +1389,14 @@ test('axe reports no serious or critical violations on key routes at all target 
   ]) {
     await page.setViewportSize(viewport);
     await assertNoSeriousAxeViolations(page);
-    await page.getByRole('link', { name: 'Tasks' }).click();
+    await goTo(page, 'Tasks');
     await assertNoSeriousAxeViolations(page);
-    await page.getByRole('link', { name: 'Runs' }).click();
+    await goTo(page, 'Runs');
     await assertNoSeriousAxeViolations(page);
     await page.getByRole('button', { name: /Review launch checklist/ }).click();
     await expect(page.getByText('2 events')).toBeVisible();
     await assertNoSeriousAxeViolations(page);
-    await page.getByRole('link', { name: 'Tasks' }).click();
+    await goTo(page, 'Tasks');
     await openApproval(page);
     await assertNoSeriousAxeViolations(page);
     await page.keyboard.press('Escape');
@@ -1430,7 +1452,7 @@ test('captures all requested route screenshots for review', async ({ page, api }
   api.configure({});
   await openWorkspace(page);
   await openTaskComposer(page);
-  await page.getByRole('link', { name: 'Command Center' }).click();
+  await goTo(page, 'Command Center');
   for (const viewport of [
     { width: 1440, height: 900 },
     { width: 820, height: 1180 },
@@ -1439,24 +1461,24 @@ test('captures all requested route screenshots for review', async ({ page, api }
   ]) {
     await page.setViewportSize(viewport);
     const tag = String(viewport.width);
-    await page.getByRole('link', { name: 'Command Center' }).click();
+    await goTo(page, 'Command Center');
     await expect(page.getByRole('heading', { name: 'Command Center' })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
       viewport.width,
     );
     await page.screenshot({ path: `/tmp/omnis-command-center-${tag}.png`, fullPage: true });
-    await page.getByRole('link', { name: 'Tasks' }).click();
+    await goTo(page, 'Tasks');
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
       viewport.width,
     );
     await page.screenshot({ path: `/tmp/omnis-tasks-${tag}.png`, fullPage: true });
-    await page.getByRole('link', { name: 'Runs' }).click();
+    await goTo(page, 'Runs');
     await page.getByRole('button', { name: /Review launch checklist/ }).click();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
       viewport.width,
     );
     await page.screenshot({ path: `/tmp/omnis-runs-${tag}.png`, fullPage: true });
-    await page.getByRole('link', { name: 'Tasks' }).click();
+    await goTo(page, 'Tasks');
     await openApproval(page);
     await page.screenshot({ path: `/tmp/omnis-approval-${tag}.png`, fullPage: false });
     await page.keyboard.press('Escape');
