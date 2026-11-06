@@ -596,11 +596,24 @@ test.describe('Department directory', () => {
   }) => {
     api.configure();
     api.failLists({ status: 401, code: 'unauthorized', message: 'Sign in to continue.' });
-    await openDepartments(page);
-    await expect(page.getByText('Engineering')).toHaveCount(0);
+    // Not openDepartments: the authenticated workspace correctly disappears once the 401 is
+    // handled, so waiting for #main-content would race the expected outcome.
+    await page.goto('/#departments');
+    // The expected outcome: the sign-in screen with the session-expiry notice.
+    await expect(page.getByRole('heading', { name: 'Welcome back.' })).toBeVisible();
     await expect(
       page.getByText('Your owner session expired. Sign in again to continue.'),
     ).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Sign in' })).toBeVisible();
+    // Nothing from the authenticated workspace is presented, and no department data survives.
+    await expect(page.locator('#main-content')).toHaveCount(0);
+    await expect(page.getByRole('navigation', { name: 'Primary navigation' })).toHaveCount(0);
+    await expect(page.getByRole('heading', { level: 1, name: 'Departments' })).toHaveCount(0);
+    await expect(page.getByText('Engineering')).toHaveCount(0);
+    await expect(page.getByText('Research')).toHaveCount(0);
+    // The 401 came from the real list request, not from a missing session at load.
+    expect(api.lists().length).toBeGreaterThanOrEqual(1);
+    expect(api.unexpected).toEqual([]);
   });
 
   test('503 limit shows the too-large state with no partial list', async ({ page, api }) => {
@@ -1803,14 +1816,30 @@ test.describe('Responsive, reflow and accessibility', () => {
     });
   }
 
-  test('primary navigation still fits at 320px with four links', async ({ page, api }) => {
+  test('primary navigation destinations stay reachable at 320px, inline or through the menu', async ({
+    page,
+    api,
+  }) => {
     api.configure();
     await page.setViewportSize({ width: 320, height: 640 });
     await openDepartments(page);
     await expectNoHorizontalOverflow(page);
-    await expect(
-      page.getByRole('navigation', { name: 'Primary navigation' }).getByRole('link'),
-    ).toHaveCount(4);
+    // Two legitimate layouts: inline links when they fit, or a disclosure menu when they do not
+    // (the shared shell collapses its navigation). Either way every destination must be present,
+    // visible and fully inside the viewport; a missing or clipped link fails here.
+    const menu = page.getByRole('button', { name: 'Navigation menu' });
+    if (await menu.isVisible()) {
+      await expect(menu).toHaveAttribute('aria-expanded', 'false');
+      await menu.click();
+      await expect(menu).toHaveAttribute('aria-expanded', 'true');
+    }
+    const primary = page.getByRole('navigation', { name: 'Primary navigation' });
+    await expect(primary.getByRole('link')).toHaveCount(4);
+    for (const name of ['Command Center', 'Tasks', 'Runs', 'Agents']) {
+      const link = primary.getByRole('link', { name, exact: true });
+      await expect(link).toBeVisible();
+      await expect(link).toBeInViewport({ ratio: 1 });
+    }
   });
 
   for (const size of [widths[0]!, widths[2]!, widths[4]!]) {
@@ -2009,6 +2038,11 @@ test.describe('16px minimum font size', () => {
       expect(minimum).toBeGreaterThan(70);
       await page.reload();
     }
+    // Drain before closing. The loop ends with a reload, so a list request and its fixture callback
+    // may still be in flight: wait for the final list to render, then for every route handler to
+    // finish, so no fixture callback can run against a closed browser.
+    await expect(row(page, longName)).toBeVisible();
+    await page.unrouteAll({ behavior: 'wait' });
     expect(api.unexpected).toEqual([]);
     await browser.close();
   });
