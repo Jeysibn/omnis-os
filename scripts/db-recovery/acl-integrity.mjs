@@ -427,6 +427,22 @@ export function assertRuntimeAclPolicy(snapshot) {
       )
         continue;
       if (
+        entry.objectType === 'column' &&
+        entry.schema === 'omnis' &&
+        entry.object === 'connector_execution_attempts' &&
+        entry.privilege === 'UPDATE' &&
+        [
+          'status',
+          'submission_started_at',
+          'provider_submission_id',
+          'cancel_requested_at',
+          'response_text',
+          'usage_provenance',
+          'updated_at',
+        ].includes(entry.column)
+      )
+        continue;
+      if (
         entry.objectType === 'routine' &&
         entry.schema === 'omnis' &&
         entry.object ===

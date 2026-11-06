@@ -204,9 +204,14 @@ try {
     '0019_project_epics',
     '0020_epic_task_association',
     '0022_synthetic_connector_authorization',
+    '0023_synthetic_broker_submission_lifecycle',
   ];
   if (afterUpgrade.migrations.includes('0021_mission_lane_events')) {
-    expectedMigrations.splice(expectedMigrations.length - 1, 0, '0021_mission_lane_events');
+    expectedMigrations.splice(
+      expectedMigrations.indexOf('0022_synthetic_connector_authorization'),
+      0,
+      '0021_mission_lane_events',
+    );
   }
   assert.deepEqual(afterUpgrade.migrations, expectedMigrations);
   assert.equal(afterUpgrade.unsafeRunStates, 3);
@@ -692,7 +697,7 @@ async function verifyPost0005ProvenanceUpgrade() {
       "SELECT id, length(checksum) AS checksum_length FROM omnis.schema_migrations WHERE id LIKE '00%' ORDER BY id",
     );
     assert.deepEqual(migrationRows.rows.at(-1), {
-      id: '0022_synthetic_connector_authorization',
+      id: '0023_synthetic_broker_submission_lifecycle',
       checksum_length: 64,
     });
   } finally {
