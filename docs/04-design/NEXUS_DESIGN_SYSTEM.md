@@ -15,17 +15,17 @@ consume it, and how existing screens migrate. Visual direction comes from
 
 ## Files
 
-| Path                                                                    | Role                                                                                      |
-| ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| `design/design.css`                                                     | Tokens (`:root`) and all component styles. Component rules are scoped to `.nx-*` classes. |
-| `design/Layout.tsx`                                                     | `NxTheme`, `PageContainer`, `PageHeader`, `Panel`, `InfoGroup`, `TelemetryLabel`          |
-| `design/Controls.tsx`                                                   | `NxButton`, `Field`, `NxInput`                                                            |
-| `design/Status.tsx`                                                     | `StatusBadge`                                                                             |
-| `design/Data.tsx`                                                       | `DataTable`, `SearchFilter`                                                               |
-| `design/States.tsx`                                                     | `LoadingState`, `EmptyState`, `ErrorState`, `ConfirmDialog`                               |
-| `design/index.ts`                                                       | Public exports. Import from here.                                                         |
-| `design/Showcase.tsx`, `design/showcase-main.tsx`, `design-system.html` | Dev-only reference page                                                                   |
-| `ui/design.spec.ts`                                                     | Browser tests (contrast, containment, zoom, axe, focus, behaviour)                        |
+| Path                                                                    | Role                                                                                                    |
+| ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `design/design.css`                                                     | Tokens (scoped to `.nx-theme`) and all component styles. Component rules are scoped to `.nx-*` classes. |
+| `design/Layout.tsx`                                                     | `NxTheme`, `PageContainer`, `PageHeader`, `Panel`, `InfoGroup`, `TelemetryLabel`                        |
+| `design/Controls.tsx`                                                   | `NxButton`, `Field`, `NxInput`, `NxTextarea`, `NxSelect`                                                |
+| `design/Status.tsx`                                                     | `StatusBadge`                                                                                           |
+| `design/Data.tsx`                                                       | `DataTable`, `SearchFilter`                                                                             |
+| `design/States.tsx`                                                     | `LoadingState`, `EmptyState`, `ErrorState`, `ConfirmDialog`                                             |
+| `design/index.ts`                                                       | Public exports. Import from here.                                                                       |
+| `design/Showcase.tsx`, `design/showcase-main.tsx`, `design-system.html` | Dev-only reference page                                                                                 |
+| `ui/design.spec.ts`                                                     | Browser tests (contrast, containment, zoom, axe, focus, behaviour)                                      |
 
 ## Tokens
 
@@ -113,19 +113,20 @@ import {
 </NxTheme>;
 ```
 
-| Component                                    | Contract                                                                                                                                                                                  |
-| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `PageHeader`                                 | `title` (the h1), optional `eyebrow`, `description`, `actions`                                                                                                                            |
-| `Panel`                                      | `title` (heading, `level` 2 or 3), optional `label`, `actions`. Region named by its heading.                                                                                              |
-| `InfoGroup`                                  | `items: {label, value}[]`, rendered as a real `dl`                                                                                                                                        |
-| `NxButton`                                   | `variant` primary / secondary / ghost / danger; defaults to `type="button"`; `busy` sets `aria-busy` + `aria-disabled`, ignores clicks, **stays focusable**                               |
-| `Field`                                      | `label`, `hint`, `error`; child is a render function receiving `{id, aria-describedby, aria-invalid}` to spread onto the control. Error is text, `role="alert"`, and sets `aria-invalid`. |
-| `NxInput`                                    | Styled `input`; use inside `Field`                                                                                                                                                        |
-| `StatusBadge`                                | `tone` ok / attention / danger / info / neutral / unknown + required text. Use `unknown` for unverified state, never `neutral`.                                                           |
-| `DataTable<Row>`                             | Required `caption`, `columns`, `rows`, `rowKey`, `empty`. Scrolls inside its own keyboard-focusable region; never widens the page.                                                        |
-| `SearchFilter`                               | Labelled search field; the parent owns value and filtering                                                                                                                                |
-| `LoadingState` / `EmptyState` / `ErrorState` | Loading is `role="status"`, error is `role="alert"` with optional retry. Empty states say why and what to do.                                                                             |
-| `ConfirmDialog`                              | Native `<dialog>`; modal, inert background, Escape cancels, focus returns to the opener, **Cancel is the initial focus**. Use `danger` for destructive actions.                           |
+| Component                                    | Contract                                                                                                                                                                                     |
+| -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PageHeader`                                 | `title` (the h1), optional `eyebrow`, `description`, `actions`                                                                                                                               |
+| `Panel`                                      | `title` (heading, `level` 2 or 3), optional `label`, `actions`, `headingRef` (makes the heading focusable with `tabIndex={-1}` so a host can move focus to it). Region named by its heading. |
+| `InfoGroup`                                  | `items: {label, value}[]`, rendered as a real `dl`                                                                                                                                           |
+| `NxButton`                                   | `variant` primary / secondary / ghost / danger; defaults to `type="button"`; `busy` sets `aria-busy` + `aria-disabled`, ignores clicks, **stays focusable**                                  |
+| `Field`                                      | `label`, `hint`, `error`; child is a render function receiving `{id, aria-describedby, aria-invalid}` to spread onto the control. Error is text, `role="alert"`, and sets `aria-invalid`.    |
+| `NxTextarea`, `NxSelect`                     | Styled `textarea` and `select`; use inside `Field` and spread the control props (added for Project Workspace V1)                                                                             |
+| `NxInput`                                    | Styled `input`; use inside `Field`                                                                                                                                                           |
+| `StatusBadge`                                | `tone` ok / attention / danger / info / neutral / unknown + required text. Use `unknown` for unverified state, never `neutral`.                                                              |
+| `DataTable<Row>`                             | Required `caption`, `columns`, `rows`, `rowKey`, `empty`. Scrolls inside its own keyboard-focusable region; never widens the page.                                                           |
+| `SearchFilter`                               | Labelled search field; the parent owns value and filtering                                                                                                                                   |
+| `LoadingState` / `EmptyState` / `ErrorState` | Loading is `role="status"`, error is `role="alert"` with optional retry. Empty states say why and what to do.                                                                                |
+| `ConfirmDialog`                              | Native `<dialog>`; modal, inert background, Escape cancels, focus returns to the opener, **Cancel is the initial focus**. Use `danger` for destructive actions.                              |
 
 Rules for features:
 
@@ -149,7 +150,7 @@ Run against the showcase in Chromium by `ui/design.spec.ts`:
   focus restore; busy button stays focusable.
 - Reduced motion: spinner animation and transitions are removed; and the spinner does animate when
   motion is allowed.
-- No request leaves the local origin (no CDN fonts), and the main application does not load the tokens.
+- No request leaves the local origin (no CDN fonts), and the tokens are defined on `.nx-theme`, never on `:root`, so loading the stylesheet defines no custom property on the document root.
 
 ## Known limitations
 
@@ -177,25 +178,24 @@ Run against the showcase in Chromium by `ui/design.spec.ts`:
 3. **Order:** Project Workspace V1 first (new, no migration risk), then Departments, Agents,
    Tasks, Runs, then the shared header, then the Command Center token cleanup.
 
-## Project Workspace V1 UI handoff
+## Project Workspace V1
 
-Project Workspace V1 can be built entirely from the existing components:
+Project Workspace V1 is built from these components. See
+[PROJECT_WORKSPACE_V1_FRONTEND.md](PROJECT_WORKSPACE_V1_FRONTEND.md) for routes, the API contract
+as implemented, mutation and recovery behaviour, and limitations.
 
-- **Projects list:** `PageHeader` (action: New project), `SearchFilter`, `DataTable` with columns
-  Name, Status (`StatusBadge`), Tasks, Updated. Empty state: "No projects yet".
-- **Project detail:** `PageHeader` with the project name, `InfoGroup` for status, department and
-  revision, and a `Panel` with a `DataTable` of tasks.
-- **Create / rename:** `Field` + `NxInput` in a form; errors via `Field.error`; submit
-  with `NxButton busy`.
-- **Archive:** `ConfirmDialog` with `danger`.
-- **Failure and loading:** `LoadingState` and `ErrorState` with retry.
+### Revisions made while building it
 
-API facts the UI must respect (verified from `apps/api` and `packages/contracts`, not new work):
-routes `/api/v1/projects`, `/api/v1/projects/:projectId` (GET/PATCH), `.../archive` (POST) and
-`.../tasks` (GET, cursor paging, `complete` flag). Mutations need the CSRF header and a UUID
-`Idempotency-Key`; updates use `expectedRevision`. Error codes are `not_found`, `conflict`,
-`invalid_transition`, `invalid_input` and `limit`. There is no GET `/api/v1/tasks/:id`.
-Follow the Departments screen for retry, unknown-outcome recovery and rejected-update messages.
-
-Open items for the owner: add a Projects entry to primary navigation (the measured shared header
-already adapts to more items), and a decision on self-hosted fonts.
+- **Token scope.** Tokens moved from `:root` to `.nx-theme`. The Projects screen is the first
+  production consumer, so the stylesheet is now in the application bundle; scoping keeps it from
+  defining anything on the document root. Every component still sits inside `NxTheme`.
+- **`NxTextarea` and `NxSelect`** were added; the project form needs a multi-line objective and a
+  priority choice.
+- **`Panel.headingRef`** was added so a screen can move focus to its heading after in-app
+  navigation.
+- **Corrections to the earlier handoff:** projects have no department field and the project list
+  has no task counts, so neither is shown. Verified error codes are `not_found`, `conflict`,
+  `invalid_transition`, `invalid_input`, `limit`, `csrf_rejected`, `project_outcome_unknown` and
+  `invalid_cursor`.
+- **`PageHeader` and `PageContainer`** are not used in the application: the shell already renders
+  the page's single `h1` and its own container, so the screen uses `Panel` (h2) and `h3`.
