@@ -903,7 +903,7 @@ test.describe('Routing', () => {
 
 test.describe('Responsive and accessibility', () => {
   for (const viewport of widths) {
-    test(`no horizontal overflow and a reachable 4-link nav at ${viewport.name}`, async ({
+    test(`no horizontal overflow and a reachable 4-link nav (inline or menu) at ${viewport.name}`, async ({
       page,
       api,
     }) => {
@@ -919,6 +919,9 @@ test.describe('Responsive and accessibility', () => {
         await expect(page.getByText('Loading', { exact: false })).toHaveCount(0);
         await expectNoHorizontalOverflow(page);
       }
+      // Narrow widths disclose the four links behind the navigation menu button.
+      const menu = page.getByRole('button', { name: 'Navigation menu' });
+      if (await menu.isVisible()) await menu.click();
       const nav = page.getByRole('navigation', { name: 'Primary navigation' });
       for (const name of ['Command Center', 'Tasks', 'Runs', 'Agents']) {
         const link = nav.getByRole('link', { name });
