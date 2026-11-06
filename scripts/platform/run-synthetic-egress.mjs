@@ -87,7 +87,16 @@ try {
     }),
   )[0];
   assert.equal(networkInspect.Internal, true);
-  assert.deepEqual(Object.keys(networkInspect.Containers).length, 2);
+  const networkPeers = Object.values(networkInspect.Containers);
+  assert.ok(
+    networkPeers.every(({ Name }) =>
+      [
+        'omnis-synthetic-egress-fake-provider-1',
+        'omnis-synthetic-egress-private-service-canary-1',
+      ].includes(Name),
+    ),
+    'internal broker network has no unexpected service peers',
+  );
   process.stdout.write(
     'PASS runtime container metadata: non-root, no capabilities/devices/Docker socket, read-only filesystem, internal-only network\n',
   );
