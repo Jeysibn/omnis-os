@@ -66,12 +66,17 @@ provider submission ID, since `submissionStartedAt` marks the pre-send boundary 
 itself prove provider receipt. Usage is taken from the durable record. If worker or authorizer
 state cannot be confirmed, the API returns an uncertain result and does not resubmit.
 
-Cancellation uses the existing owner-protected grant revocation operation. The authorizer
-atomically marks the single-use grant revoked and records the in-flight attempt's durable
-`cancelRequestedAt`; the owner API response is `requested: true, confirmed: false`. The broker
-recovery loop may request provider cancellation, but only a correlated `interrupted` event
-confirms termination. If the broker cannot establish the outcome, status and billing exposure
-remain unknown. No cancellation result is inferred from a lost response.
+Cancellation uses the existing owner-protected grant revocation operation. Both the task-specific
+cancellation route and the standard Run stop route resolve the persisted Run-to-grant binding;
+the standard route does not accept an authorization ID from the caller. The API revokes the
+matching grant first, then asks the worker to persist `stopping`. The authorizer atomically blocks
+future consumption and records the in-flight attempt's durable `cancelRequestedAt`; this remains
+possible after grant expiry only when an active attempt exists. An expired unused grant cannot be
+revoked, and cannot be consumed. The owner receives a requested, unconfirmed state; worker
+unavailability after revocation does not erase that authorizer record, and a retry is idempotent.
+The broker recovery loop may request provider cancellation, but only a correlated `interrupted`
+event confirms termination. If the broker cannot establish the outcome, status and billing
+exposure remain unknown. No cancellation result is inferred from a lost response.
 
 ## Security and production behavior
 

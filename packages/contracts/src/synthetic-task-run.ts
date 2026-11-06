@@ -41,6 +41,16 @@ export type SyntheticTaskRunAdmissionResponse = z.infer<
   typeof SyntheticTaskRunAdmissionResponseSchema
 >;
 
+export const SyntheticRunBindingSchema = z
+  .object({
+    version: z.literal('omnis.synthetic-task-run.v1'),
+    runId: z.string().uuid(),
+    taskId: z.string().min(1).max(128),
+    authorizationId: z.string().uuid(),
+  })
+  .strict();
+export type SyntheticRunBinding = z.infer<typeof SyntheticRunBindingSchema>;
+
 export const SyntheticTaskRunResponseSchema = z
   .object({
     version: z.literal('omnis.synthetic-task-run.v1'),

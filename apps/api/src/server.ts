@@ -29,6 +29,7 @@ import { registerTaskEpicRoutes } from './task-epic-routes.ts';
 import { registerTaskRoutes } from './task-routes.ts';
 import { registerConnectorAuthorizationRoutes } from './connector-authorization-routes.ts';
 import { registerSyntheticTaskRunRoutes } from './synthetic-task-run-routes.ts';
+import { registerRunStopRoute } from './run-stop-route.ts';
 import {
   parseRun,
   parseRunList,
@@ -259,16 +260,11 @@ app.get<{ Params: { runId: string } }>(
   async (request) =>
     workerRequest(`/internal/v1/runs/${encodeURIComponent(request.params.runId)}`, {}, parseRun),
 );
-app.post<{ Params: { runId: string } }>(
-  '/api/v1/runs/:runId/stop',
-  { preHandler: [requireOwner, requireMutationProtection] },
-  async (request) =>
-    workerRequest(
-      `/internal/v1/runs/${encodeURIComponent(request.params.runId)}/stop`,
-      { method: 'POST' },
-      parseRun,
-    ),
-);
+registerRunStopRoute(app, {
+  requireOwner,
+  requireMutationProtection,
+  syntheticBrokerEnabled: syntheticBrokerTestMode,
+});
 app.get<{ Params: { runId: string } }>(
   '/api/v1/runs/:runId/events',
   { preHandler: requireOwner },

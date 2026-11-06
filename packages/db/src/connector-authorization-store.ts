@@ -326,7 +326,20 @@ export class PostgresConnectorAuthorizationStore {
       const current = result.rows[0];
       if (!current) throw notFound();
       if (current.status === 'revoked') return mapAuthorization(current);
-      if (current.status !== 'authorized' || toEpoch(current.expires_at) <= Date.now()) {
+      const isExpired = toEpoch(current.expires_at) <= Date.now();
+      let hasActiveAttempt = false;
+      if (current.status === 'authorized' && isExpired) {
+        const activeAttempt = await client.query(
+          `SELECT 1 FROM omnis.connector_execution_attempts
+            WHERE authorization_id = $1
+              AND status = ANY($2::text[])
+            LIMIT 1
+            FOR UPDATE`,
+          [id, ['admitted', 'submitting', 'accepted', 'running', 'unknown']],
+        );
+        hasActiveAttempt = activeAttempt.rows.length > 0;
+      }
+      if (current.status !== 'authorized' || (isExpired && !hasActiveAttempt)) {
         throw invalidTransition('Only an active connector authorization can be revoked.');
       }
       const updated = await client.query<AuthorizationRow>(

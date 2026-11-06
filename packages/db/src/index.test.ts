@@ -363,6 +363,61 @@ const postgresSuite = describe(
       );
     });
 
+    it('allows owner cancellation of a submitted attempt after its grant expires', async () => {
+      const fixture = await connectorFixture(3);
+      const grant = await fixture.authorizations.request(fixture.request, randomUUID());
+      await fixture.authorizations.decide(grant.id, 'owner', {
+        decision: 'approve',
+        promptDigestConfirmation: fixture.request.promptDigest,
+      });
+      const pair = generateKeyPairSync('ed25519');
+      const signingKey = {
+        keyId: 'test-disposable-expired-cancel',
+        privateKey: pair.privateKey,
+        notBefore: new Date(Date.now() - 60_000).toISOString(),
+        notAfter: new Date(Date.now() + 120_000).toISOString(),
+      };
+      const brokerStore = new PostgresConnectorAuthorizationStore(authorizerPool!, {
+        signDecision: (claims) => signConnectorDecisionEnvelope(claims, signingKey),
+      });
+      const admission = await brokerStore.consumeForBroker(grant.id, fixture.request, randomUUID());
+      await brokerStore.beginSyntheticSubmission(
+        admission.attempt.id,
+        admission.envelope,
+        fixture.renderedRequest,
+      );
+      await delay(3_100);
+
+      const revoked = await fixture.authorizations.revoke(grant.id, 'owner');
+      assert.equal(revoked.status, 'revoked');
+      const execution = await fixture.authorizations.getExecutionForAuthorization(grant.id);
+      assert.ok(execution?.attempt.cancelRequestedAt);
+      assert.equal(execution?.attempt.status, 'submitting');
+      const audit = await authorizerPool!.query<{ event_type: string }>(
+        `SELECT event_type FROM omnis.connector_authorization_audit
+          WHERE authorization_id = $1`,
+        [grant.id],
+      );
+      assert.ok(
+        audit.rows.some((event) => event.event_type === 'connector.cancellation_requested'),
+      );
+    });
+
+    it('does not revoke an expired grant when no active attempt exists', async () => {
+      const fixture = await connectorFixture(1);
+      const grant = await fixture.authorizations.request(fixture.request, randomUUID());
+      await fixture.authorizations.decide(grant.id, 'owner', {
+        decision: 'approve',
+        promptDigestConfirmation: fixture.request.promptDigest,
+      });
+      await delay(1_100);
+      await assert.rejects(
+        fixture.authorizations.revoke(grant.id, 'owner'),
+        (error: unknown) =>
+          error instanceof ConnectorAuthorizationStoreError && error.code === 'invalid_transition',
+      );
+    });
+
     it('rolls back a provider transition when its audit append fails', async () => {
       const fixture = await connectorFixture();
       const grant = await fixture.authorizations.request(fixture.request, randomUUID());
