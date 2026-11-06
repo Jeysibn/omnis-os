@@ -53,7 +53,11 @@ async function installApi(page: Page, ownerName = 'Director') {
   await page.route('**/api/v1/**', handle);
 }
 
-async function open(page: Page, hash = '#command-center') {
+/**
+ * Opens a route that always renders the shared shell. The default is #tasks: other branches may
+ * render #command-center with a route-specific header, so shell behaviour is asserted elsewhere.
+ */
+async function open(page: Page, hash = '#tasks') {
   await page.goto(`/${hash}`);
   await expect(page.getByRole('banner')).toBeVisible();
   await expect(page.locator('#main-content')).toBeVisible();
@@ -200,7 +204,7 @@ test.describe('navigation: discoverable at every width', () => {
         await expect(link).toBeInViewport({ ratio: 1 });
       }
       await expect(signOut(page)).toBeVisible();
-      await expect(primary.getByRole('link', { name: 'Command Center' })).toHaveAttribute(
+      await expect(primary.getByRole('link', { name: 'Tasks', exact: true })).toHaveAttribute(
         'aria-current',
         'page',
       );
@@ -377,19 +381,20 @@ test.describe('disclosed menu: state, keyboard and focus', () => {
     page,
   }) => {
     await menuButton(page).click();
-    await nav(page).getByRole('link', { name: 'Tasks', exact: true }).click();
-    await expect(page).toHaveURL(/#tasks$/);
-    await expect(page.getByRole('heading', { level: 1, name: 'Tasks' })).toBeAttached();
+    await nav(page).getByRole('link', { name: 'Runs', exact: true }).click();
+    await expect(page).toHaveURL(/#runs$/);
+    await expect(page.getByRole('heading', { level: 1, name: 'Runs' })).toBeAttached();
     await expect(menuButton(page)).toHaveAttribute('aria-expanded', 'false');
     await expect(menuButton(page)).toBeFocused();
     await menuButton(page).click();
-    await expect(nav(page).getByRole('link', { name: 'Tasks', exact: true })).toHaveAttribute(
+    await expect(nav(page).getByRole('link', { name: 'Runs', exact: true })).toHaveAttribute(
       'aria-current',
       'page',
     );
-    await expect(
-      nav(page).getByRole('link', { name: 'Command Center', exact: true }),
-    ).not.toHaveAttribute('aria-current', 'page');
+    await expect(nav(page).getByRole('link', { name: 'Tasks', exact: true })).not.toHaveAttribute(
+      'aria-current',
+      'page',
+    );
   });
 
   test('pressing outside the header dismisses the menu without moving focus', async ({ page }) => {
@@ -402,7 +407,14 @@ test.describe('disclosed menu: state, keyboard and focus', () => {
 
   test('tabbing out of the open menu closes it', async ({ page }) => {
     await menuButton(page).click();
-    for (let i = 0; i < 5; i += 1) await page.keyboard.press('Tab'); // 4 links, then sign-out
+    // Tab through every link until focus leaves the panel for sign-out.
+    for (
+      let i = 0;
+      i < 12 && !(await signOut(page).evaluate((el) => el === document.activeElement));
+      i += 1
+    )
+      await page.keyboard.press('Tab');
+    await expect(signOut(page)).toBeFocused();
     await expect(menuButton(page)).toHaveAttribute('aria-expanded', 'false');
   });
 
@@ -420,7 +432,7 @@ test.describe('disclosed menu: state, keyboard and focus', () => {
     await expect(page.getByRole('heading', { level: 1, name: 'Runs' })).toBeAttached();
     await expect(menuButton(page)).toHaveAttribute('aria-expanded', 'false');
     await page.goBack();
-    await expect(page).toHaveURL(/#command-center$|\/$/);
+    await expect(page).toHaveURL(/#tasks$/);
     await page.goForward();
     await expect(page).toHaveURL(/#runs$/);
     await expect(menuButton(page)).toHaveAttribute('aria-expanded', 'false');
@@ -458,7 +470,7 @@ test.describe('disclosed menu: state, keyboard and focus', () => {
     await page.keyboard.press('Tab');
     await page.keyboard.press('Enter');
     await expect(page.locator('#main-content')).toBeFocused();
-    expect(new URL(page.url()).hash).toBe('#command-center');
+    expect(new URL(page.url()).hash).toBe('#tasks');
     expect(await page.evaluate(() => window.history.length)).toBe(before);
   });
 
