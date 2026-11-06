@@ -65,6 +65,7 @@ function createApp(input: {
   consumed?: boolean;
   throwWorker?: boolean;
   executionOverride?: unknown;
+  eventsOverride?: unknown;
 }) {
   const app = Fastify();
   const calls: string[] = [];
@@ -103,6 +104,24 @@ function createApp(input: {
             responseText: 'Synthetic response',
           },
           usage: { kind: 'unknown', reason: 'not_reported', billingExposure: 'unknown' },
+        }) as TResult;
+      }
+      if (path.includes('/events?')) {
+        return (input.eventsOverride ?? {
+          version: 'omnis.synthetic-task-run-events.v1',
+          authorizationId,
+          taskId,
+          events: [
+            {
+              attemptId: '44444444-4444-4444-8444-444444444444',
+              sequence: 3,
+              eventType: 'connector.execution_completed',
+              outcome: 'recorded',
+              revocationGeneration: 0,
+              occurredAt: '2026-11-07T00:00:03.000Z',
+            },
+          ],
+          page: { nextAfter: null },
         }) as TResult;
       }
       return (
@@ -377,6 +396,44 @@ describe('owner synthetic task run routes', () => {
       `authorizer:/internal/v1/connector-authorizations/${authorizationId}`,
       `authorizer:/internal/v1/connector-authorizations/${authorizationId}/execution`,
     ]);
+    await app.close();
+  });
+
+  it('reads paginated task-run events only after verifying the owner task binding', async () => {
+    const { app, calls } = createApp({});
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/v1/tasks/${taskId}/synthetic-runs/${authorizationId}/events?after=2&limit=10`,
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json().events[0].attemptId, '44444444-4444-4444-8444-444444444444');
+    assert.equal(response.json().events[0].eventType, 'connector.execution_completed');
+    assert.deepEqual(calls, [
+      `authorizer:/internal/v1/connector-authorizations/${authorizationId}`,
+      `authorizer:/internal/v1/connector-authorizations/${authorizationId}/events?after=2&limit=10`,
+    ]);
+    await app.close();
+  });
+
+  it('does not expose event history for a grant bound to another task', async () => {
+    const { app, calls } = createApp({});
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/v1/tasks/task-other/synthetic-runs/${authorizationId}/events`,
+    });
+    assert.equal(response.statusCode, 404);
+    assert.equal(calls.length, 1);
+    await app.close();
+  });
+
+  it('rejects malformed event cursors and page sizes', async () => {
+    const { app, calls } = createApp({});
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/v1/tasks/${taskId}/synthetic-runs/${authorizationId}/events?after=-1&limit=1000`,
+    });
+    assert.equal(response.statusCode, 400);
+    assert.equal(calls.length, 0);
     await app.close();
   });
 

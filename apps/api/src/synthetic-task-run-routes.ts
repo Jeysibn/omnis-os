@@ -6,6 +6,8 @@ import {
 import {
   SyntheticTaskRunCancellationResponseSchema,
   SyntheticTaskRunDetailSchema,
+  SyntheticTaskRunEventsQuerySchema,
+  SyntheticTaskRunEventsResponseSchema,
   SyntheticTaskRunRequestSchema,
   SyntheticTaskRunResponseSchema,
 } from '@omnis/contracts/synthetic-task-run';
@@ -205,6 +207,53 @@ export function registerSyntheticTaskRunRoutes(
         {},
         (value) => SyntheticTaskRunDetailSchema.parse(value),
       );
+    },
+  );
+
+  app.get<{
+    Params: { taskId: string; authorizationId: string };
+    Querystring: { after?: string; limit?: string };
+  }>(
+    '/api/v1/tasks/:taskId/synthetic-runs/:authorizationId/events',
+    { preHandler: guards.requireOwner },
+    async (request, reply) => {
+      const query = SyntheticTaskRunEventsQuerySchema.safeParse(request.query);
+      if (!query.success) {
+        return reply.code(400).send({
+          error: { code: 'invalid_input', message: 'Synthetic task-run event query is invalid.' },
+        });
+      }
+      const authorization = await toAuthorizer(
+        `/internal/v1/connector-authorizations/${encodeURIComponent(request.params.authorizationId)}`,
+        {},
+        (value) => ConnectorAuthorizationSchema.parse(value),
+      );
+      if (
+        authorization.id !== request.params.authorizationId ||
+        authorization.taskId !== request.params.taskId
+      ) {
+        return reply.code(404).send({
+          error: { code: 'not_found', message: 'Synthetic task run was not found.' },
+        });
+      }
+      const params = new URLSearchParams({
+        after: String(query.data.after),
+        limit: String(query.data.limit),
+      });
+      const events = await toAuthorizer(
+        `/internal/v1/connector-authorizations/${encodeURIComponent(authorization.id)}/events?${params.toString()}`,
+        {},
+        (value) => SyntheticTaskRunEventsResponseSchema.parse(value),
+      );
+      if (events.authorizationId !== authorization.id || events.taskId !== request.params.taskId) {
+        return reply.code(503).send({
+          error: {
+            code: 'synthetic_event_identity_mismatch',
+            message: 'The durable event history did not match the requested task run.',
+          },
+        });
+      }
+      return events;
     },
   );
 }

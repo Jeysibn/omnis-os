@@ -269,6 +269,27 @@ const postgresSuite = describe(
         outputUnits: 8,
         billingExposure: 'synthetic-only',
       });
+      const firstEventPage = await brokerStore.listSyntheticTaskRunEvents(pending.id, 0, 2);
+      assert.deepEqual(
+        firstEventPage.events.map((event) => event.eventType),
+        ['connector.authorization_consumed', 'connector.submission_started'],
+      );
+      assert.equal(firstEventPage.nextAfter, 4);
+      assert.equal('responseText' in firstEventPage.events[0]!, false);
+      const secondEventPage = await brokerStore.listSyntheticTaskRunEvents(
+        pending.id,
+        firstEventPage.nextAfter,
+        2,
+      );
+      assert.deepEqual(
+        secondEventPage.events.map((event) => event.eventType),
+        ['connector.submission_accepted', 'connector.execution_completed'],
+      );
+      assert.equal(secondEventPage.nextAfter, null);
+      await assert.rejects(
+        brokerStore.listSyntheticTaskRunEvents(pending.id, -1, 2),
+        /event page is invalid/,
+      );
       assert.equal(
         (await brokerStore.listBrokerRecoveryCandidates(10, null)).some(
           (candidate) => candidate.id === completed.id,

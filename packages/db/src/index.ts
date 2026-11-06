@@ -29,6 +29,7 @@ export {
 export type {
   BrokerAdmission,
   ConnectorAuthorizationStoreErrorCode,
+  SyntheticTaskRunEventPage,
 } from './connector-authorization-store.ts';
 export type {
   RuntimeAuthorizationRecord,

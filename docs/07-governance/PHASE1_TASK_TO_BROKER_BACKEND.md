@@ -90,13 +90,11 @@ remain unknown. No cancellation result is inferred from a lost response.
 
 ## Remaining integration gates
 
-PR #49 does not implement the socket target above or the broker's execution contract, so the
-owner-to-broker end-to-end path remains unavailable until Codex #3 aligns its active platform
-work to this versioned interface and supplies executable peer-identity/egress evidence.
-PR #46 remains Draft historical context and is not modified here. Its current unknown-submission
-response omits `correlationId`, which this backend contract requires to bind the outcome to the
-approved grant. It must be aligned before end-to-end integration; this PR does not claim it is
-compatible as-is.
+PR #49 is merged and contributes disposable Docker boundary tests; it does not implement the
+socket target above or the broker execution contract. PR #46 remains a separate Draft platform
+workstream and is not modified here. The owner-to-broker end-to-end path remains unavailable
+until the platform implementation supplies the fixed socket target and executable
+peer-identity/egress evidence.
 The current application `runs` table and pg-boss queue remain mock-specific; this integration
 uses the existing connector attempt as its durable run identity and does not enqueue connector
 prompts in PostgreSQL. This avoids persisting the exact rendered request, but it is a synchronous
@@ -105,7 +103,18 @@ must decide how to retain or retrieve rendered input without storing it in plain
 link any run projection to the existing attempt rather than creating a second state machine.
 
 The standard Run SSE stream remains mock-only. Connector status is available as a durable
-attempt snapshot; a separate event-history/UI projection is not part of this backend slice.
+attempt snapshot. This backend also exposes an owner-protected paginated task-run event-history
+projection over the existing append-only `connector_authorization_audit` records. It returns
+only attempt ID, sequence, event type, outcome, revocation generation, and timestamp; it does
+not expose request text, provider payloads, response content, usage, or credentials. It adds no
+event table or competing state machine, and it does not change canonical `runs`/`run_events` or
+the standard mock Run SSE stream. The endpoint is available only with the test-only synthetic
+routes enabled.
+
+This remains synchronous worker dispatch rather than pg-boss connector scheduling. The attempt
+ID remains the durable synthetic run identity. A durable asynchronous connector scheduler and
+unified Run SSE projection remain separate follow-up work requiring coordination with deferred
+task-event architecture and the platform broker implementation.
 Rootful Docker remains host-root-equivalent, so no real credential custody is permitted on that
 host. G4-3 remains Partially Fixed, R1-G5 Partially Complete, AO-107/AO-113 remain BLOCKED, and
 real-runtime activation remains BLOCK.
