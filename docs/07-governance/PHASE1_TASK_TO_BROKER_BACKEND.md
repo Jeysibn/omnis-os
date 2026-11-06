@@ -60,9 +60,11 @@ audit records remain authoritative. A caller can read status through the owner A
 `GET /api/v1/tasks/{taskId}/synthetic-runs/{authorizationId}`, which checks the grant/task
 association and reads the persisted authorizer attempt and usage provenance. No request text,
 token, or private signing key is returned. After a broker response, the API reads the durable
-attempt again and checks task, grant, request, attempt, status, submission marker, and response
-text before returning it; usage is taken from that durable record. If worker or authorizer state
-cannot be confirmed, the API returns an uncertain result and does not resubmit.
+attempt again and checks task, grant, request, attempt, status, submission evidence, and response
+text before returning it; it derives the submission evidence from the persisted lifecycle and
+provider submission ID, since `submissionStartedAt` marks the pre-send boundary and does not by
+itself prove provider receipt. Usage is taken from the durable record. If worker or authorizer
+state cannot be confirmed, the API returns an uncertain result and does not resubmit.
 
 Cancellation uses the existing owner-protected grant revocation operation. The authorizer
 atomically marks the single-use grant revoked and records the in-flight attempt's durable

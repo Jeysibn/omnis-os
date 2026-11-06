@@ -302,6 +302,46 @@ describe('owner synthetic task run routes', () => {
     await app.close();
   });
 
+  it('accepts a durable pre-submission rejection without mistaking the boundary timestamp for submission', async () => {
+    const { app } = createApp({
+      onWorker: () => ({
+        version: 'omnis.synthetic-task-run.v1',
+        taskId,
+        authorizationId,
+        requestId,
+        correlationId: grant.correlationId,
+        attemptId: '44444444-4444-4444-8444-444444444444',
+        status: 'failed',
+        submitted: false,
+        usage: { kind: 'unknown', reason: 'not_reported', billingExposure: 'unknown' },
+      }),
+      executionOverride: {
+        version: 'omnis.synthetic-task-run.v1',
+        taskId,
+        attempt: {
+          id: '44444444-4444-4444-8444-444444444444',
+          authorizationId,
+          requestId,
+          status: 'failed',
+          synthetic: true,
+          createdAt: '2026-11-07T00:00:00.000Z',
+          submissionStartedAt: '2026-11-07T00:00:01.000Z',
+          providerSubmissionId: null,
+        },
+        usage: { kind: 'unknown', reason: 'not_reported', billingExposure: 'unknown' },
+      },
+    });
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/v1/tasks/${taskId}/synthetic-runs`,
+      headers: { 'idempotency-key': requestId },
+      payload: { authorizationId, request: binding, renderedRequest },
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json().submitted, false);
+    await app.close();
+  });
+
   it('records cancellation as requested without claiming provider termination', async () => {
     let cancellationAudit = false;
     const { app, getRevokeCount } = createApp({

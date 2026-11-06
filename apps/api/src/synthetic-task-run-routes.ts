@@ -134,7 +134,7 @@ export function registerSyntheticTaskRunRoutes(
         attempt.requestId !== requestId ||
         attempt.id !== result.attemptId ||
         attempt.status !== result.status ||
-        Boolean(attempt.submissionStartedAt) !== result.submitted ||
+        hasSubmissionEvidence(attempt) !== result.submitted ||
         (attempt.responseText ?? undefined) !== result.responseText
       ) {
         return reply.code(503).send({
@@ -207,6 +207,15 @@ export function registerSyntheticTaskRunRoutes(
       );
     },
   );
+}
+
+function hasSubmissionEvidence(
+  attempt: ReturnType<typeof SyntheticTaskRunDetailSchema.parse>['attempt'],
+): boolean {
+  if (attempt.status === 'admitted') return false;
+  if (attempt.status === 'failed') return attempt.providerSubmissionId != null;
+  if (attempt.status === 'interrupted') return attempt.submissionStartedAt != null;
+  return true;
 }
 
 function matchesApprovedTask(
