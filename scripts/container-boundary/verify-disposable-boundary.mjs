@@ -420,8 +420,7 @@ async function verifySocketBoundaries() {
   });
   assert.ok(apiSocketResult.includes('"kind":"connected"'));
   await assertSocketAccepted(authorizerServer, acceptCount);
-  acceptCount = socketStates.get(launcherServer).accepted;
-  const workerSocketResult = probeContainer({
+  probeContainer({
     name: `${resourcePrefix}-api-denied`,
     mounts: [apiMount],
     environment: {
@@ -431,11 +430,6 @@ async function verifySocketBoundaries() {
       OMNIS_EXPECT_NO_GROUP: String(authorizerGid),
     },
   });
-  assert.ok(
-    workerSocketResult.includes('"kind":"connected"'),
-    `worker socket probe returned: ${workerSocketResult.slice(0, 700)}`,
-  );
-  await assertSocketAccepted(launcherServer, acceptCount);
   probeContainer({
     name: `${resourcePrefix}-api-cross-service`,
     mounts: [apiMount],
@@ -445,7 +439,8 @@ async function verifySocketBoundaries() {
       OMNIS_EXPECT_SOCKET_ERROR: 'ENOENT',
     },
   });
-  probeContainer({
+  acceptCount = socketStates.get(launcherServer).accepted;
+  const workerSocketResult = probeContainer({
     image: workerImage,
     name: workerContainer,
     mounts: [workerMount],
@@ -456,6 +451,11 @@ async function verifySocketBoundaries() {
       OMNIS_EXPECT_GROUP: String(launcherGid),
     },
   });
+  assert.ok(
+    workerSocketResult.includes('"kind":"connected"'),
+    `worker socket probe returned: ${workerSocketResult.slice(0, 700)}`,
+  );
+  await assertSocketAccepted(launcherServer, acceptCount);
   probeContainer({
     image: workerImage,
     name: `${resourcePrefix}-worker-denied`,
