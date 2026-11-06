@@ -138,7 +138,11 @@ function docker(args, options = {}) {
   });
   if (result.error || result.status !== 0) {
     const detail = result.error?.code ?? `exit ${result.status}`;
-    throw new Error(`Docker command failed (${detail}): docker ${args[0] ?? ''}`);
+    const output = `${result.stdout ?? ''}${result.stderr ?? ''}`
+      .replace(/(password|token|secret|database_url)\s*[=:]\s*[^\s'"`]+/gi, '$1=<redacted>')
+      .replace(/[\r\n]+/g, ' ')
+      .slice(0, 500);
+    throw new Error(`Docker command failed (${detail}) for ${args[0] ?? 'unknown'}: ${output}`);
   }
   return result.stdout.trim();
 }
