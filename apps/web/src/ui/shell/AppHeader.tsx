@@ -36,11 +36,15 @@ type Props = {
  * `requiredWidth` is the width the inline layout needed when it last overflowed. The header
  * expands again only once it is at least that wide, which gives the switch hysteresis and
  * prevents flicker at the threshold.
+ *
+ * `beforeSwitch` runs immediately before the mode changes, while the old controls are still in
+ * the document, so the caller can record where keyboard focus is.
  */
 function useCollapsedNavigation(
   headerRef: { current: HTMLElement | null },
   navRef: { current: HTMLElement | null },
   itemCount: number,
+  beforeSwitch: { current: () => void },
 ) {
   const [collapsed, setCollapsed] = useState(false);
   const requiredWidth = useRef(0);
@@ -55,9 +59,11 @@ function useCollapsedNavigation(
       if (!collapsed) {
         if (header.scrollWidth > header.clientWidth) {
           requiredWidth.current = header.scrollWidth;
+          beforeSwitch.current();
           setCollapsed(true);
         }
       } else if (header.clientWidth >= requiredWidth.current + 1) {
+        beforeSwitch.current();
         setCollapsed(false);
       }
     };
@@ -75,7 +81,7 @@ function useCollapsedNavigation(
       active = false;
       observer.disconnect();
     };
-  }, [collapsed, headerRef, navRef, itemCount]);
+  }, [collapsed, headerRef, navRef, itemCount, beforeSwitch]);
 
   return collapsed;
 }
@@ -85,7 +91,19 @@ export function AppHeader({ brand, items, activeId, ownerName, onSignOut }: Prop
   const buttonRef = useRef<HTMLButtonElement | null>(null);
   const navRef = useRef<HTMLElement | null>(null);
   const menuId = useId();
-  const collapsed = useCollapsedNavigation(headerRef, navRef, items.length);
+  // Where keyboard focus was inside the navigation when the layout mode last switched.
+  const focusIntent = useRef<{ kind: 'link'; id: string } | { kind: 'trigger' } | null>(null);
+  const recordFocus = useRef(() => {
+    const active = document.activeElement;
+    focusIntent.current = null;
+    if (active instanceof HTMLAnchorElement && navRef.current?.contains(active)) {
+      const id = active.dataset.navId;
+      if (id) focusIntent.current = { kind: 'link', id };
+    } else if (active !== null && active === buttonRef.current) {
+      focusIntent.current = { kind: 'trigger' };
+    }
+  });
+  const collapsed = useCollapsedNavigation(headerRef, navRef, items.length, recordFocus);
   const [open, setOpen] = useState(false);
   const expanded = collapsed && open;
 
@@ -93,6 +111,25 @@ export function AppHeader({ brand, items, activeId, ownerName, onSignOut }: Prop
     setOpen(false);
     if (restoreFocus) buttonRef.current?.focus();
   }, []);
+
+  // Keyboard focus survives a layout switch. A focused control that is about to be replaced would
+  // otherwise drop focus to the document body. Focus is moved only when it was inside the
+  // navigation, and only to a control that exists and is visible in the new mode.
+  useLayoutEffect(() => {
+    const intent = focusIntent.current;
+    focusIntent.current = null;
+    if (!intent) return;
+    if (collapsed) {
+      // Inline -> menu: the links are now hidden, so the menu trigger takes focus (menu stays closed).
+      buttonRef.current?.focus({ preventScroll: true });
+      return;
+    }
+    // Menu -> inline: the same destination when it exists, else the active one.
+    const links = navRef.current?.querySelectorAll<HTMLAnchorElement>('a[data-nav-id]') ?? [];
+    const wanted = intent.kind === 'link' ? intent.id : activeId;
+    const target = [...links].find((item) => item.dataset.navId === wanted) ?? links[0];
+    target?.focus({ preventScroll: true });
+  }, [collapsed]); // activeId is read only at switch time, so it is not a dependency
 
   // Growing back to the inline layout dismisses the menu.
   useEffect(() => {
@@ -145,6 +182,7 @@ export function AppHeader({ brand, items, activeId, ownerName, onSignOut }: Prop
         <a
           key={item.id}
           href={`#${item.id}`}
+          data-nav-id={item.id}
           aria-current={activeId === item.id ? 'page' : undefined}
           className={activeId === item.id ? 'nav-active' : ''}
           onClick={() => {

@@ -238,7 +238,7 @@ test.describe('navigation: discoverable at every width', () => {
       await expect(nav(page).getByRole('link', { name, exact: true })).toBeVisible();
   });
 
-  test('the layout switches where the content stops fitting and switches back without flicker', async ({
+  test('the layout settles to the menu below the switch width and back to inline above it (settled layout, not individual frames)', async ({
     page,
   }) => {
     await installApi(page);
@@ -254,6 +254,8 @@ test.describe('navigation: discoverable at every width', () => {
       }
     }
     expect(switchedAt).toBeGreaterThan(320);
+    // Checks the settled layout only. One frame of the previous layout during a live resize is a
+    // documented, accepted trade-off (see AppHeader), so frames are not asserted.
     // Everything wider than the switch point is inline and contained; everything narrower is a menu.
     for (const width of [switchedAt + 20, switchedAt + 120, 1440]) {
       await page.setViewportSize({ width, height: 900 });
@@ -312,6 +314,156 @@ test.describe('navigation: discoverable at every width', () => {
         });
       await expectContained(page, `${total} destinations @${width}`);
     }
+  });
+});
+
+test.describe('focus continuity across responsive transitions', () => {
+  const wide = { width: 1440, height: 900 };
+  const narrow = { width: 390, height: 844 };
+  const resize = async (page: Page, size: { width: number; height: number }) => {
+    await page.setViewportSize(size);
+    await settle(page);
+  };
+  /** Collects ResizeObserver loop errors, which must never appear during transitions. */
+  const watchLoopErrors = (page: Page) => {
+    const errors: string[] = [];
+    page.on('pageerror', (error) => {
+      if (/ResizeObserver/.test(error.message)) errors.push(error.message);
+    });
+    page.on('console', (message) => {
+      if (/ResizeObserver loop/.test(message.text())) errors.push(message.text());
+    });
+    return errors;
+  };
+  const link = (page: Page, name: string) => nav(page).getByRole('link', { name, exact: true });
+  const focusedLabel = (page: Page) =>
+    page.evaluate(
+      () =>
+        document.activeElement?.getAttribute('aria-label') ??
+        document.activeElement?.textContent?.trim() ??
+        document.activeElement?.tagName,
+    );
+
+  test.beforeEach(async ({ page }) => {
+    await installApi(page);
+  });
+
+  test('menu to inline: focus on Runs stays on the Runs link', async ({ page }) => {
+    const errors = watchLoopErrors(page);
+    await page.setViewportSize(narrow);
+    await open(page);
+    await page.keyboard.press('Tab'); // skip link
+    await page.keyboard.press('Tab'); // brand
+    await page.keyboard.press('Tab'); // menu button
+    await page.keyboard.press('Enter');
+    for (let i = 0; i < 3; i += 1) await page.keyboard.press('Tab'); // Command Center, Tasks, Runs
+    await expect(link(page, 'Runs')).toBeFocused();
+    await resize(page, wide);
+    await expect(header(page)).toHaveAttribute('data-nav', 'inline');
+    await expect(link(page, 'Runs')).toBeFocused();
+    expect(await focusedLabel(page)).toBe('Runs');
+    // Keyboard navigation continues logically from there.
+    await page.keyboard.press('Tab');
+    await expect(link(page, 'Agents')).toBeFocused();
+    await page.keyboard.press('Shift+Tab');
+    await page.keyboard.press('Shift+Tab');
+    await expect(link(page, 'Tasks')).toBeFocused();
+    expect(errors).toEqual([]);
+  });
+
+  test('menu to inline: focus on the menu button moves to the active destination', async ({
+    page,
+  }) => {
+    await page.setViewportSize(narrow);
+    await open(page, '#runs');
+    await menuButton(page).focus();
+    await expect(menuButton(page)).toBeFocused();
+    await resize(page, wide);
+    await expect(menuButton(page)).toHaveCount(0);
+    await expect(link(page, 'Runs')).toBeFocused();
+    await expect(link(page, 'Runs')).toHaveAttribute('aria-current', 'page');
+  });
+
+  test('inline to menu: focus on a link moves to the closed menu button, never a hidden link', async ({
+    page,
+  }) => {
+    const errors = watchLoopErrors(page);
+    await page.setViewportSize(wide);
+    await open(page);
+    await link(page, 'Runs').focus();
+    await expect(link(page, 'Runs')).toBeFocused();
+    await resize(page, narrow);
+    await expect(header(page)).toHaveAttribute('data-nav', 'menu');
+    await expect(menuButton(page)).toBeFocused();
+    await expect(menuButton(page)).toHaveAttribute('aria-expanded', 'false');
+    await expect(nav(page)).toBeHidden(); // focus never lands on a hidden element
+    expect(await page.evaluate(() => document.activeElement === document.body)).toBe(false);
+    // The menu opens only when the user asks, and Tab then reaches the links in order.
+    await page.keyboard.press('Enter');
+    await page.keyboard.press('Tab');
+    await expect(link(page, 'Command Center')).toBeFocused();
+    expect(errors).toEqual([]);
+  });
+
+  test('focus outside the navigation is left alone in both directions', async ({ page }) => {
+    await page.setViewportSize(wide);
+    await open(page);
+    await signOut(page).focus();
+    await resize(page, narrow);
+    await expect(signOut(page)).toBeFocused();
+    await expect(menuButton(page)).toHaveAttribute('aria-expanded', 'false');
+    await resize(page, wide);
+    await expect(signOut(page)).toBeFocused();
+    await page.locator('#main-content').focus();
+    await resize(page, narrow);
+    await expect(page.locator('#main-content')).toBeFocused();
+    await expect(menuButton(page)).toHaveAttribute('aria-expanded', 'false');
+    await resize(page, wide);
+    await expect(page.locator('#main-content')).toBeFocused();
+    // Nothing focused at all stays that way: no focus theft onto the navigation.
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    await resize(page, narrow);
+    expect(await page.evaluate(() => document.activeElement === document.body)).toBe(true);
+  });
+
+  test('repeated resizing with keyboard navigation is stable (10 round trips)', async ({
+    page,
+  }) => {
+    test.setTimeout(90_000);
+    const errors = watchLoopErrors(page);
+    await page.setViewportSize(wide);
+    await open(page);
+    for (let round = 0; round < 10; round += 1) {
+      await link(page, 'Runs').focus();
+      await resize(page, narrow);
+      await expect(menuButton(page), `round ${round}`).toBeFocused();
+      await page.keyboard.press('Enter');
+      for (let i = 0; i < 3; i += 1) await page.keyboard.press('Tab');
+      await expect(link(page, 'Runs'), `round ${round}`).toBeFocused();
+      await resize(page, wide);
+      await expect(link(page, 'Runs'), `round ${round}`).toBeFocused();
+      await expect(header(page)).toHaveAttribute('data-nav', 'inline');
+      await expect(menuButton(page)).toHaveCount(0);
+    }
+    expect(errors).toEqual([]);
+  });
+
+  test('Escape, route change and sign-out still work after a transition', async ({ page }) => {
+    await page.setViewportSize(wide);
+    await open(page);
+    await link(page, 'Runs').focus();
+    await resize(page, narrow);
+    await page.keyboard.press('Enter');
+    await expect(menuButton(page)).toHaveAttribute('aria-expanded', 'true');
+    await page.keyboard.press('Escape');
+    await expect(menuButton(page)).toBeFocused();
+    await expect(menuButton(page)).toHaveAttribute('aria-expanded', 'false');
+    await page.keyboard.press('Enter');
+    await link(page, 'Agents').click();
+    await expect(page).toHaveURL(/#agents$/);
+    await expect(menuButton(page)).toBeFocused();
+    await signOut(page).click();
+    await expect(page.getByRole('heading', { name: 'Welcome back.' })).toBeVisible();
   });
 });
 
