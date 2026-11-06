@@ -15,5 +15,7 @@ describe('production runtime selection boundary', () => {
       productionWorker,
       /process\.env\.OMNIS_(?:RUNTIME_KIND|CONNECTOR_KIND|CODEX_CONNECTOR_ENABLED)/,
     );
+    assert.doesNotMatch(productionWorker, /connector-authorization|ConnectorAuthorization/);
+    assert.doesNotMatch(productionWorker, /\.consume\(/);
   });
 });

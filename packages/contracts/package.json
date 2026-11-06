@@ -2,11 +2,16 @@
   "name": "@omnis/contracts",
   "private": true,
   "type": "module",
-  "exports": { ".": "./src/index.ts" },
+  "exports": {
+    ".": "./src/index.ts",
+    "./connector-authorization": "./src/connector-authorization.ts"
+  },
   "scripts": {
     "build": "pnpm typecheck",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --experimental-strip-types --test src/index.test.ts"
+    "test": "node --experimental-strip-types --test src/index.test.ts src/connector-authorization.test.ts"
   },
-  "dependencies": { "zod": "4.6.7" }
+  "dependencies": {
+    "zod": "4.6.7"
+  }
 }

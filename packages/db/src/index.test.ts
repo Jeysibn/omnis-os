@@ -7,6 +7,10 @@ import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { Pool } from 'pg';
 import {
+  ConnectorAuthorizationRequestSchema,
+  createRenderedRequestDigest,
+} from '@omnis/contracts/connector-authorization';
+import {
   createPool,
   AgentLifecycleStoreError,
   DepartmentStoreError,
@@ -14,6 +18,8 @@ import {
   PostgresAgentProfileStore,
   PostgresAgentLifecycleStore,
   PostgresAuthorizationStore,
+  PostgresConnectorAuthorizationStore,
+  ConnectorAuthorizationStoreError,
   PostgresDepartmentManagementStore,
   PostgresProjectManagementStore,
   PostgresProjectMilestoneStore,
@@ -82,12 +88,368 @@ const postgresSuite = describe(
         'GRANT SELECT, INSERT, UPDATE, DELETE ON omnis.test_queue_outbox TO omnis_runtime',
       );
       await adminPool!.query(
-        'TRUNCATE omnis.test_queue_outbox, omnis.task_project_management_idempotency, omnis.task_epic_management_audit, omnis.task_epic_associations, omnis.task_project_management_audit, omnis.project_epic_management_audit, omnis.project_epics, omnis.project_milestone_management_audit, omnis.project_milestones, omnis.project_management_idempotency, omnis.project_management_audit, omnis.projects, omnis.agent_management_idempotency, omnis.agent_management_audit, omnis.agent_profile_drafts, omnis.department_management_audit, omnis.agent_profile_versions, omnis.agents, omnis.departments, omnis.mock_sandbox_launches, omnis.legacy_unscoped_runs, omnis.authorization_audit, omnis.runtime_authorizations, omnis.run_idempotency, omnis.run_events, omnis.runs, omnis.tasks',
+        'TRUNCATE omnis.test_queue_outbox, omnis.connector_authorization_audit, omnis.connector_execution_attempts, omnis.connector_authorizations, omnis.task_project_management_idempotency, omnis.task_epic_management_audit, omnis.task_epic_associations, omnis.task_project_management_audit, omnis.project_epic_management_audit, omnis.project_epics, omnis.project_milestone_management_audit, omnis.project_milestones, omnis.project_management_idempotency, omnis.project_management_audit, omnis.projects, omnis.agent_management_idempotency, omnis.agent_management_audit, omnis.agent_profile_drafts, omnis.department_management_audit, omnis.agent_profile_versions, omnis.agents, omnis.departments, omnis.mock_sandbox_launches, omnis.legacy_unscoped_runs, omnis.authorization_audit, omnis.runtime_authorizations, omnis.run_idempotency, omnis.run_events, omnis.runs, omnis.tasks',
       );
       await adminPool!.query('ALTER SEQUENCE omnis.task_id_seq RESTART WITH 1');
       await adminPool!.query('ALTER SEQUENCE omnis.run_id_seq RESTART WITH 1');
       nextKey += 1;
     });
+
+    it('creates an owner-approved synthetic connector grant and consumes it once', async () => {
+      const fixture = await connectorFixture();
+      const authStore = fixture.authorizations;
+      const requestId = randomUUID();
+      const pending = await authStore.request(fixture.request, requestId);
+      assert.equal(pending.status, 'pending');
+      assert.equal(pending.requestingActor, 'owner');
+      assert.equal(pending.capabilities.length, 0);
+      assert.equal(pending.synthetic, true);
+      await assert.rejects(
+        authorizerPool!.query(
+          `UPDATE omnis.connector_authorizations SET status = 'revoked' WHERE id = $1`,
+          [pending.id],
+        ),
+        /invalid connector authorization state transition/,
+      );
+
+      const approved = await authStore.decide(pending.id, 'owner', {
+        decision: 'approve',
+        promptDigestConfirmation: fixture.request.promptDigest,
+      });
+      assert.equal(approved.status, 'authorized');
+      assert.ok(approved.consentedAt);
+
+      const attemptRequestId = randomUUID();
+      const [attempt, replayedAttempt] = await Promise.all([
+        authStore.consume(approved.id, fixture.request, attemptRequestId),
+        authStore.consume(approved.id, fixture.request, attemptRequestId),
+      ]);
+      assert.equal(attempt.id, replayedAttempt.id);
+      assert.equal(attempt.synthetic, true);
+      assert.equal(attempt.status, 'admitted');
+      await assert.rejects(
+        authStore.consume(approved.id, fixture.request, randomUUID()),
+        (error: unknown) =>
+          error instanceof ConnectorAuthorizationStoreError && error.code === 'invalid_transition',
+      );
+      const consumed = await authStore.get(approved.id);
+      assert.equal(consumed?.consumedRequestId, attemptRequestId);
+    });
+
+    it('makes request idempotency return the same grant and rejects changed content', async () => {
+      const fixture = await connectorFixture();
+      const requestId = randomUUID();
+      const [first, retry] = await Promise.all([
+        fixture.authorizations.request(fixture.request, requestId),
+        fixture.authorizations.request(fixture.request, requestId),
+      ]);
+      assert.equal(first.id, retry.id);
+      await assert.rejects(
+        fixture.authorizations.request(
+          { ...fixture.request, promptDigest: createRenderedRequestDigest('changed request') },
+          requestId,
+        ),
+        (error: unknown) =>
+          error instanceof ConnectorAuthorizationStoreError && error.code === 'conflict',
+      );
+    });
+
+    it('rejects mismatched task, project revision, profile version, prompt, provider, model, and tools', async () => {
+      const fixture = await connectorFixture();
+      const wrongBindings: unknown[] = [
+        { ...fixture.request, taskId: 'task-does-not-match' },
+        { ...fixture.request, projectId: 'prj_ffffffffffffffffffffffffffffffff' },
+        { ...fixture.request, projectRevision: fixture.request.projectRevision + 1 },
+        { ...fixture.request, taskRevision: fixture.request.taskRevision + 1 },
+        { ...fixture.request, profileVersion: fixture.request.profileVersion + 1 },
+        { ...fixture.request, providerId: 'openai' },
+        { ...fixture.request, modelId: 'real-model' },
+        { ...fixture.request, capabilities: ['shell.execute'] },
+      ];
+      for (const binding of wrongBindings) {
+        await assert.rejects(
+          fixture.authorizations.request(binding, randomUUID()),
+          (error: unknown) =>
+            error instanceof ConnectorAuthorizationStoreError &&
+            ['conflict', 'invalid_input'].includes(error.code),
+        );
+      }
+
+      const approved = await fixture.authorizations.request(fixture.request, randomUUID());
+      await fixture.authorizations.decide(approved.id, 'owner', {
+        decision: 'approve',
+        promptDigestConfirmation: fixture.request.promptDigest,
+      });
+      await assert.rejects(
+        fixture.authorizations.consume(
+          approved.id,
+          { ...fixture.request, promptDigest: createRenderedRequestDigest('different') },
+          randomUUID(),
+        ),
+        (error: unknown) =>
+          error instanceof ConnectorAuthorizationStoreError && error.code === 'conflict',
+      );
+      await assert.rejects(
+        fixture.authorizations.decide(approved.id, 'owner', {
+          decision: 'approve',
+          promptDigestConfirmation: createRenderedRequestDigest('different'),
+        }),
+        (error: unknown) =>
+          error instanceof ConnectorAuthorizationStoreError && error.code === 'conflict',
+      );
+    });
+
+    it('rejects expired and revoked grants and serializes parallel consumption', async () => {
+      const expiredFixture = await connectorFixture(5);
+      const expired = await expiredFixture.authorizations.request(
+        expiredFixture.request,
+        randomUUID(),
+      );
+      await expiredFixture.authorizations.decide(expired.id, 'owner', {
+        decision: 'approve',
+        promptDigestConfirmation: expiredFixture.request.promptDigest,
+      });
+      await delay(5_100);
+      await assert.rejects(
+        expiredFixture.authorizations.consume(expired.id, expiredFixture.request, randomUUID()),
+        (error: unknown) =>
+          error instanceof ConnectorAuthorizationStoreError && error.code === 'invalid_transition',
+      );
+
+      const revokedFixture = await connectorFixture();
+      const revoked = await revokedFixture.authorizations.request(
+        revokedFixture.request,
+        randomUUID(),
+      );
+      await revokedFixture.authorizations.decide(revoked.id, 'owner', {
+        decision: 'approve',
+        promptDigestConfirmation: revokedFixture.request.promptDigest,
+      });
+      const afterRevoke = await revokedFixture.authorizations.revoke(revoked.id, 'owner');
+      assert.equal(afterRevoke.status, 'revoked');
+      assert.equal(afterRevoke.revocationGeneration, 1);
+      await assert.rejects(
+        revokedFixture.authorizations.consume(revoked.id, revokedFixture.request, randomUUID()),
+        (error: unknown) =>
+          error instanceof ConnectorAuthorizationStoreError && error.code === 'invalid_transition',
+      );
+
+      const parallelFixture = await connectorFixture();
+      const grant = await parallelFixture.authorizations.request(
+        parallelFixture.request,
+        randomUUID(),
+      );
+      await parallelFixture.authorizations.decide(grant.id, 'owner', {
+        decision: 'approve',
+        promptDigestConfirmation: parallelFixture.request.promptDigest,
+      });
+      const results = await Promise.allSettled([
+        parallelFixture.authorizations.consume(grant.id, parallelFixture.request, randomUUID()),
+        parallelFixture.authorizations.consume(grant.id, parallelFixture.request, randomUUID()),
+      ]);
+      assert.equal(results.filter((result) => result.status === 'fulfilled').length, 1);
+      assert.equal(results.filter((result) => result.status === 'rejected').length, 1);
+      const attempts = await adminPool!.query(
+        'SELECT id FROM omnis.connector_execution_attempts WHERE authorization_id = $1',
+        [grant.id],
+      );
+      assert.equal(attempts.rowCount, 1);
+    });
+
+    it('linearizes revocation against consumption and preserves the winning audit trail', async () => {
+      const fixture = await connectorFixture();
+      const grant = await fixture.authorizations.request(fixture.request, randomUUID());
+      await fixture.authorizations.decide(grant.id, 'owner', {
+        decision: 'approve',
+        promptDigestConfirmation: fixture.request.promptDigest,
+      });
+      const results = await Promise.allSettled([
+        fixture.authorizations.consume(grant.id, fixture.request, randomUUID()),
+        fixture.authorizations.revoke(grant.id, 'owner'),
+      ]);
+      assert.equal(results[1]?.status, 'fulfilled');
+      if (results[0]?.status === 'rejected') {
+        assert.ok(
+          results[0].reason instanceof ConnectorAuthorizationStoreError &&
+            results[0].reason.code === 'invalid_transition',
+        );
+      }
+      const finalGrant = await fixture.authorizations.get(grant.id);
+      assert.equal(finalGrant?.status, 'revoked');
+      assert.equal(finalGrant?.revocationGeneration, 1);
+      const attempts = await adminPool!.query(
+        'SELECT id FROM omnis.connector_execution_attempts WHERE authorization_id = $1',
+        [grant.id],
+      );
+      assert.ok(attempts.rowCount === 0 || attempts.rowCount === 1);
+      const events = await adminPool!.query<{ event_type: string }>(
+        'SELECT event_type FROM omnis.connector_authorization_audit WHERE authorization_id = $1 ORDER BY sequence',
+        [grant.id],
+      );
+      assert.deepEqual(
+        events.rows.map((row) => row.event_type),
+        [
+          'connector.authorization_requested',
+          'connector.authorization_approved',
+          ...(results[0]?.status === 'fulfilled' ? ['connector.authorization_consumed'] : []),
+          'connector.authorization_revoked',
+        ],
+      );
+    });
+
+    it('denies runtime direct grant access, mock-grant reuse, and rolls back grant changes on audit failure', async () => {
+      const fixture = await connectorFixture();
+      const grant = await fixture.authorizations.request(fixture.request, randomUUID());
+      await assert.rejects(
+        pool!.query('SELECT id FROM omnis.connector_authorizations WHERE id = $1', [grant.id]),
+        /permission denied/,
+      );
+      await assert.rejects(
+        pool!.query(
+          "INSERT INTO omnis.connector_authorizations (id, request_id, request_fingerprint, correlation_id, requesting_actor, project_id, project_revision, task_id, task_revision, agent_id, profile_version, connector_id, connector_version, provider_id, model_id, operation, capabilities, limits, prompt_digest, policy_version, expires_at) VALUES ($1,$2,$3,$4,'owner',$5,1,$6,1,$7,1,'synthetic.codex.fixture','0.0.0-synthetic.1','synthetic','synthetic-text-only-v1','connector.respond','[]','{}', $8,'r1p1-synthetic-connector-v1',now()+interval '1 minute')",
+          [
+            randomUUID(),
+            randomUUID(),
+            Buffer.alloc(32),
+            randomUUID(),
+            fixture.project.id,
+            fixture.task.id,
+            fixture.agent.agentId,
+            fixture.request.promptDigest,
+          ],
+        ),
+        /permission denied/,
+      );
+      await assert.rejects(
+        pool!.query(
+          `UPDATE omnis.connector_authorizations SET status = 'authorized' WHERE id = $1`,
+          [grant.id],
+        ),
+        /permission denied/,
+      );
+
+      const mock = await authorizations.request(fixture.task.id, 'owner');
+      await assert.rejects(
+        fixture.authorizations.consume(mock.id, fixture.request, randomUUID()),
+        (error: unknown) =>
+          error instanceof ConnectorAuthorizationStoreError && error.code === 'not_found',
+      );
+
+      await adminPool!.query(`
+        CREATE FUNCTION omnis.test_reject_connector_audit() RETURNS trigger
+        LANGUAGE plpgsql AS $body$
+        BEGIN RAISE EXCEPTION 'injected connector audit failure'; END
+        $body$;
+        CREATE TRIGGER test_reject_connector_audit
+          BEFORE INSERT ON omnis.connector_authorization_audit
+          FOR EACH ROW EXECUTE FUNCTION omnis.test_reject_connector_audit();
+      `);
+      try {
+        await assert.rejects(
+          fixture.authorizations.decide(grant.id, 'owner', {
+            decision: 'approve',
+            promptDigestConfirmation: fixture.request.promptDigest,
+          }),
+          /injected connector audit failure/,
+        );
+        const unchanged = await fixture.authorizations.get(grant.id);
+        assert.equal(unchanged?.status, 'pending');
+        assert.equal(unchanged?.consentedAt, null);
+      } finally {
+        await adminPool!.query(`
+          DROP TRIGGER test_reject_connector_audit ON omnis.connector_authorization_audit;
+          DROP FUNCTION omnis.test_reject_connector_audit();
+        `);
+      }
+    });
+
+    async function connectorFixture(grantTtlSeconds = 600) {
+      const projectManagement = new PostgresProjectManagementStore(
+        authorizerPool!,
+        Buffer.alloc(32, 41),
+      );
+      const project = await projectManagement.create(
+        {
+          key: `CONN-${randomUUID().slice(0, 8).toUpperCase()}`,
+          name: 'Synthetic connector project',
+          objective: 'Fixture for connector authorization integration tests.',
+          priority: 'normal',
+        },
+        randomUUID(),
+      );
+      const lifecycle = new PostgresAgentLifecycleStore(authorizerPool!, Buffer.alloc(32, 42));
+      const agent = await lifecycle.createAgent(
+        {
+          name: 'Synthetic connector agent',
+          slug: `synthetic-connector-${randomUUID().slice(0, 8)}`,
+          departmentId: null,
+        },
+        randomUUID(),
+      );
+      await lifecycle.saveDraft(
+        agent.agentId,
+        {
+          expectedDraftRevision: 0,
+          baseVersionNo: null,
+          profile: {
+            profession: 'Test agent',
+            seniority: null,
+            specialties: ['synthetic'],
+            personality: { traits: ['careful'], tone: null, principles: ['verify'] },
+            behavior: { autonomy: null, escalation: null },
+            instructions: 'Use synthetic fixtures only.',
+          },
+        },
+        randomUUID(),
+      );
+      const published = await lifecycle.publish(
+        agent.agentId,
+        { expectedVersionNo: null, expectedDraftRevision: 1 },
+        randomUUID(),
+      );
+      const task = await store.createTask(
+        {
+          title: 'Synthetic connector authorization task',
+          detail: 'A bounded synthetic task used only for authorization tests.',
+          projectId: project.id,
+        },
+        randomUUID(),
+      );
+      const request = ConnectorAuthorizationRequestSchema.parse({
+        projectId: project.id,
+        projectRevision: project.revision,
+        taskId: task.id,
+        taskRevision: task.associationRevision,
+        agentId: agent.agentId,
+        profileVersion: published.versionNo,
+        promptDigest: createRenderedRequestDigest(
+          'Read the synthetic task and return a short answer.',
+        ),
+        connectorId: 'synthetic.codex.fixture',
+        connectorVersion: '0.0.0-synthetic.1',
+        providerId: 'synthetic',
+        modelId: 'synthetic-text-only-v1',
+        operation: 'connector.respond',
+        capabilities: [],
+        limits: {
+          maxInputTokens: 4_000,
+          maxOutputTokens: 1_000,
+          maxDurationSeconds: 120,
+          maxConcurrentRuns: 1,
+          maxUsageUnits: 10_000,
+          maxCostMicrousd: 1_000_000,
+        },
+      });
+      return {
+        project,
+        task,
+        agent,
+        request,
+        authorizations: new PostgresConnectorAuthorizationStore(authorizerPool!, {
+          grantTtlSeconds,
+        }),
+      };
+    }
 
     it('returns an honestly empty complete agent directory', async () => {
       const profiles = new PostgresAgentProfileStore(
@@ -4922,7 +5284,9 @@ const postgresSuite = describe(
       if (pool && databaseUrl) {
         assertTestDatabase(databaseUrl);
         await adminPool!.query(`
-        TRUNCATE omnis.test_queue_outbox, omnis.task_project_management_idempotency,
+        TRUNCATE omnis.test_queue_outbox, omnis.connector_authorization_audit,
+          omnis.connector_execution_attempts, omnis.connector_authorizations,
+          omnis.task_project_management_idempotency,
           omnis.task_epic_management_audit, omnis.task_epic_associations,
           omnis.task_project_management_audit, omnis.project_management_idempotency,
           omnis.project_epic_management_audit, omnis.project_epics,

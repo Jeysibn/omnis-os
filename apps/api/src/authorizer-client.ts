@@ -44,6 +44,8 @@ export async function authorizerRequest<T>(
       (init.method ?? 'GET') !== 'GET' &&
       path.startsWith('/internal/v1/tasks/') &&
       path.endsWith('/epic');
+    const connectorMutation =
+      (init.method ?? 'GET') !== 'GET' && path.startsWith('/internal/v1/connector-authorizations');
     throw new AuthorizerRequestError(503, {
       error: {
         code: outcomeUnknown
@@ -55,7 +57,9 @@ export async function authorizerRequest<T>(
                 ? 'project_outcome_unknown'
                 : taskEpicMutation
                   ? 'task_epic_outcome_unknown'
-                  : 'authorization_outcome_unknown'
+                  : connectorMutation
+                    ? 'connector_authorization_outcome_unknown'
+                    : 'authorization_outcome_unknown'
           : 'authorizer_unavailable',
         message: outcomeUnknown
           ? departmentMutation
@@ -66,7 +70,9 @@ export async function authorizerRequest<T>(
                 ? 'The authorizer response was lost; the project change may have committed. Retry with the same idempotency key or read the project.'
                 : taskEpicMutation
                   ? 'The authorizer response was lost; the task Epic change may have committed. Read the task Epic or retry with the same idempotency key.'
-                  : 'The authorizer response was lost; the decision may have committed. Retry with the same idempotency key or read the authorization state.'
+                  : connectorMutation
+                    ? 'The authorizer response was lost; the synthetic connector authorization may have committed. Read it or retry with the same idempotency key.'
+                    : 'The authorizer response was lost; the decision may have committed. Retry with the same idempotency key or read the authorization state.'
           : 'The authorizer could not be reached; no decision was submitted. Retry when the service is available.',
       },
     });
@@ -95,6 +101,7 @@ export async function authorizerRequest<T>(
       const agentMutation = path.startsWith('/internal/v1/agents');
       const projectMutation = path.startsWith('/internal/v1/projects');
       const taskEpicMutation = path.startsWith('/internal/v1/tasks/') && path.endsWith('/epic');
+      const connectorMutation = path.startsWith('/internal/v1/connector-authorizations');
       throw new AuthorizerRequestError(503, {
         error: {
           code: departmentMutation
@@ -105,7 +112,9 @@ export async function authorizerRequest<T>(
                 ? 'project_outcome_unknown'
                 : taskEpicMutation
                   ? 'task_epic_outcome_unknown'
-                  : 'authorization_outcome_unknown',
+                  : connectorMutation
+                    ? 'connector_authorization_outcome_unknown'
+                    : 'authorization_outcome_unknown',
           message: departmentMutation
             ? 'The authorizer response could not be validated; the department change may have committed. Read the department state before retrying.'
             : agentMutation
@@ -114,7 +123,9 @@ export async function authorizerRequest<T>(
                 ? 'The authorizer response could not be validated; the project change may have committed. Retry with the same idempotency key or read the project.'
                 : taskEpicMutation
                   ? 'The authorizer response could not be validated; the task Epic change may have committed. Read the task Epic or retry with the same idempotency key.'
-                  : 'The authorizer response could not be validated; the decision may have committed. Read the authorization state or retry with the same idempotency key.',
+                  : connectorMutation
+                    ? 'The authorizer response could not be validated; the synthetic connector authorization may have committed. Read it or retry with the same idempotency key.'
+                    : 'The authorizer response could not be validated; the decision may have committed. Read the authorization state or retry with the same idempotency key.',
         },
       });
     }
