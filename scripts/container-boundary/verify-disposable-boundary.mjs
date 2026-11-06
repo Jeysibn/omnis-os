@@ -224,9 +224,9 @@ function createSocketDirectory(path, owner, group) {
 }
 
 async function openSyntheticSocket(path, owner, group) {
-  const server = net.createServer((socket) => {
-    socket.once('data', () => socket.end('ok'));
-  });
+  // The synthetic server responds on accept so the client probe verifies the
+  // connect permission itself without relying on request framing or timing.
+  const server = net.createServer((socket) => socket.end('ok'));
   await new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(path, resolve);
@@ -583,9 +583,9 @@ function verifyRuntimeImageRestrictions() {
 
   const [web] = JSON.parse(docker(['image', 'inspect', webImage]));
   assert.equal(web.Config.User, '65532:65532');
-  assert.equal(web.Config.Cmd, null);
-  assert.equal(web.Config.Entrypoint, null);
-  assert.equal(web.Config.ExposedPorts, null);
+  assert.equal(web.Config.Cmd ?? null, null);
+  assert.equal(web.Config.Entrypoint ?? null, null);
+  assert.equal(web.Config.ExposedPorts ?? null, null);
 }
 
 async function verifyNetworkIsolation() {
