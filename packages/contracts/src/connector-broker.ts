@@ -156,6 +156,9 @@ export function signConnectorDecisionEnvelope(
     now.getTime() + Math.min(Math.max(ttlSeconds, 1), 60) * 1000,
   ).toISOString();
   if (
+    !isCanonicalTimestamp(key.notBefore) ||
+    !isCanonicalTimestamp(key.notAfter) ||
+    Date.parse(key.notAfter) <= Date.parse(key.notBefore) ||
     Date.parse(key.notBefore) > now.getTime() ||
     Date.parse(key.notAfter) < now.getTime() + 1000
   ) {
@@ -219,7 +222,13 @@ export function assertTrustAnchorRotationWindow(anchors: readonly VerificationKe
     ids.add(anchor.keyId);
     const notBefore = Date.parse(anchor.notBefore);
     const notAfter = Date.parse(anchor.notAfter);
-    if (!Number.isFinite(notBefore) || !Number.isFinite(notAfter) || notAfter <= notBefore) {
+    if (
+      !isCanonicalTimestamp(anchor.notBefore) ||
+      !isCanonicalTimestamp(anchor.notAfter) ||
+      !Number.isFinite(notBefore) ||
+      !Number.isFinite(notAfter) ||
+      notAfter <= notBefore
+    ) {
       throw new Error('Decision envelope trust anchor validity window is malformed.');
     }
   }
@@ -233,6 +242,11 @@ export function assertTrustAnchorRotationWindow(anchors: readonly VerificationKe
       }
     }
   }
+}
+
+function isCanonicalTimestamp(value: string): boolean {
+  const epoch = Date.parse(value);
+  return Number.isFinite(epoch) && new Date(epoch).toISOString() === value;
 }
 
 export function digestConnectorDecisionEnvelope(envelope: ConnectorDecisionEnvelope): string {

@@ -164,6 +164,10 @@ describe('synthetic connector broker contracts', () => {
       notAfter: '2026-11-07T00:00:00.000Z',
     };
     const envelope = signConnectorDecisionEnvelope(claims(), key, now);
+    assert.throws(
+      () => signConnectorDecisionEnvelope(claims(), { ...key, notBefore: 'bad' }, now),
+      /validity window/,
+    );
     assert.equal(
       verifyConnectorDecisionEnvelope(
         envelope,

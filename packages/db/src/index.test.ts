@@ -180,6 +180,15 @@ const postgresSuite = describe(
       assert.equal(idempotent.attempt.id, admission.attempt.id);
       assert.deepEqual(idempotent.envelope, admission.envelope);
 
+      await assert.rejects(
+        brokerStore.beginSyntheticSubmission(
+          admission.attempt.id,
+          admission.envelope,
+          `${fixture.renderedRequest} changed`,
+        ),
+        /does not match the signed digest/,
+      );
+
       const submitting = await brokerStore.beginSyntheticSubmission(
         admission.attempt.id,
         admission.envelope,
