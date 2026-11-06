@@ -10,6 +10,7 @@ import { registerSyntheticTaskRunRoutes } from './synthetic-task-run-routes.ts';
 const authorizationId = '11111111-1111-4111-8111-111111111111';
 const requestId = '22222222-2222-4222-8222-222222222222';
 const taskId = 'task-0001';
+const correlationId = '33333333-3333-4333-8333-333333333333';
 const renderedRequest = 'Synthetic task request';
 const binding = {
   projectId: `prj_${'a'.repeat(32)}`,
@@ -37,7 +38,7 @@ const binding = {
 const grant = ConnectorAuthorizationSchema.parse({
   id: authorizationId,
   requestId,
-  correlationId: '33333333-3333-4333-8333-333333333333',
+  correlationId,
   requestingActor: 'owner',
   ...binding,
   status: 'authorized',
@@ -54,42 +55,53 @@ const grant = ConnectorAuthorizationSchema.parse({
   consumedRequestId: null,
   synthetic: true,
 });
+const run = {
+  id: correlationId,
+  taskId,
+  taskTitle: 'Synthetic task',
+  status: 'queued' as const,
+  runtimeKind: 'mock' as const,
+  synthetic: true as const,
+  usage: { quality: 'unknown' as const, inputTokens: null, outputTokens: null, cost: null },
+  createdAt: '2026-11-07T00:00:00.000Z',
+  updatedAt: '2026-11-07T00:00:00.000Z',
+};
 
 function createApp(input: {
   authorized?: boolean;
+  revoked?: boolean;
   enabled?: boolean;
-  onWorker?: (body: unknown) => unknown;
-  onRevoke?: () => void;
+  consumedBy?: string;
   ownerAllowed?: boolean;
   mutationAllowed?: boolean;
-  consumed?: boolean;
   throwWorker?: boolean;
-  executionOverride?: unknown;
+  runOverride?: unknown;
+  missingAttempt?: boolean;
 }) {
   const app = Fastify();
   const calls: string[] = [];
   let revokeCount = 0;
+  let workerCancelCount = 0;
   registerSyntheticTaskRunRoutes(app, {
     requireOwner: async (_request, reply) => {
-      if (input.ownerAllowed === false) {
+      if (input.ownerAllowed === false)
         return reply.code(401).send({ error: { code: 'owner_required' } });
-      }
     },
     requireMutationProtection: async (_request, reply) => {
-      if (input.mutationAllowed === false) {
+      if (input.mutationAllowed === false)
         return reply.code(403).send({ error: { code: 'csrf_rejected' } });
-      }
     },
     enabled: input.enabled ?? true,
     forwardAuthorizer: async <TResult>(path: string): Promise<TResult> => {
       calls.push(`authorizer:${path}`);
       if (path.endsWith('/revoke')) {
         revokeCount += 1;
-        input.onRevoke?.();
         return { ...grant, status: 'revoked' } as TResult;
       }
       if (path.endsWith('/execution')) {
-        return (input.executionOverride ?? {
+        if (input.missingAttempt)
+          throw Object.assign(new Error('No attempt yet.'), { statusCode: 404 });
+        return {
           version: 'omnis.synthetic-task-run.v1',
           taskId,
           attempt: {
@@ -99,259 +111,147 @@ function createApp(input: {
             status: 'completed',
             synthetic: true,
             createdAt: '2026-11-07T00:00:00.000Z',
-            submissionStartedAt: '2026-11-07T00:00:01.000Z',
             responseText: 'Synthetic response',
           },
           usage: { kind: 'unknown', reason: 'not_reported', billingExposure: 'unknown' },
-        }) as TResult;
+        } as TResult;
       }
       return (
-        input.authorized === false
+        input.revoked
           ? { ...grant, status: 'revoked' }
-          : input.consumed
-            ? { ...grant, consumedAt: '2026-11-07T00:01:00.000Z', consumedRequestId: requestId }
-            : grant
+          : input.authorized === false
+            ? { ...grant, status: 'revoked' }
+            : input.consumedBy
+              ? {
+                  ...grant,
+                  consumedAt: '2026-11-07T00:01:00.000Z',
+                  consumedRequestId: input.consumedBy,
+                }
+              : grant
       ) as TResult;
     },
-    forwardWorker: async <TResult>(_path: string, init: RequestInit): Promise<TResult> => {
-      calls.push('worker');
-      if (input.throwWorker) throw new Error('worker outcome unavailable');
-      return (input.onWorker?.(JSON.parse(String(init.body))) ?? {
+    forwardWorker: async <TResult>(path: string, init: RequestInit): Promise<TResult> => {
+      calls.push(`worker:${path}`);
+      if (path.endsWith('/cancel')) {
+        workerCancelCount += 1;
+        return undefined as TResult;
+      }
+      if (input.throwWorker) throw new Error('worker admission unavailable');
+      if (path.startsWith('/internal/v1/runs/')) return (input.runOverride ?? run) as TResult;
+      const body: unknown = JSON.parse(String(init.body));
+      assert.equal((body as { correlationId?: string }).correlationId, correlationId);
+      assert.equal((body as { renderedRequest?: string }).renderedRequest, renderedRequest);
+      return {
         version: 'omnis.synthetic-task-run.v1',
-        taskId,
-        authorizationId,
-        requestId,
-        correlationId: grant.correlationId,
-        attemptId: '44444444-4444-4444-8444-444444444444',
-        status: 'completed',
-        submitted: true,
-        usage: { kind: 'unknown', reason: 'not_reported', billingExposure: 'unknown' },
-        responseText: 'Synthetic response',
-      }) as TResult;
+        created: true,
+        run: input.runOverride ?? run,
+      } as TResult;
     },
   });
-  return { app, calls, getRevokeCount: () => revokeCount };
+  return { app, calls, revokeCount: () => revokeCount, workerCancelCount: () => workerCancelCount };
 }
 
 describe('owner synthetic task run routes', () => {
-  it('requires an owner session and mutation protection before forwarding', async () => {
-    const unauthenticated = createApp({ ownerAllowed: false });
-    const noOwner = await unauthenticated.app.inject({
-      method: 'POST',
-      url: `/api/v1/tasks/${taskId}/synthetic-runs`,
-      headers: { 'idempotency-key': requestId },
-      payload: { authorizationId, request: binding, renderedRequest },
-    });
-    assert.equal(noOwner.statusCode, 401);
-    assert.deepEqual(unauthenticated.calls, []);
-    await unauthenticated.app.close();
-
-    const csrfRejected = createApp({ mutationAllowed: false });
-    const noCsrf = await csrfRejected.app.inject({
-      method: 'POST',
-      url: `/api/v1/tasks/${taskId}/synthetic-runs`,
-      headers: { 'idempotency-key': requestId },
-      payload: { authorizationId, request: binding, renderedRequest },
-    });
-    assert.equal(noCsrf.statusCode, 403);
-    assert.deepEqual(csrfRejected.calls, []);
-    await csrfRejected.app.close();
+  it('requires an owner session and CSRF protection before forwarding', async () => {
+    for (const [options, status] of [
+      [{ ownerAllowed: false }, 401],
+      [{ mutationAllowed: false }, 403],
+    ] as const) {
+      const fixture = createApp(options);
+      const response = await fixture.app.inject({
+        method: 'POST',
+        url: `/api/v1/tasks/${taskId}/synthetic-runs`,
+        headers: { 'idempotency-key': requestId },
+        payload: { authorizationId, request: binding, renderedRequest },
+      });
+      assert.equal(response.statusCode, status);
+      assert.deepEqual(fixture.calls, []);
+      await fixture.app.close();
+    }
   });
 
-  it('forwards a fully bound approved request and uses the same idempotency identity', async () => {
-    let workerPayload: Record<string, unknown> | undefined;
-    const { app, calls } = createApp({
-      onWorker: (body) => {
-        workerPayload = body as Record<string, unknown>;
-        return {
-          version: 'omnis.synthetic-task-run.v1',
-          taskId,
-          authorizationId,
-          requestId,
-          correlationId: grant.correlationId,
-          attemptId: '44444444-4444-4444-8444-444444444444',
-          status: 'completed',
-          submitted: true,
-          usage: { kind: 'unknown', reason: 'not_reported', billingExposure: 'unknown' },
-          responseText: 'Synthetic response',
-        };
-      },
-    });
-    const response = await app.inject({
+  it('queues a canonical Run with the grant correlation and stable idempotency identity', async () => {
+    const fixture = createApp({});
+    const response = await fixture.app.inject({
       method: 'POST',
       url: `/api/v1/tasks/${taskId}/synthetic-runs`,
       headers: { 'idempotency-key': requestId },
       payload: { authorizationId, request: binding, renderedRequest },
     });
-    assert.equal(response.statusCode, 200);
-    assert.deepEqual(calls, [
+    assert.equal(response.statusCode, 202);
+    assert.equal(response.json().id, correlationId);
+    assert.equal(response.json().status, 'queued');
+    assert.deepEqual(fixture.calls, [
       `authorizer:/internal/v1/connector-authorizations/${authorizationId}`,
-      'worker',
-      `authorizer:/internal/v1/connector-authorizations/${authorizationId}/execution`,
+      'worker:/internal/v1/tasks/task-0001/synthetic-runs',
     ]);
-    assert.equal(workerPayload?.requestId, requestId);
-    assert.equal(workerPayload?.renderedRequest, renderedRequest);
-    await app.close();
+    await fixture.app.close();
   });
 
-  it('rejects prompt changes, task mismatches, and revoked grants before worker dispatch', async () => {
-    const { app, calls } = createApp({ authorized: false });
-    const changedDigest = await app.inject({
+  it('denies changed prompt, unauthorized grant and replay under a different request ID', async () => {
+    const fixture = createApp({ authorized: false });
+    const changedDigest = await fixture.app.inject({
       method: 'POST',
       url: `/api/v1/tasks/${taskId}/synthetic-runs`,
       headers: { 'idempotency-key': requestId },
       payload: { authorizationId, request: binding, renderedRequest: 'modified request' },
     });
     assert.equal(changedDigest.statusCode, 400);
-    const revoked = await app.inject({
+    const revoked = await fixture.app.inject({
       method: 'POST',
       url: `/api/v1/tasks/${taskId}/synthetic-runs`,
       headers: { 'idempotency-key': requestId },
       payload: { authorizationId, request: binding, renderedRequest },
     });
     assert.equal(revoked.statusCode, 409);
-    assert.equal(calls.includes('worker'), false);
-    await app.close();
-  });
+    await fixture.app.close();
 
-  it('does not redispatch an already consumed request, even with the same idempotency key', async () => {
-    const { app, calls } = createApp({ consumed: true });
-    const response = await app.inject({
+    const replay = createApp({ consumedBy: '99999999-9999-4999-8999-999999999999' });
+    const denied = await replay.app.inject({
       method: 'POST',
       url: `/api/v1/tasks/${taskId}/synthetic-runs`,
       headers: { 'idempotency-key': requestId },
       payload: { authorizationId, request: binding, renderedRequest },
     });
-    assert.equal(response.statusCode, 409);
-    assert.equal(response.json().error.code, 'request_already_consumed');
-    assert.equal(calls.includes('worker'), false);
-    await app.close();
+    assert.equal(denied.statusCode, 409);
+    assert.equal(
+      replay.calls.includes('worker:/internal/v1/tasks/task-0001/synthetic-runs'),
+      false,
+    );
+    await replay.app.close();
   });
 
-  it('reports an uncertain worker outcome without retrying or inventing completion', async () => {
-    const { app, calls } = createApp({ throwWorker: true });
-    const response = await app.inject({
+  it('allows same-key admission recovery without authorizing a second execution', async () => {
+    const fixture = createApp({ consumedBy: requestId });
+    const response = await fixture.app.inject({
       method: 'POST',
       url: `/api/v1/tasks/${taskId}/synthetic-runs`,
       headers: { 'idempotency-key': requestId },
       payload: { authorizationId, request: binding, renderedRequest },
     });
-    assert.equal(response.statusCode, 503);
-    assert.equal(response.json().error.code, 'synthetic_worker_outcome_unknown');
-    assert.deepEqual(calls, [
-      `authorizer:/internal/v1/connector-authorizations/${authorizationId}`,
-      'worker',
-    ]);
-    await app.close();
+    assert.equal(response.statusCode, 202);
+    await fixture.app.close();
   });
 
-  it('fails closed when the broker response correlation differs from the approved grant', async () => {
-    const { app } = createApp({
-      onWorker: () => ({
-        version: 'omnis.synthetic-task-run.v1',
-        taskId,
-        authorizationId,
-        requestId,
-        correlationId: '99999999-9999-4999-8999-999999999999',
-        attemptId: '44444444-4444-4444-8444-444444444444',
-        status: 'unknown',
-        submitted: true,
-        usage: { kind: 'unknown', reason: 'submission_uncertain', billingExposure: 'unknown' },
-      }),
-    });
-    const response = await app.inject({
+  it('reports uncertain admission and never invents provider completion', async () => {
+    const fixture = createApp({ throwWorker: true });
+    const response = await fixture.app.inject({
       method: 'POST',
       url: `/api/v1/tasks/${taskId}/synthetic-runs`,
       headers: { 'idempotency-key': requestId },
       payload: { authorizationId, request: binding, renderedRequest },
     });
     assert.equal(response.statusCode, 503);
-    assert.equal(response.json().error.code, 'synthetic_broker_correlation_unknown');
-    await app.close();
+    assert.equal(response.json().error.code, 'synthetic_run_admission_unknown');
+    await fixture.app.close();
   });
 
-  it('does not return a broker result that disagrees with the durable authorizer attempt', async () => {
-    const { app } = createApp({
-      onWorker: () => ({
-        version: 'omnis.synthetic-task-run.v1',
-        taskId,
-        authorizationId,
-        requestId,
-        correlationId: grant.correlationId,
-        attemptId: '99999999-9999-4999-8999-999999999999',
-        status: 'completed',
-        submitted: true,
-        usage: {
-          kind: 'measured',
-          source: 'synthetic-provider',
-          inputUnits: 1,
-          outputUnits: 1,
-          billingExposure: 'synthetic-only',
-        },
-        responseText: 'forged completion',
-      }),
-    });
-    const response = await app.inject({
-      method: 'POST',
-      url: `/api/v1/tasks/${taskId}/synthetic-runs`,
-      headers: { 'idempotency-key': requestId },
-      payload: { authorizationId, request: binding, renderedRequest },
-    });
-    assert.equal(response.statusCode, 503);
-    assert.equal(response.json().error.code, 'synthetic_broker_state_mismatch');
-    await app.close();
-  });
-
-  it('accepts a durable pre-submission rejection without mistaking the boundary timestamp for submission', async () => {
-    const { app } = createApp({
-      onWorker: () => ({
-        version: 'omnis.synthetic-task-run.v1',
-        taskId,
-        authorizationId,
-        requestId,
-        correlationId: grant.correlationId,
-        attemptId: '44444444-4444-4444-8444-444444444444',
-        status: 'failed',
-        submitted: false,
-        usage: { kind: 'unknown', reason: 'not_reported', billingExposure: 'unknown' },
-      }),
-      executionOverride: {
-        version: 'omnis.synthetic-task-run.v1',
-        taskId,
-        attempt: {
-          id: '44444444-4444-4444-8444-444444444444',
-          authorizationId,
-          requestId,
-          status: 'failed',
-          synthetic: true,
-          createdAt: '2026-11-07T00:00:00.000Z',
-          submissionStartedAt: '2026-11-07T00:00:01.000Z',
-          providerSubmissionId: null,
-        },
-        usage: { kind: 'unknown', reason: 'not_reported', billingExposure: 'unknown' },
-      },
-    });
-    const response = await app.inject({
-      method: 'POST',
-      url: `/api/v1/tasks/${taskId}/synthetic-runs`,
-      headers: { 'idempotency-key': requestId },
-      payload: { authorizationId, request: binding, renderedRequest },
-    });
-    assert.equal(response.statusCode, 200);
-    assert.equal(response.json().submitted, false);
-    await app.close();
-  });
-
-  it('records cancellation as requested without claiming provider termination', async () => {
-    let cancellationAudit = false;
-    const { app, getRevokeCount } = createApp({
-      onRevoke: () => {
-        cancellationAudit = true;
-      },
-    });
-    const response = await app.inject({
+  it('requests cancellation through grant revocation without claiming termination', async () => {
+    const fixture = createApp({});
+    const response = await fixture.app.inject({
       method: 'POST',
       url: `/api/v1/tasks/${taskId}/synthetic-runs/${authorizationId}/cancel`,
+      headers: { origin: 'http://localhost' },
     });
     assert.equal(response.statusCode, 200);
     assert.deepEqual(response.json(), {
@@ -360,35 +260,81 @@ describe('owner synthetic task run routes', () => {
       authorizationId,
       taskId,
     });
-    assert.equal(cancellationAudit, true);
-    assert.equal(getRevokeCount(), 1);
-    await app.close();
+    assert.equal(fixture.revokeCount(), 1);
+    assert.equal(fixture.workerCancelCount(), 1);
+    await fixture.app.close();
   });
 
-  it('reads durable attempt status only after verifying the grant task binding', async () => {
-    const { app, calls } = createApp({});
-    const response = await app.inject({
+  it('retries worker cancellation for an already revoked grant without revoking twice', async () => {
+    const fixture = createApp({ revoked: true });
+    const response = await fixture.app.inject({
+      method: 'POST',
+      url: `/api/v1/tasks/${taskId}/synthetic-runs/${authorizationId}/cancel`,
+      headers: { origin: 'http://localhost' },
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(fixture.revokeCount(), 0);
+    assert.equal(fixture.workerCancelCount(), 1);
+    await fixture.app.close();
+  });
+
+  it('returns authoritative attempt usage alongside the canonical Run projection', async () => {
+    const fixture = createApp({});
+    const response = await fixture.app.inject({
       method: 'GET',
       url: `/api/v1/tasks/${taskId}/synthetic-runs/${authorizationId}`,
     });
     assert.equal(response.statusCode, 200);
+    assert.equal(response.json().run.id, correlationId);
     assert.equal(response.json().attempt.status, 'completed');
-    assert.deepEqual(calls, [
-      `authorizer:/internal/v1/connector-authorizations/${authorizationId}`,
-      `authorizer:/internal/v1/connector-authorizations/${authorizationId}/execution`,
-    ]);
-    await app.close();
+    assert.deepEqual(response.json().usage, {
+      kind: 'unknown',
+      reason: 'not_reported',
+      billingExposure: 'unknown',
+    });
+    await fixture.app.close();
+  });
+
+  it('returns a durable Run when no authorizer attempt exists without inventing usage', async () => {
+    const fixture = createApp({
+      missingAttempt: true,
+      runOverride: { ...run, status: 'unknown' },
+    });
+    const response = await fixture.app.inject({
+      method: 'GET',
+      url: `/api/v1/tasks/${taskId}/synthetic-runs/${authorizationId}`,
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json().run.status, 'unknown');
+    assert.equal(response.json().attempt, undefined);
+    assert.deepEqual(response.json().usage, {
+      kind: 'unknown',
+      reason: 'submission_uncertain',
+      billingExposure: 'unknown',
+    });
+    await fixture.app.close();
+  });
+
+  it('does not turn an unavailable Run store into a not-found response', async () => {
+    const fixture = createApp({ missingAttempt: true, throwWorker: true });
+    const response = await fixture.app.inject({
+      method: 'GET',
+      url: `/api/v1/tasks/${taskId}/synthetic-runs/${authorizationId}`,
+    });
+    assert.equal(response.statusCode, 503);
+    assert.equal(response.json().error.code, 'synthetic_run_status_unknown');
+    await fixture.app.close();
   });
 
   it('does not expose the route unless the test-only switch is enabled', async () => {
-    const { app } = createApp({ enabled: false });
-    const response = await app.inject({
+    const fixture = createApp({ enabled: false });
+    const response = await fixture.app.inject({
       method: 'POST',
       url: `/api/v1/tasks/${taskId}/synthetic-runs`,
       headers: { 'idempotency-key': requestId },
       payload: { authorizationId, request: binding, renderedRequest },
     });
     assert.equal(response.statusCode, 404);
-    await app.close();
+    await fixture.app.close();
   });
 });

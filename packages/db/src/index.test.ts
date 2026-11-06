@@ -739,6 +739,141 @@ const postgresSuite = describe(
       };
     }
 
+    it('admits a canonical synthetic Run once and preserves uncertain broker outcomes', async () => {
+      const fixture = await connectorFixture();
+      const grant = await fixture.authorizations.request(fixture.request, randomUUID());
+      await fixture.authorizations.decide(grant.id, 'owner', {
+        decision: 'approve',
+        promptDigestConfirmation: fixture.request.promptDigest,
+      });
+      const requestId = randomUUID();
+      const runId = randomUUID();
+      let queued = 0;
+      const enqueue = async (tx: PgBossTransaction, data: { runId: string }) => {
+        queued += 1;
+        assert.deepEqual(data, { runId });
+        await tx.executeSql('INSERT INTO omnis.test_queue_outbox (run_id) VALUES ($1)', [
+          data.runId,
+        ]);
+        return `job-${data.runId}`;
+      };
+      const input = {
+        runId,
+        taskId: fixture.task.id,
+        authorizationId: grant.id,
+        requestId,
+        correlationId: runId,
+        binding: fixture.request,
+      };
+      const [admitted, replay] = await Promise.all([
+        store.admitSyntheticBrokerRun(input, enqueue),
+        store.admitSyntheticBrokerRun(input, enqueue),
+      ]);
+      assert.equal(admitted.created, true);
+      assert.equal(replay.created, false);
+      assert.equal(admitted.run.id, runId);
+      assert.equal(admitted.run.status, 'queued');
+      assert.equal(queued, 1);
+      const linked = await store.getSyntheticBrokerRun(runId);
+      assert.equal(linked?.authorizationId, grant.id);
+      assert.equal(linked?.requestId, requestId);
+      assert.equal(linked?.binding.promptDigest, fixture.request.promptDigest);
+      assert.equal(
+        (
+          await adminPool!.query(
+            "SELECT connector_request_binding ? 'renderedRequest' AS includes_prompt FROM omnis.runs WHERE id = $1",
+            [runId],
+          )
+        ).rows[0]?.includes_prompt,
+        false,
+      );
+
+      const [started, duplicateStart] = await Promise.all([
+        store.beginSyntheticBrokerRun(runId, 'synthetic-worker', 30),
+        store.beginSyntheticBrokerRun(runId, 'duplicate-worker', 30),
+      ]);
+      assert.equal(started.started, true);
+      assert.equal(duplicateStart.started, false);
+      await fixture.authorizations.revoke(grant.id, 'owner');
+      await store.requestSyntheticBrokerStop(runId, grant.id);
+      const unknown = await store.finishSyntheticBrokerRun(
+        runId,
+        'synthetic-worker',
+        started.generation,
+        { attemptId: randomUUID(), status: 'unknown' },
+      );
+      assert.equal(unknown.run.status, 'unknown');
+      assert.equal((await store.getTask(fixture.task.id))?.status, 'in_progress');
+      assert.equal((await store.getSyntheticBrokerRun(runId))?.attemptId !== null, true);
+      assert.deepEqual(
+        (await store.getEvents(runId)).map((event) => event.type),
+        ['run.queued', 'run.started', 'run.stop_requested', 'run.interrupted'],
+      );
+      assert.match((await store.getEvents(runId)).at(-1)!.message, /Do not resubmit/);
+    });
+
+    it('reconciles an expired synthetic worker lease as unknown without replay', async () => {
+      const fixture = await connectorFixture();
+      const grant = await fixture.authorizations.request(fixture.request, randomUUID());
+      await fixture.authorizations.decide(grant.id, 'owner', {
+        decision: 'approve',
+        promptDigestConfirmation: fixture.request.promptDigest,
+      });
+      const runId = randomUUID();
+      const admitted = await store.admitSyntheticBrokerRun(
+        {
+          runId,
+          taskId: fixture.task.id,
+          authorizationId: grant.id,
+          requestId: randomUUID(),
+          correlationId: runId,
+          binding: fixture.request,
+        },
+        async () => 'synthetic-job',
+      );
+      const claim = await store.beginSyntheticBrokerRun(admitted.run.id, 'old-worker', 1);
+      await pool!.query(
+        "UPDATE omnis.runs SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
+        [runId],
+      );
+      const events = await store.reconcileExpiredRuns();
+      assert.equal((await store.getRun(runId))?.status, 'unknown');
+      assert.equal((await store.getTask(fixture.task.id))?.status, 'in_progress');
+      assert.equal(events[0]?.event.type, 'run.interrupted');
+      assert.equal(
+        await store.renewSyntheticBrokerLease(runId, 'old-worker', claim.generation, 30),
+        false,
+      );
+      assert.equal((await store.listActiveRunIds([runId])).includes(runId), false);
+    });
+
+    it('confirms cancellation before the queued synthetic Run can begin', async () => {
+      const fixture = await connectorFixture();
+      const grant = await fixture.authorizations.request(fixture.request, randomUUID());
+      await fixture.authorizations.decide(grant.id, 'owner', {
+        decision: 'approve',
+        promptDigestConfirmation: fixture.request.promptDigest,
+      });
+      const runId = randomUUID();
+      const admitted = await store.admitSyntheticBrokerRun(
+        {
+          runId,
+          taskId: fixture.task.id,
+          authorizationId: grant.id,
+          requestId: randomUUID(),
+          correlationId: runId,
+          binding: fixture.request,
+        },
+        async () => 'synthetic-job',
+      );
+      assert.equal(admitted.run.id, runId);
+      await fixture.authorizations.revoke(grant.id, 'owner');
+      await store.requestSyntheticBrokerStop(runId, grant.id);
+      const started = await store.beginSyntheticBrokerRun(runId, 'synthetic-worker', 30);
+      assert.equal(started.started, false);
+      assert.equal(started.run.status, 'cancelled');
+    });
+
     it('returns an honestly empty complete agent directory', async () => {
       const profiles = new PostgresAgentProfileStore(
         pool!,

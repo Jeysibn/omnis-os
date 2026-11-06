@@ -9,6 +9,7 @@ import { registerSyntheticTaskRunRoute } from './synthetic-task-run-routes.ts';
 const taskId = 'task-0001';
 const requestId = '22222222-2222-4222-8222-222222222222';
 const authorizationId = '11111111-1111-4111-8111-111111111111';
+const correlationId = '55555555-5555-4555-8555-555555555555';
 const task = {
   id: taskId,
   title: 'Synthetic task',
@@ -36,6 +37,7 @@ const input = {
   version: 'omnis.synthetic-task-run.v1',
   authorizationId,
   requestId,
+  correlationId,
   request: {
     projectId: `prj_${'a'.repeat(32)}`,
     projectRevision: 1,
@@ -66,7 +68,7 @@ function createApp(
   options: {
     enabled?: boolean;
     taskExists?: boolean;
-    throwBroker?: boolean;
+    throwAdmission?: boolean;
     authenticated?: boolean;
     profileVersion?: number;
     taskIdOverride?: string;
@@ -95,29 +97,31 @@ function createApp(
           isCurrent: true,
         }) as never,
     },
-    broker: {
-      execute: async (_id, request) => {
-        called += 1;
-        if (options.throwBroker) throw new Error('broker unavailable');
-        return {
-          version: 'omnis.synthetic-task-run.v1',
+    admit: async (request) => {
+      called += 1;
+      if (options.throwAdmission) throw new Error('database unavailable');
+      return {
+        created: true,
+        run: {
+          id: request.correlationId,
           taskId,
-          authorizationId: request.authorizationId,
-          requestId: request.requestId,
-          correlationId: '55555555-5555-4555-8555-555555555555',
-          attemptId: '44444444-4444-4444-8444-444444444444',
-          status: 'unknown',
-          submitted: true,
-          usage: { kind: 'unknown', reason: 'submission_uncertain', billingExposure: 'unknown' },
-        };
-      },
+          taskTitle: task.title,
+          status: 'queued' as const,
+          runtimeKind: 'mock' as const,
+          synthetic: true as const,
+          usage: { quality: 'unknown' as const, inputTokens: null, outputTokens: null, cost: null },
+          createdAt: '2026-11-06T00:00:00.000Z',
+          updatedAt: '2026-11-06T00:00:00.000Z',
+        },
+      };
     },
+    cancel: async () => {},
   });
   return { app, getCalled: () => called };
 }
 
-describe('worker synthetic task broker dispatch', () => {
-  it('requires the internal worker credential before broker dispatch', async () => {
+describe('worker synthetic task run admission', () => {
+  it('requires the internal worker credential before admission', async () => {
     const { app, getCalled } = createApp({ authenticated: false });
     const response = await app.inject({
       method: 'POST',
@@ -130,7 +134,7 @@ describe('worker synthetic task broker dispatch', () => {
     await app.close();
   });
 
-  it('dispatches a task-bound request once and preserves unknown outcome', async () => {
+  it('admits a task-bound Run and returns the canonical correlation identity', async () => {
     const { app, getCalled } = createApp();
     const response = await app.inject({
       method: 'POST',
@@ -138,14 +142,14 @@ describe('worker synthetic task broker dispatch', () => {
       headers: { 'idempotency-key': requestId },
       payload: input,
     });
-    assert.equal(response.statusCode, 200);
-    assert.equal(response.json().status, 'unknown');
-    assert.equal(response.json().usage.kind, 'unknown');
+    assert.equal(response.statusCode, 202);
+    assert.equal(response.json().run.id, correlationId);
+    assert.equal(response.json().run.status, 'queued');
     assert.equal(getCalled(), 1);
     await app.close();
   });
 
-  it('rejects wrong route task and idempotency identity before broker dispatch', async () => {
+  it('rejects wrong route task and idempotency identity before admission', async () => {
     const { app, getCalled } = createApp();
     const wrongTask = await app.inject({
       method: 'POST',
@@ -165,7 +169,7 @@ describe('worker synthetic task broker dispatch', () => {
     await app.close();
   });
 
-  it('does not dispatch nonexistent tasks or automatically retry uncertain broker failures', async () => {
+  it('does not admit nonexistent tasks and fails closed when durable admission is unavailable', async () => {
     const missing = createApp({ taskExists: false });
     const missingTask = await missing.app.inject({
       method: 'POST',
@@ -176,7 +180,7 @@ describe('worker synthetic task broker dispatch', () => {
     assert.equal(missingTask.statusCode, 404);
     await missing.app.close();
 
-    const unavailable = createApp({ throwBroker: true });
+    const unavailable = createApp({ throwAdmission: true });
     const response = await unavailable.app.inject({
       method: 'POST',
       url: `/internal/v1/tasks/${taskId}/synthetic-runs`,
@@ -188,7 +192,7 @@ describe('worker synthetic task broker dispatch', () => {
     await unavailable.app.close();
   });
 
-  it('reconstructs the approved prompt from persisted task and immutable profile content', async () => {
+  it('reconstructs the approved prompt before durable admission', async () => {
     const { app, getCalled } = createApp();
     const alteredPrompt = await app.inject({
       method: 'POST',
@@ -205,12 +209,12 @@ describe('worker synthetic task broker dispatch', () => {
       headers: { 'idempotency-key': requestId },
       payload: input,
     });
-    assert.equal(canonical.statusCode, 200);
+    assert.equal(canonical.statusCode, 202);
     assert.equal(getCalled(), 1);
     await app.close();
   });
 
-  it('rejects a changed immutable profile version before broker dispatch', async () => {
+  it('rejects a changed immutable profile version before admission', async () => {
     const { app, getCalled } = createApp({ profileVersion: 2 });
     const response = await app.inject({
       method: 'POST',
@@ -223,7 +227,7 @@ describe('worker synthetic task broker dispatch', () => {
     await app.close();
   });
 
-  it('rejects a persisted task with an unexpected identity before broker dispatch', async () => {
+  it('rejects a persisted task with an unexpected identity before admission', async () => {
     const { app, getCalled } = createApp({ taskIdOverride: 'task-foreign' });
     const response = await app.inject({
       method: 'POST',

@@ -216,6 +216,10 @@ export class RunCoordinator {
     return () => this.emitter.off(runId, listener);
   }
 
+  publishExternalEvents(events: DurableEvent[]): void {
+    this.publish(events);
+  }
+
   async stopRun(runId: string): Promise<Run> {
     const result = await translateStoreError(() => this.store.requestStop(runId));
     this.publish(result.events);
