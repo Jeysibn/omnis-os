@@ -13,11 +13,13 @@ const BrokerResponseSchema = z
     attemptId: z.string().uuid(),
     status: ConnectorExecutionStatusSchema,
     submitted: z.boolean(),
-    correlationId: z.string().uuid(),
+    correlationId: z.string().uuid().optional(),
     responseText: z.string().min(1).max(32_000).optional(),
   })
   .strict()
-  .refine((value) => value.status !== 'completed' || value.responseText !== undefined);
+  .refine((value) => value.status !== 'completed' || value.responseText !== undefined)
+  .refine((value) => value.status === 'unknown' || value.correlationId !== undefined)
+  .refine((value) => value.status !== 'unknown' || value.submitted);
 
 export interface SyntheticBrokerExecutor {
   execute(taskId: string, request: SyntheticTaskRunRequest): Promise<SyntheticTaskRunResponse>;
@@ -55,7 +57,7 @@ export class SyntheticBrokerClient implements SyntheticBrokerExecutor {
       taskId,
       authorizationId: request.authorizationId,
       requestId: request.requestId,
-      correlationId: brokerResult.correlationId,
+      ...(brokerResult.correlationId ? { correlationId: brokerResult.correlationId } : {}),
       attemptId: brokerResult.attemptId,
       status: brokerResult.status,
       submitted: brokerResult.submitted,

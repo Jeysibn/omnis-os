@@ -24,7 +24,7 @@ export const SyntheticTaskRunResponseSchema = z
     taskId: z.string().min(1).max(128),
     authorizationId: z.string().uuid(),
     requestId: z.string().uuid(),
-    correlationId: z.string().uuid(),
+    correlationId: z.string().uuid().optional(),
     attemptId: z.string().uuid(),
     status: ConnectorExecutionStatusSchema,
     submitted: z.boolean(),
@@ -35,6 +35,14 @@ export const SyntheticTaskRunResponseSchema = z
   .refine(
     (value) => value.status !== 'completed' || value.responseText !== undefined,
     'Synthetic task run response identity or submission state is inconsistent.',
+  )
+  .refine(
+    (value) => value.status === 'unknown' || value.correlationId !== undefined,
+    'Confirmed synthetic task run responses must include their correlation identity.',
+  )
+  .refine(
+    (value) => value.status !== 'unknown' || value.submitted,
+    'Unknown synthetic task run outcomes must preserve possible submission evidence.',
   );
 export type SyntheticTaskRunResponse = z.infer<typeof SyntheticTaskRunResponseSchema>;
 

@@ -71,6 +71,28 @@ describe('synthetic task-to-broker contract', () => {
     );
   });
 
+  it('allows a missing correlation only on unknown broker outcomes', () => {
+    const unknown = {
+      version: 'omnis.synthetic-task-run.v1',
+      taskId: 'task-0001',
+      authorizationId: request.authorizationId,
+      requestId: request.requestId,
+      attemptId: '33333333-3333-4333-8333-333333333333',
+      status: 'unknown',
+      submitted: true,
+      usage: { kind: 'unknown', reason: 'submission_uncertain', billingExposure: 'unknown' },
+    };
+    assert.equal(SyntheticTaskRunResponseSchema.safeParse(unknown).success, true);
+    assert.equal(
+      SyntheticTaskRunResponseSchema.safeParse({ ...unknown, status: 'failed' }).success,
+      false,
+    );
+    assert.equal(
+      SyntheticTaskRunResponseSchema.safeParse({ ...unknown, submitted: false }).success,
+      false,
+    );
+  });
+
   it('validates bounded, ordered synthetic task-run event history', () => {
     const event = {
       attemptId: '33333333-3333-4333-8333-333333333333',

@@ -49,9 +49,13 @@ The broker request protocol is `omnis.synthetic-broker.v1`; its body contains on
 stable request ID, immutable connector binding, and exact rendered request. The socket path is
 absolute configuration, never caller input. The body and response are limited to 64 KiB; the
 worker performs one request and never retries a possibly submitted request. Broker responses
-must include an attempt UUID, the exact persisted grant correlation UUID, lifecycle state,
-submission evidence, and a completed response only when the state is `completed`. Provider usage not present in the broker response is
-reported as `unknown/not_reported`, never zero.
+include an attempt UUID, lifecycle state, submission evidence, and a completed response only
+when the state is `completed`. Known outcomes include the persisted grant correlation UUID.
+The current platform contract omits that field for `unknown`; the worker accepts this omission
+only for `unknown`, and the owner API fills it from the already loaded authorized grant only
+after a durable authorizer read confirms the same attempt, authorization, request, status and
+submission evidence. It never guesses correlation from caller input. Provider usage not present
+in the broker response is reported as `unknown/not_reported`, never zero.
 
 The broker calls the four existing authorizer IPC operations from
 `PHASE1_PR_C_BACKEND_CONTRACT.md`. Its `attemptId` is the durable connector run identity; the

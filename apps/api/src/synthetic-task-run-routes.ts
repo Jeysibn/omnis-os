@@ -105,7 +105,10 @@ export function registerSyntheticTaskRunRoutes(
           },
         });
       }
-      if (result.correlationId !== authorization.correlationId) {
+      if (
+        result.correlationId !== undefined &&
+        result.correlationId !== authorization.correlationId
+      ) {
         return reply.code(503).send({
           error: {
             code: 'synthetic_broker_correlation_unknown',
@@ -147,7 +150,11 @@ export function registerSyntheticTaskRunRoutes(
           },
         });
       }
-      return reply.send({ ...result, usage: execution.usage });
+      return reply.send({
+        ...result,
+        correlationId: result.correlationId ?? authorization.correlationId,
+        usage: execution.usage,
+      });
     },
   );
 
