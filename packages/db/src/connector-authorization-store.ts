@@ -715,6 +715,39 @@ export class PostgresConnectorAuthorizationStore {
       return mapAttempt(row);
     });
   }
+
+  /** Bounded restart scan; it never reopens admission or marks an attempt as submitted. */
+  async listBrokerRecoveryCandidates(
+    limit: number,
+    afterAttemptId: string | null,
+  ): Promise<ConnectorExecutionAttempt[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new ConnectorAuthorizationStoreError(
+        'invalid_input',
+        'Broker recovery page size is invalid.',
+        400,
+      );
+    }
+    if (afterAttemptId !== null && !isUuid(afterAttemptId)) {
+      throw new ConnectorAuthorizationStoreError(
+        'invalid_input',
+        'Broker recovery cursor is invalid.',
+        400,
+      );
+    }
+    const result = await this.authorizer.query<AttemptRow>(
+      `SELECT id, authorization_id, request_id, status, synthetic, created_at, updated_at,
+              submission_started_at, provider_submission_id, cancel_requested_at
+         FROM omnis.connector_execution_attempts
+        WHERE synthetic IS TRUE
+          AND status IN ('admitted', 'submitting', 'accepted', 'running', 'unknown')
+          AND ($2::uuid IS NULL OR id > $2::uuid)
+        ORDER BY id
+        LIMIT $1`,
+      [limit, afterAttemptId],
+    );
+    return result.rows.map(mapAttempt);
+  }
 }
 
 function fingerprintRequest(request: ConnectorAuthorizationRequest): Buffer {

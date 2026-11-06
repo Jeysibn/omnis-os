@@ -90,11 +90,12 @@ textarea {
   outline: none;
 }
 .topbar {
+  position: relative;
   min-height: 68px;
-  padding: 0 clamp(18px, 5vw, 72px);
+  padding: 0 clamp(16px, 5vw, 72px);
   display: flex;
   align-items: center;
-  gap: clamp(24px, 5vw, 68px);
+  gap: clamp(16px, 3vw, 48px);
   background: var(--navy);
   color: #fff;
 }
@@ -131,6 +132,8 @@ textarea {
 }
 .primary-nav a {
   min-height: 100%;
+  flex: none;
+  white-space: nowrap;
   display: inline-flex;
   align-items: center;
   gap: 9px;
@@ -152,18 +155,64 @@ textarea {
   color: #fff;
   border-color: #a9beff;
 }
+.primary-nav[hidden] {
+  display: none;
+}
+/* The inline navigation did not fit, so AppHeader disclosed it as a menu panel under the bar. */
+.primary-nav[data-collapsed] {
+  position: absolute;
+  z-index: 40;
+  top: 100%;
+  left: 0;
+  right: 0;
+  height: auto;
+  flex-direction: column;
+  gap: 0;
+  padding: 6px clamp(16px, 5vw, 72px) 10px;
+  background: var(--navy);
+  border-top: 1px solid #ffffff1f;
+  box-shadow: 0 18px 28px -12px #0a1424b3;
+  /* At 400% zoom the viewport is ~200px tall; the panel scrolls instead of running off screen. */
+  max-height: calc(100dvh - 62px);
+  overflow-y: auto;
+}
+.primary-nav[data-collapsed] a {
+  min-height: 48px;
+  padding: 0 4px;
+  border-bottom: 0;
+  border-left: 3px solid transparent;
+  padding-left: 12px;
+  font-size: 14px;
+}
+.primary-nav[data-collapsed] a.nav-active {
+  border-left-color: #a9beff;
+  background: #ffffff12;
+}
 .topbar-actions {
   margin-left: auto;
+  min-width: 0;
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 8px;
+}
+.topbar[data-nav='inline'] .topbar-actions {
+  /* Inline, the bar collapses to the menu before it would shrink the owner chip. */
+  flex: none;
 }
 .owner-chip {
+  min-width: 0;
   display: inline-flex;
   align-items: center;
   gap: 9px;
   color: #e0e6ef;
   font-size: 12px;
+}
+.owner-chip > span:last-child {
+  min-width: 0;
+  max-width: 18ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .owner-avatar {
   width: 28px;
@@ -250,7 +299,10 @@ h1 {
   border-radius: 9px;
   background: #fff;
   font-size: 11px;
-  white-space: nowrap;
+  /* May wrap: at a 16px minimum font or 200% zoom the one-line status is wider than the column. */
+  flex-wrap: wrap;
+  row-gap: 2px;
+  max-width: 100%;
 }
 .status-dot,
 .stream-badge > span {
@@ -1340,12 +1392,6 @@ button:disabled {
 }
 
 @media (max-width: 900px) {
-  .topbar {
-    gap: 18px;
-  }
-  .primary-nav a {
-    padding: 0 10px;
-  }
   .tasks-layout {
     grid-template-columns: minmax(0, 1.4fr) minmax(230px, 0.8fr);
   }
@@ -1356,31 +1402,9 @@ button:disabled {
 @media (max-width: 680px) {
   .topbar {
     min-height: 62px;
-    flex-wrap: wrap;
-    gap: 0;
-    padding: 0 16px;
-  }
-  .topbar > .brand {
-    min-height: 58px;
-  }
-  .topbar-actions {
-    min-height: 58px;
   }
   .owner-chip > span:last-child {
     display: none;
-  }
-  .primary-nav {
-    order: 3;
-    width: 100%;
-    height: 47px;
-    margin: 0 -2px;
-  }
-  .primary-nav a {
-    flex: 1;
-    min-height: 48px;
-    justify-content: center;
-    padding: 0 7px;
-    font-size: 11px;
   }
   .main-content {
     width: calc(100% - 32px);
@@ -1447,14 +1471,6 @@ button:disabled {
   }
 }
 @media (max-width: 360px) {
-  /* Four nav links must fit in the 320px topbar without overflow or truncation. */
-  .primary-nav a {
-    gap: 0;
-    padding: 0 4px;
-  }
-  .primary-nav a svg {
-    display: none;
-  }
   .main-content {
     width: calc(100% - 24px);
   }
@@ -1918,5 +1934,243 @@ button:disabled {
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
+  }
+}
+
+/* Department Management (Milestone 2): list, create, rename */
+.agents-head-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+}
+.agents-head-row h2 {
+  margin: 0;
+}
+.agents-manage {
+  min-height: 40px;
+  text-decoration: none;
+}
+.dept-workspace {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+.dept-status {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.dept-status:empty,
+.dept-status:not(:has(p)) {
+  display: block;
+}
+.dept-status p {
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid #c5d3f5;
+  border-radius: 8px;
+  background: var(--blue-soft);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.dept-status p.dept-target {
+  padding: 0 12px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 12px;
+}
+.dept-recovery,
+.dept-form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.dept-list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.dept-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px 16px;
+  min-width: 0;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.dept-main {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+.dept-main h3 {
+  margin: 0 0 4px;
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+.dept-main h3:focus {
+  outline: none;
+}
+.dept-main h3:focus-visible {
+  outline: 3px solid var(--blue);
+  outline-offset: 3px;
+}
+.dept-main p {
+  margin: 0 0 4px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.dept-label {
+  color: var(--muted);
+  font-weight: 650;
+}
+.dept-fixed {
+  margin: 0;
+  font-size: 12px;
+}
+.dept-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.dept-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  flex: 1 1 100%;
+  gap: 12px;
+  min-width: 0;
+  padding: 14px 16px;
+  border: 1px solid #c5d3f5;
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.dept-row > .dept-form {
+  padding: 0;
+  border: 0;
+}
+.dept-form h3 {
+  margin: 0;
+  font-size: 15px;
+}
+.dept-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 16px;
+}
+.dept-field {
+  display: grid;
+  gap: 6px;
+  align-content: start;
+  min-width: 0;
+}
+.dept-field label {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 650;
+}
+.dept-required {
+  color: var(--muted);
+  font-weight: 500;
+}
+.dept-field input {
+  min-height: 40px;
+  min-width: 0;
+  padding: 0 10px;
+  border: 1px solid #c9d2df;
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+}
+.dept-field input[aria-invalid='true'] {
+  border-color: var(--red);
+}
+.dept-field input:focus-visible,
+.dept-summary:focus-visible,
+.dept-summary .text-button:focus-visible {
+  outline: 3px solid var(--blue);
+  outline-offset: 2px;
+}
+.dept-field-error {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  color: var(--red);
+  font-size: 12px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.dept-field-error svg {
+  flex: none;
+  margin-top: 2px;
+}
+.dept-summary {
+  padding: 10px 12px;
+  border: 1px solid #e3b4bb;
+  border-radius: 8px;
+  background: #fdf1f2;
+  color: var(--red);
+  font-size: 13px;
+}
+.dept-summary ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+.dept-summary .text-button {
+  min-height: 24px;
+  padding: 0;
+  text-align: left;
+  color: var(--red);
+  text-decoration: underline;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.dept-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+@media (max-width: 900px) {
+  .dept-summary .text-button {
+    display: inline-flex;
+    align-items: center;
+  }
+  .dept-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .dept-row .secondary-button,
+  .dept-summary .text-button,
+  .dept-form .primary-button,
+  .dept-form .secondary-button,
+  .dept-recovery button,
+  .agents-manage,
+  .dept-workspace .agents-toolbar .primary-button,
+  .dept-workspace .agents-check {
+    min-height: 44px;
+  }
+  .dept-workspace .agents-check label {
+    padding: 10px 0;
+  }
+}
+@media (max-width: 360px) {
+  .dept-actions,
+  .dept-recovery,
+  .dept-form-actions,
+  .dept-actions button,
+  .dept-recovery button,
+  .dept-form-actions button {
+    width: 100%;
+  }
+  .dept-workspace .agents-toolbar > * {
+    width: 100%;
   }
 }

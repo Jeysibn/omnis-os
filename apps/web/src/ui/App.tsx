@@ -18,7 +18,6 @@ import {
   FolderKanban,
   ListChecks,
   LockKeyhole,
-  LogOut,
   Play,
   Plus,
   ShieldCheck,
@@ -38,9 +37,11 @@ import {
 } from '@omnis/contracts';
 import { ApiRequestError, request } from './api.js';
 import { AgentsWorkspace } from './agents/AgentsWorkspace.js';
+import { DepartmentsWorkspace } from './departments/DepartmentsWorkspace.js';
+import { AppHeader } from './shell/AppHeader.js';
 
 type Owner = { id: string; displayName: string };
-type Page = 'command-center' | 'tasks' | 'runs' | 'agents';
+type Page = 'command-center' | 'tasks' | 'runs' | 'agents' | 'departments';
 type StreamState = 'connecting' | 'connected' | 'reconnecting' | 'closed' | 'ended';
 type ApprovalOperation = {
   taskId: string;
@@ -181,6 +182,8 @@ function App() {
   const approvalTrigger = useRef<HTMLButtonElement | null>(null);
   const focusRunInspector = useRef(false);
   const sessionRecoveryInFlight = useRef(false);
+  // False until the first in-app hash navigation, so a direct load of a screen never steals focus.
+  const navigatedInApp = useRef(false);
   const stopInFlight = useRef(new Set<string>());
   const seenSequences = useRef(new Map<string, Set<number>>());
 
@@ -314,6 +317,7 @@ function App() {
 
   useEffect(() => {
     const onHashChange = () => {
+      navigatedInApp.current = true;
       const route = readRoute();
       setPage(route.page);
       if (route.page === 'runs') setSelectedRunId(route.runId ?? null);
@@ -808,38 +812,13 @@ function App() {
       <a className="skip-link" href="#main-content" onClick={skipToMain}>
         Skip to main content
       </a>
-      <header className="topbar">
-        <Brand />
-        <nav className="primary-nav" aria-label="Primary navigation">
-          {navItems.map((item) => (
-            <a
-              key={item.id}
-              href={`#${item.id}`}
-              aria-current={page === item.id ? 'page' : undefined}
-              className={page === item.id ? 'nav-active' : ''}
-            >
-              <item.icon size={16} />
-              <span>{item.label}</span>
-            </a>
-          ))}
-        </nav>
-        <div className="topbar-actions">
-          <div className="owner-chip">
-            <span className="owner-avatar" aria-hidden="true">
-              {owner.displayName.slice(0, 1)}
-            </span>
-            <span>{owner.displayName}</span>
-          </div>
-          <button
-            className="icon-button"
-            onClick={() => void signOut()}
-            aria-label="Sign out"
-            title="Sign out"
-          >
-            <LogOut size={17} />
-          </button>
-        </div>
-      </header>
+      <AppHeader
+        brand={<Brand />}
+        items={navItems}
+        activeId={page}
+        ownerName={owner.displayName}
+        onSignOut={() => void signOut()}
+      />
       <main id="main-content" className="main-content" tabIndex={-1}>
         <section className="page-heading">
           <div>
@@ -925,6 +904,14 @@ function App() {
           />
         )}
         {page === 'agents' && <AgentsWorkspace onUnauthorized={expireSessionIfNeeded} />}
+        {page === 'departments' && (
+          <DepartmentsWorkspace
+            onUnauthorized={expireSessionIfNeeded}
+            csrfToken={csrfToken}
+            refreshCsrf={refreshCsrf}
+            arrivedByNavigation={navigatedInApp.current}
+          />
+        )}
         <footer className="page-foot">
           <ShieldCheck size={14} />
           <span>
@@ -967,12 +954,14 @@ const pageTitles: Record<Page, string> = {
   tasks: 'Tasks',
   runs: 'Runs',
   agents: 'Agents & Profiles',
+  departments: 'Departments',
 };
 const pageSubtitles: Record<Page, string> = {
   'command-center': 'Your operational overview for tasks and synthetic runs.',
   tasks: 'Create and review work in your local workspace.',
   runs: 'Follow current and historical mock run activity.',
   agents: 'Review agent identities and immutable profile versions. Read-only in this release.',
+  departments: 'Create and rename the departments agents belong to.',
 };
 
 // The app uses hash routing, so the default `#main-content` anchor jump would replace
@@ -997,6 +986,7 @@ function readRoute(): { page: Page; runId?: string } {
   const [head = '', encodedRunId] = window.location.hash.slice(1).split('/', 2);
   const destination = head.split('?', 1)[0];
   if (destination === 'agents') return { page: 'agents' };
+  if (destination === 'departments') return { page: 'departments' };
   if (destination === 'tasks') return { page: 'tasks' };
   if (destination === 'runs') {
     if (!encodedRunId) return { page: 'runs' };
