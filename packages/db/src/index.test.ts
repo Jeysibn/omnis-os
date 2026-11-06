@@ -200,7 +200,7 @@ const postgresSuite = describe(
     });
 
     it('rejects expired and revoked grants and serializes parallel consumption', async () => {
-      const expiredFixture = await connectorFixture(1);
+      const expiredFixture = await connectorFixture(5);
       const expired = await expiredFixture.authorizations.request(
         expiredFixture.request,
         randomUUID(),
@@ -209,7 +209,7 @@ const postgresSuite = describe(
         decision: 'approve',
         promptDigestConfirmation: expiredFixture.request.promptDigest,
       });
-      await delay(1_100);
+      await delay(5_100);
       await assert.rejects(
         expiredFixture.authorizations.consume(expired.id, expiredFixture.request, randomUUID()),
         (error: unknown) =>
