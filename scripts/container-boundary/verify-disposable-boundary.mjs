@@ -415,7 +415,10 @@ async function verifySocketBoundaries() {
       OMNIS_EXPECT_NO_GROUP: String(authorizerGid),
     },
   });
-  assert.ok(workerSocketResult.includes('"kind":"connected"'));
+  assert.ok(
+    workerSocketResult.includes('"kind":"connected"'),
+    `worker socket probe returned: ${workerSocketResult.slice(0, 240)}`,
+  );
   await assertSocketAccepted(launcherServer, acceptCount);
   probeContainer({
     name: `${resourcePrefix}-api-cross-service`,
