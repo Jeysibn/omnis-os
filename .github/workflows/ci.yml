@@ -232,9 +232,36 @@ jobs:
       - name: Verify disposable PostgreSQL backup and restore
         run: pnpm integration:backup-restore
 
+  container-images:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.22.1
+      - name: Build images and verify non-root metadata, runtime-only configuration, and secret exclusion
+        run: |
+          set -euo pipefail
+          trap 'rm -f .env.container-image-canary' EXIT
+          printf '%s' 'omnis-image-canary-9f6d3e2c1a' > .env.container-image-canary
+          docker build --file infra/docker/api.Dockerfile --tag omnis-api:ci .
+          docker build --file infra/docker/worker.Dockerfile --tag omnis-worker:ci .
+          docker build --file infra/docker/web-assets.Dockerfile --tag omnis-web-assets:ci .
+          node scripts/container-images/verify-built-images.mjs
+
   checks:
     if: ${{ always() }}
-    needs: [checks-core, database-integration, full-stack-browser-integration, backup-restore]
+    needs:
+      [
+        checks-core,
+        database-integration,
+        full-stack-browser-integration,
+        backup-restore,
+        container-images,
+      ]
     runs-on: ubuntu-24.04
     steps:
       - name: Require every quality job to pass
@@ -243,8 +270,9 @@ jobs:
           DATABASE_RESULT: ${{ needs.database-integration.result }}
           FULL_STACK_RESULT: ${{ needs.full-stack-browser-integration.result }}
           BACKUP_RESTORE_RESULT: ${{ needs.backup-restore.result }}
+          CONTAINER_IMAGES_RESULT: ${{ needs.container-images.result }}
         run: |
-          if [[ "$CORE_RESULT" != "success" || "$DATABASE_RESULT" != "success" || "$FULL_STACK_RESULT" != "success" || "$BACKUP_RESTORE_RESULT" != "success" ]]; then
-            echo "CI quality jobs did not all pass: core=$CORE_RESULT database=$DATABASE_RESULT full_stack=$FULL_STACK_RESULT backup_restore=$BACKUP_RESTORE_RESULT"
+          if [[ "$CORE_RESULT" != "success" || "$DATABASE_RESULT" != "success" || "$FULL_STACK_RESULT" != "success" || "$BACKUP_RESTORE_RESULT" != "success" || "$CONTAINER_IMAGES_RESULT" != "success" ]]; then
+            echo "CI quality jobs did not all pass: core=$CORE_RESULT database=$DATABASE_RESULT full_stack=$FULL_STACK_RESULT backup_restore=$BACKUP_RESTORE_RESULT container_images=$CONTAINER_IMAGES_RESULT"
             exit 1
           fi
