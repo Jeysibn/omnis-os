@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import type { ReactNode, Ref } from 'react';
 import './design.css';
 
 /** Applies the NEXUS tokens and base typography to everything inside it. */
@@ -48,18 +48,22 @@ type PanelProps = {
   level?: 2 | 3;
   label?: string | undefined;
   actions?: ReactNode;
+  /** Makes the heading programmatically focusable (tabIndex -1), so a host can move focus to it. */
+  headingRef?: Ref<HTMLHeadingElement>;
   children: ReactNode;
 };
 
 /** A titled surface. The region is named by its heading. */
-export function Panel({ title, level = 2, label, actions, children }: PanelProps) {
+export function Panel({ title, level = 2, label, actions, headingRef, children }: PanelProps) {
   const Heading = level === 2 ? 'h2' : 'h3';
   return (
     <section className="nx-panel" aria-label={title}>
       <div className="nx-panel__head">
         <div>
           {label && <TelemetryLabel>{label}</TelemetryLabel>}
-          <Heading>{title}</Heading>
+          <Heading ref={headingRef} tabIndex={headingRef ? -1 : undefined}>
+            {title}
+          </Heading>
         </div>
         {actions}
       </div>

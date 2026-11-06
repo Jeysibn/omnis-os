@@ -1,0 +1,133 @@
+/*
+ * Project Workspace layout. Colour, type, spacing and controls come from the NEXUS tokens and
+ * components (../design/design.css). These rules only arrange them, and are scoped to `.pw-*`
+ * so no other screen changes. The surrounding application shell is still light; the workspace is
+ * a NEXUS surface inside it until the shell is migrated.
+ */
+.pw-surface {
+  display: grid;
+  gap: var(--nx-space-5);
+  min-width: 0;
+  padding: var(--nx-space-5) var(--nx-space-4);
+  border-radius: 12px;
+  background: var(--nx-surface-page);
+  color: var(--nx-text);
+}
+@media (min-width: 720px) {
+  .pw-surface {
+    padding: var(--nx-space-6);
+  }
+}
+.nx-theme:has(> .pw-surface) {
+  min-height: 0;
+  border-radius: 12px;
+}
+.pw-stack {
+  display: grid;
+  gap: var(--nx-space-5);
+  min-width: 0;
+}
+.pw-back a {
+  color: var(--nx-status-info);
+}
+.pw-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--nx-space-2);
+  align-items: center;
+}
+.pw-form {
+  display: grid;
+  gap: var(--nx-space-4);
+  max-width: 720px;
+}
+.pw-readonly {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--nx-space-2);
+  align-items: baseline;
+}
+.pw-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--nx-space-4);
+  align-items: flex-end;
+}
+.pw-toolbar > .nx-filters {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+.pw-check {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--nx-space-2);
+  min-height: var(--nx-control-height);
+}
+.pw-check input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--nx-jade);
+}
+.pw-subhead {
+  margin-top: var(--nx-space-4);
+  font-family: var(--nx-font-mono);
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--nx-text-quiet);
+}
+.pw-prose {
+  margin-top: var(--nx-space-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-width: 80ch;
+}
+.pw-live:empty {
+  display: none;
+}
+.pw-live:focus-visible {
+  outline: 2px solid var(--nx-focus);
+  outline-offset: 2px;
+}
+.pw-notice {
+  display: grid;
+  gap: var(--nx-space-3);
+  padding: var(--nx-space-3) var(--nx-space-4);
+  border: 1px solid var(--nx-border-control);
+  border-left-width: 4px;
+  border-radius: var(--nx-radius);
+  background: var(--nx-surface-panel);
+  overflow-wrap: anywhere;
+}
+.pw-notice[data-tone='success'] {
+  border-color: var(--nx-status-ok);
+}
+.pw-notice[data-tone='error'] {
+  border-color: var(--nx-status-danger);
+}
+.pw-notice[data-tone='warning'],
+.pw-notice[data-tone='static'] {
+  border-color: var(--nx-status-attention);
+}
+.pw-notice[data-tone='progress'] {
+  border-color: var(--nx-status-info);
+}
+.pw-notice a {
+  color: var(--nx-status-info);
+}
+.pw-surface a:not(.nx-button) {
+  color: var(--nx-status-info);
+}
+.nx-table a {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* Wide tables scroll inside their own focusable region instead of crushing their columns. */
+.pw-surface .nx-table {
+  min-width: 640px;
+}
+.pw-title {
+  overflow-wrap: break-word;
+}

@@ -2,12 +2,13 @@
  * OMNIS NEXUS design system — tokens and component styles.
  *
  * Everything is scoped under `.nx-theme` (or a `.nx-*` class), so importing this file changes no
- * existing screen. Raw palette values live in one place, the :root block below. Semantic roles
+ * existing screen and defines no custom property on the document root. Raw palette values live in
+ * one place, the first .nx-theme block below. Semantic roles
  * (status, text, surface, focus) are defined from the palette; components use only the roles.
  * Fonts are system fallbacks. The named families are used only when already installed locally;
  * nothing is fetched from a CDN.
  */
-:root {
+.nx-theme {
   /* Palette (docs/04-design/OMNIS_NEXUS_UI_UX_SPEC_V2.md §3) */
   --nx-void: #060c0e;
   --nx-slate: #101c20;
@@ -215,7 +216,9 @@
   color: var(--nx-status-danger);
   font-size: 13px;
 }
-.nx-input {
+.nx-input,
+.nx-textarea,
+.nx-select {
   width: 100%;
   min-height: var(--nx-control-height);
   padding: var(--nx-space-2) var(--nx-space-3);
@@ -226,11 +229,18 @@
   font: inherit;
   caret-color: var(--nx-jade);
 }
-.nx-input[aria-invalid='true'] {
+.nx-input[aria-invalid='true'],
+.nx-textarea[aria-invalid='true'],
+.nx-select[aria-invalid='true'] {
   border-color: var(--nx-status-danger);
 }
-.nx-input::placeholder {
+.nx-input::placeholder,
+.nx-textarea::placeholder {
   color: var(--nx-text-quiet);
+}
+.nx-textarea {
+  min-height: calc(var(--nx-control-height) * 3);
+  resize: vertical;
 }
 
 /* Panels and information groups */
