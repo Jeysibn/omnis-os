@@ -23,6 +23,56 @@ Prefer a **separate protected host** for the first credential-bearing authorizer
 
 If operating a separate host is unacceptable, evaluate rootless launcher redesign against the actual deployment threat model. It can reduce the launcher’s authority, but it does not protect ordinary files from host root. Do not store real provider credentials on the current host while the rootful launcher remains.
 
+## Provider authentication policy finding (2026-11-07)
+
+Current official OpenAI documentation makes **Sign in with ChatGPT (SIWC) for an
+open-source app** a candidate OAuth-first integration, subject to the intended
+host meeting the terms and the owner approving that account connection. The
+documented Codex app-server flow passes an SIWC access token to the app-server,
+which then calls the Responses API. SIWC also documents self-hosted VM usage and
+a direct Responses API flow. The token-sharing terms require supported OAuth,
+user authorization, and persistent token storage local to and under the user's
+control; they prohibit storage in a remote or managed environment. For ChatGPT
+Plan usage, requests must be for the authenticated user and connected app, a
+remote runtime must be controlled by that user, and express consent is required
+for background automation. These conditions mean a separately administered
+host or managed Omnis service is not automatically eligible; confirm that the
+specific self-hosted deployment meets the terms before implementing or storing
+tokens.
+
+The initial adapter candidate should call the Responses API directly through a
+narrow model-only broker and omit the `tools` field. The Codex app-server is not
+the preferred first boundary: its official preview limitations explicitly
+state that it can run local shell and MCP tools and coordinate child agents.
+Omitting provider-side tools in a direct Responses request still does not prove
+host isolation; OS identity, credential custody, and fixed egress must be
+enforced separately. Do not use or copy a Codex CLI login or app-server token.
+
+OpenAI documents API-key authentication as standard usage-based API billing,
+separate from ChatGPT Plan usage. Do not silently fall back to an API key if
+SIWC is unavailable. Anthropic's current Claude Code legal documentation says
+developers building applications should use API-key authentication and may not
+intermediate Claude.ai subscription OAuth credentials for end users. Claude's
+API-key route would require a separate owner decision about provider, billing,
+credential custody, and terms; it is not the current OAuth-first candidate.
+
+This is a provider-integration candidate assessment, not approval to implement
+OAuth, retrieve or store tokens, choose a model, contact an endpoint, spend
+credits, or execute inference. Current installed runtimes were observed as
+Codex CLI 0.166.0 and Hermes Agent 0.22.2; installed sign-in state was not
+inspected or reused.
+
+Official sources checked on 2026-11-07:
+
+- [Sign in with ChatGPT Terms](https://openai.com/policies/sign-in-with-chatgpt-terms/)
+- [Open-source SIWC registration and sign-in](https://developers.openai.com/siwc/token-sharing-open-source/sign-in)
+- [Codex app-server with SIWC](https://developers.openai.com/siwc/token-sharing-open-source/codex-app-server)
+- [SIWC preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)
+- [Self-hosted VMs with SIWC](https://developers.openai.com/siwc/token-sharing-open-source/self-hosted-vms)
+- [OpenAI API authentication](https://developers.openai.com/api/reference/overview)
+- [Anthropic Claude Code legal and compliance](https://code.claude.com/docs/en/legal-and-compliance)
+- [Anthropic API authentication](https://platform.claude.com/docs/en/manage-claude/authentication)
+
 Systemd `IPAddressAllow=`/`IPAddressDeny=` applies IP filtering to sockets created by a unit and can implement an allowlist with `IPAddressDeny=any` plus explicit allows. Its presence in a unit file is not proof that the target host loaded and enforces the filter. The intended Linux/systemd/cgroup environment must be inspected, the active policy verified, and positive plus negative traffic tests run there. [systemd.resource-control](https://www.freedesktop.org/software/systemd/man/latest/systemd.resource-control.html)
 
 ## Required evidence before selecting an option
