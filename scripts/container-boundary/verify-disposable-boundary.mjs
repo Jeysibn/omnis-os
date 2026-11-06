@@ -34,6 +34,10 @@ const nodeProbe = `
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import net from 'node:net';
+const status = fs.readFileSync('/proc/self/status', 'utf8');
+const groups = status.match(/^Groups:\\s*(.*)$/m)?.[1]?.trim().split(/\\s+/).filter(Boolean) ?? [];
+if (process.env.OMNIS_EXPECT_GROUP) assert.ok(groups.includes(process.env.OMNIS_EXPECT_GROUP), 'expected supplementary group is missing');
+if (process.env.OMNIS_EXPECT_NO_GROUP) assert.ok(!groups.includes(process.env.OMNIS_EXPECT_NO_GROUP), 'forbidden supplementary group is present');
 const socketPath = process.env.OMNIS_PROBE_SOCKET;
 if (socketPath) {
   const result = await new Promise((resolve) => {
@@ -53,7 +57,7 @@ if (socketPath) {
   });
   process.stdout.write(JSON.stringify(result));
   if (process.env.OMNIS_EXPECT_SOCKET === 'allow') {
-    assert.equal(result.kind, 'connected');
+    assert.equal(result.kind, 'connected', 'allowed socket connection failed');
   }
   else if (process.env.OMNIS_EXPECT_SOCKET === 'deny') {
     assert.equal(result.kind, 'error');
@@ -66,12 +70,6 @@ if (process.env.OMNIS_PROBE_DIRECTORY) {
   catch (error) { result = error.code; }
   process.stdout.write(JSON.stringify({ directory: result }));
   if (process.env.OMNIS_EXPECT_NO_LIST === '1') assert.equal(result, 'EACCES');
-}
-if (process.env.OMNIS_EXPECT_GROUP || process.env.OMNIS_EXPECT_NO_GROUP) {
-  const status = fs.readFileSync('/proc/self/status', 'utf8');
-    const groups = status.match(/^Groups:\\s*(.*)$/m)?.[1]?.trim().split(/\\s+/).filter(Boolean) ?? [];
-  if (process.env.OMNIS_EXPECT_GROUP) assert.ok(groups.includes(process.env.OMNIS_EXPECT_GROUP));
-  if (process.env.OMNIS_EXPECT_NO_GROUP) assert.ok(!groups.includes(process.env.OMNIS_EXPECT_NO_GROUP));
 }
 if (process.env.OMNIS_PROBE_WRITE_DIRECTORY) {
   let result;
