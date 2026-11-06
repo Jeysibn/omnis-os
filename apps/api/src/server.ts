@@ -26,6 +26,7 @@ import { registerProjectEpicRoutes } from './project-epic-routes.ts';
 import { registerProjectWorkspaceRoutes } from './project-workspace-routes.ts';
 import { registerTaskEpicRoutes } from './task-epic-routes.ts';
 import { registerTaskRoutes } from './task-routes.ts';
+import { registerConnectorAuthorizationRoutes } from './connector-authorization-routes.ts';
 import {
   parseRun,
   parseRunList,
@@ -209,6 +210,7 @@ registerProjectEpicRoutes(app);
 registerProjectWorkspaceRoutes(app);
 registerTaskEpicRoutes(app);
 registerTaskRoutes(app);
+registerConnectorAuthorizationRoutes(app, { requireOwner, requireMutationProtection });
 app.get('/api/v1/runs', { preHandler: requireOwner }, async () =>
   workerRequest('/internal/v1/runs', {}, parseRunList),
 );

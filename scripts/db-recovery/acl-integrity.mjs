@@ -341,6 +341,12 @@ export function assertRuntimeAclPolicy(snapshot) {
         ((entry.object === 'authorization_audit' &&
           ['SELECT', 'INSERT'].includes(entry.privilege)) ||
           (entry.object === 'runtime_authorizations' && entry.privilege === 'SELECT') ||
+          (entry.object === 'connector_authorizations' &&
+            ['SELECT', 'INSERT'].includes(entry.privilege)) ||
+          (entry.object === 'connector_execution_attempts' &&
+            ['SELECT', 'INSERT'].includes(entry.privilege)) ||
+          (entry.object === 'connector_authorization_audit' &&
+            ['SELECT', 'INSERT'].includes(entry.privilege)) ||
           (entry.object === 'departments' && entry.privilege === 'SELECT'))
       )
         continue;
@@ -400,6 +406,49 @@ export function assertRuntimeAclPolicy(snapshot) {
         entry.object === 'runtime_authorizations' &&
         entry.privilege === 'UPDATE' &&
         ['status', 'decided_at', 'decided_by', 'revoked_at', 'revoked_by'].includes(entry.column)
+      )
+        continue;
+      if (
+        entry.objectType === 'column' &&
+        entry.schema === 'omnis' &&
+        entry.object === 'connector_authorizations' &&
+        entry.privilege === 'UPDATE' &&
+        [
+          'status',
+          'consented_at',
+          'decided_at',
+          'decided_by',
+          'revoked_at',
+          'revoked_by',
+          'revocation_generation',
+          'consumed_at',
+          'consumed_request_id',
+        ].includes(entry.column)
+      )
+        continue;
+      if (
+        entry.objectType === 'column' &&
+        entry.schema === 'omnis' &&
+        entry.object === 'connector_execution_attempts' &&
+        entry.privilege === 'UPDATE' &&
+        [
+          'status',
+          'submission_started_at',
+          'provider_submission_id',
+          'cancel_requested_at',
+          'response_text',
+          'usage_provenance',
+          'updated_at',
+        ].includes(entry.column)
+      )
+        continue;
+      if (
+        entry.objectType === 'routine' &&
+        entry.schema === 'omnis' &&
+        entry.object ===
+          'validate_connector_authorization_context(p_project_id text, p_project_revision integer, p_task_id text, p_task_revision integer, p_agent_id text, p_profile_version integer)' &&
+        entry.privilege === 'EXECUTE' &&
+        entry.securityDefiner === true
       )
         continue;
       throw new Error(
