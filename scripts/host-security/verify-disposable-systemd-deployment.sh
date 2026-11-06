@@ -28,7 +28,7 @@ done
 for user in omnis-api omnis-authorizer omnis-worker omnis-launcher omnis-broker-gateway omnis-broker-ingress-gateway omnis-synthetic-broker; do
   if id "$user" >/dev/null 2>&1; then echo "Refusing to replace existing identity $user." >&2; exit 1; fi
 done
-for group in omnis-api omnis-authorizer omnis-worker omnis-launcher omnis-authorizer-socket omnis-launcher-socket omnis-broker-gateway-socket omnis-broker-ingress-socket omnis-broker-ingress-callers omnis-broker-gateway-token omnis-synthetic-broker; do
+for group in omnis-api omnis-authorizer omnis-worker omnis-launcher omnis-authorizer-socket omnis-launcher-socket omnis-broker-gateway omnis-broker-ingress-gateway omnis-broker-gateway-socket omnis-broker-ingress-socket omnis-broker-ingress-callers omnis-broker-gateway-token omnis-synthetic-broker; do
   if getent group "$group" >/dev/null; then echo "Refusing to reuse existing group $group." >&2; exit 1; fi
 done
 for path in /opt/omnis-os /etc/omnis /var/lib/omnis-sandbox /run/omnis-authorizer /run/omnis-broker-authorizer /run/omnis-sandbox; do

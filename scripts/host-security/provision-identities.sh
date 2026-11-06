@@ -17,7 +17,7 @@ record_created() {
   fi
 }
 
-for group in omnis-api omnis-authorizer omnis-worker omnis-launcher omnis-authorizer-socket omnis-launcher-socket omnis-broker-gateway-socket omnis-broker-ingress-socket omnis-broker-ingress-callers omnis-broker-gateway-token omnis-synthetic-broker; do
+for group in omnis-api omnis-authorizer omnis-worker omnis-launcher omnis-authorizer-socket omnis-launcher-socket omnis-broker-gateway omnis-broker-ingress-gateway omnis-broker-gateway-socket omnis-broker-ingress-socket omnis-broker-ingress-callers omnis-broker-gateway-token omnis-synthetic-broker; do
   if ! getent group "$group" >/dev/null; then
     groupadd --system "$group"
     record_created group "$group"
