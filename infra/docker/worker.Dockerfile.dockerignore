@@ -26,3 +26,5 @@
 !packages/runtime-adapters/tsconfig.json
 !scripts/
 !scripts/configure-hooks.ts
+!scripts/container-images/
+!scripts/container-images/compile-workspace-runtime.mjs
