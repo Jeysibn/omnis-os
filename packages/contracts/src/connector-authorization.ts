@@ -96,9 +96,23 @@ export const ConnectorExecutionAttemptSchema = z
     id: UuidSchema,
     authorizationId: UuidSchema,
     requestId: UuidSchema,
-    status: z.literal('admitted'),
+    status: z.enum([
+      'admitted',
+      'submitting',
+      'accepted',
+      'running',
+      'completed',
+      'failed',
+      'interrupted',
+      'unknown',
+    ]),
     synthetic: z.literal(true),
     createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime().optional(),
+    submissionStartedAt: z.string().datetime().nullable().optional(),
+    providerSubmissionId: z.string().min(1).max(256).nullable().optional(),
+    cancelRequestedAt: z.string().datetime().nullable().optional(),
+    responseText: z.string().max(32_000).nullable().optional(),
   })
   .strict();
 export type ConnectorExecutionAttempt = z.infer<typeof ConnectorExecutionAttemptSchema>;

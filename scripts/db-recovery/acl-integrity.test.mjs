@@ -327,6 +327,24 @@ describe('post-restore PostgreSQL ACL integrity', () => {
       acl('table', 'omnis', 'connector_authorizations', 'INSERT', null, 'omnis_authorizer'),
       acl('table', 'omnis', 'connector_execution_attempts', 'SELECT', null, 'omnis_authorizer'),
       acl('table', 'omnis', 'connector_execution_attempts', 'INSERT', null, 'omnis_authorizer'),
+      ...[
+        'status',
+        'submission_started_at',
+        'provider_submission_id',
+        'cancel_requested_at',
+        'response_text',
+        'usage_provenance',
+        'updated_at',
+      ].map((column) =>
+        acl(
+          'column',
+          'omnis',
+          'connector_execution_attempts',
+          'UPDATE',
+          column,
+          'omnis_authorizer',
+        ),
+      ),
       acl('table', 'omnis', 'connector_authorization_audit', 'SELECT', null, 'omnis_authorizer'),
       acl('table', 'omnis', 'connector_authorization_audit', 'INSERT', null, 'omnis_authorizer'),
       acl(
