@@ -14,6 +14,8 @@ import {
   PublishAgentProfileInputSchema,
   CreateDepartmentSchema,
   DepartmentListResponseSchema,
+  MissionEventSchema,
+  MissionEventWaitQuerySchema,
   CreateProjectSchema,
   CreateTaskSchema,
   SetTaskProjectSchema,
@@ -818,6 +820,71 @@ describe('AO-104 management input contracts', () => {
     );
     assert.equal(
       DepartmentListResponseSchema.safeParse({ departments: [], total: 1 }).success,
+      false,
+    );
+  });
+});
+
+describe('Mission Lane V2 contracts', () => {
+  it('accepts safe task and synthetic run events with bigint cursors', () => {
+    const taskEvent = {
+      id: `mev_${'a'.repeat(32)}`,
+      seq: '9007199254740993',
+      occurredAt: '2026-11-06T00:00:00.000Z',
+      taskId: 'task-0001',
+      projectId: `prj_${'1'.repeat(32)}`,
+      type: 'task.status_changed',
+      runId: 'run-0001',
+      actor: 'system',
+      origin: { kind: 'task_state', synthetic: false },
+      payload: { fromStatus: 'open', toStatus: 'in_progress' },
+    };
+    assert.equal(MissionEventSchema.safeParse(taskEvent).success, true);
+    assert.equal(
+      MissionEventSchema.safeParse({
+        ...taskEvent,
+        payload: { ...taskEvent.payload, output: 'must not be projected' },
+      }).success,
+      false,
+    );
+    assert.equal(
+      MissionEventWaitQuerySchema.safeParse({
+        after: 'signed.cursor',
+        waitMs: 15_001,
+      }).success,
+      false,
+    );
+  });
+
+  it('only accepts explicitly synthetic mock run lifecycle projection events', () => {
+    assert.equal(
+      MissionEventSchema.safeParse({
+        id: `mev_${'b'.repeat(32)}`,
+        seq: '1',
+        occurredAt: '2026-11-06T00:00:00.000Z',
+        taskId: 'task-0001',
+        projectId: null,
+        type: 'run.completed',
+        runId: 'run-0001',
+        actor: 'system',
+        origin: { kind: 'run_event', source: 'mock', synthetic: true },
+        payload: {},
+      }).success,
+      true,
+    );
+    assert.equal(
+      MissionEventSchema.safeParse({
+        id: `mev_${'b'.repeat(32)}`,
+        seq: '1',
+        occurredAt: '2026-11-06T00:00:00.000Z',
+        taskId: 'task-0001',
+        projectId: null,
+        type: 'run.completed',
+        runId: 'run-0001',
+        actor: 'system',
+        origin: { kind: 'run_event', source: 'provider', synthetic: false },
+        payload: {},
+      }).success,
       false,
     );
   });

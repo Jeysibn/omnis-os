@@ -31,8 +31,10 @@ export async function authorizerRequest<T>(
       init.method ?? 'GET',
       headers,
       init.body,
+      init.signal ?? undefined,
     );
   } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') throw error;
     const outcomeUnknown = error instanceof AuthorizerTransportError && error.mayHaveCommitted;
     const departmentMutation =
       (init.method ?? 'GET') !== 'GET' && path.startsWith('/internal/v1/departments');
@@ -142,9 +144,15 @@ function unixRequest(
   method: string,
   headers: Headers,
   body: RequestInit['body'],
+  signal?: AbortSignal,
 ): Promise<Response> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException('The request was aborted.', 'AbortError'));
+      return;
+    }
     let requestMayHaveCommitted = false;
+    let settled = false;
     const headerRecord: Record<string, string> = {};
     headers.forEach((value, key) => {
       headerRecord[key] = value;
@@ -156,9 +164,20 @@ function unixRequest(
         data += chunk;
         if (data.length > 1024 * 1024) req.destroy(new Error('authorizer_response_too_large'));
       });
-      res.once('end', () => resolve(new Response(data, { status: res.statusCode ?? 503 })));
+      res.once('end', () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(new Response(data, { status: res.statusCode ?? 503 }));
+      });
     });
     const timer = setTimeout(() => req.destroy(new Error('authorizer_timeout')), 5_000);
+    const onAbort = () => req.destroy(new DOMException('The request was aborted.', 'AbortError'));
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
     req.on('socket', (socket) => {
       // Unix sockets may already be connected by the time Node emits `socket`.
       requestMayHaveCommitted = !socket.connecting;
@@ -166,8 +185,15 @@ function unixRequest(
         requestMayHaveCommitted = true;
       });
     });
-    req.once('close', () => clearTimeout(timer));
+    req.once('close', cleanup);
     req.once('error', (error: NodeJS.ErrnoException) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error.name === 'AbortError') {
+        reject(error);
+        return;
+      }
       const definitelyBeforeConnect = ['ENOENT', 'EACCES', 'ECONNREFUSED', 'ENOTSOCK'].includes(
         error.code ?? '',
       );

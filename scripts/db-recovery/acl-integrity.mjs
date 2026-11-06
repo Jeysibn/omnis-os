@@ -107,15 +107,10 @@ const applicationReadTables = new Set([
   'agent_profile_versions',
 ]);
 const applicationColumnPrivileges = new Map([
-  ['tasks', new Set(['UPDATE:status'])],
   [
     'runs',
     new Set([
-      'INSERT:id',
-      'INSERT:task_id',
-      'INSERT:task_title',
       ...[
-        'status',
         'execution_generation',
         'lease_owner',
         'lease_expires_at',
@@ -123,31 +118,23 @@ const applicationColumnPrivileges = new Map([
         'result_output',
         'result_evidence_refs',
         'pg_boss_job_id',
-        'last_event_sequence',
       ].map((column) => `UPDATE:${column}`),
     ]),
   ],
-  [
-    'run_events',
-    new Set(
-      ['id', 'run_id', 'sequence', 'event_type', 'at', 'message'].map(
-        (column) => `INSERT:${column}`,
-      ),
-    ),
-  ],
-  [
-    'run_idempotency',
-    new Set(
-      ['idempotency_key', 'request_fingerprint', 'run_id'].map((column) => `INSERT:${column}`),
-    ),
-  ],
+  ['run_idempotency', new Set()],
 ]);
 const approvedSecurityDefinerRoutineArities = new Map([
+  ['set_task_status_from_run', 3],
   ['consume_run_authorization', 4],
   ['lock_active_run_authorization', 1],
   ['lock_run_authorization_for_admission', 2],
   ['append_runtime_admission_denial', 3],
-  ['append_runtime_authorization_audit', 3],
+]);
+const approvedRuntimeSecurityDefinerRoutines = new Set([
+  'lock_mission_event_clock()',
+  'admit_run(p_task_id text, p_authorization_id text, p_idempotency_key text, p_fingerprint text, p_correlation_id text)',
+  'transition_run_status(p_run_id text, p_expected_status text, p_next_status text, p_worker_id text, p_generation integer, p_lease_seconds integer, p_result_output text, p_evidence_refs jsonb, p_audit_reason text)',
+  'append_run_output(p_run_id text, p_worker_id text, p_generation integer, p_message text)',
 ]);
 const approvedTaskProjectRoutines = new Set([
   'create_task(p_title text, p_detail text, p_project_id text, p_request_id uuid, p_fingerprint bytea)',
@@ -156,6 +143,7 @@ const approvedTaskProjectRoutines = new Set([
 
 function isApprovedRuntimeSecurityDefiner(entry) {
   if (entry.objectType !== 'routine' || entry.schema !== 'omnis') return false;
+  if (approvedRuntimeSecurityDefinerRoutines.has(entry.object)) return true;
   if (approvedTaskProjectRoutines.has(entry.object)) return true;
   const match = /^([a-z_][a-z0-9_]*)\((.*)\)$/.exec(entry.object);
   if (!match) return false;
@@ -328,6 +316,9 @@ export function assertRuntimeAclPolicy(snapshot) {
           'get_task_epic(p_task_id text)',
           'list_project_epic_tasks(p_project_id text, p_epic_id text, p_after_created_at timestamp with time zone, p_after_task_id text, p_limit integer)',
           'set_task_epic(p_task_id text, p_expected_association_revision integer, p_epic_id text, p_request_id uuid, p_fingerprint bytea)',
+          'list_mission_events(p_project_id text, p_task_id text, p_run_id text, p_before_seq bigint, p_limit integer)',
+          'list_mission_events_after(p_project_id text, p_task_id text, p_run_id text, p_after_seq bigint, p_limit integer)',
+          'mission_event_storage_metrics()',
         ].includes(entry.object) &&
         entry.privilege === 'EXECUTE' &&
         entry.securityDefiner === true

@@ -4,6 +4,7 @@ import {
   PostgresProjectManagementStore,
   PostgresProjectMilestoneStore,
   PostgresProjectEpicStore,
+  PostgresMissionEventStore,
 } from '@omnis/db';
 import { chmod, lstat, mkdir, rm } from 'node:fs/promises';
 import path from 'node:path';
@@ -40,8 +41,10 @@ const store = new PostgresAuthorizationStore(pool, pool, {
 });
 await store.recordExpiredAuthorizations();
 
+const missionEventStore = new PostgresMissionEventStore(pool, env.agentIdempotencyKey);
 const app = createAuthorizerApp({
   store,
+  missionEvents: missionEventStore,
   serviceToken: env.serviceToken,
   checkDatabase: async () => {
     await pool.query('SELECT 1');
@@ -59,6 +62,7 @@ expiryTimer.unref();
 
 app.addHook('onClose', async () => {
   clearInterval(expiryTimer);
+  await missionEventStore.close();
   await pool.end();
   await rm(env.socketPath, { force: true });
 });
