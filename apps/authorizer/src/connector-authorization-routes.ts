@@ -4,6 +4,7 @@ import {
   ConnectorAuthorizationRequestSchema,
   ConnectorAuthorizationSchema,
 } from '@omnis/contracts/connector-authorization';
+import { SyntheticTaskRunDetailSchema } from '@omnis/contracts/synthetic-task-run';
 import {
   ConnectorAuthorizationStoreError,
   type PostgresConnectorAuthorizationStore,
@@ -12,7 +13,8 @@ import {
 export type ConnectorAuthorizerStore = Pick<
   PostgresConnectorAuthorizationStore,
   'request' | 'get' | 'decide' | 'revoke'
->;
+> &
+  Partial<Pick<PostgresConnectorAuthorizationStore, 'getExecutionForAuthorization'>>;
 
 export function registerConnectorAuthorizationRoutes(
   app: FastifyInstance,
@@ -50,6 +52,39 @@ export function registerConnectorAuthorizationRoutes(
           });
     },
   );
+
+  const getExecutionForAuthorization = store.getExecutionForAuthorization;
+  if (getExecutionForAuthorization) {
+    app.get<{ Params: { authorizationId: string } }>(
+      '/internal/v1/connector-authorizations/:authorizationId/execution',
+      async (request, reply) => {
+        if (!isUuid(request.params.authorizationId)) {
+          return reply.code(400).send({
+            error: { code: 'invalid_input', message: 'Connector authorization ID is invalid.' },
+          });
+        }
+        const authorization = await store.get(request.params.authorizationId);
+        if (!authorization) {
+          return reply.code(404).send({
+            error: { code: 'not_found', message: 'Connector authorization was not found.' },
+          });
+        }
+        const execution = await getExecutionForAuthorization.call(
+          store,
+          request.params.authorizationId,
+        );
+        return execution
+          ? SyntheticTaskRunDetailSchema.parse({
+              version: 'omnis.synthetic-task-run.v1',
+              taskId: authorization.taskId,
+              ...execution,
+            })
+          : reply.code(404).send({
+              error: { code: 'not_found', message: 'Synthetic task run was not found.' },
+            });
+      },
+    );
+  }
 
   app.post<{ Params: { authorizationId: string } }>(
     '/internal/v1/connector-authorizations/:authorizationId/decision',

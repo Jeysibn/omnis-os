@@ -223,6 +223,33 @@ export class PostgresConnectorAuthorizationStore {
     return result.rows[0] ? mapAuthorization(result.rows[0]) : undefined;
   }
 
+  async getExecutionForAuthorization(
+    authorizationId: string,
+  ): Promise<{ attempt: ConnectorExecutionAttempt; usage: UsageProvenance } | undefined> {
+    if (!isUuid(authorizationId)) {
+      throw new ConnectorAuthorizationStoreError(
+        'invalid_input',
+        'Connector authorization ID is invalid.',
+        400,
+      );
+    }
+    const result = await this.authorizer.query<AttemptRow>(
+      `SELECT id, authorization_id, request_id, status, synthetic, created_at, updated_at,
+              submission_started_at, provider_submission_id, cancel_requested_at,
+              usage_provenance, response_text
+         FROM omnis.connector_execution_attempts
+        WHERE authorization_id = $1`,
+      [authorizationId],
+    );
+    const row = result.rows[0];
+    return row
+      ? {
+          attempt: mapAttempt(row),
+          usage: UsageProvenanceSchema.parse(row.usage_provenance),
+        }
+      : undefined;
+  }
+
   async decide(id: string, actor: 'owner', input: unknown): Promise<ConnectorAuthorization> {
     const parsed = ConnectorAuthorizationDecisionSchema.safeParse(input);
     if (!isUuid(id) || !parsed.success) {
