@@ -38,25 +38,22 @@ const socketPath = process.env.OMNIS_PROBE_SOCKET;
 if (socketPath) {
   const result = await new Promise((resolve) => {
     const socket = net.createConnection(socketPath);
-    let response = '';
-    socket.setEncoding('utf8');
-    socket.on('data', (chunk) => { response += chunk; });
-    let connected = false;
-    socket.once('connect', () => { connected = true; socket.end('probe'); });
-    socket.once('end', () => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
       socket.destroy();
-      resolve({ kind: 'connected', response });
-    });
+      resolve(value);
+    };
+    socket.once('connect', () => finish({ kind: 'connected' }));
     socket.once('error', (error) => {
-      socket.destroy();
-      resolve({ kind: 'error', code: error.code, connected });
+      finish({ kind: 'error', code: error.code });
     });
-    setTimeout(() => { socket.destroy(); resolve({ kind: 'error', code: 'ETIMEDOUT', connected, response }); }, 2000).unref();
+    setTimeout(() => finish({ kind: 'error', code: 'ETIMEDOUT' }), 2000).unref();
   });
   process.stdout.write(JSON.stringify(result));
   if (process.env.OMNIS_EXPECT_SOCKET === 'allow') {
     assert.equal(result.kind, 'connected');
-    assert.equal(result.response, 'ok');
   }
   else if (process.env.OMNIS_EXPECT_SOCKET === 'deny') {
     assert.equal(result.kind, 'error');
@@ -139,6 +136,7 @@ if (process.env.OMNIS_PROBE_IDENTITY === '1') {
 
 const activeServers = new Set();
 const serverSockets = new WeakMap();
+const socketStates = new WeakMap();
 let signalReceived = false;
 
 function docker(args, options = {}) {
@@ -232,10 +230,11 @@ function createSocketDirectory(path, owner, group) {
 
 async function openSyntheticSocket(path, owner, group) {
   const sockets = new Set();
+  const state = { accepted: 0, sockets };
   const server = net.createServer((socket) => {
+    state.accepted += 1;
     sockets.add(socket);
     socket.once('close', () => sockets.delete(socket));
-    socket.once('data', () => socket.end('ok'));
   });
   await new Promise((resolve, reject) => {
     server.once('error', reject);
@@ -245,6 +244,7 @@ async function openSyntheticSocket(path, owner, group) {
   chmodSync(path, 0o660);
   activeServers.add(server);
   serverSockets.set(server, sockets);
+  socketStates.set(server, state);
   const info = lstatSync(path);
   assert.equal(info.isSocket(), true);
   assert.equal(info.uid, owner);
@@ -254,17 +254,11 @@ async function openSyntheticSocket(path, owner, group) {
 }
 
 async function verifyHostSocketPositiveControl(path) {
-  const response = await new Promise((resolve, reject) => {
+  const socket = await new Promise((resolve, reject) => {
     const socket = net.createConnection(path);
-    let text = '';
-    socket.setEncoding('utf8');
-    socket.on('data', (chunk) => {
-      text += chunk;
-    });
-    socket.once('connect', () => socket.end('probe'));
-    socket.once('end', () => {
+    socket.once('connect', () => {
       socket.destroy();
-      resolve(text);
+      resolve(socket);
     });
     socket.once('error', (error) => {
       socket.destroy();
@@ -275,7 +269,21 @@ async function verifyHostSocketPositiveControl(path) {
       reject(new Error('synthetic host socket positive control timed out'));
     }, 2000).unref();
   });
-  assert.equal(response, 'ok');
+  assert.ok(socket.destroyed);
+}
+
+async function assertSocketAccepted(server, previousCount) {
+  const state = socketStates.get(server);
+  assert.ok(state, 'synthetic socket server state is unavailable');
+  const deadline = Date.now() + 2000;
+  while (state.accepted <= previousCount && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.equal(
+    state.accepted,
+    previousCount + 1,
+    'permitted client was not accepted by the server',
+  );
 }
 
 async function closeSyntheticSocket(server, path) {
@@ -368,7 +376,9 @@ async function verifySocketBoundaries() {
     40003,
     launcherGid,
   );
+  const hostAcceptCount = socketStates.get(authorizerServer).accepted;
   await verifyHostSocketPositiveControl(join(apiSocketDir, 'authorizer.sock'));
+  await assertSocketAccepted(authorizerServer, hostAcceptCount);
   const apiContainer = `${resourcePrefix}-api-socket`;
   const workerContainer = `${resourcePrefix}-worker-socket`;
   const apiMount = socketMount(apiSocketDir, '/run/omnis-authorizer');
@@ -378,7 +388,8 @@ async function verifySocketBoundaries() {
   chownSync(readOnlyDirectory, 10001, 10001);
   chmodSync(readOnlyDirectory, 0o777);
 
-  probeContainer({
+  let acceptCount = socketStates.get(authorizerServer).accepted;
+  const apiSocketResult = probeContainer({
     name: apiContainer,
     supplementaryGroups: [authorizerGid],
     environment: {
@@ -391,7 +402,10 @@ async function verifySocketBoundaries() {
     },
     mounts: [apiMount, socketMount(readOnlyDirectory, '/run/read-only-control')],
   });
-  probeContainer({
+  assert.ok(apiSocketResult.includes('"kind":"connected"'));
+  await assertSocketAccepted(authorizerServer, acceptCount);
+  acceptCount = socketStates.get(launcherServer).accepted;
+  const workerSocketResult = probeContainer({
     name: `${resourcePrefix}-api-denied`,
     mounts: [apiMount],
     environment: {
@@ -401,6 +415,8 @@ async function verifySocketBoundaries() {
       OMNIS_EXPECT_NO_GROUP: String(authorizerGid),
     },
   });
+  assert.ok(workerSocketResult.includes('"kind":"connected"'));
+  await assertSocketAccepted(launcherServer, acceptCount);
   probeContainer({
     name: `${resourcePrefix}-api-cross-service`,
     mounts: [apiMount],
