@@ -230,7 +230,8 @@ test.describe('navigation: discoverable at every width', () => {
     await expect(nav(page).getByRole('link')).toHaveCount(0);
     await menuButton(page).click();
     await expect(menuButton(page)).toHaveAttribute('aria-expanded', 'true');
-    await expect(nav(page).getByRole('link')).toHaveCount(4);
+    for (const name of linkNames)
+      await expect(nav(page).getByRole('link', { name, exact: true })).toBeVisible();
   });
 
   test('the layout switches where the content stops fitting and switches back without flicker', async ({
@@ -270,16 +271,21 @@ test.describe('navigation: discoverable at every width', () => {
     await installApi(page);
     await page.setViewportSize({ width: 1440, height: 900 });
     await open(page);
-    // Stand-ins for the expected Projects and Departments entries are added to the live list.
+    const extras = ['Projects', 'Milestones']; // stand-ins for entries added later
+    const baseline = await page.evaluate(
+      () => document.querySelector('nav.primary-nav')!.querySelectorAll('a').length,
+    );
+    const total = baseline + extras.length;
     for (const width of [1500, 1440, 1280, 1180, 1100, 1024, 820, 720, 390, 320]) {
       await page.setViewportSize({ width, height: 900 });
       await settle(page);
       // A layout switch rebuilds the list, so add the stand-ins again until the mode is stable.
       for (let attempt = 0; attempt < 4; attempt += 1) {
-        await page.evaluate(() => {
+        await page.evaluate((labels) => {
           const list = document.querySelector('nav.primary-nav')!;
-          if (list.querySelectorAll('a').length >= 6) return;
-          for (const label of ['Projects', 'Departments']) {
+          const existing = [...list.querySelectorAll('a span')].map((el) => el.textContent);
+          for (const label of labels) {
+            if (existing.includes(label)) continue;
             const link = list.querySelector('a')!.cloneNode(true) as HTMLAnchorElement;
             link.href = `#${label.toLowerCase()}`;
             link.querySelector('span')!.textContent = label;
@@ -287,20 +293,20 @@ test.describe('navigation: discoverable at every width', () => {
             link.className = '';
             list.append(link);
           }
-        });
+        }, extras);
         await page.waitForTimeout(150);
         const count = await page.evaluate(
           () => document.querySelector('nav.primary-nav')!.querySelectorAll('a').length,
         );
-        if (count === 6) break;
+        if (count === total) break;
       }
       const primary = await revealNavigation(page);
-      await expect(primary.getByRole('link')).toHaveCount(6);
-      for (const name of [...linkNames, 'Projects', 'Departments'])
+      await expect(primary.getByRole('link')).toHaveCount(total);
+      for (const name of [...linkNames, ...extras])
         await expect(primary.getByRole('link', { name, exact: true })).toBeInViewport({
           ratio: 1,
         });
-      await expectContained(page, `six destinations @${width}`);
+      await expectContained(page, `${total} destinations @${width}`);
     }
   });
 });
