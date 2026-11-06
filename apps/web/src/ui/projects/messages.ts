@@ -36,9 +36,6 @@ export const catalog = {
 
   'rejected.csrf': fixed(csrfText),
   'rejected.invalidInput': fixed(invalidInputText),
-  'rejected.create.keyTaken': fixed(
-    'This project key is already used by another project, including an archived one. Choose a different key.',
-  ),
   'rejected.create.limit': fixed(
     "The project limit (500) has been reached. Archiving is permanent, so existing projects can't be removed in this release.",
   ),
@@ -46,21 +43,39 @@ export const catalog = {
   'rejected.edit.stale': fixed(
     'This project changed since you opened it, so your edits were not applied. Your unsaved edits are still in the form.',
   ),
-  'rejected.archived': fixed(
-    "The server rejected the change: this project is archived, so it can't be changed.",
-  ),
   'rejected.archive.stale': fixed(
     'This project changed since you opened it, so it was not archived. Review the latest version, then archive again if you still want to.',
   ),
-  'rejected.readbackFailed': fixed(
-    "The server rejected the change. Omnis OS couldn't read the latest project state to explain why.",
+
+  // A 409 does not say why: duplicate key, stale revision and idempotency-key reuse share one code
+  // and one message. These entries state only what a readback of the authoritative state shows.
+  'conflict.create.keyInUse': ({ key = '', name = '' }) =>
+    `The key ${key} is already used by a project named ${name}. The server reported a conflict, but it doesn't say which condition caused it.`,
+  'conflict.create.noMatch': fixed(
+    "The server reported a conflict, but the project list doesn't show this key in use, and a conflict response doesn't say why. Your values are kept. You can check again, or create again, which sends a new request.",
+  ),
+  'conflict.create.readbackFailed': fixed(
+    "The server reported a conflict, and Omnis OS couldn't read the project list to check why. Your values are kept. Check again before trying again.",
+  ),
+  'conflict.edit.sameRevision': ({ revision = 0 }) =>
+    `The server reported a conflict, but the project is unchanged at revision ${revision}, so Omnis OS can't tell why. Your edits are kept. You can check again, or save again, which sends a new request.`,
+  'conflict.edit.readbackFailed': fixed(
+    "The server reported a conflict, and Omnis OS couldn't read the project to check why. Your edits are kept. Check again before saving.",
+  ),
+  'conflict.archive.sameRevision': ({ revision = 0 }) =>
+    `The server reported a conflict, but the project is still active at revision ${revision}, so Omnis OS can't tell why. It was not archived. You can confirm the archive again, which sends a new request.`,
+  'conflict.archive.readbackFailed': fixed(
+    "The server reported a conflict, and Omnis OS couldn't read the project to check why, so its current state is unconfirmed. Reload the page before trying again.",
+  ),
+  'conflict.observedArchived': fixed(
+    "The project is currently archived, so it can't be changed. The server reported a conflict, and it can't be determined whether this request or something else archived it.",
   ),
 
   'unknown.create.recheckFailed': fixed(
     "The result of creating this project is unknown, and Omnis OS couldn't check the project list. Check again before trying again.",
   ),
   'unknown.create.matchingRow': ({ name = '' }) =>
-    `The result was unknown, but the project list now shows a project with this key and the name ${name}. It was probably created. Open it to confirm the objective.`,
+    `The result was unknown. The project list shows a project with this key, the name ${name} and this priority. We couldn't confirm whether this request created it. Open it to check.`,
   'unknown.create.keyTaken': ({ name = '' }) =>
     `The result was unknown. The project list shows this key is used by a project named ${name}, which doesn't match what you entered. Choose a different key.`,
   'unknown.create.noMatch': fixed(
@@ -70,8 +85,11 @@ export const catalog = {
   'unknown.edit.recheckFailed': fixed(
     "The result of saving is unknown, and Omnis OS couldn't read the project. Check again before trying again.",
   ),
-  'unknown.edit.applied': ({ revision = 0 }) =>
-    `The result was unknown, but the project now shows your changes at revision ${revision}. They were saved.`,
+  // Matching values at the next revision are consistent with this request having saved them, but
+  // another session could have made the same change, so the write is not attributed to this request.
+  'unknown.edit.matching': fixed(
+    "The project currently has the requested values. We couldn't confirm whether this request saved them.",
+  ),
   'unknown.edit.notApplied': fixed(
     'The result was unknown. The project still shows its previous values, so your changes were probably not saved. Trying again reuses the same request, which cannot apply twice.',
   ),
@@ -88,8 +106,8 @@ export const catalog = {
   'unknown.archive.recheckFailed': fixed(
     "The result of archiving is unknown, and Omnis OS couldn't read the project. Check again before trying again.",
   ),
-  'unknown.archive.applied': fixed(
-    'The result was unknown, but the project is now archived. It is read-only, and there is no restore action.',
+  'unknown.archive.observedArchived': fixed(
+    "The result was unknown. The project is now archived, and it is read-only with no restore action. We couldn't confirm whether this request archived it.",
   ),
   'unknown.archive.notApplied': fixed(
     'The result was unknown. The project is still not archived. Trying again reuses the same request, which cannot archive twice.',
@@ -102,6 +120,13 @@ export const catalog = {
   ),
 
   'edit.noChanges': fixed('Change at least one field before saving.'),
+  'edit.frozenHint': fixed(
+    'The values are locked so a retry sends exactly the request that was sent. Choose Edit values to change them.',
+  ),
+  'edit.resumed': fixed('You can edit the values again. Saving sends a new request.'),
+  'edit.valuesChanged': fixed(
+    'The values changed, so the earlier request was not sent. Review them, then save again.',
+  ),
   'edit.loaded': ({ revision = 0 }) => `Loaded the latest values, revision ${revision}.`,
   'edit.kept': ({ revision = 0 }) =>
     `Your edits are kept on top of the latest version, revision ${revision}. Review them, then save.`,

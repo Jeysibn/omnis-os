@@ -21,6 +21,7 @@ import { type Msg } from './messages.js';
 import { Message, Notice, priorityLabel, priorityOptions } from './parts.js';
 import {
   analyse,
+  analyseConflict,
   type Conclusion,
   type Observation,
   type Op,
@@ -96,10 +97,14 @@ export function ProjectForm({
   const [notice, setNotice] = useState<{ tone: 'error' | 'success'; msg: Msg } | null>(null);
   const [recovery, setRecovery] = useState<Recovery | null>(null);
   const [focusTick, setFocusTick] = useState(0);
+  const [focusFirst, setFocusFirst] = useState(0);
 
   const formRef = useRef<HTMLFormElement | null>(null);
   const intent = useRef(new IdempotentIntent());
   const inflight = useRef(false);
+  // Identifies the latest recheck. A response for an older one is ignored, so a late answer cannot
+  // reopen a recovery state the owner has already left (for example through Edit values).
+  const recheckSeq = useRef(0);
   const mounted = useRef(true);
   const csrfRef = useRef(csrfToken);
   csrfRef.current = csrfToken;
@@ -119,7 +124,19 @@ export function ProjectForm({
     formRef.current?.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus();
   }, [focusTick]);
 
+  // After Edit values, return focus to the first control.
+  useEffect(() => {
+    if (focusFirst === 0) return;
+    formRef.current?.querySelector<HTMLElement>('.nx-input')?.focus();
+  }, [focusFirst]);
+
   const blocking = recovery?.conclusion.blocking ?? false;
+  // While a retry of the exact request that was sent is on offer, the values are locked: the form
+  // can never show a value that the retry would not send. They are also locked while a request or
+  // a recheck is in flight, for the same reason. Edit values ends the retry and unlocks them.
+  const retryFrozen =
+    recovery?.mode === 'unknown' && recovery.conclusion.actions.includes('tryAgain');
+  const locked = busy !== null || retryFrozen;
   const set = (field: keyof Values, value: string) => {
     setValues((current) => ({ ...current, [field]: value }) as Values);
     setErrors((current) => ({ ...current, [field]: undefined }));
@@ -152,56 +169,30 @@ export function ProjectForm({
     }
   }
 
-  /** One read-only recheck. In `conflict` mode the server definitively rejected the edit. */
+  /** One read-only recheck. In `conflict` mode the server answered 409, which does not say why. */
   async function recheck(op: Op, mode: 'unknown' | 'conflict') {
+    recheckSeq.current += 1;
+    const seq = recheckSeq.current;
     setBusy('check');
     const observation = await observe(op);
-    if (!mounted.current || observation === 'unauthorized') return;
-    let conclusion: Conclusion;
-    if (mode === 'conflict' && op.kind === 'edit') {
-      const project = observation.kind === 'project' ? observation.project : null;
-      if (observation.kind !== 'project')
-        conclusion = {
-          message: { key: 'rejected.readbackFailed' },
-          actions: ['checkAgain'],
-          blocking: true,
-          settled: false,
-          project: null,
-          keyProblem: false,
-          openProjectId: null,
-        };
-      else if (project?.status === 'archived')
-        conclusion = {
-          message: { key: 'rejected.archived' },
-          actions: [],
-          blocking: true,
-          settled: false,
-          project,
-          keyProblem: false,
-          openProjectId: null,
-        };
-      else
-        conclusion = {
-          message: { key: 'rejected.edit.stale' },
-          actions: ['loadLatest', 'keepEdits'],
-          blocking: true,
-          settled: false,
-          project,
-          keyProblem: false,
-          openProjectId: null,
-        };
-    } else conclusion = analyse(op, observation);
+    if (!mounted.current || observation === 'unauthorized' || seq !== recheckSeq.current) return;
+    const conclusion =
+      mode === 'conflict' ? analyseConflict(op, observation) : analyse(op, observation);
     setRecovery({ op, mode, conclusion });
     setBusy(null);
     if (conclusion.settled && conclusion.project) {
       intent.current.settle();
       onSaved(conclusion.project, conclusion.message);
-    } else if (conclusion.keyProblem) setKeyTaken(true);
+      return;
+    }
+    setKeyTaken(conclusion.keyProblem);
+    if (conclusion.keyProblem && mode === 'conflict') setFocusTick((tick) => tick + 1);
   }
 
   async function run(op: Op) {
     if (inflight.current) return; // synchronous guard: a second activation cannot send a request
     inflight.current = true;
+    recheckSeq.current += 1; // anything still being rechecked is superseded by this request
     setBusy('submit');
     setNotice(null);
     setRecovery(null);
@@ -265,15 +256,12 @@ export function ProjectForm({
     } else if (failure.status === 404) error({ key: 'rejected.notFound' });
     else if (failure.status === 422) error({ key: 'rejected.invalidInput' });
     else if (failure.status === 503) error({ key: 'rejected.create.limit' });
-    else if (op.kind === 'create') {
-      setKeyTaken(true);
-      setFocusTick((tick) => tick + 1);
-    } else await recheck(op, 'conflict'); // edit: stale revision or archived; read why
+    else await recheck(op, 'conflict'); // 409 does not say why: read the authoritative state
   }
 
   const onSubmit = (event: FormEvent) => {
     event.preventDefault();
-    if (inflight.current || blocking) return;
+    if (inflight.current || blocking || retryFrozen) return;
     const { errors: found, trimmed } = validateValues(values, creating);
     setErrors(found);
     if (Object.keys(found).length > 0) {
@@ -291,12 +279,35 @@ export function ProjectForm({
   };
 
   const act = (action: RecoveryAction) => {
-    if (!recovery || busy) return;
+    if (!recovery || busy === 'submit') return;
+    // While a recheck is in flight only leaving the state is allowed.
+    if (busy === 'check' && action !== 'editValues' && action !== 'close') return;
     const { op, mode, conclusion } = recovery;
     if (action === 'checkAgain') void recheck(op, mode);
-    else if (action === 'tryAgain') void run(op);
-    else if (action === 'editValues' || action === 'close') setRecovery(null);
-    else if (action === 'openProject' && conclusion.openProjectId)
+    else if (action === 'tryAgain') {
+      // Never send an older request while different values are on screen.
+      const { errors: found, trimmed } = validateValues(values, creating);
+      const visible = Object.keys(found).length === 0 ? buildOp(trimmed) : null;
+      if (JSON.stringify(visible) !== JSON.stringify(op)) {
+        intent.current.settle();
+        recheckSeq.current += 1;
+        setRecovery(null);
+        setNotice({ tone: 'error', msg: { key: 'edit.valuesChanged' } });
+        return;
+      }
+      void run(op);
+    } else if (action === 'editValues' || action === 'close') {
+      // Ends the retry: its idempotency key is dropped, so whatever is saved next is a new request.
+      recheckSeq.current += 1;
+      intent.current.settle();
+      setBusy(null);
+      setRecovery(null);
+      setKeyTaken(false);
+      if (action === 'editValues') {
+        setNotice({ tone: 'success', msg: { key: 'edit.resumed' } });
+        setFocusFirst((tick) => tick + 1);
+      }
+    } else if (action === 'openProject' && conclusion.openProjectId)
       window.location.hash = projectHash(conclusion.openProjectId);
     else if ((action === 'loadLatest' || action === 'keepEdits') && conclusion.project) {
       const latest = conclusion.project;
@@ -356,6 +367,7 @@ export function ProjectForm({
                 autoComplete="off"
                 spellCheck={false}
                 autoFocus={autoFocus}
+                readOnly={locked}
                 onChange={(event) => set('key', event.target.value)}
               />
             )}
@@ -372,6 +384,7 @@ export function ProjectForm({
               {...control}
               value={values.name}
               autoFocus={autoFocus && !creating}
+              readOnly={locked}
               onChange={(event) => set('name', event.target.value)}
             />
           )}
@@ -385,6 +398,7 @@ export function ProjectForm({
             <NxTextarea
               {...control}
               rows={5}
+              readOnly={locked}
               value={values.objective}
               onChange={(event) => set('objective', event.target.value)}
             />
@@ -395,6 +409,7 @@ export function ProjectForm({
             <NxSelect
               {...control}
               value={values.priority}
+              disabled={locked}
               onChange={(event) => set('priority', event.target.value)}
             >
               {priorityOptions.map((option) => (
@@ -442,8 +457,18 @@ export function ProjectForm({
           </Notice>
         )}
 
+        {retryFrozen && (
+          <p className="nx-muted">
+            <Message msg={{ key: 'edit.frozenHint' }} />
+          </p>
+        )}
         <div className="pw-actions">
-          <NxButton type="submit" variant="primary" busy={busy === 'submit'} disabled={blocking}>
+          <NxButton
+            type="submit"
+            variant="primary"
+            busy={busy === 'submit'}
+            disabled={blocking || retryFrozen}
+          >
             {creating ? 'Create project' : 'Save changes'}
           </NxButton>
           <NxButton onClick={onCancel}>Cancel</NxButton>

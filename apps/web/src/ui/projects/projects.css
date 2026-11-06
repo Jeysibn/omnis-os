@@ -119,7 +119,7 @@
 .pw-surface a:not(.nx-button) {
   color: var(--nx-status-info);
 }
-.nx-table a {
+.pw-surface .nx-table a {
   text-decoration: underline;
   text-underline-offset: 2px;
 }

@@ -204,10 +204,12 @@ test.describe('responsive containment', () => {
   }
 
   test('a 16px minimum font setting still contains the page at 320px', async () => {
+    const baseURL = test.info().project.use.baseURL;
+    if (!baseURL) throw new Error('The Playwright project has no baseURL.');
     const browser = await chromium.launch({ args: ['--blink-settings=minimumFontSize=16'] });
     try {
       const page = await browser.newPage({ viewport: { width: 320, height: 900 } });
-      await page.goto(`http://127.0.0.1:5173${SHOWCASE}`);
+      await page.goto(`${baseURL}${SHOWCASE}`);
       await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
       const m = await page.evaluate(() => ({
         doc: document.documentElement.scrollWidth,
