@@ -475,6 +475,8 @@ function verifyApplicationImagesFailClosed() {
       '--rm',
       '--network',
       'none',
+      '--user',
+      '10001:10001',
       '--read-only',
       '--cap-drop',
       'ALL',
@@ -486,6 +488,8 @@ function verifyApplicationImagesFailClosed() {
       '128m',
       '--cpus',
       '0.5',
+      '--tmpfs',
+      '/tmp:rw,noexec,nosuid,nodev,size=16m',
       image,
     ]);
     assert.notEqual(
@@ -494,9 +498,10 @@ function verifyApplicationImagesFailClosed() {
       `${image} unexpectedly started without required configuration`,
     );
     const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+    const boundedOutput = output.replace(/[\r\n]+/g, ' ').slice(0, 400);
     assert.ok(
       output.includes(expectedMessage),
-      `${image} did not fail for the expected missing configuration`,
+      `${image} did not fail for the expected missing configuration; bounded output: ${boundedOutput}`,
     );
     assert.ok(
       !/DATABASE_URL|password=|token=|secret=/i.test(output),
