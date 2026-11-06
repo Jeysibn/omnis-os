@@ -1,0 +1,18 @@
+{
+  "name": "@omnis/synthetic-broker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch --experimental-strip-types src/server.ts",
+    "start": "node --permission --allow-fs-read=/opt/omnis-os/apps/synthetic-broker --allow-fs-read=/opt/omnis-os/packages/contracts --allow-fs-read=/run/omnis-synthetic-broker --allow-fs-write=/run/omnis-synthetic-broker --experimental-strip-types src/server.ts",
+    "start:provider": "node --experimental-strip-types src/fake-provider.ts",
+    "build": "pnpm typecheck",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --experimental-strip-types --test src/*.test.ts"
+  },
+  "dependencies": {
+    "@omnis/contracts": "workspace:*",
+    "fastify": "5.12.7",
+    "zod": "4.6.7"
+  }
+}

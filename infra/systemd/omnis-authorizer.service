@@ -6,10 +6,11 @@ After=network.target postgresql.service
 Type=simple
 User=omnis-authorizer
 Group=omnis-authorizer
-RuntimeDirectory=omnis-authorizer
+RuntimeDirectory=omnis-authorizer omnis-broker-authorizer
 RuntimeDirectoryMode=0750
-SupplementaryGroups=omnis-authorizer-socket
+SupplementaryGroups=omnis-authorizer-socket omnis-broker-gateway-socket
 ExecStartPost=/opt/omnis-os/scripts/host-security/set-service-socket-group.sh authorizer
+ExecStartPost=/opt/omnis-os/scripts/host-security/set-service-socket-group.sh authorizer-broker
 WorkingDirectory=/opt/omnis-os/apps/authorizer
 EnvironmentFile=/etc/omnis/authorizer.env
 ExecStart=/usr/bin/node --experimental-strip-types src/server.ts
@@ -29,6 +30,11 @@ ProcSubset=pid
 RestrictSUIDSGID=true
 LockPersonality=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CPUQuota=50%
+MemoryMax=384M
+TasksMax=64
+LimitNOFILE=256
+TimeoutStopSec=10
 
 [Install]
 WantedBy=multi-user.target

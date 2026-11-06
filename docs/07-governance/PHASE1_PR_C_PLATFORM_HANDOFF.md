@@ -1,6 +1,6 @@
-# Phase 1 PR C — platform handoff and implementation gate
+# Phase 1 PR C — historical platform handoff
 
-**Status: BLOCKED pending the PR #45 authorizer IPC contract.** This document records the source gap found before platform implementation. It does not authorize a provider, credentials, inference, deployment, or real-runtime selection.
+**Historical status at reviewed base `7a7fd46d4736af02ad94a82c2977a2054943ea66`: BLOCKED pending an authorizer IPC contract.** PR #47 later added broker-only authorizer IPC and a fake-provider transport contract. This preserves the original findings; current status is in [Phase 1 PR C platform status](PHASE1_PR_C_PLATFORM_STATUS.md). No real authentication, credentials, inference, deployment, or runtime selection is authorized.
 
 ## Reviewed base and scope
 

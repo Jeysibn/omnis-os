@@ -14,7 +14,7 @@ for identity in omnis-worker omnis-authorizer omnis-api omnis-launcher; do
 done
 
 worker_groups="$(id -nG omnis-worker | tr ' ' '\n')"
-for forbidden_group in docker omnis-authorizer-socket omnis-api omnis-authorizer omnis-launcher; do
+for forbidden_group in docker omnis-authorizer-socket omnis-broker-gateway-socket omnis-synthetic-broker omnis-api omnis-authorizer omnis-launcher; do
   if grep -qx "$forbidden_group" <<<"$worker_groups"; then
     echo "omnis-worker must not belong to $forbidden_group." >&2
     exit 1
@@ -24,7 +24,7 @@ grep -qx omnis-launcher-socket <<<"$worker_groups" || {
   echo "omnis-worker is missing the narrow launcher socket group." >&2
   exit 1
 }
-expected_worker_groups="$(printf '%s\n' omnis-worker omnis-launcher-socket | sort)"
+expected_worker_groups="$(printf '%s\n' omnis-worker omnis-launcher-socket omnis-broker-ingress-callers | sort)"
 actual_worker_groups="$(printf '%s\n' "$worker_groups" | sort)"
 [[ "$actual_worker_groups" == "$expected_worker_groups" ]] || {
   echo "omnis-worker has unexpected supplementary group membership." >&2
@@ -49,12 +49,27 @@ for identity in omnis-api omnis-authorizer; do
     echo "$identity must use its private primary group." >&2
     exit 1
   }
-  expected_groups="$(printf '%s\n' "$identity" omnis-authorizer-socket | sort)"
+  if [[ "$identity" == omnis-authorizer ]]; then
+    expected_groups="$(printf '%s\n' "$identity" omnis-authorizer-socket omnis-broker-gateway-socket | sort)"
+  else
+    expected_groups="$(printf '%s\n' "$identity" omnis-authorizer-socket | sort)"
+  fi
   actual_groups="$(id -nG "$identity" | tr ' ' '\n' | sort)"
   [[ "$actual_groups" == "$expected_groups" ]] || {
     echo "$identity has unexpected supplementary group membership." >&2
     exit 1
   }
+done
+
+for identity in omnis-broker-gateway omnis-broker-ingress-gateway omnis-synthetic-broker; do
+  [[ "$(id -gn "$identity")" == "$identity" ]] || {
+    echo "$identity must use its private primary group." >&2
+    exit 1
+  }
+  if id -nG "$identity" | tr ' ' '\n' | grep -qx docker; then
+    echo "$identity must not belong to docker." >&2
+    exit 1
+  fi
 done
 
 authorizer_pid="$(systemctl show --property MainPID --value omnis-authorizer.service)"
