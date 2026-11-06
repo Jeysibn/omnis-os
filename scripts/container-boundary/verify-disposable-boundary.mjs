@@ -200,7 +200,7 @@ function probeContainer({
   for (const group of supplementaryGroups) args.push('--group-add', String(group));
   for (const mount of mounts) args.push('--mount', mount);
   for (const [key, value] of Object.entries(environment)) args.push('--env', `${key}=${value}`);
-  args.push('--entrypoint', 'node', image, '-e', script);
+  args.push('--entrypoint', 'node', image, '--input-type=module', '-e', script);
   return docker(args);
 }
 
@@ -275,8 +275,13 @@ function assertRuntimeRestrictions(container) {
   assert.equal(host.Memory, 134217728);
   assert.equal(host.NanoCpus, 500000000);
   assert.deepEqual(host.Binds ?? [], []);
+  assert.deepEqual(host.PortBindings ?? {}, {});
   assert.equal(container.Config.User, '10001:10001');
   assert.ok(!JSON.stringify(container.Mounts).includes('/var/run/docker.sock'));
+  assert.ok(
+    container.Mounts.every((mount) => mount.Type === 'tmpfs' && mount.Destination === '/tmp'),
+    'workload containers must not receive host, developer-home, or Windows filesystem mounts',
+  );
 }
 
 async function verifySocketBoundaries() {
@@ -389,6 +394,7 @@ async function verifySocketBoundaries() {
       `OMNIS_EXPECT_GROUP=${authorizerGid}`,
       lifecycleContainer,
       'node',
+      '--input-type=module',
       '-e',
       nodeProbe,
     ]);
@@ -405,6 +411,7 @@ async function verifySocketBoundaries() {
     'OMNIS_EXPECT_SOCKET=allow',
     lifecycleContainer,
     'node',
+    '--input-type=module',
     '-e',
     nodeProbe,
   ]);
@@ -428,6 +435,7 @@ async function verifySocketBoundaries() {
     'OMNIS_EXPECT_SOCKET=allow',
     lifecycleContainer,
     'node',
+    '--input-type=module',
     '-e',
     nodeProbe,
   ]);
@@ -532,6 +540,7 @@ function verifyRuntimeImageRestrictions() {
       '--entrypoint',
       'node',
       image,
+      '--input-type=module',
       '-e',
       nodeProbe,
     ]);
@@ -603,6 +612,7 @@ async function verifyNetworkIsolation() {
     '--entrypoint',
     'node',
     apiImage,
+    '--input-type=module',
     '-e',
     "const s=await import('node:http').then(({createServer})=>createServer((_,r)=>{r.end('ok')}));s.listen(45678,'0.0.0.0');setInterval(()=>{},1000)",
   ]);
@@ -645,6 +655,7 @@ async function verifyNetworkIsolation() {
     '--entrypoint',
     'node',
     workerImage,
+    '--input-type=module',
     '-e',
     "const s=await import('node:http').then(({createServer})=>createServer((_,r)=>r.end('isolated')));s.listen(45679,'0.0.0.0');setInterval(()=>{},1000)",
   ]);
@@ -678,6 +689,7 @@ function verifyCleanupOnSyntheticFailure() {
     '--entrypoint',
     'node',
     apiImage,
+    '--input-type=module',
     '-e',
     'setInterval(() => {}, 1000)',
   ]);
