@@ -787,6 +787,40 @@ const postgresSuite = describe(
         ).rows[0]?.includes_prompt,
         false,
       );
+      const projectionPrivileges = await adminPool!.query(
+        `SELECT has_column_privilege('omnis_runtime','omnis.runs','connector_authorization_id','INSERT') AS can_insert_authorization_reference,
+                has_column_privilege('omnis_runtime','omnis.runs','connector_request_binding','INSERT') AS can_insert_binding,
+                has_column_privilege('omnis_runtime','omnis.runs','connector_attempt_id','UPDATE') AS can_update_attempt_reference,
+                has_column_privilege('omnis_runtime','omnis.runs','connector_authorization_id','UPDATE') AS can_rewrite_authorization_reference`,
+      );
+      assert.deepEqual(projectionPrivileges.rows[0], {
+        can_insert_authorization_reference: true,
+        can_insert_binding: true,
+        can_update_attempt_reference: true,
+        can_rewrite_authorization_reference: false,
+      });
+      await assert.rejects(
+        adminPool!.query(
+          `INSERT INTO omnis.runs
+             (id, task_id, task_title, connector_authorization_id, connector_request_id,
+              connector_correlation_id, connector_request_binding)
+           VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
+          [
+            randomUUID(),
+            fixture.task.id,
+            fixture.task.title,
+            randomUUID(),
+            randomUUID(),
+            randomUUID(),
+            JSON.stringify({ taskId: fixture.task.id }),
+          ],
+        ),
+        (error: unknown) =>
+          typeof error === 'object' &&
+          error !== null &&
+          'constraint' in error &&
+          error.constraint === 'runs_connector_projection_complete',
+      );
 
       const [started, duplicateStart] = await Promise.all([
         store.beginSyntheticBrokerRun(runId, 'synthetic-worker', 30),
@@ -836,14 +870,20 @@ const postgresSuite = describe(
         "UPDATE omnis.runs SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
         [runId],
       );
-      const events = await store.reconcileExpiredRuns();
-      assert.equal((await store.getRun(runId))?.status, 'unknown');
-      assert.equal((await store.getTask(fixture.task.id))?.status, 'in_progress');
-      assert.equal(events[0]?.event.type, 'run.interrupted');
       assert.equal(
         await store.renewSyntheticBrokerLease(runId, 'old-worker', claim.generation, 30),
         false,
       );
+      await assert.rejects(
+        store.finishSyntheticBrokerRun(runId, 'old-worker', claim.generation, {
+          status: 'unknown',
+        }),
+        /no longer owns this synthetic Run/i,
+      );
+      const events = await store.reconcileExpiredRuns();
+      assert.equal((await store.getRun(runId))?.status, 'unknown');
+      assert.equal((await store.getTask(fixture.task.id))?.status, 'in_progress');
+      assert.equal(events[0]?.event.type, 'run.interrupted');
       assert.equal((await store.listActiveRunIds([runId])).includes(runId), false);
     });
 

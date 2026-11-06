@@ -205,6 +205,7 @@ try {
     '0020_epic_task_association',
     '0022_synthetic_connector_authorization',
     '0023_synthetic_broker_submission_lifecycle',
+    '0024_synthetic_task_run_projection',
   ];
   if (afterUpgrade.migrations.includes('0021_mission_lane_events')) {
     expectedMigrations.splice(
@@ -697,7 +698,7 @@ async function verifyPost0005ProvenanceUpgrade() {
       "SELECT id, length(checksum) AS checksum_length FROM omnis.schema_migrations WHERE id LIKE '00%' ORDER BY id",
     );
     assert.deepEqual(migrationRows.rows.at(-1), {
-      id: '0023_synthetic_broker_submission_lifecycle',
+      id: '0024_synthetic_task_run_projection',
       checksum_length: 64,
     });
   } finally {

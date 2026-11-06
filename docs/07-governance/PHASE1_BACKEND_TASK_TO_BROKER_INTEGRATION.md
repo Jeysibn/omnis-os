@@ -69,9 +69,11 @@ credential custody.
 - Deferred PR #41's migration 0021 is numbered before 0024 and its migration runner applies
   unapplied files in lexical order. Its current Draft also revokes direct runtime writes to
   `omnis.runs`, `omnis.tasks`, and `omnis.run_events`, replacing them with database transition
-  functions. This backend implementation currently uses the current-main direct RunStore write
-  path. It therefore requires a compatibility update against the exact PR #41 candidate before
-  these changes can be integrated with PR #41; PR #41 is untouched here.
+  functions. This PR is based on current main without migration 0021 and is mergeable only in that
+  sequence; it does not include or change PR #41. If PR #41 is merged first, or before this PR is
+  integrated, this branch must be adapted to the exact 0021 transition-function contract and
+  re-reviewed before merge. The new column-level grants in 0024 do not restore any table write
+  privileges revoked by 0021.
 - PR #46 does not expose a backend worker status/reconciliation route for a late attempt update.
   The owner status API reads the authorizer attempt directly, while the Run projection remains
   `unknown` after an uncertain worker result. The Run projection must not be treated as a

@@ -736,6 +736,7 @@ export class PostgresRunStore {
          updated_at=now()
        WHERE id=$1 AND connector_authorization_id IS NOT NULL AND lease_owner=$2
          AND execution_generation=$3 AND status IN ('running','stopping')
+         AND lease_expires_at > now()
        RETURNING status`,
       [runId, workerId, generation, leaseSeconds],
     );
@@ -803,6 +804,7 @@ export class PostgresRunStore {
            connector_attempt_id=COALESCE($6, connector_attempt_id),
            lease_owner=NULL, lease_expires_at=NULL, updated_at=now()
          WHERE id=$1 AND lease_owner=$2 AND execution_generation=$3
+           AND lease_expires_at > now()
          RETURNING ${runColumns}`,
         [
           runId,
