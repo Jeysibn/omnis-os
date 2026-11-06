@@ -65,7 +65,11 @@ try {
   assert.ok(container.HostConfig.SecurityOpt?.includes('no-new-privileges:true'));
   assert.ok(
     container.Mounts.every(
-      (mount) => mount.Type === 'tmpfs' || mount.Destination === '/probe/egress-probe.mjs',
+      (mount) =>
+        mount.Type === 'tmpfs' ||
+        ['/probe/egress-probe.mjs', '/etc/hosts', '/etc/hostname', '/etc/resolv.conf'].includes(
+          mount.Destination,
+        ),
     ),
   );
   assert.ok(

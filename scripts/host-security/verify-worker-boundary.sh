@@ -94,7 +94,7 @@ fi
   exit 1
 }
 [[ "$(stat -c '%U:%G:%a' /run/omnis-authorizer/authorizer.sock)" == "omnis-authorizer:omnis-authorizer-socket:660" ]] || {
-  echo "Authorizer socket owner, group, or mode differs from the approved policy." >&2
+  echo "Authorizer socket owner, group, or mode differs from the approved policy (observed $(stat -c '%U:%G:%a' /run/omnis-authorizer/authorizer.sock))." >&2
   exit 1
 }
 

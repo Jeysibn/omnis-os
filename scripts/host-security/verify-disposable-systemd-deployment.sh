@@ -129,6 +129,10 @@ cleanup() {
             rm -f -- "$value/authorizer.sock"
             remove_created_directory "$value"
             ;;
+          /run/omnis-broker-authorizer)
+            rm -f -- "$value/broker.sock"
+            remove_created_directory "$value"
+            ;;
           /run/omnis-sandbox)
             rm -f -- "$value/launcher.sock"
             remove_created_directory "$value"
