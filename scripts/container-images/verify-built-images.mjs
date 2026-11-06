@@ -70,6 +70,8 @@ for (const [image, reason] of [
       [
         'run',
         '--rm',
+        '--name',
+        `${name}-identity`,
         '--network',
         'none',
         '--entrypoint',
@@ -118,7 +120,10 @@ for (const [image, reason] of [
       `${image}: runtime UID/GID and expected configuration failure verified.\n`,
     );
   } finally {
-    spawnSync('docker', ['rm', '-f', name], { stdio: 'ignore', timeout: 10000 });
+    spawnSync('docker', ['rm', '-f', name, `${name}-identity`], {
+      stdio: 'ignore',
+      timeout: 10000,
+    });
   }
 }
 
