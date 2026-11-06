@@ -40,21 +40,43 @@ host or managed Omnis service is not automatically eligible; confirm that the
 specific self-hosted deployment meets the terms before implementing or storing
 tokens.
 
-The initial adapter candidate should call the Responses API directly through a
-narrow model-only broker and omit the `tools` field. The Codex app-server is not
-the preferred first boundary: its official preview limitations explicitly
-state that it can run local shell and MCP tools and coordinate child agents.
-Omitting provider-side tools in a direct Responses request still does not prove
-host isolation; OS identity, credential custody, and fixed egress must be
-enforced separately. Do not use or copy a Codex CLI login or app-server token.
+The narrowest OAuth-first candidate is a direct Responses API request through a
+model-only broker, omitting the `tools` field. The SIWC preview requires
+`store: false` and `stream: true` on each HTTP request, requires the input
+context on every request, and disallows `background` and
+`max_output_tokens`. That last limitation means the current grant's
+`maxOutputTokens` cannot be enforced as an upstream per-request bound for this
+flow. Cutting off a stream locally is not a provider-side output or billing
+limit. Do not implement or activate this adapter until the owner chooses a
+supported bounded alternative or explicitly resolves this limit without
+silently weakening authorization.
+
+The Codex app-server is not the preferred first boundary: its official preview
+limitations explicitly state that it can run local shell and MCP tools and
+coordinate child agents. Omitting provider-side tools in a direct Responses
+request still does not prove host isolation; OS identity, credential custody,
+and fixed egress must be enforced separately. Do not use or copy a Codex CLI
+login or app-server token. The documented SIWC HTTP path only treats
+`response.completed` as successful; an interrupted stream remains uncertain.
+The Responses cancel endpoint only cancels background responses, while SIWC
+preview rejects the `background` field, so provider-confirmed cancellation is
+not available in this candidate flow.
 
 OpenAI documents API-key authentication as standard usage-based API billing,
-separate from ChatGPT Plan usage. Do not silently fall back to an API key if
-SIWC is unavailable. Anthropic's current Claude Code legal documentation says
-developers building applications should use API-key authentication and may not
-intermediate Claude.ai subscription OAuth credentials for end users. Claude's
-API-key route would require a separate owner decision about provider, billing,
-credential custody, and terms; it is not the current OAuth-first candidate.
+separate from ChatGPT Plan usage; plan credits must not be inferred from API
+token prices. Do not silently fall back to an API key if SIWC is unavailable.
+Anthropic's current Claude Code legal documentation says developers building
+applications should use API-key authentication and may not intermediate
+Claude.ai subscription OAuth credentials for end users. Claude's API-key route
+would require a separate owner decision about provider, billing, credential
+custody, and terms; it is not the current OAuth-first candidate.
+
+The SIWC self-hosted VM guide additionally says host-specific usage attribution
+and revocation of ChatGPT Plan access for transferred sessions are not yet
+available. Treat a transferred credential as not independently attributable or
+revocable per host until the provider documents otherwise. Do not claim per-run
+cost from token counts; only provider-returned token usage can be recorded as
+measured tokens, and plan-charge attribution remains unavailable in this flow.
 
 This is a provider-integration candidate assessment, not approval to implement
 OAuth, retrieve or store tokens, choose a model, contact an endpoint, spend
@@ -70,6 +92,10 @@ Official sources checked on 2026-11-07:
 - [SIWC preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)
 - [Self-hosted VMs with SIWC](https://developers.openai.com/siwc/token-sharing-open-source/self-hosted-vms)
 - [OpenAI API authentication](https://developers.openai.com/api/reference/overview)
+- [SIWC Models and inference](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference)
+- [SIWC preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)
+- [Responses API cancellation](https://developers.openai.com/api/reference/resources/responses/methods/cancel)
+- [ChatGPT and Codex pricing](https://learn.chatgpt.com/docs/pricing.md)
 - [Anthropic Claude Code legal and compliance](https://code.claude.com/docs/en/legal-and-compliance)
 - [Anthropic API authentication](https://platform.claude.com/docs/en/manage-claude/authentication)
 
