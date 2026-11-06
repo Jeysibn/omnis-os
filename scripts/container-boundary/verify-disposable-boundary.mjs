@@ -465,49 +465,40 @@ async function verifySocketBoundaries() {
   await closeSyntheticSocket(launcherServer, join(workerSocketDir, 'launcher.sock'));
 }
 
-function verifyApplicationImagesFailClosed() {
-  for (const [image, expectedMessage] of [
-    [apiImage, 'OMNIS_SESSION_SECRET must be generated'],
-    [workerImage, 'OMNIS_INTERNAL_TOKEN must be generated'],
-  ]) {
-    const result = dockerExpectedFailure([
-      'run',
-      '--rm',
-      '--network',
-      'none',
-      '--user',
-      '10001:10001',
-      '--read-only',
-      '--cap-drop',
-      'ALL',
-      '--security-opt',
-      'no-new-privileges:true',
-      '--pids-limit',
-      '64',
-      '--memory',
-      '128m',
-      '--cpus',
-      '0.5',
-      '--tmpfs',
-      '/tmp:rw,noexec,nosuid,nodev,size=16m',
-      image,
-    ]);
-    assert.notEqual(
-      result.status,
-      0,
-      `${image} unexpectedly started without required configuration`,
-    );
-    const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
-    const boundedOutput = output.replace(/[\r\n]+/g, ' ').slice(0, 400);
-    assert.ok(
-      output.includes(expectedMessage),
-      `${image} did not fail for the expected missing configuration; bounded output: ${boundedOutput}`,
-    );
-    assert.ok(
-      !/DATABASE_URL|password=|token=|secret=/i.test(output),
-      `${image} failure output exposed configuration-like data`,
-    );
-  }
+function verifyApplicationImageFailsClosed(image, expectedMessage) {
+  const result = dockerExpectedFailure([
+    'run',
+    '--rm',
+    '--network',
+    'none',
+    '--user',
+    '10001:10001',
+    '--read-only',
+    '--cap-drop',
+    'ALL',
+    '--security-opt',
+    'no-new-privileges:true',
+    '--pids-limit',
+    '64',
+    '--memory',
+    '128m',
+    '--cpus',
+    '0.5',
+    '--tmpfs',
+    '/tmp:rw,noexec,nosuid,nodev,size=16m',
+    image,
+  ]);
+  assert.notEqual(result.status, 0, `${image} unexpectedly started without required configuration`);
+  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+  const boundedOutput = output.replace(/[\r\n]+/g, ' ').slice(0, 400);
+  assert.ok(
+    output.includes(expectedMessage),
+    `${image} did not fail for the expected missing configuration; bounded output: ${boundedOutput}`,
+  );
+  assert.ok(
+    !/DATABASE_URL|password=|token=|secret=/i.test(output),
+    `${image} failure output exposed configuration-like data`,
+  );
 }
 
 function verifyRuntimeImageRestrictions() {
@@ -731,12 +722,39 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
   });
 }
 
+const failures = [];
+async function runCheck(name, check) {
+  try {
+    await check();
+    process.stdout.write(`PASS ${name}\n`);
+  } catch (error) {
+    const detail = String(error)
+      .replace(/[\r\n]+/g, ' ')
+      .slice(0, 500);
+    failures.push(name);
+    process.stderr.write(`FAIL ${name}: ${detail}\n`);
+  }
+}
+
 try {
-  verifyApplicationImagesFailClosed();
-  verifyRuntimeImageRestrictions();
-  await verifySocketBoundaries();
-  await verifyNetworkIsolation();
-  verifyCleanupOnSyntheticFailure();
+  await runCheck('API fails closed without required configuration', () =>
+    verifyApplicationImageFailsClosed(apiImage, 'OMNIS_SESSION_SECRET must be generated'),
+  );
+  await runCheck('worker fails closed without required configuration', () =>
+    verifyApplicationImageFailsClosed(workerImage, 'OMNIS_INTERNAL_TOKEN must be generated'),
+  );
+  await runCheck(
+    'runtime image identity and privilege restrictions',
+    verifyRuntimeImageRestrictions,
+  );
+  await runCheck('synthetic Unix socket ACL and lifecycle boundaries', verifySocketBoundaries);
+  await runCheck('internal Docker network isolation', verifyNetworkIsolation);
+  await runCheck('cleanup after an intentional synthetic failure', verifyCleanupOnSyntheticFailure);
+  if (failures.length > 0) {
+    throw new Error(
+      `Docker boundary verification failed in ${failures.length} group(s): ${failures.join(', ')}`,
+    );
+  }
   process.stdout.write(
     'Disposable Docker boundary verification passed: runtime identity, dropped capabilities, read-only rootfs, resource limits, fail-closed configuration, synthetic socket ACLs/lifecycle, isolated networking, no Docker authority, and scoped cleanup.\n',
   );
