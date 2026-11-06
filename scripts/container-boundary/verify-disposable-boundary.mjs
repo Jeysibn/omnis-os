@@ -51,7 +51,25 @@ if (socketPath) {
     };
     socket.once('connect', () => finish({ kind: 'connected' }));
     socket.once('error', (error) => {
-      finish({ kind: 'error', code: error.code });
+      let socketInfo;
+      let directoryInfo;
+      try {
+        const info = fs.statSync(socketPath);
+        socketInfo = { uid: info.uid, gid: info.gid, mode: info.mode & 0o777 };
+        const directory = fs.statSync(socketPath.slice(0, socketPath.lastIndexOf('/')));
+        directoryInfo = { uid: directory.uid, gid: directory.gid, mode: directory.mode & 0o777 };
+      } catch (statError) {
+        socketInfo = { error: statError.code };
+      }
+      finish({
+        kind: 'error',
+        code: error.code,
+        uid: process.getuid(),
+        gid: process.getgid(),
+        groups,
+        socket: socketInfo,
+        directory: directoryInfo,
+      });
     });
     setTimeout(() => finish({ kind: 'error', code: 'ETIMEDOUT' }), 2000).unref();
   });
@@ -415,7 +433,7 @@ async function verifySocketBoundaries() {
   });
   assert.ok(
     workerSocketResult.includes('"kind":"connected"'),
-    `worker socket probe returned: ${workerSocketResult.slice(0, 240)}`,
+    `worker socket probe returned: ${workerSocketResult.slice(0, 700)}`,
   );
   await assertSocketAccepted(launcherServer, acceptCount);
   probeContainer({
