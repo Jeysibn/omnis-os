@@ -60,7 +60,7 @@ try {
   assert.equal(container.Config.User, '10001:10001');
   assert.equal(container.HostConfig.Privileged, false);
   assert.equal(container.HostConfig.ReadonlyRootfs, true);
-  assert.deepEqual(container.HostConfig.Devices, []);
+  assert.deepEqual(container.HostConfig.Devices ?? [], []);
   assert.ok(container.HostConfig.CapDrop?.includes('ALL'));
   assert.ok(container.HostConfig.SecurityOpt?.includes('no-new-privileges:true'));
   assert.ok(
