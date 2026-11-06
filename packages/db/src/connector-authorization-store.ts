@@ -8,6 +8,7 @@ import {
   type ConnectorAuthorization,
   type ConnectorAuthorizationRequest,
   type ConnectorExecutionAttempt,
+  createRenderedRequestDigest,
 } from '@omnis/contracts/connector-authorization';
 import {
   ConnectorDecisionEnvelopeSchema,
@@ -579,6 +580,7 @@ export class PostgresConnectorAuthorizationStore {
   async beginSyntheticSubmission(
     attemptId: string,
     envelopeInput: unknown,
+    renderedRequest: string,
   ): Promise<ConnectorExecutionAttempt> {
     if (!isUuid(attemptId))
       throw new ConnectorAuthorizationStoreError('invalid_input', 'Attempt ID is invalid.', 400);
@@ -587,6 +589,20 @@ export class PostgresConnectorAuthorizationStore {
       throw new ConnectorAuthorizationStoreError(
         'invalid_input',
         'Broker decision envelope is invalid.',
+        400,
+      );
+    }
+    if (
+      typeof renderedRequest !== 'string' ||
+      renderedRequest.length < 1 ||
+      renderedRequest.length > 32_000 ||
+      renderedRequest.includes('\0') ||
+      renderedRequest.trim().length === 0 ||
+      createRenderedRequestDigest(renderedRequest) !== envelope.data.claims.promptDigest
+    ) {
+      throw new ConnectorAuthorizationStoreError(
+        'invalid_input',
+        'Rendered connector request does not match the signed digest.',
         400,
       );
     }
@@ -599,6 +615,7 @@ export class PostgresConnectorAuthorizationStore {
         !execution.decision_nonce ||
         digestConnectorDecisionEnvelope(envelope.data) !==
           digestConnectorDecisionEnvelope(execution.decision_envelope) ||
+        envelope.data.claims.promptDigest !== authorization.prompt_digest ||
         execution.status !== 'admitted' ||
         authorization.status !== 'authorized' ||
         authorization.revocation_generation !== 0 ||
@@ -649,10 +666,20 @@ export class PostgresConnectorAuthorizationStore {
       if (!pair) throw notFound();
       const { authorization, execution } = pair;
       const duplicate = await client.query(
-        `SELECT 1 FROM omnis.connector_authorization_audit WHERE authorization_id = $1 AND source_event_id = $2`,
+        `SELECT source_event_fingerprint FROM omnis.connector_authorization_audit
+          WHERE authorization_id = $1 AND source_event_id = $2`,
         [authorization.id, parsed.data.eventId],
       );
-      if (duplicate.rowCount) return mapAttempt(execution);
+      if (duplicate.rows[0]) {
+        const previous = duplicate.rows[0].source_event_fingerprint as Buffer | null;
+        if (
+          !previous ||
+          !sameFingerprint(previous, fingerprintSyntheticProviderEvent(parsed.data))
+        ) {
+          throw conflict('Synthetic provider event ID was reused with different contents.');
+        }
+        return mapAttempt(execution);
+      }
       if (!allowedSyntheticEventTransition(execution.status, parsed.data.status))
         throw invalidTransition('Provider event is duplicate, stale, or out of order.');
       const updated = await client.query<AttemptRow>(
@@ -679,6 +706,7 @@ export class PostgresConnectorAuthorizationStore {
         requestId: row.request_id,
         attemptId,
         sourceEventId: parsed.data.eventId,
+        sourceEventFingerprint: fingerprintSyntheticProviderEvent(parsed.data),
         eventType,
         actorId: 'service:omnis-authorizer',
         effectiveIdentity: 'service:omnis-authorizer',
@@ -728,6 +756,7 @@ async function appendAudit(
     requestId: string;
     attemptId?: string;
     sourceEventId?: string;
+    sourceEventFingerprint?: Buffer;
     eventType: string;
     actorId: 'owner' | 'service:omnis-authorizer';
     effectiveIdentity: 'human:owner' | 'service:omnis-authorizer';
@@ -742,8 +771,9 @@ async function appendAudit(
   await client.query(
     `INSERT INTO omnis.connector_authorization_audit (
        authorization_id, attempt_id, request_id, sequence, event_type, actor_id,
-       effective_identity, correlation_id, outcome, revocation_generation, source_event_id
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+       effective_identity, correlation_id, outcome, revocation_generation,
+       source_event_id, source_event_fingerprint
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
     [
       authorization.id,
       input.attemptId ?? null,
@@ -756,6 +786,7 @@ async function appendAudit(
       input.outcome,
       authorization.revocation_generation,
       input.sourceEventId ?? null,
+      input.sourceEventFingerprint ?? null,
     ],
   );
 }
@@ -918,6 +949,10 @@ function toEpoch(value: Date | string): number {
 
 function sameFingerprint(left: Buffer, right: Buffer): boolean {
   return left.length === right.length && timingSafeEqual(left, right);
+}
+
+function fingerprintSyntheticProviderEvent(event: SyntheticProviderEvent): Buffer {
+  return createHash('sha256').update(JSON.stringify(event), 'utf8').digest();
 }
 
 function requiredRow<T>(row: T | undefined): T {

@@ -183,8 +183,30 @@ const postgresSuite = describe(
       const submitting = await brokerStore.beginSyntheticSubmission(
         admission.attempt.id,
         admission.envelope,
+        fixture.renderedRequest,
       );
       assert.equal(submitting.status, 'submitting');
+      const credentialCanary = 'SYNTHETIC-CREDENTIAL-CANARY-DO-NOT-LOG';
+      await assert.rejects(
+        brokerStore.recordSyntheticProviderEvent(admission.attempt.id, {
+          eventId: 'credential-canary-event',
+          status: 'failed',
+          credentialCanary,
+        }),
+        (error: unknown) =>
+          error instanceof ConnectorAuthorizationStoreError &&
+          error.code === 'invalid_input' &&
+          !error.message.includes(credentialCanary),
+      );
+      const noCanary = await adminPool!.query<{ evidence: string }>(
+        `SELECT COALESCE(jsonb_agg(to_jsonb(attempts)), '[]'::jsonb)::text ||
+                COALESCE((SELECT jsonb_agg(to_jsonb(audit))::text FROM omnis.connector_authorization_audit audit
+                  WHERE audit.authorization_id = attempts.authorization_id), '[]') AS evidence
+           FROM omnis.connector_execution_attempts attempts WHERE attempts.id = $1
+           GROUP BY attempts.authorization_id`,
+        [admission.attempt.id],
+      );
+      assert.equal(noCanary.rows[0]?.evidence.includes(credentialCanary), false);
       const accepted = await brokerStore.recordSyntheticProviderEvent(admission.attempt.id, {
         eventId: 'fake-accepted-1',
         status: 'accepted',
@@ -197,6 +219,14 @@ const postgresSuite = describe(
         providerSubmissionId: 'fake-provider-submission-1',
       });
       assert.equal(duplicate.status, 'accepted');
+      await assert.rejects(
+        brokerStore.recordSyntheticProviderEvent(admission.attempt.id, {
+          eventId: 'fake-accepted-1',
+          status: 'accepted',
+          providerSubmissionId: 'different-provider-submission',
+        }),
+        /reused with different contents/,
+      );
       const completed = await brokerStore.recordSyntheticProviderEvent(admission.attempt.id, {
         eventId: 'fake-completed-1',
         status: 'completed',
@@ -212,7 +242,11 @@ const postgresSuite = describe(
       assert.equal(completed.status, 'completed');
       assert.equal(completed.responseText, 'Synthetic response fixture.');
       await assert.rejects(
-        brokerStore.beginSyntheticSubmission(admission.attempt.id, admission.envelope),
+        brokerStore.beginSyntheticSubmission(
+          admission.attempt.id,
+          admission.envelope,
+          fixture.renderedRequest,
+        ),
         /not eligible/,
       );
       await assert.rejects(
@@ -271,7 +305,11 @@ const postgresSuite = describe(
         signDecision: (claims) => signConnectorDecisionEnvelope(claims, signingKey),
       });
       const admission = await brokerStore.consumeForBroker(grant.id, fixture.request, randomUUID());
-      await brokerStore.beginSyntheticSubmission(admission.attempt.id, admission.envelope);
+      await brokerStore.beginSyntheticSubmission(
+        admission.attempt.id,
+        admission.envelope,
+        fixture.renderedRequest,
+      );
       const revoked = await fixture.authorizations.revoke(grant.id, 'owner');
       assert.equal(revoked.status, 'revoked');
       const request = await brokerStore.recordSyntheticProviderEvent(admission.attempt.id, {
@@ -281,7 +319,11 @@ const postgresSuite = describe(
       });
       assert.equal(request.status, 'interrupted');
       await assert.rejects(
-        brokerStore.beginSyntheticSubmission(admission.attempt.id, admission.envelope),
+        brokerStore.beginSyntheticSubmission(
+          admission.attempt.id,
+          admission.envelope,
+          fixture.renderedRequest,
+        ),
         /not eligible/,
       );
     });
@@ -304,7 +346,11 @@ const postgresSuite = describe(
         signDecision: (claims) => signConnectorDecisionEnvelope(claims, signingKey),
       });
       const admission = await brokerStore.consumeForBroker(grant.id, fixture.request, randomUUID());
-      await brokerStore.beginSyntheticSubmission(admission.attempt.id, admission.envelope);
+      await brokerStore.beginSyntheticSubmission(
+        admission.attempt.id,
+        admission.envelope,
+        fixture.renderedRequest,
+      );
       await adminPool!.query(`
         CREATE FUNCTION omnis.test_reject_submission_audit() RETURNS trigger
         LANGUAGE plpgsql SET search_path = pg_catalog, omnis AS $function$
@@ -571,6 +617,7 @@ const postgresSuite = describe(
     });
 
     async function connectorFixture(grantTtlSeconds = 600) {
+      const renderedRequest = 'Read the synthetic task and return a short answer.';
       const projectManagement = new PostgresProjectManagementStore(
         authorizerPool!,
         Buffer.alloc(32, 41),
@@ -629,9 +676,7 @@ const postgresSuite = describe(
         taskRevision: task.associationRevision,
         agentId: agent.agentId,
         profileVersion: published.versionNo,
-        promptDigest: createRenderedRequestDigest(
-          'Read the synthetic task and return a short answer.',
-        ),
+        promptDigest: createRenderedRequestDigest(renderedRequest),
         connectorId: 'synthetic.codex.fixture',
         connectorVersion: '0.0.0-synthetic.1',
         providerId: 'synthetic',
@@ -652,6 +697,7 @@ const postgresSuite = describe(
         task,
         agent,
         request,
+        renderedRequest,
         authorizations: new PostgresConnectorAuthorizationStore(authorizerPool!, {
           grantTtlSeconds,
         }),

@@ -25,7 +25,12 @@ ALTER TABLE omnis.connector_authorization_audit
     'connector.execution_interrupted', 'connector.execution_unknown',
     'connector.cancellation_requested', 'connector.cancellation_confirmed'
   )),
-  ADD COLUMN source_event_id text;
+  ADD COLUMN source_event_id text,
+  ADD COLUMN source_event_fingerprint bytea,
+  ADD CONSTRAINT connector_authorization_source_event_fingerprint_shape CHECK (
+    (source_event_id IS NULL) = (source_event_fingerprint IS NULL)
+    AND (source_event_fingerprint IS NULL OR octet_length(source_event_fingerprint) = 32)
+  );
 CREATE UNIQUE INDEX connector_authorization_audit_source_event_idx
   ON omnis.connector_authorization_audit(authorization_id, source_event_id)
   WHERE source_event_id IS NOT NULL;

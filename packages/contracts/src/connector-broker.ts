@@ -217,6 +217,11 @@ export function assertTrustAnchorRotationWindow(anchors: readonly VerificationKe
   for (const anchor of anchors) {
     if (ids.has(anchor.keyId)) throw new Error('Duplicate decision envelope key ID.');
     ids.add(anchor.keyId);
+    const notBefore = Date.parse(anchor.notBefore);
+    const notAfter = Date.parse(anchor.notAfter);
+    if (!Number.isFinite(notBefore) || !Number.isFinite(notAfter) || notAfter <= notBefore) {
+      throw new Error('Decision envelope trust anchor validity window is malformed.');
+    }
   }
   for (let left = 0; left < anchors.length; left += 1) {
     for (let right = left + 1; right < anchors.length; right += 1) {

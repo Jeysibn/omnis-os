@@ -214,5 +214,21 @@ describe('synthetic connector broker contracts', () => {
         ]),
       /overlap exceeds 60 seconds/,
     );
+    assert.throws(
+      () =>
+        verifyConnectorDecisionEnvelope(
+          envelope,
+          [
+            {
+              keyId: key.keyId,
+              publicKey: pair.publicKey,
+              notBefore: 'not-a-date',
+              notAfter: 'also-not-a-date',
+            },
+          ],
+          now,
+        ),
+      /validity window is malformed/,
+    );
   });
 });

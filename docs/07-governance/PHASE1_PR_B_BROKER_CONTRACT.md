@@ -34,13 +34,16 @@ admit a submission.
 - Authorizer `consumeForBroker(authorizationId, exactBoundRequest, requestId)` validates and
   consumes the existing owner grant. `requestId` is the stable execution idempotency key.
   It returns a persisted attempt plus the exact short-lived envelope.
-- Broker validates the envelope using explicit public trust anchors, then calls authorizer
-  `beginSyntheticSubmission(attemptId, envelope)`. The authorizer compares the envelope digest
-  to the persisted envelope and rechecks expiry, revocation, generation, nonce, and attempt
-  state while holding the grant lock. This commits `submitting` before the provider port call.
+- Broker receives the rendered request ephemerally, recomputes the existing canonical request
+  digest, and compares it to the signed claim before calling authorizer
+  `beginSyntheticSubmission(attemptId, envelope, renderedRequest)`. The authorizer independently
+  repeats the digest check, compares the envelope digest to the persisted envelope, and rechecks
+  expiry, revocation, generation, nonce, and attempt state while holding the grant lock. It does
+  not persist request text. This commits `submitting` before the provider port call.
 - Broker reports provider evidence through `recordSyntheticProviderEvent(attemptId, event)`.
   Strict event schemas bound event ID, state, optional provider submission identity, usage
-  provenance, and completed response. The authorizer deduplicates event IDs and commits the
+  provenance, and completed response. The authorizer fingerprints each event, accepts an
+  identical replay as a no-op, rejects event-ID reuse with different contents, and commits the
   attempt transition with its append-only audit event.
 - These are in-process synthetic milestone interfaces. The future platform integration must
   transport them over authenticated IPC; the envelope signature does not authenticate the IPC

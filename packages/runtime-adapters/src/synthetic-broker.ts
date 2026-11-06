@@ -5,6 +5,7 @@ import {
   type UsageProvenance,
   type VerificationKey,
 } from '@omnis/contracts/connector-broker';
+import { createRenderedRequestDigest } from '@omnis/contracts/connector-authorization';
 
 export type SyntheticSubmissionResult =
   | {
@@ -23,13 +24,17 @@ export type SyntheticSubmissionResult =
   | { kind: 'unavailable' };
 
 export interface SyntheticProvider {
-  submit(envelope: ConnectorDecisionEnvelope): Promise<SyntheticSubmissionResult>;
+  submit(
+    envelope: ConnectorDecisionEnvelope,
+    renderedRequest: string,
+  ): Promise<SyntheticSubmissionResult>;
 }
 
 export interface SyntheticBrokerAuthorizer {
   beginSyntheticSubmission(
     attemptId: string,
     envelope: unknown,
+    renderedRequest: string,
   ): Promise<{ status: ConnectorExecutionStatus }>;
   recordSyntheticProviderEvent(
     attemptId: string,
@@ -67,14 +72,32 @@ export class SyntheticBrokerHarness {
     this.trustAnchors = trustAnchors;
   }
 
-  async submit(envelopeInput: unknown, now = new Date()): Promise<SyntheticBrokerResult> {
+  async submit(
+    envelopeInput: unknown,
+    renderedRequest: string,
+    now = new Date(),
+  ): Promise<SyntheticBrokerResult> {
     const envelope = verifyConnectorDecisionEnvelope(envelopeInput, this.trustAnchors, now);
+    if (
+      typeof renderedRequest !== 'string' ||
+      renderedRequest.length < 1 ||
+      renderedRequest.length > 32_000 ||
+      renderedRequest.includes('\0') ||
+      renderedRequest.trim().length === 0 ||
+      createRenderedRequestDigest(renderedRequest) !== envelope.claims.promptDigest
+    ) {
+      throw new Error('Rendered connector request does not match the signed digest.');
+    }
     const attemptId = envelope.claims.attemptId;
     // Persist the submission boundary before crossing into the provider implementation.
-    const admitted = await this.authorizer.beginSyntheticSubmission(attemptId, envelope);
+    const admitted = await this.authorizer.beginSyntheticSubmission(
+      attemptId,
+      envelope,
+      renderedRequest,
+    );
     if (admitted.status !== 'submitting')
       throw new Error('Authorizer did not persist submitting state.');
-    const outcome = await this.provider.submit(envelope);
+    const outcome = await this.provider.submit(envelope, renderedRequest);
     switch (outcome.kind) {
       case 'unavailable':
         await this.authorizer.recordSyntheticProviderEvent(attemptId, {
@@ -158,16 +181,21 @@ export type FakeProviderScenario =
 /** Deterministic fake endpoint. No sockets, credentials, DNS, or provider URLs exist here. */
 export class DeterministicSyntheticProvider implements SyntheticProvider {
   readonly submissions: string[] = [];
+  readonly requests: string[] = [];
   private readonly scenario: FakeProviderScenario;
 
   constructor(scenario: FakeProviderScenario) {
     this.scenario = scenario;
   }
 
-  async submit(envelope: ConnectorDecisionEnvelope): Promise<SyntheticSubmissionResult> {
+  async submit(
+    envelope: ConnectorDecisionEnvelope,
+    renderedRequest: string,
+  ): Promise<SyntheticSubmissionResult> {
     if (this.submissions.includes(envelope.claims.attemptId))
       throw new Error('Synthetic provider received a duplicate attempt.');
     this.submissions.push(envelope.claims.attemptId);
+    this.requests.push(renderedRequest);
     if (this.scenario.kind === 'duplicate') return this.scenario.first;
     return this.scenario;
   }
