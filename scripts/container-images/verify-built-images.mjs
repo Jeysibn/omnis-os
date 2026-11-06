@@ -58,6 +58,75 @@ for (const expected of images) {
   }
 }
 
+// Start the final images: a module-loader crash is never a configuration pass.
+for (const [image, reason] of [
+  ['omnis-api:ci', 'OMNIS_SESSION_SECRET must be generated'],
+  ['omnis-worker:ci', 'OMNIS_INTERNAL_TOKEN must be generated'],
+]) {
+  const name = `omnis-startup-${process.pid}-${image.split(':')[0]}`;
+  try {
+    const identity = execFileSync(
+      'docker',
+      [
+        'run',
+        '--rm',
+        '--name',
+        `${name}-identity`,
+        '--network',
+        'none',
+        '--entrypoint',
+        'node',
+        image,
+        '-e',
+        'if(process.getuid()!==10001 || process.getgid()!==10001) process.exit(1)',
+      ],
+      { encoding: 'utf8', timeout: 15000 },
+    );
+    if (identity.trim()) throw new Error('Unexpected image identity output.');
+    const result = spawnSync(
+      'docker',
+      [
+        'run',
+        '--rm',
+        '--name',
+        name,
+        '--network',
+        'none',
+        '--read-only',
+        '--cap-drop',
+        'ALL',
+        '--security-opt',
+        'no-new-privileges:true',
+        '--pids-limit',
+        '64',
+        '--memory',
+        '128m',
+        '--cpus',
+        '0.5',
+        image,
+      ],
+      { encoding: 'utf8', timeout: 15000, maxBuffer: 256 * 1024 },
+    );
+    const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+    if (
+      result.error ||
+      result.status === 0 ||
+      !output.includes(reason) ||
+      /ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING|ERR_MODULE_NOT_FOUND|SyntaxError/.test(output)
+    ) {
+      throw new Error(`${image} did not reach its expected application configuration error.`);
+    }
+    process.stdout.write(
+      `${image}: runtime UID/GID and expected configuration failure verified.\n`,
+    );
+  } finally {
+    spawnSync('docker', ['rm', '-f', name, `${name}-identity`], {
+      stdio: 'ignore',
+      timeout: 10000,
+    });
+  }
+}
+
 const tempDirectory = mkdtempSync(join(tmpdir(), 'omnis-image-check-'));
 try {
   const canary = readFileSync('.env.container-image-canary', 'utf8');
