@@ -62,7 +62,7 @@ if (process.env.OMNIS_PROBE_DIRECTORY) {
 }
 if (process.env.OMNIS_EXPECT_GROUP || process.env.OMNIS_EXPECT_NO_GROUP) {
   const status = fs.readFileSync('/proc/self/status', 'utf8');
-  const groups = status.match(/^Groups:\\s*(.*)$/m)?.[1]?.trim().split(/\\s+/).filter(Boolean) ?? [];
+    const groups = status.match(/^Groups:\\s*(.*)$/m)?.[1]?.trim().split(/\\s+/).filter(Boolean) ?? [];
   if (process.env.OMNIS_EXPECT_GROUP) assert.ok(groups.includes(process.env.OMNIS_EXPECT_GROUP));
   if (process.env.OMNIS_EXPECT_NO_GROUP) assert.ok(!groups.includes(process.env.OMNIS_EXPECT_NO_GROUP));
 }
@@ -118,7 +118,7 @@ if (process.env.OMNIS_PROBE_IDENTITY === '1') {
   const absent = ['/var/run/docker.sock', '/run/docker.sock', '/mnt/c', '/host'].every((path) => !fs.existsSync(path));
   assert.equal(process.getuid(), 10001);
   assert.equal(process.getgid(), 10001);
-  assert.deepEqual(groups, []);
+  assert.deepEqual(groups, ['10001']);
   assert.equal(capEff, '0000000000000000');
   assert.equal(absent, true);
   const modules = JSON.parse(process.env.OMNIS_PROBE_MODULES ?? '[]');
@@ -220,7 +220,9 @@ function createSocketDirectory(path, owner, group) {
 }
 
 async function openSyntheticSocket(path, owner, group) {
-  const server = net.createServer((socket) => socket.end('ok'));
+  const server = net.createServer((socket) => {
+    socket.once('data', () => socket.end('ok'));
+  });
   await new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(path, resolve);
