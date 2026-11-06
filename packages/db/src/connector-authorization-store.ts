@@ -87,9 +87,18 @@ const selectAuthorization = `
 /** Uses only the dedicated authorizer pool. No runtime or launcher pool is accepted. */
 export class PostgresConnectorAuthorizationStore {
   private readonly authorizer: Pool;
+  private readonly grantTtlSeconds: number;
 
-  constructor(authorizer: Pool) {
+  constructor(authorizer: Pool, options: { grantTtlSeconds?: number } = {}) {
     this.authorizer = authorizer;
+    this.grantTtlSeconds = options.grantTtlSeconds ?? 600;
+    if (
+      !Number.isSafeInteger(this.grantTtlSeconds) ||
+      this.grantTtlSeconds < 1 ||
+      this.grantTtlSeconds > 600
+    ) {
+      throw new Error('Connector authorization grant TTL must be between 1 and 600 seconds.');
+    }
   }
 
   async request(input: unknown, requestId: string): Promise<ConnectorAuthorization> {
@@ -131,7 +140,8 @@ export class PostgresConnectorAuthorizationStore {
            $1, $2, $3, $4, 'owner', $5, $6, $7, $8, $9, $10,
            'synthetic.codex.fixture', '0.0.0-synthetic.1', 'synthetic',
            'synthetic-text-only-v1', 'connector.respond', '[]'::jsonb,
-           $11::jsonb, $12, 'r1p1-synthetic-connector-v1', now() + interval '10 minutes'
+           $11::jsonb, $12, 'r1p1-synthetic-connector-v1',
+           now() + ($13::integer * interval '1 second')
          ) RETURNING *`,
         [
           randomUUID(),
@@ -146,6 +156,7 @@ export class PostgresConnectorAuthorizationStore {
           request.profileVersion,
           JSON.stringify(request.limits),
           request.promptDigest,
+          this.grantTtlSeconds,
         ],
       );
       const row = requiredRow(result.rows[0]);

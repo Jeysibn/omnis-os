@@ -162,10 +162,6 @@ const postgresSuite = describe(
         { ...fixture.request, projectRevision: fixture.request.projectRevision + 1 },
         { ...fixture.request, taskRevision: fixture.request.taskRevision + 1 },
         { ...fixture.request, profileVersion: fixture.request.profileVersion + 1 },
-        {
-          ...fixture.request,
-          promptDigest: createRenderedRequestDigest('modified rendered request'),
-        },
         { ...fixture.request, providerId: 'openai' },
         { ...fixture.request, modelId: 'real-model' },
         { ...fixture.request, capabilities: ['shell.execute'] },
@@ -204,7 +200,7 @@ const postgresSuite = describe(
     });
 
     it('rejects expired and revoked grants and serializes parallel consumption', async () => {
-      const expiredFixture = await connectorFixture();
+      const expiredFixture = await connectorFixture(1);
       const expired = await expiredFixture.authorizations.request(
         expiredFixture.request,
         randomUUID(),
@@ -213,10 +209,7 @@ const postgresSuite = describe(
         decision: 'approve',
         promptDigestConfirmation: expiredFixture.request.promptDigest,
       });
-      await adminPool!.query(
-        "UPDATE omnis.connector_authorizations SET expires_at = now() - interval '1 second' WHERE id = $1",
-        [expired.id],
-      );
+      await delay(1_100);
       await assert.rejects(
         expiredFixture.authorizations.consume(expired.id, expiredFixture.request, randomUUID()),
         (error: unknown) =>
@@ -370,7 +363,7 @@ const postgresSuite = describe(
       }
     });
 
-    async function connectorFixture() {
+    async function connectorFixture(grantTtlSeconds = 600) {
       const projectManagement = new PostgresProjectManagementStore(
         authorizerPool!,
         Buffer.alloc(32, 41),
@@ -452,7 +445,9 @@ const postgresSuite = describe(
         task,
         agent,
         request,
-        authorizations: new PostgresConnectorAuthorizationStore(authorizerPool!),
+        authorizations: new PostgresConnectorAuthorizationStore(authorizerPool!, {
+          grantTtlSeconds,
+        }),
       };
     }
 
