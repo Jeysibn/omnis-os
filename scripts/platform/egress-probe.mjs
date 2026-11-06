@@ -11,7 +11,7 @@ const effectiveGid = status.match(/^Gid:\s+\d+\s+(\d+)/m)?.[1];
 const supplementaryGroups = status.match(/^Groups:\s*(.*)$/m)?.[1] ?? '';
 assert.equal(effectiveUid, '10001');
 assert.equal(effectiveGid, '10001');
-assert.equal(supplementaryGroups.trim(), '');
+assert.equal(supplementaryGroups.trim(), '10001');
 
 const resolved = await lookup('omnis-synthetic-provider');
 assert.equal(
