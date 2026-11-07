@@ -213,6 +213,7 @@ try {
     '0024_synthetic_task_run_projection',
     '0025_synthetic_run_event_semantics',
     '0026_task_execution_assignment',
+    '0027_agent_identity_management',
   ];
   if (afterUpgrade.migrations.includes('0021_mission_lane_events')) {
     expectedMigrations.splice(
@@ -705,7 +706,7 @@ async function verifyPost0005ProvenanceUpgrade() {
       "SELECT id, length(checksum) AS checksum_length FROM omnis.schema_migrations WHERE id LIKE '00%' ORDER BY id",
     );
     assert.deepEqual(migrationRows.rows.at(-1), {
-      id: '0026_task_execution_assignment',
+      id: '0027_agent_identity_management',
       checksum_length: 64,
     });
   } finally {

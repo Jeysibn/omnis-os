@@ -40,6 +40,15 @@ const receipt = {
   draftRevision: 0,
   occurredAt: at,
 };
+const identityReceipt = {
+  requestId: receipt.requestId,
+  operation: 'agent.identity_updated',
+  agentId: 'agt_atlas',
+  name: 'Atlas North',
+  slug: 'atlas-north',
+  identityRevision: 2,
+  updatedAt: at,
+};
 
 type Call = { path: string; method: string; body?: string; idempotencyKey?: string };
 
@@ -69,7 +78,13 @@ function testApp(owner: boolean, calls: Call[]) {
           ? {}
           : { idempotencyKey: headers.get('idempotency-key')! }),
       });
-      return parse((init?.method ?? 'GET') === 'GET' ? draftState : receipt);
+      return parse(
+        path.endsWith('/identity')
+          ? identityReceipt
+          : (init?.method ?? 'GET') === 'GET'
+            ? draftState
+            : receipt,
+      );
     },
   );
   return app;
@@ -187,6 +202,15 @@ describe('owner agent lifecycle routes', () => {
       });
       assert.equal(archived.statusCode, 200);
 
+      const identity = await app.inject({
+        method: 'PUT',
+        url: '/api/v1/agents/agt_atlas/identity',
+        headers,
+        payload: { expectedIdentityRevision: 1, name: 'Atlas North', slug: 'atlas-north' },
+      });
+      assert.equal(identity.statusCode, 200);
+      assert.deepEqual(identity.json(), identityReceipt);
+
       assert.deepEqual(
         calls.map(({ path, method }) => [path, method]),
         [
@@ -195,6 +219,7 @@ describe('owner agent lifecycle routes', () => {
           ['/internal/v1/agents/agt_atlas/draft-profile', 'PUT'],
           ['/internal/v1/agents/agt_atlas/publish', 'POST'],
           ['/internal/v1/agents/agt_atlas/archive', 'POST'],
+          ['/internal/v1/agents/agt_atlas/identity', 'PUT'],
         ],
       );
       assert.equal(calls[1]?.idempotencyKey, receipt.requestId);
@@ -202,6 +227,11 @@ describe('owner agent lifecycle routes', () => {
         expectedDraftRevision: 0,
         baseVersionNo: null,
         profile,
+      });
+      assert.deepEqual(JSON.parse(calls.at(-1)!.body!), {
+        expectedIdentityRevision: 1,
+        name: 'Atlas North',
+        slug: 'atlas-north',
       });
     } finally {
       await app.close();

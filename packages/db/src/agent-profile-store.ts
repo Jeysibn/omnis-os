@@ -14,6 +14,7 @@ type AgentRow = {
   id: string;
   name: string;
   slug: string;
+  identity_revision: number | string;
   department_id: string | null;
   department_slug: string | null;
   department_name: string | null;
@@ -149,7 +150,7 @@ export function validateAgentProfileWriteInput(value: unknown): AgentProfileWrit
 }
 
 const agentSelection = `
-  SELECT a.id, a.name, a.slug, a.department_id,
+  SELECT a.id, a.name, a.slug, a.identity_revision, a.department_id,
          d.slug AS department_slug, d.name AS department_name,
          a.lifecycle, a.archived_at, a.current_version_no, a.provenance,
          a.created_at, a.updated_at,
@@ -166,6 +167,7 @@ function timestamp(value: Date | null): string | null {
 function mapAgent(row: AgentRow): AgentSummary {
   const agent: AgentSummary = {
     id: row.id,
+    identityRevision: Number(row.identity_revision),
     name: row.name,
     slug: row.slug,
     department:

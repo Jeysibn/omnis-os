@@ -2,11 +2,13 @@ import type { FastifyInstance } from 'fastify';
 import {
   AgentIdSchema,
   AgentMutationReceiptSchema,
+  AgentIdentityUpdateReceiptSchema,
   AgentProfileDraftResponseSchema,
   AgentIdempotencyKeySchema,
   CreateAgentInputSchema,
   PublishAgentProfileInputSchema,
   SaveAgentProfileDraftInputSchema,
+  UpdateAgentIdentityInputSchema,
 } from '@omnis/contracts';
 import { requireMutationProtection, requireOwner } from './auth.ts';
 import { authorizerRequest } from './authorizer-client.ts';
@@ -95,6 +97,27 @@ export function registerAgentManagementRoutes(
         `/internal/v1/agents/${encodeURIComponent(agentId.data)}/archive`,
         { method: 'POST', headers: { 'idempotency-key': key } },
         (value) => AgentMutationReceiptSchema.parse(value),
+      );
+      return reply.send(receipt);
+    },
+  );
+
+  app.put<{ Params: { agentId: string } }>(
+    '/api/v1/agents/:agentId/identity',
+    { preHandler: mutationPreHandler },
+    async (httpRequest, reply) => {
+      const agentId = AgentIdSchema.safeParse(httpRequest.params.agentId);
+      const body = UpdateAgentIdentityInputSchema.safeParse(httpRequest.body);
+      const key = idempotencyKey(httpRequest.headers['idempotency-key']);
+      if (!agentId.success || !body.success || !key) return reply.code(422).send(invalid);
+      const receipt = await request(
+        `/internal/v1/agents/${encodeURIComponent(agentId.data)}/identity`,
+        {
+          method: 'PUT',
+          headers: { 'idempotency-key': key },
+          body: JSON.stringify(body.data),
+        },
+        (value) => AgentIdentityUpdateReceiptSchema.parse(value),
       );
       return reply.send(receipt);
     },

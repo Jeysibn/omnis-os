@@ -90,6 +90,7 @@ function agent(
   return {
     summary: AgentSummarySchema.parse({
       id,
+      identityRevision: 1,
       name,
       slug: id.replace(/^agent-/, ''),
       department: options.department === undefined ? engineering : options.department,
@@ -299,8 +300,12 @@ function createApi(page: Page) {
 
     const draftMatch = path.match(/^\/api\/v1\/agents\/([^/]+)\/draft-profile$/);
     const publishMatch = path.match(/^\/api\/v1\/agents\/([^/]+)\/publish$/);
-    if ((method === 'PUT' && draftMatch) || (method === 'POST' && publishMatch)) {
-      const agentId = decodeURIComponent((draftMatch ?? publishMatch)![1]!);
+    const identityMatch = path.match(/^\/api\/v1\/agents\/([^/]+)\/identity$/);
+    if (
+      (method === 'PUT' && (draftMatch || identityMatch)) ||
+      (method === 'POST' && publishMatch)
+    ) {
+      const agentId = decodeURIComponent((draftMatch ?? publishMatch ?? identityMatch)![1]!);
       const key = request.headers()['idempotency-key'];
       const body = request.postDataJSON() as Record<string, unknown>;
       mutationRequests.push({ method, path, body, key });
@@ -314,6 +319,22 @@ function createApi(page: Page) {
       }
       const fixture = fixtures.find((item) => item.summary.id === agentId);
       if (!fixture) return error(route, 404, 'not_found', 'Agent not found.');
+      if (identityMatch) {
+        fixture.summary.name = String(body.name);
+        fixture.summary.slug = String(body.slug);
+        fixture.summary.identityRevision += 1;
+        return route.fulfill({
+          json: {
+            requestId: key,
+            operation: 'agent.identity_updated',
+            agentId,
+            name: fixture.summary.name,
+            slug: fixture.summary.slug,
+            identityRevision: fixture.summary.identityRevision,
+            updatedAt: later,
+          },
+        });
+      }
       const previous = drafts.get(agentId) ?? {
         revision: 0,
         baseVersionNo: null,
@@ -969,6 +990,26 @@ test.describe('Agent Directory', () => {
 });
 
 test.describe('Agent Profile', () => {
+  test('edits an agent name and slug through the owner protected API', async ({ page, api }) => {
+    api.configure();
+    await openAgents(page, '#agents/agent-atlas');
+    await page.getByLabel('Name', { exact: true }).last().fill('Atlas North');
+    await page.getByLabel('Slug', { exact: true }).fill('atlas-north');
+    await page.getByRole('button', { name: 'Save identity' }).click();
+    await expect(page.getByText('Atlas North').first()).toBeVisible();
+    await expect(page.getByText('atlas-north').first()).toBeVisible();
+    expect(api.mutationRequests[0]).toMatchObject({
+      method: 'PUT',
+      path: '/api/v1/agents/agent-atlas/identity',
+      key: expect.stringMatching(/^[0-9a-f-]{36}$/i),
+      body: {
+        expectedIdentityRevision: 1,
+        name: 'Atlas North',
+        slug: 'atlas-north',
+      },
+    });
+  });
+
   test('archiving requires confirmation and reloads the authoritative archived profile', async ({
     page,
     api,
@@ -991,6 +1032,7 @@ test.describe('Agent Profile', () => {
       .click();
     await expect(page.getByText(/This agent is archived/)).toBeVisible();
     await expect(page.getByRole('button', { name: 'Archive agent' })).toHaveCount(0);
+    await expect(page.getByRole('heading', { level: 4, name: 'Agent identity' })).toHaveCount(0);
     expect(api.archiveRequests).toHaveLength(1);
     expect(api.archiveRequests[0]).toMatchObject({
       path: '/api/v1/agents/agent-atlas/archive',

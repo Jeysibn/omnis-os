@@ -9,6 +9,8 @@ import {
   AgentVersionQuerySchema,
   AgentProfileDraftResponseSchema,
   AgentMutationReceiptSchema,
+  AgentIdentityUpdateReceiptSchema,
+  UpdateAgentIdentityInputSchema,
   CreateAgentInputSchema,
   SaveAgentProfileDraftInputSchema,
   PublishAgentProfileInputSchema,
@@ -593,6 +595,7 @@ describe('agent profile read contracts', () => {
   const at = '2026-11-02T00:00:00.000Z';
   const agent = {
     id: 'agt_atlas',
+    identityRevision: 1,
     name: 'Atlas',
     slug: 'atlas',
     department: { id: 'dep_engineering', slug: 'engineering', name: 'Engineering' },
@@ -603,6 +606,35 @@ describe('agent profile read contracts', () => {
     createdAt: at,
     updatedAt: at,
   };
+
+  it('validates optimistic identity updates and strict, versioned receipts', () => {
+    const input = { expectedIdentityRevision: 1, name: ' Atlas ', slug: 'atlas-next' };
+    assert.deepEqual(UpdateAgentIdentityInputSchema.parse(input), {
+      expectedIdentityRevision: 1,
+      name: 'Atlas',
+      slug: 'atlas-next',
+    });
+    assert.equal(
+      UpdateAgentIdentityInputSchema.safeParse({ ...input, isOwner: true }).success,
+      false,
+    );
+    assert.equal(
+      UpdateAgentIdentityInputSchema.safeParse({ ...input, slug: 'Atlas' }).success,
+      false,
+    );
+    assert.equal(
+      AgentIdentityUpdateReceiptSchema.safeParse({
+        requestId: '123e4567-e89b-12d3-a456-426614174000',
+        operation: 'agent.identity_updated',
+        agentId: 'agt_atlas',
+        name: 'Atlas',
+        slug: 'atlas-next',
+        identityRevision: 2,
+        updatedAt: at,
+      }).success,
+      true,
+    );
+  });
   const createdBy = { id: 'owner', displayName: 'Director' };
   const version = {
     versionId: 'apv_atlas_2',

@@ -10,6 +10,7 @@ const safeSnapshot = {
     '0016_project_lifecycle',
     '0017_task_project_admission',
     '0026_task_execution_assignment',
+    '0027_agent_identity_management',
   ],
   agentManagementCounts: {
     departments: 0,

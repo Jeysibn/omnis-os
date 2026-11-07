@@ -128,6 +128,7 @@ export function assertValidMetrics(report) {
     !report.migrations.includes('0016_project_lifecycle') ||
     !report.migrations.includes('0017_task_project_admission') ||
     !report.migrations.includes('0026_task_execution_assignment') ||
+    !report.migrations.includes('0027_agent_identity_management') ||
     !validAgentManagementCounts(report.agentManagementCounts) ||
     !validProjectManagementCounts(report.projectManagementCounts) ||
     !validTaskProjectManagementCounts(report.taskProjectManagementCounts) ||

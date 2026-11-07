@@ -219,6 +219,7 @@ function createMockApi(page: Page) {
   const assignmentWrites: Array<{ taskId: string; key: string; body: unknown }> = [];
   const fixtureAgent = {
     id: 'agent-analyst',
+    identityRevision: 1,
     name: 'Research Analyst',
     slug: 'research-analyst',
     department: null,
