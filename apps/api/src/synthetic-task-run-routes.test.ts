@@ -65,6 +65,7 @@ function createApp(input: {
   consumed?: boolean;
   throwWorker?: boolean;
   executionOverride?: unknown;
+  eventsOverride?: unknown;
 }) {
   const app = Fastify();
   const calls: string[] = [];
@@ -103,6 +104,24 @@ function createApp(input: {
             responseText: 'Synthetic response',
           },
           usage: { kind: 'unknown', reason: 'not_reported', billingExposure: 'unknown' },
+        }) as TResult;
+      }
+      if (path.includes('/events?')) {
+        return (input.eventsOverride ?? {
+          version: 'omnis.synthetic-task-run-events.v1',
+          authorizationId,
+          taskId,
+          events: [
+            {
+              attemptId: '44444444-4444-4444-8444-444444444444',
+              sequence: 3,
+              eventType: 'connector.execution_completed',
+              outcome: 'recorded',
+              revocationGeneration: 0,
+              occurredAt: '2026-11-07T00:00:03.000Z',
+            },
+          ],
+          page: { nextAfter: null },
         }) as TResult;
       }
       return (
@@ -270,6 +289,83 @@ describe('owner synthetic task run routes', () => {
     await app.close();
   });
 
+  it('recovers omitted unknown-outcome correlation only from the matching durable attempt', async () => {
+    const { app } = createApp({
+      onWorker: () => ({
+        version: 'omnis.synthetic-task-run.v1',
+        taskId,
+        authorizationId,
+        requestId,
+        attemptId: '44444444-4444-4444-8444-444444444444',
+        status: 'unknown',
+        submitted: true,
+        usage: { kind: 'unknown', reason: 'submission_uncertain', billingExposure: 'unknown' },
+      }),
+      executionOverride: {
+        version: 'omnis.synthetic-task-run.v1',
+        taskId,
+        attempt: {
+          id: '44444444-4444-4444-8444-444444444444',
+          authorizationId,
+          requestId,
+          status: 'unknown',
+          synthetic: true,
+          createdAt: '2026-11-07T00:00:00.000Z',
+          submissionStartedAt: '2026-11-07T00:00:01.000Z',
+        },
+        usage: { kind: 'unknown', reason: 'submission_uncertain', billingExposure: 'unknown' },
+      },
+    });
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/v1/tasks/${taskId}/synthetic-runs`,
+      headers: { 'idempotency-key': requestId },
+      payload: { authorizationId, request: binding, renderedRequest },
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json().status, 'unknown');
+    assert.equal(response.json().correlationId, grant.correlationId);
+    await app.close();
+  });
+
+  it('rejects worker response identity mismatches before recovering correlation', async () => {
+    const { app } = createApp({
+      onWorker: () => ({
+        version: 'omnis.synthetic-task-run.v1',
+        taskId: 'task-other',
+        authorizationId: '99999999-9999-4999-8999-999999999999',
+        requestId: '88888888-8888-4888-8888-888888888888',
+        attemptId: '44444444-4444-4444-8444-444444444444',
+        status: 'unknown',
+        submitted: true,
+        usage: { kind: 'unknown', reason: 'submission_uncertain', billingExposure: 'unknown' },
+      }),
+      executionOverride: {
+        version: 'omnis.synthetic-task-run.v1',
+        taskId,
+        attempt: {
+          id: '44444444-4444-4444-8444-444444444444',
+          authorizationId,
+          requestId,
+          status: 'unknown',
+          synthetic: true,
+          createdAt: '2026-11-07T00:00:00.000Z',
+          submissionStartedAt: '2026-11-07T00:00:01.000Z',
+        },
+        usage: { kind: 'unknown', reason: 'submission_uncertain', billingExposure: 'unknown' },
+      },
+    });
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/v1/tasks/${taskId}/synthetic-runs`,
+      headers: { 'idempotency-key': requestId },
+      payload: { authorizationId, request: binding, renderedRequest },
+    });
+    assert.equal(response.statusCode, 503);
+    assert.equal(response.json().error.code, 'synthetic_broker_identity_unknown');
+    await app.close();
+  });
+
   it('does not return a broker result that disagrees with the durable authorizer attempt', async () => {
     const { app } = createApp({
       onWorker: () => ({
@@ -377,6 +473,44 @@ describe('owner synthetic task run routes', () => {
       `authorizer:/internal/v1/connector-authorizations/${authorizationId}`,
       `authorizer:/internal/v1/connector-authorizations/${authorizationId}/execution`,
     ]);
+    await app.close();
+  });
+
+  it('reads paginated task-run events only after verifying the owner task binding', async () => {
+    const { app, calls } = createApp({});
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/v1/tasks/${taskId}/synthetic-runs/${authorizationId}/events?after=2&limit=10`,
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json().events[0].attemptId, '44444444-4444-4444-8444-444444444444');
+    assert.equal(response.json().events[0].eventType, 'connector.execution_completed');
+    assert.deepEqual(calls, [
+      `authorizer:/internal/v1/connector-authorizations/${authorizationId}`,
+      `authorizer:/internal/v1/connector-authorizations/${authorizationId}/events?after=2&limit=10`,
+    ]);
+    await app.close();
+  });
+
+  it('does not expose event history for a grant bound to another task', async () => {
+    const { app, calls } = createApp({});
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/v1/tasks/task-other/synthetic-runs/${authorizationId}/events`,
+    });
+    assert.equal(response.statusCode, 404);
+    assert.equal(calls.length, 1);
+    await app.close();
+  });
+
+  it('rejects malformed event cursors and page sizes', async () => {
+    const { app, calls } = createApp({});
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/v1/tasks/${taskId}/synthetic-runs/${authorizationId}/events?after=-1&limit=1000`,
+    });
+    assert.equal(response.statusCode, 400);
+    assert.equal(calls.length, 0);
     await app.close();
   });
 

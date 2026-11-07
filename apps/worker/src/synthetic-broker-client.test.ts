@@ -95,6 +95,43 @@ describe('synthetic broker worker client', () => {
     }
   });
 
+  it('accepts an uncertain broker outcome without correlation and preserves its attempt identity', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'omnis-broker-worker-'));
+    const socketPath = path.join(directory, 'broker.sock');
+    const server = createServer((request, response) => {
+      request.resume();
+      request.on('end', () => {
+        response.writeHead(202, { 'content-type': 'application/json' });
+        response.end(
+          JSON.stringify({
+            attemptId: '44444444-4444-4444-8444-444444444444',
+            status: 'unknown',
+            submitted: true,
+          }),
+        );
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+    const client = new SyntheticBrokerClient(socketPath, 'a'.repeat(64));
+
+    try {
+      const result = await client.execute(taskId, request);
+      assert.equal(result.status, 'unknown');
+      assert.equal(result.attemptId, '44444444-4444-4444-8444-444444444444');
+      assert.equal(result.correlationId, undefined);
+      assert.deepEqual(result.usage, {
+        kind: 'unknown',
+        reason: 'submission_uncertain',
+        billingExposure: 'unknown',
+      });
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('rejects task mutation before opening the broker socket', async () => {
     const client = new SyntheticBrokerClient('/tmp/unused-broker.sock', 'a'.repeat(64));
     await assert.rejects(client.execute('task-0002', request), /task binding failed/);

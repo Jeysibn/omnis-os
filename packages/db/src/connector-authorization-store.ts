@@ -11,6 +11,10 @@ import {
   createRenderedRequestDigest,
 } from '@omnis/contracts/connector-authorization';
 import {
+  SyntheticTaskRunEventSchema,
+  type SyntheticTaskRunEvent,
+} from '@omnis/contracts/synthetic-task-run';
+import {
   ConnectorDecisionEnvelopeSchema,
   canonicalizeConnectorDecisionClaims,
   digestConnectorDecisionEnvelope,
@@ -103,6 +107,10 @@ type AttemptRow = QueryResultRow & {
 export type BrokerAdmission = {
   attempt: ConnectorExecutionAttempt;
   envelope: ConnectorDecisionEnvelope;
+};
+export type SyntheticTaskRunEventPage = {
+  events: SyntheticTaskRunEvent[];
+  nextAfter: number | null;
 };
 export type ConnectorDecisionSigner = (claims: unknown) => ConnectorDecisionEnvelope;
 const selectAuthorization = `
@@ -248,6 +256,72 @@ export class PostgresConnectorAuthorizationStore {
           usage: UsageProvenanceSchema.parse(row.usage_provenance),
         }
       : undefined;
+  }
+
+  /** Reads the existing append-only audit stream for this grant's persisted attempt. */
+  async listSyntheticTaskRunEvents(
+    authorizationId: string,
+    afterSequence: number,
+    limit: number,
+  ): Promise<SyntheticTaskRunEventPage> {
+    if (!isUuid(authorizationId)) {
+      throw new ConnectorAuthorizationStoreError(
+        'invalid_input',
+        'Connector authorization ID is invalid.',
+        400,
+      );
+    }
+    if (
+      !Number.isSafeInteger(afterSequence) ||
+      afterSequence < 0 ||
+      !Number.isSafeInteger(limit) ||
+      limit < 1 ||
+      limit > 100
+    ) {
+      throw new ConnectorAuthorizationStoreError(
+        'invalid_input',
+        'Synthetic task-run event page is invalid.',
+        400,
+      );
+    }
+    const result = await this.authorizer.query<
+      QueryResultRow & {
+        attempt_id: string;
+        sequence: number;
+        event_type: string;
+        outcome: string;
+        revocation_generation: number;
+        occurred_at: Date | string;
+      }
+    >(
+      `SELECT audit.attempt_id, audit.sequence, audit.event_type, audit.outcome,
+              audit.revocation_generation, audit.occurred_at
+         FROM omnis.connector_authorization_audit AS audit
+         JOIN omnis.connector_execution_attempts AS attempt
+           ON attempt.id = audit.attempt_id
+          AND attempt.authorization_id = audit.authorization_id
+        WHERE audit.authorization_id = $1 AND audit.attempt_id IS NOT NULL
+          AND audit.sequence > $2
+        ORDER BY audit.sequence ASC
+        LIMIT $3`,
+      [authorizationId, afterSequence, limit + 1],
+    );
+    const hasMore = result.rows.length > limit;
+    const rows = result.rows.slice(0, limit);
+    const events = rows.map((row) =>
+      SyntheticTaskRunEventSchema.parse({
+        attemptId: row.attempt_id,
+        sequence: row.sequence,
+        eventType: row.event_type,
+        outcome: row.outcome,
+        revocationGeneration: row.revocation_generation,
+        occurredAt: toIso(row.occurred_at),
+      }),
+    );
+    return {
+      events,
+      nextAfter: hasMore ? (rows.at(-1)?.sequence ?? null) : null,
+    };
   }
 
   async decide(id: string, actor: 'owner', input: unknown): Promise<ConnectorAuthorization> {

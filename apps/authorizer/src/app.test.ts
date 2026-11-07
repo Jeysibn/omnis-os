@@ -339,6 +339,23 @@ describe('independent authorizer service boundary', () => {
           usage: { kind: 'unknown', reason: 'not_reported', billingExposure: 'unknown' },
         };
       },
+      async listSyntheticTaskRunEvents(_authorizationId, after, limit) {
+        assert.equal(after, 2);
+        assert.equal(limit, 10);
+        return {
+          events: [
+            {
+              attemptId: '44444444-4444-4444-8444-444444444444',
+              sequence: 3,
+              eventType: 'connector.execution_completed',
+              outcome: 'recorded',
+              revocationGeneration: 0,
+              occurredAt: '2026-11-07T00:00:03.000Z',
+            },
+          ],
+          nextAfter: null,
+        };
+      },
       async decide() {
         throw new Error('not used');
       },
@@ -364,6 +381,26 @@ describe('independent authorizer service boundary', () => {
       assert.equal(response.json().taskId, 'task-0001');
       assert.equal(response.json().attempt.status, 'completed');
       assert.equal(response.json().usage.kind, 'unknown');
+      const eventsUrl = `/internal/v1/connector-authorizations/${authorizationId}/events?after=2&limit=10`;
+      assert.equal((await app.inject({ method: 'GET', url: eventsUrl })).statusCode, 401);
+      const events = await app.inject({
+        method: 'GET',
+        url: eventsUrl,
+        headers: { 'x-omnis-authorizer-token': serviceToken },
+      });
+      assert.equal(events.statusCode, 200);
+      assert.equal(events.json().taskId, 'task-0001');
+      assert.equal(events.json().events[0].attemptId, '44444444-4444-4444-8444-444444444444');
+      assert.equal(
+        (
+          await app.inject({
+            method: 'GET',
+            url: `/internal/v1/connector-authorizations/${authorizationId}/events?limit=101`,
+            headers: { 'x-omnis-authorizer-token': serviceToken },
+          })
+        ).statusCode,
+        400,
+      );
     } finally {
       await app.close();
     }

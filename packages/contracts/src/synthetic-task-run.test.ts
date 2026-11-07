@@ -3,6 +3,8 @@ import { describe, it } from 'node:test';
 import {
   SyntheticTaskRunRequestSchema,
   SyntheticTaskRunResponseSchema,
+  SyntheticTaskRunEventsResponseSchema,
+  SyntheticTaskRunEventsQuerySchema,
   syntheticTaskRunTestMode,
 } from './synthetic-task-run.ts';
 
@@ -64,6 +66,72 @@ describe('synthetic task-to-broker contract', () => {
         status: 'completed',
         submitted: true,
         usage: { kind: 'unknown', reason: 'not_reported', billingExposure: 'unknown' },
+      }).success,
+      false,
+    );
+  });
+
+  it('allows a missing correlation only on unknown broker outcomes', () => {
+    const unknown = {
+      version: 'omnis.synthetic-task-run.v1',
+      taskId: 'task-0001',
+      authorizationId: request.authorizationId,
+      requestId: request.requestId,
+      attemptId: '33333333-3333-4333-8333-333333333333',
+      status: 'unknown',
+      submitted: true,
+      usage: { kind: 'unknown', reason: 'submission_uncertain', billingExposure: 'unknown' },
+    };
+    assert.equal(SyntheticTaskRunResponseSchema.safeParse(unknown).success, true);
+    assert.equal(
+      SyntheticTaskRunResponseSchema.safeParse({ ...unknown, status: 'failed' }).success,
+      false,
+    );
+    assert.equal(
+      SyntheticTaskRunResponseSchema.safeParse({ ...unknown, submitted: false }).success,
+      false,
+    );
+  });
+
+  it('validates bounded, ordered synthetic task-run event history', () => {
+    const event = {
+      attemptId: '33333333-3333-4333-8333-333333333333',
+      sequence: 4,
+      eventType: 'connector.execution_completed',
+      outcome: 'recorded',
+      revocationGeneration: 0,
+      occurredAt: '2026-11-07T00:00:00.000Z',
+    };
+    assert.equal(
+      SyntheticTaskRunEventsResponseSchema.safeParse({
+        version: 'omnis.synthetic-task-run-events.v1',
+        authorizationId: request.authorizationId,
+        taskId: request.request.taskId,
+        events: [event],
+        page: { nextAfter: null },
+      }).success,
+      true,
+    );
+    assert.equal(
+      SyntheticTaskRunEventsResponseSchema.safeParse({
+        version: 'omnis.synthetic-task-run-events.v1',
+        authorizationId: request.authorizationId,
+        taskId: request.request.taskId,
+        events: [{ ...event, prompt: 'must not be exposed' }],
+        page: { nextAfter: null },
+      }).success,
+      false,
+    );
+    assert.equal(SyntheticTaskRunEventsQuerySchema.safeParse({ after: '-1' }).success, false);
+    assert.equal(SyntheticTaskRunEventsQuerySchema.safeParse({ after: ['1'] }).success, false);
+    assert.equal(SyntheticTaskRunEventsQuerySchema.safeParse({ limit: '101' }).success, false);
+    assert.equal(
+      SyntheticTaskRunEventsResponseSchema.safeParse({
+        version: 'omnis.synthetic-task-run-events.v1',
+        authorizationId: request.authorizationId,
+        taskId: request.request.taskId,
+        events: [event],
+        page: { nextAfter: 5 },
       }).success,
       false,
     );
