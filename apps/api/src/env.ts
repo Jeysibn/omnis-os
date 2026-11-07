@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { lstatSync, realpathSync } from 'node:fs';
+import { validateApiNetwork } from './deployment-config.ts';
 
 const sessionSecret = process.env.OMNIS_SESSION_SECRET;
 const ownerPasswordHash = process.env.OMNIS_OWNER_PASSWORD_HASH;
@@ -24,14 +25,13 @@ if (!authorizerToken || authorizerToken.length < 64 || authorizerToken === inter
 const apiPort = Number(process.env.OMNIS_API_PORT ?? 4100);
 const workerPort = Number(process.env.OMNIS_WORKER_PORT ?? 4101);
 const workerHost = process.env.OMNIS_WORKER_HOST ?? '127.0.0.1';
+const privateCompose = process.env.OMNIS_COMPOSE_PRIVATE === 'true';
 const authorizerSocket = validateAuthorizerSocket(process.env.OMNIS_AUTHORIZER_SOCKET);
 if (!Number.isInteger(apiPort) || apiPort < 1 || apiPort > 65535)
   throw new Error('OMNIS_API_PORT is invalid.');
 if (!Number.isInteger(workerPort) || workerPort < 1 || workerPort > 65535)
   throw new Error('OMNIS_WORKER_PORT is invalid.');
-if (!['127.0.0.1', '::1', 'localhost'].includes(workerHost)) {
-  throw new Error('The initial Omnis OS worker must bind to loopback.');
-}
+validateApiNetwork(process.env.OMNIS_API_HOST ?? '127.0.0.1', workerHost, privateCompose);
 export const env = {
   host: process.env.OMNIS_API_HOST ?? '127.0.0.1',
   port: apiPort,
@@ -77,8 +77,4 @@ export function validateAuthorizerSocket(value: string | undefined): string {
     );
   }
   return value;
-}
-
-if (env.host !== '127.0.0.1' && env.host !== '::1' && env.host !== 'localhost') {
-  throw new Error('The initial Omnis OS API must bind to loopback.');
 }

@@ -14,12 +14,18 @@ const images = [
     user: '10001:10001',
     command: ['node', '--experimental-strip-types', 'src/server.ts'],
   },
+  {
+    name: 'omnis-web:ci',
+    user: '10001:10001',
+    command: ['node', 'server.js'],
+  },
   { name: 'omnis-web-assets:ci', user: '65532:65532', command: null },
 ];
 
 for (const dockerfile of [
   'infra/docker/api.Dockerfile',
   'infra/docker/worker.Dockerfile',
+  'infra/docker/web.Dockerfile',
   'infra/docker/web-assets.Dockerfile',
 ]) {
   const source = readFileSync(dockerfile, 'utf8');
@@ -127,9 +133,148 @@ for (const [image, reason] of [
   }
 }
 
+const invalidWebConfig = spawnSync(
+  'docker',
+  [
+    'run',
+    '--rm',
+    '--network',
+    'none',
+    '--read-only',
+    '--cap-drop',
+    'ALL',
+    '--security-opt',
+    'no-new-privileges:true',
+    '--env',
+    'OMNIS_API_URL=https://provider.example.invalid',
+    'omnis-web:ci',
+  ],
+  { encoding: 'utf8', timeout: 15000, maxBuffer: 256 * 1024 },
+);
+if (
+  invalidWebConfig.error ||
+  invalidWebConfig.status === 0 ||
+  !`${invalidWebConfig.stdout ?? ''}${invalidWebConfig.stderr ?? ''}`.includes(
+    'private Compose API service endpoint',
+  )
+) {
+  throw new Error('The web image did not reject an unapproved API endpoint.');
+}
+
+const proxyNetwork = `omnis-web-proxy-${process.pid}`;
+const fakeApi = `omnis-web-fake-api-${process.pid}`;
+const webContainer = `omnis-web-app-${process.pid}`;
+try {
+  execFileSync('docker', ['network', 'create', '--internal', proxyNetwork], {
+    encoding: 'utf8',
+  });
+  const fakeApiSource =
+    "require('node:http').createServer((req,res)=>{if(req.url==='/api/v1/events'){res.writeHead(200,{'content-type':'text/event-stream'});res.write('event: fixture\\ndata: connected\\n\\n');setTimeout(()=>res.end(),30);return}res.writeHead(200,{'content-type':'application/json; charset=utf-8','set-cookie':'fixture=session; HttpOnly'});res.end(JSON.stringify({path:req.url,origin:req.headers.origin,cookie:req.headers.cookie}))}).listen(4100,'0.0.0.0')";
+  execFileSync(
+    'docker',
+    [
+      'run',
+      '--detach',
+      '--rm',
+      '--name',
+      fakeApi,
+      '--network',
+      proxyNetwork,
+      '--network-alias',
+      'api',
+      '--read-only',
+      '--cap-drop',
+      'ALL',
+      '--security-opt',
+      'no-new-privileges:true',
+      '--memory',
+      '128m',
+      '--entrypoint',
+      'node',
+      'node:24.22.1-bookworm-slim@sha256:be8204d4bd327363357f532187b752ff62759c31bedf98e9e18fc08c9cbd605c',
+      '-e',
+      fakeApiSource,
+    ],
+    { encoding: 'utf8' },
+  );
+  execFileSync(
+    'docker',
+    [
+      'run',
+      '--detach',
+      '--rm',
+      '--name',
+      webContainer,
+      '--network',
+      proxyNetwork,
+      '--read-only',
+      '--cap-drop',
+      'ALL',
+      '--security-opt',
+      'no-new-privileges:true',
+      '--pids-limit',
+      '64',
+      '--memory',
+      '256m',
+      '--cpus',
+      '0.5',
+      'omnis-web:ci',
+    ],
+    { encoding: 'utf8' },
+  );
+  const webCheck = String.raw`
+    import assert from 'node:assert/strict';
+    import http from 'node:http';
+    const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+    let health;
+    for(let n=0;n<30;n++){try{health=await fetch('http://127.0.0.1:8080/health');if(health.ok)break}catch{}await wait(100)}
+    assert.ok(health?.ok,'web health endpoint did not start');
+    assert.deepEqual(await health.json(),{status:'ok',product:'Omnis OS'});
+    const page=await fetch('http://127.0.0.1:8080/');
+    assert.equal(page.status,200);
+    assert.match(await page.text(),/Omnis OS/);
+    const traversal=await new Promise((resolve,reject)=>http.get({host:'127.0.0.1',port:8080,path:'/%2e%2e%2fetc/passwd'},resolve).on('error',reject));
+    assert.equal(traversal.statusCode,404);
+    traversal.resume();
+    const rejectedMethod=await fetch('http://127.0.0.1:8080/',{method:'POST'});
+    assert.equal(rejectedMethod.status,405);
+    const proxied=await fetch('http://127.0.0.1:8080/api/v1/health',{headers:{origin:'https://omnis.example.invalid',cookie:'owner=session-fixture'}});
+    assert.equal(proxied.status,200);
+    assert.equal(proxied.headers.get('set-cookie'),'fixture=session; HttpOnly');
+    assert.deepEqual(await proxied.json(),{path:'/api/v1/health',origin:'https://omnis.example.invalid',cookie:'owner=session-fixture'});
+    const stream=await fetch('http://127.0.0.1:8080/api/v1/events');
+    assert.equal(stream.status,200);
+    assert.match(await stream.text(),/event: fixture\ndata: connected/);
+  `;
+  let lastError;
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    try {
+      execFileSync('docker', ['exec', webContainer, 'node', '-e', webCheck], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 5000,
+      });
+      lastError = undefined;
+      break;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+  if (lastError)
+    throw new Error('The web image failed its static, proxy, or SSE smoke test.', {
+      cause: lastError,
+    });
+  process.stdout.write('Web image static delivery, API proxy, cookies, and SSE verified.\n');
+} finally {
+  spawnSync('docker', ['rm', '-f', fakeApi, webContainer], { stdio: 'ignore', timeout: 10000 });
+  spawnSync('docker', ['network', 'rm', proxyNetwork], { stdio: 'ignore', timeout: 10000 });
+}
+
 const tempDirectory = mkdtempSync(join(tmpdir(), 'omnis-image-check-'));
 try {
-  const canary = readFileSync('.env.container-image-canary', 'utf8');
+  const canary =
+    process.env.OMNIS_IMAGE_CANARY ?? readFileSync('.env.container-image-canary', 'utf8');
   for (const expected of images) {
     const archivePath = join(tempDirectory, `${expected.name.replaceAll(':', '-')}.tar`);
     execFileSync('docker', ['image', 'save', '--output', archivePath, expected.name]);

@@ -249,7 +249,9 @@ jobs:
           printf '%s' 'omnis-image-canary-9f6d3e2c1a' > .env.container-image-canary
           docker build --file infra/docker/api.Dockerfile --tag omnis-api:ci .
           docker build --file infra/docker/worker.Dockerfile --tag omnis-worker:ci .
+          docker build --file infra/docker/web.Dockerfile --tag omnis-web:ci .
           docker build --file infra/docker/web-assets.Dockerfile --tag omnis-web-assets:ci .
+          node scripts/compose/verify-app-config.mjs
           node scripts/container-images/verify-built-images.mjs
       - name: Verify disposable Docker privilege, socket, lifecycle, and network boundaries
         env:

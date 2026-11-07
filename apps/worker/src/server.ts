@@ -29,12 +29,12 @@ import { streamPersistedRunEvents } from './reliable-event-stream.ts';
 import { SyntheticBrokerClient } from './synthetic-broker-client.ts';
 import { SyntheticBrokerRunCoordinator } from './synthetic-broker-run-coordinator.ts';
 import { registerSyntheticTaskRunRoute } from './synthetic-task-run-routes.ts';
+import { createRuntimeDatabaseUrl, validateWorkerBindHost } from './deployment-config.ts';
 
 const host = process.env.OMNIS_WORKER_HOST ?? '127.0.0.1';
 const port = Number(process.env.OMNIS_WORKER_PORT ?? 4101);
-if (!['127.0.0.1', '::1', 'localhost'].includes(host)) {
-  throw new Error('The initial Omnis OS worker must bind to loopback.');
-}
+const privateCompose = process.env.OMNIS_COMPOSE_PRIVATE === 'true';
+validateWorkerBindHost(host, privateCompose);
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
   throw new Error('OMNIS_WORKER_PORT must be a valid TCP port.');
 }
@@ -55,7 +55,14 @@ for (const forbiddenSecret of [
     );
   }
 }
-const connectionString = getDatabaseUrl();
+const connectionString = createRuntimeDatabaseUrl({
+  databaseUrl: process.env.OMNIS_DATABASE_URL,
+  password: process.env.OMNIS_RUNTIME_DB_PASSWORD,
+  host: process.env.OMNIS_DB_HOST,
+  port: process.env.OMNIS_DB_PORT,
+  database: process.env.OMNIS_DB_NAME,
+  privateCompose,
+});
 const pool = createPool({ connectionString, max: 8, application_name: 'omnis-worker' });
 
 const boss = new PgBoss({
@@ -527,24 +534,4 @@ function taskIdempotencyKey(value: string | string[] | undefined): string | unde
 
 function parseRunInput(body: unknown) {
   return CreateRunSchema.safeParse(body);
-}
-
-function getDatabaseUrl(): string {
-  const configured = process.env.OMNIS_DATABASE_URL;
-  if (configured) {
-    const parsed = new URL(configured);
-    if (!['127.0.0.1', '::1', 'localhost', 'postgres'].includes(parsed.hostname)) {
-      throw new Error(
-        'The initial worker database must be reachable through approved local Compose networking.',
-      );
-    }
-    if (parsed.username !== 'omnis_runtime') {
-      throw new Error('The worker database connection must use the restricted omnis_runtime role.');
-    }
-    return configured;
-  }
-  const password = process.env.OMNIS_RUNTIME_DB_PASSWORD;
-  if (!password)
-    throw new Error('OMNIS_DATABASE_URL or OMNIS_RUNTIME_DB_PASSWORD must be configured.');
-  return `postgresql://omnis_runtime:${encodeURIComponent(password)}@127.0.0.1:5432/omnis`;
 }

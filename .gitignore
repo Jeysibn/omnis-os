@@ -9,6 +9,7 @@ apps/web/playwright-report/
 !.env.example
 !.env.authorizer.example
 !.env.sandbox-launcher.example
+!.env.compose.example
 *.log
 .DS_Store
 *:Zone.Identifier
