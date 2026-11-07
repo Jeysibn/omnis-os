@@ -38,7 +38,14 @@ export function createSyntheticFakeProviderServer(input: {
   const { token, fixtures, trustAnchors } = input;
   const submissions = new Map<
     string,
-    { digest: string; attemptId: string; fixture: string; response: unknown; events: unknown[] }
+    {
+      digest: string;
+      attemptId: string;
+      fixture: string;
+      providerSubmissionId: string;
+      response: unknown;
+      events: unknown[];
+    }
   >();
   const server = createServer((request, response) => {
     void handleRequest(request, response).catch(() => {
@@ -135,6 +142,7 @@ export function createSyntheticFakeProviderServer(input: {
         digest,
         attemptId,
         fixture,
+        providerSubmissionId,
         response: result,
         events: providerEvents,
       });
@@ -162,6 +170,8 @@ export function createSyntheticFakeProviderServer(input: {
         return send(response, 400, { error: 'invalid_input' });
       const submission = submissions.get(parsed.data.attemptId);
       if (!submission) return send(response, 404, { error: 'unknown_submission' });
+      if (submission.providerSubmissionId !== cancelMatch[1])
+        return send(response, 409, { error: 'provider_submission_mismatch' });
       if (submission.fixture === 'delayed-cancel-confirmed')
         await new Promise((resolve) => setTimeout(resolve, 250));
       if (['cancel-confirmed', 'delayed-cancel-confirmed'].includes(submission.fixture)) {

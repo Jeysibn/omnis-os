@@ -44,7 +44,10 @@ export class FakeProviderClient {
     const path = `/v1/submissions/${encodeURIComponent(providerSubmissionId)}/events`;
     const response = await this.send(path, 'GET');
     const parsed = SyntheticFakeProviderEventResponseSchema.parse(response);
-    if (parsed.attemptId !== attemptId)
+    if (
+      parsed.attemptId !== attemptId ||
+      parsed.event.providerSubmissionId !== providerSubmissionId
+    )
       throw new Error('Fake provider event correlation mismatch.');
     return parsed;
   }
@@ -61,7 +64,11 @@ export class FakeProviderClient {
       2_000,
     );
     const parsed = SyntheticFakeProviderCancellationResponseSchema.parse(response);
-    if (parsed.attemptId !== attemptId)
+    if (
+      parsed.attemptId !== attemptId ||
+      (parsed.cancellation === 'confirmed' &&
+        parsed.event?.providerSubmissionId !== providerSubmissionId)
+    )
       throw new Error('Fake provider cancellation correlation mismatch.');
     return parsed;
   }

@@ -182,6 +182,20 @@ describe('synthetic fake-provider HTTP boundary', () => {
       body: JSON.stringify(payload),
     });
     const acceptedBody = await accepted.json();
+    const mismatchedCancellation = await fetch(
+      `${origin}/v1/submissions/${encodeURIComponent(`wrong-${acceptedBody.providerSubmissionId}`)}`,
+      {
+        method: 'DELETE',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          version: 'omnis.fake-provider.v1',
+          attemptId: cancelAttemptId,
+          providerSubmissionId: `wrong-${acceptedBody.providerSubmissionId}`,
+        }),
+      },
+    );
+    assert.equal(mismatchedCancellation.status, 409);
+
     const cancelled = await fetch(
       `${origin}/v1/submissions/${encodeURIComponent(acceptedBody.providerSubmissionId)}`,
       {
