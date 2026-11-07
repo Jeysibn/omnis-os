@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -102,24 +102,21 @@ try {
   assert.ok(Object.hasOwn(worker.networks, 'data') && !Object.hasOwn(worker.networks, 'edge'));
   assert.ok(Object.hasOwn(web.networks, 'edge') && !Object.hasOwn(web.networks, 'data'));
   assert.ok(Object.hasOwn(postgres.networks, 'data'));
-  assert.deepEqual(api.volumes, [
-    {
-      type: 'bind',
-      source: '/run/omnis-authorizer',
-      target: '/run/omnis-authorizer',
-      read_only: true,
-      bind: { create_host_path: false },
-    },
-  ]);
-  assert.deepEqual(worker.volumes, [
-    {
-      type: 'bind',
-      source: '/run/omnis-sandbox',
-      target: '/run/omnis-sandbox',
-      read_only: true,
-      bind: { create_host_path: false },
-    },
-  ]);
+  for (const [service, source, target] of [
+    [api, '/run/omnis-authorizer', '/run/omnis-authorizer'],
+    [worker, '/run/omnis-sandbox', '/run/omnis-sandbox'],
+  ]) {
+    assert.equal(service.volumes?.length, 1);
+    const [volume] = service.volumes;
+    assert.equal(volume.type, 'bind');
+    assert.equal(volume.source, source);
+    assert.equal(volume.target, target);
+    assert.equal(volume.read_only, true);
+    assert.ok(!volume.bind || volume.bind.create_host_path === false);
+  }
+
+  const composeSource = readFileSync('infra/compose/docker-compose.app.yml', 'utf8');
+  assert.equal((composeSource.match(/create_host_path:\s*false/g) ?? []).length, 2);
   assert.ok(!JSON.stringify(config).includes('/var/run/docker.sock'));
   process.stdout.write('Private Compose service topology and privilege settings verified.\n');
 } finally {

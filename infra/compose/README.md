@@ -4,9 +4,19 @@ The application overlay runs PostgreSQL, API, worker, and the Omnis OS web gatew
 
 The `edge` and `data` networks are Docker internal networks. Web is attached only to `edge`; the worker and database are attached only to `data`; API bridges both so the browser gateway can reach the API and the API can reach the worker. API and worker have no published ports. Web and PostgreSQL publish only to host loopback. The web gateway serves the built SPA and proxies `/api/*` requests, including SSE streams, to the internal API while preserving browser origin, cookies, CSRF, and idempotency headers.
 
+## First startup
+
+This topology is for a private Linux deployment, not a command to run on an unreviewed host. Start PostgreSQL first so roles and migrations can be provisioned before the API and worker processes are launched:
+
+```sh
+docker compose --env-file .env.db-admin -f infra/compose/docker-compose.yml up -d postgres
+pnpm db:roles
+pnpm db:migrate
+```
+
 ## Host prerequisites
 
-This topology is for a private Linux deployment, not a command to run on an unreviewed host. Install and review the existing service identities, secret files, and systemd units first. Start only the authorizer and restricted launcher as host services; Compose owns the web, API, worker, and PostgreSQL processes.
+After PostgreSQL is healthy and migrations are applied, install and review the existing service identities, secret files, and systemd units using the approved host procedure. Start only the authorizer and restricted launcher as host services; Compose owns the web, API, worker, and PostgreSQL processes.
 
 1. Generate owner secrets and install the service-specific files using the existing reviewed host procedure. Keep `.env.db-admin`, `/etc/omnis/api.env`, and `/etc/omnis/worker.env` owner-only. The Compose command must run as root because Docker control is root-equivalent and the service env files are deliberately not readable by an ordinary account.
 2. Set `OMNIS_ALLOWED_ORIGIN` in `/etc/omnis/api.env` to the exact HTTPS origin served by the private reverse proxy and set `OMNIS_SECURE_COOKIES=true`. Configure the proxy to forward requests to `127.0.0.1:8080`; it must preserve `Origin`, `Cookie`, and `Set-Cookie` and support long-lived SSE responses. The proxy, TLS certificate, DNS, and private ingress are outside this Compose file.
@@ -19,14 +29,9 @@ This topology is for a private Linux deployment, not a command to run on an unre
 
 The preflight is read-only. It does not install host identities, modify systemd, alter firewall rules, change Docker, or start services.
 
-## First startup
-
-Provision the database roles and apply migrations before starting API or worker processes:
+Then start the application overlay:
 
 ```sh
-docker compose --env-file .env.db-admin -f infra/compose/docker-compose.yml up -d postgres
-pnpm db:roles
-pnpm db:migrate
 sudo docker compose --env-file .env.db-admin --env-file .env.compose \
   -f infra/compose/docker-compose.yml \
   -f infra/compose/docker-compose.app.yml up -d --build
