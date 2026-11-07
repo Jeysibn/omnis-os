@@ -10,6 +10,7 @@ services:
     environment:
       OMNIS_FAKE_PROVIDER_TOKEN_FILE: /run/secrets/fake-provider-token
       OMNIS_FAKE_PROVIDER_FIXTURES: '{}'
+      OMNIS_FAKE_PROVIDER_TRUST_ANCHORS: '${OMNIS_BROKER_TEST_TRUST_ANCHORS:-[]}'
     secrets: [fake-provider-token]
     read_only: true
     cap_drop: ['ALL']
@@ -32,6 +33,50 @@ services:
       interval: 1s
       timeout: 1s
       retries: 15
+
+  broker-process:
+    profiles: ['process-e2e']
+    build:
+      context: ../..
+      dockerfile: infra/docker/synthetic-broker.Dockerfile
+    user: '10001:${OMNIS_BROKER_TEST_GROUP_ID:-1001}'
+    environment:
+      OMNIS_BROKER_SOCKET: /run/omnis-synthetic-broker/broker.sock
+      OMNIS_BROKER_CALLER_TOKEN_FILE: /run/omnis-broker-secrets/caller.token
+      OMNIS_BROKER_AUTHORIZER_SOCKET: /run/omnis-broker-authorizer/broker-authorizer.sock
+      OMNIS_BROKER_AUTHORIZER_TOKEN_FILE: /run/omnis-broker-secrets/authorizer.token
+      OMNIS_BROKER_TRUST_ANCHORS: '${OMNIS_BROKER_TEST_TRUST_ANCHORS:-[]}'
+      OMNIS_FAKE_PROVIDER_TOKEN_FILE: /run/omnis-broker-secrets/provider.token
+    volumes:
+      - type: bind
+        source: ${OMNIS_BROKER_TEST_SOCKET_DIRECTORY:-/tmp/omnis-broker-sockets}
+        target: /run/omnis-synthetic-broker
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${OMNIS_BROKER_TEST_AUTHORIZER_DIRECTORY:-/tmp/omnis-broker-authorizer}
+        target: /run/omnis-broker-authorizer
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${OMNIS_BROKER_TEST_SECRET_DIRECTORY:-/tmp/omnis-broker-secrets}
+        target: /run/omnis-broker-secrets
+        read_only: true
+        bind:
+          create_host_path: false
+    read_only: true
+    cap_drop: ['ALL']
+    security_opt: ['no-new-privileges:true']
+    pids_limit: 32
+    mem_limit: 128m
+    cpus: 0.5
+    tmpfs: ['/tmp:size=4m,noexec,nosuid,nodev']
+    networks: [broker-egress]
+    depends_on:
+      fake-provider:
+        condition: service_healthy
+    stop_grace_period: 10s
 
   broker-boundary-probe:
     image: omnis-synthetic-broker:ci

@@ -7,7 +7,7 @@ import {
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:net';
 import { request as httpRequest } from 'node:http';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,6 +16,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { createPool } from '../../../packages/db/src/index.ts';
 
 const scrypt = promisify(scryptCallback);
+const repositoryRoot = fileURLToPath(new URL('../../../', import.meta.url));
 
 export const testOwnerPassword = 'test-owner-password-2026';
 
@@ -24,7 +25,11 @@ export async function startMockServices({
   requireAuditPool = false,
   reservedPorts = [],
   enableSyntheticBrokerTestMode = false,
+  enableSyntheticBrokerProcessTestMode = false,
 }) {
+  if (enableSyntheticBrokerProcessTestMode && !enableSyntheticBrokerTestMode) {
+    throw new Error('The synthetic broker process test requires the owner-authorized test mode.');
+  }
   const databaseConfig = validateTestDatabaseConfiguration(process.env, {
     requireAdmin: requireAuditPool,
   });
@@ -78,8 +83,15 @@ export async function startMockServices({
   excludedPorts.add(apiPort);
   const workerPort = await freePort(excludedPorts);
   const authorizerSocket = join(tempDirectory, 'authorizer.sock');
-  const brokerAuthorizerSocket = join(tempDirectory, 'broker-authorizer.sock');
-  const syntheticBrokerSocket = join(tempDirectory, 'synthetic-broker.sock');
+  const brokerSocketDirectory = enableSyntheticBrokerProcessTestMode
+    ? join(tempDirectory, 'broker-runtime')
+    : tempDirectory;
+  const brokerAuthorizerDirectory = enableSyntheticBrokerProcessTestMode
+    ? join(tempDirectory, 'broker-authorizer')
+    : tempDirectory;
+  const brokerSecretDirectory = join(tempDirectory, 'broker-secrets');
+  const brokerAuthorizerSocket = join(brokerAuthorizerDirectory, 'broker-authorizer.sock');
+  const syntheticBrokerSocket = join(brokerSocketDirectory, 'broker.sock');
   const launcherSocket = join(tempDirectory, 'launcher.sock');
   const salt = randomBytes(16);
   const internalToken = randomBytes(48).toString('hex');
@@ -89,6 +101,7 @@ export async function startMockServices({
   const decisionKeyFile = join(tempDirectory, 'authorizer-ed25519.pem');
   const decisionKeyNotBefore = new Date(Date.now() - 5_000).toISOString();
   const decisionKeyNotAfter = new Date(Date.now() + 60 * 60_000).toISOString();
+  const fakeProviderToken = randomBytes(48).toString('hex');
   const decisionKeyPair = enableSyntheticBrokerTestMode
     ? generateKeyPairSync('ed25519')
     : undefined;
@@ -108,6 +121,27 @@ export async function startMockServices({
   ];
 
   try {
+    if (enableSyntheticBrokerProcessTestMode) {
+      await Promise.all([
+        mkdir(brokerSocketDirectory, { mode: 0o770 }),
+        mkdir(brokerAuthorizerDirectory, { mode: 0o770 }),
+        mkdir(brokerSecretDirectory, { mode: 0o750 }),
+      ]);
+      await chmod(brokerSocketDirectory, 0o770);
+      await chmod(brokerAuthorizerDirectory, 0o770);
+      await chmod(brokerSecretDirectory, 0o750);
+      await Promise.all([
+        writeFile(join(brokerSecretDirectory, 'caller.token'), syntheticBrokerTestToken, {
+          mode: 0o440,
+        }),
+        writeFile(join(brokerSecretDirectory, 'authorizer.token'), brokerAuthorizerToken, {
+          mode: 0o440,
+        }),
+        writeFile(join(brokerSecretDirectory, 'provider.token'), fakeProviderToken, {
+          mode: 0o444,
+        }),
+      ]);
+    }
     await writeFile(
       apiEnvPath,
       `${[
@@ -150,6 +184,9 @@ export async function startMockServices({
           ? [
               `OMNIS_BROKER_AUTHORIZER_SOCKET=${brokerAuthorizerSocket}`,
               `OMNIS_BROKER_AUTHORIZER_TOKEN=${brokerAuthorizerToken}`,
+              ...(enableSyntheticBrokerProcessTestMode
+                ? ['OMNIS_BROKER_AUTHORIZER_SOCKET_MODE=660']
+                : []),
               `OMNIS_CONNECTOR_DECISION_KEY_FILE=${decisionKeyFile}`,
               'OMNIS_CONNECTOR_DECISION_KEY_ID=disposable-test-key-v1',
               `OMNIS_CONNECTOR_DECISION_KEY_NOT_BEFORE=${decisionKeyNotBefore}`,
@@ -188,6 +225,7 @@ export async function startMockServices({
   let api;
   let syntheticBrokerFixture;
   let syntheticBrokerProcess;
+  let syntheticBrokerCompose;
   let cleanupPromise;
   const startWorker = async () => {
     const env = withoutDatabaseSecrets(process.env);
@@ -234,6 +272,7 @@ export async function startMockServices({
       try {
         await auditPool?.end();
       } finally {
+        await syntheticBrokerCompose?.close();
         await syntheticBrokerFixture?.close();
         await rm(tempDirectory, { recursive: true, force: true });
       }
@@ -244,7 +283,7 @@ export async function startMockServices({
   };
 
   try {
-    if (enableSyntheticBrokerTestMode) {
+    if (enableSyntheticBrokerTestMode && !enableSyntheticBrokerProcessTestMode) {
       syntheticBrokerFixture = await startSyntheticBrokerFixture({
         socketPath: syntheticBrokerSocket,
         testToken: syntheticBrokerTestToken,
@@ -281,6 +320,26 @@ export async function startMockServices({
       launcherSocket,
       launcherProcess: launcher,
     });
+    if (enableSyntheticBrokerProcessTestMode) {
+      const trustAnchors = JSON.stringify([
+        {
+          keyId: 'disposable-test-key-v1',
+          publicKeyPem: decisionKeyPair.publicKey
+            .export({ type: 'spki', format: 'pem' })
+            .toString(),
+          notBefore: decisionKeyNotBefore,
+          notAfter: decisionKeyNotAfter,
+        },
+      ]);
+      syntheticBrokerCompose = await startSyntheticBrokerCompose({
+        brokerSocketPath: syntheticBrokerSocket,
+        brokerSocketDirectory,
+        brokerAuthorizerDirectory,
+        brokerSecretDirectory,
+        trustAnchors,
+        providerTokenPath: join(brokerSecretDirectory, 'provider.token'),
+      });
+    }
     return {
       password: testOwnerPassword,
       origin: parsedOrigin.origin,
@@ -303,6 +362,7 @@ export async function startMockServices({
       canary,
       syntheticBrokerFixture,
       syntheticBrokerProcess,
+      syntheticBrokerCompose,
       auditPool,
       api,
       worker,
@@ -604,6 +664,78 @@ export function socketRequest(socketPath, requestPath, init = {}) {
     req.setTimeout(3_000, () => req.destroy(new Error('unix_socket_request_timeout')));
     req.end(init.body);
   });
+}
+
+async function startSyntheticBrokerCompose({
+  brokerSocketPath,
+  brokerSocketDirectory,
+  brokerAuthorizerDirectory,
+  brokerSecretDirectory,
+  trustAnchors,
+  providerTokenPath,
+}) {
+  const projectName = `omnis-broker-e2e-${process.pid}-${randomUUID().replaceAll('-', '').slice(0, 10)}`;
+  const compose = [
+    'compose',
+    '--profile',
+    'process-e2e',
+    '--project-name',
+    projectName,
+    '--file',
+    'infra/compose/synthetic-egress.yml',
+  ];
+  const environment = {
+    PATH: process.env.PATH ?? '/usr/bin:/bin',
+    HOME: process.env.HOME ?? '/tmp',
+    TMPDIR: process.env.TMPDIR ?? '/tmp',
+    ...(process.env.DOCKER_HOST ? { DOCKER_HOST: process.env.DOCKER_HOST } : {}),
+    ...(process.env.DOCKER_CONFIG ? { DOCKER_CONFIG: process.env.DOCKER_CONFIG } : {}),
+    OMNIS_FAKE_PROVIDER_TOKEN_FILE: providerTokenPath,
+    OMNIS_BROKER_TEST_TRUST_ANCHORS: trustAnchors,
+    OMNIS_BROKER_TEST_SOCKET_DIRECTORY: brokerSocketDirectory,
+    OMNIS_BROKER_TEST_AUTHORIZER_DIRECTORY: brokerAuthorizerDirectory,
+    OMNIS_BROKER_TEST_SECRET_DIRECTORY: brokerSecretDirectory,
+    OMNIS_BROKER_TEST_GROUP_ID: String(process.getgid?.() ?? 1001),
+  };
+  const runCompose = (arguments_) =>
+    spawnSync('docker', [...compose, ...arguments_], {
+      cwd: repositoryRoot,
+      env: environment,
+      encoding: 'utf8',
+      timeout: 120_000,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+  const started = runCompose(['up', '--build', '--detach', 'broker-process']);
+  if (started.error || started.status !== 0) {
+    runCompose(['down', '--volumes', '--remove-orphans']);
+    throw new Error('Disposable synthetic broker Compose service did not start.');
+  }
+
+  try {
+    const timeoutAt = Date.now() + 30_000;
+    while (Date.now() < timeoutAt) {
+      try {
+        const response = await socketRequest(brokerSocketPath, '/health');
+        if ([401, 404].includes(response.status)) {
+          return {
+            close() {
+              const stopped = runCompose(['down', '--volumes', '--remove-orphans']);
+              if (stopped.error || stopped.status !== 0) {
+                throw new Error('Disposable synthetic broker Compose cleanup failed.');
+              }
+            },
+          };
+        }
+      } catch {
+        // The broker socket may appear before the process accepts connections.
+      }
+      await delay(100);
+    }
+    throw new Error('Synthetic broker process socket did not become ready.');
+  } catch (error) {
+    runCompose(['down', '--volumes', '--remove-orphans']);
+    throw error;
+  }
 }
 
 export async function startSyntheticBrokerFixture({

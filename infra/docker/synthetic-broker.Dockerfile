@@ -19,4 +19,4 @@ WORKDIR /app
 COPY --from=build --chown=10001:10001 /out/broker/ ./
 RUN mkdir -p /run/omnis-synthetic-broker && chown 10001:10001 /run/omnis-synthetic-broker
 USER 10001:10001
-CMD ["node", "--permission", "--allow-fs-read=/app", "--allow-fs-read=/run/omnis-synthetic-broker", "--allow-fs-write=/run/omnis-synthetic-broker", "--experimental-strip-types", "src/server.ts"]
+CMD ["node", "--permission", "--allow-fs-read=/app", "--allow-fs-read=/run/omnis-synthetic-broker", "--allow-fs-read=/run/omnis-broker-authorizer", "--allow-fs-read=/run/omnis-broker-secrets", "--allow-fs-write=/run/omnis-synthetic-broker", "--experimental-strip-types", "src/server.ts"]

@@ -7,6 +7,7 @@ import test from 'node:test';
 import {
   assertNoExecutableWork,
   buildBrowserEnvironment,
+  startMockServices,
   startManagedProcess,
   startSyntheticBrokerFixture,
   startServicesWithCleanup,
@@ -203,6 +204,16 @@ test('fails closed when runs or executable queue jobs already exist', async () =
     const pool = { query: async () => ({ rows: [row] }) };
     await assert.rejects(assertNoExecutableWork(pool), /existing executable work/);
   }
+});
+
+test('requires the owner-authorized test mode before starting the broker process profile', async () => {
+  await assert.rejects(
+    startMockServices({
+      origin: 'http://127.0.0.1:5173',
+      enableSyntheticBrokerProcessTestMode: true,
+    }),
+    /requires the owner-authorized test mode/,
+  );
 });
 
 test('a required service spawn error cleans up already-started services and temp files', async () => {

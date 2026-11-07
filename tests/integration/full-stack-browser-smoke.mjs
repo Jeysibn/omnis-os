@@ -32,9 +32,10 @@ try {
     reservedPorts: [frontendPort],
     requireAuditPool: true,
     enableSyntheticBrokerTestMode: true,
+    enableSyntheticBrokerProcessTestMode: true,
   });
   if (interrupted) throw new Error('The full-stack smoke was interrupted during service startup.');
-  stages.push('api-worker-authorizer-launcher-ready');
+  stages.push('api-worker-authorizer-launcher-broker-and-fake-provider-ready');
   const syntheticProjectId = await createActiveSyntheticProject(services);
 
   const browserEnvironment = buildBrowserEnvironment(process.env, {
@@ -116,8 +117,8 @@ async function createActiveSyntheticProject(services) {
     },
     body: JSON.stringify({
       key: `SYNTH-${randomUUID().replaceAll('-', '').slice(0, 12).toUpperCase()}`,
-      name: 'Synthetic broker integration fixture',
-      objective: 'Exercise the test-only owner-authorized broker path.',
+      name: 'Synthetic broker process integration',
+      objective: 'Exercise the test-only owner-authorized broker and fake-provider processes.',
     }),
   });
   if (!project.ok) throw new Error('Disposable synthetic project creation failed.');

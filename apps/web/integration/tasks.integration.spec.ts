@@ -320,7 +320,7 @@ test('owner sees an authorized synthetic broker Run, ordered events, result and 
   await expect(inspector).toContainText('started');
   await expect(inspector).toContainText('provider submission requested');
   await expect(inspector).toContainText('completed');
-  await expect(inspector).toContainText('Synthetic provider fixture result.');
+  await expect(inspector).toContainText('Synthetic provider response.');
   await expect(page.getByText('completed', { exact: true })).toBeVisible();
 });
 
