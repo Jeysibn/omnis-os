@@ -12,9 +12,10 @@ import {
 } from '@omnis/contracts/connector-broker';
 
 export const FakeProviderFixturesSchema = z.record(
-  z.string().uuid(),
+  z.union([z.string().uuid(), z.literal('default')]),
   z.enum([
     'completed',
+    'delayed-events',
     'rejected',
     'delayed',
     'timeout',
@@ -45,6 +46,7 @@ export function createSyntheticFakeProviderServer(input: {
       providerSubmissionId: string;
       response: unknown;
       events: unknown[];
+      eventReads: number;
     }
   >();
   const server = createServer((request, response) => {
@@ -88,7 +90,7 @@ export function createSyntheticFakeProviderServer(input: {
         return previous.digest === digest
           ? send(response, 200, previous.response)
           : send(response, 409, { error: 'idempotency_conflict' });
-      const fixture = fixtures[attemptId] ?? 'completed';
+      const fixture = fixtures[attemptId] ?? fixtures.default ?? 'completed';
       if (fixture === 'fail-before-acceptance')
         return send(response, 422, { error: 'not_accepted' });
       if (fixture === 'rejected') return send(response, 422, { error: 'fixture_rejected' });
@@ -145,6 +147,7 @@ export function createSyntheticFakeProviderServer(input: {
         providerSubmissionId,
         response: result,
         events: providerEvents,
+        eventReads: 0,
       });
       if (fixture === 'lost-ack') {
         response.destroy();
@@ -158,9 +161,14 @@ export function createSyntheticFakeProviderServer(input: {
       const found = [...submissions.values()].find((item) =>
         JSON.stringify(item.response).includes(providerSubmissionId ?? ''),
       );
-      return found
-        ? send(response, 200, found.events.at(-1))
-        : send(response, 404, { error: 'unknown_submission' });
+      if (!found) return send(response, 404, { error: 'unknown_submission' });
+      if (found.fixture === 'delayed-events' && found.eventReads === 0) {
+        found.eventReads += 1;
+        await new Promise((resolve) => setTimeout(resolve, 8_000));
+      } else {
+        found.eventReads += 1;
+      }
+      return send(response, 200, found.events.at(-1));
     }
     const cancelMatch = request.url?.match(/^\/v1\/submissions\/([A-Za-z0-9._~-]{1,128})$/);
     if (request.method === 'DELETE' && cancelMatch) {

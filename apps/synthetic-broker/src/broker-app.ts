@@ -6,6 +6,7 @@ import {
 } from '@omnis/contracts/connector-authorization';
 import {
   verifyConnectorDecisionEnvelope,
+  type ConnectorDecisionEnvelope,
   type VerificationKey,
 } from '@omnis/contracts/connector-broker';
 import { SyntheticFakeProviderSubmissionResponseSchema } from '@omnis/contracts/broker-ipc';
@@ -30,7 +31,9 @@ export function createSyntheticBrokerApp(input: {
   callerToken: string;
   verificationKeys: VerificationKey[];
   authorizer: Pick<AuthorizerClient, 'admit' | 'begin' | 'record'>;
-  provider: Pick<FakeProviderClient, 'submit' | 'events'>;
+  provider: Pick<FakeProviderClient, 'submit' | 'events'> & {
+    cancel?: FakeProviderClient['cancel'];
+  };
 }) {
   const { callerToken, verificationKeys, authorizer, provider } = input;
 
@@ -71,7 +74,10 @@ export function createSyntheticBrokerApp(input: {
         input.requestId,
         input.request,
       );
-      const envelope = verifyConnectorDecisionEnvelope(admission.envelope, verificationKeys);
+      const retryingExistingAttempt = admission.attempt.status !== 'admitted';
+      const envelope = retryingExistingAttempt
+        ? verifyPersistedDecisionEnvelope(admission.envelope, verificationKeys)
+        : verifyConnectorDecisionEnvelope(admission.envelope, verificationKeys);
       if (
         envelope.claims.authorizationId !== input.authorizationId ||
         envelope.claims.requestId !== input.requestId ||
@@ -95,6 +101,53 @@ export function createSyntheticBrokerApp(input: {
         !sameLimits(envelope.claims.limits, input.request.limits)
       )
         throw new Error('Authorizer envelope binding did not match the broker request.');
+
+      if (retryingExistingAttempt) {
+        let attempt = admission.attempt;
+        if (attempt.status === 'submitting') {
+          attempt = await authorizer.record(attempt.id, {
+            eventId: `restart-unknown:${attempt.id}`,
+            status: 'unknown',
+            usage: {
+              kind: 'unknown',
+              reason: 'submission_uncertain',
+              billingExposure: 'unknown',
+            },
+          });
+        } else if (attempt.cancelRequestedAt && attempt.providerSubmissionId && provider.cancel) {
+          try {
+            const cancellation = await provider.cancel(attempt.id, attempt.providerSubmissionId);
+            if (cancellation.cancellation === 'confirmed' && cancellation.event) {
+              attempt = await authorizer.record(attempt.id, cancellation.event);
+            }
+          } catch {
+            // A failed cancellation observation does not prove that work stopped.
+          }
+        } else if (
+          attempt.providerSubmissionId &&
+          ['accepted', 'running', 'unknown'].includes(attempt.status)
+        ) {
+          try {
+            const completion = await provider.events(attempt.id, attempt.providerSubmissionId);
+            attempt = await authorizer.record(attempt.id, completion.event);
+          } catch {
+            // A read-only status failure is retried with the same authorization and request IDs.
+          }
+        }
+
+        const result = {
+          attemptId: attempt.id,
+          correlationId: envelope.claims.correlationId,
+          status: attempt.status,
+          submitted: Boolean(
+            attempt.submissionStartedAt ||
+            attempt.providerSubmissionId ||
+            ['submitting', 'accepted', 'running', 'unknown'].includes(attempt.status),
+          ),
+          ...(attempt.responseText ? { responseText: attempt.responseText } : {}),
+        };
+        return reply.code(attempt.status === 'unknown' ? 202 : 200).send(result);
+      }
 
       const started = await authorizer.begin(admission.attempt.id, envelope, input.renderedRequest);
       if (started.status !== 'submitting')
@@ -201,5 +254,22 @@ function sameLimits(
     decision.maxConcurrentRuns === request.maxConcurrentRuns &&
     decision.maxUsageUnits === request.maxUsageUnits &&
     decision.maxCostMicrousd === request.maxCostMicrousd
+  );
+}
+
+function verifyPersistedDecisionEnvelope(
+  envelope: ConnectorDecisionEnvelope,
+  anchors: readonly VerificationKey[],
+) {
+  const historicalExpiry = Math.min(
+    Date.parse(envelope.expiresAt) - 1,
+    Date.parse(envelope.claims.grantExpiresAt) - 1,
+  );
+  if (!Number.isFinite(historicalExpiry))
+    throw new Error('Persisted decision envelope expiry is invalid.');
+  return verifyConnectorDecisionEnvelope(
+    envelope,
+    anchors,
+    new Date(Math.min(Date.now(), historicalExpiry)),
   );
 }

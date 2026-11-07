@@ -160,4 +160,100 @@ describe('synthetic broker submission boundary', () => {
       await app.close();
     }
   });
+
+  it('resolves the same request from a durable accepted attempt without submitting again', async () => {
+    const acceptedAttempt = {
+      id: attemptId,
+      authorizationId,
+      requestId,
+      status: 'accepted' as const,
+      synthetic: true as const,
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString(),
+      submissionStartedAt: now.toISOString(),
+      providerSubmissionId: `synthetic-${attemptId}`,
+      cancelRequestedAt: null,
+    };
+    const completion = {
+      eventId: `completed-${attemptId}`,
+      status: 'completed' as const,
+      providerSubmissionId: `synthetic-${attemptId}`,
+      usage: {
+        kind: 'measured' as const,
+        source: 'synthetic-provider' as const,
+        inputUnits: 1,
+        outputUnits: 1,
+        billingExposure: 'synthetic-only' as const,
+      },
+      responseText: 'Recovered synthetic result.',
+    };
+    let submitCalls = 0;
+    let eventLookups = 0;
+    const app = createSyntheticBrokerApp({
+      callerToken: 'a'.repeat(96),
+      verificationKeys: [
+        {
+          keyId: 'test-key',
+          publicKey: keyPair.publicKey,
+          notBefore: new Date(now.getTime() - 60_000).toISOString(),
+          notAfter: new Date(now.getTime() + 10 * 60_000).toISOString(),
+        },
+      ],
+      authorizer: {
+        async admit() {
+          return {
+            version: 'omnis.broker-authorizer-ipc.v1' as const,
+            attempt: acceptedAttempt,
+            envelope,
+          };
+        },
+        async begin() {
+          throw new Error('An accepted attempt must not begin a new submission.');
+        },
+        async record(_id, event) {
+          assert.equal(event.eventId, completion.eventId);
+          return {
+            ...acceptedAttempt,
+            status: 'completed' as const,
+            responseText: completion.responseText,
+          };
+        },
+      },
+      provider: {
+        async submit() {
+          submitCalls += 1;
+          throw new Error('An accepted attempt must not be submitted again.');
+        },
+        async events() {
+          eventLookups += 1;
+          return {
+            version: 'omnis.fake-provider.v1' as const,
+            attemptId,
+            event: completion,
+          };
+        },
+      },
+    });
+
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/internal/broker/v1/submit',
+        headers: { authorization: `Bearer ${'a'.repeat(96)}` },
+        payload: request,
+      });
+      assert.equal(response.statusCode, 200);
+      assert.deepEqual(response.json(), {
+        attemptId,
+        correlationId,
+        status: 'completed',
+        submitted: true,
+        responseText: 'Recovered synthetic result.',
+      });
+      assert.equal(submitCalls, 0);
+      assert.equal(eventLookups, 1);
+    } finally {
+      await app.close();
+    }
+  });
 });

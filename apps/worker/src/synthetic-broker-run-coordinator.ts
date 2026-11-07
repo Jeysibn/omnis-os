@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import {
   createRenderedRequestDigest,
@@ -41,6 +42,7 @@ export class SyntheticBrokerRunCoordinator {
   private readonly broker: SyntheticBrokerExecutor;
   private readonly enqueue: EnqueueRun;
   private readonly publish: (events: DurableEvent[]) => void;
+  private readonly recoveryTimeoutMs: number;
   private readonly workerId = randomUUID();
 
   constructor(input: {
@@ -49,12 +51,14 @@ export class SyntheticBrokerRunCoordinator {
     broker: SyntheticBrokerExecutor;
     enqueue: EnqueueRun;
     publish: (events: DurableEvent[]) => void;
+    recoveryTimeoutMs?: number;
   }) {
     this.store = input.store;
     this.profiles = input.profiles;
     this.broker = input.broker;
     this.enqueue = input.enqueue;
     this.publish = input.publish;
+    this.recoveryTimeoutMs = input.recoveryTimeoutMs ?? 12_000;
   }
 
   async admit(input: {
@@ -126,12 +130,9 @@ export class SyntheticBrokerRunCoordinator {
       this.publish(submissionRequested.events);
       let response: SyntheticTaskRunResponse;
       try {
-        response = SyntheticTaskRunResponseSchema.parse(
-          await this.broker.execute(link.run.taskId, request),
-        );
+        response = await this.executeWithRecovery(link.run.taskId, request);
       } catch {
-        // The broker may have crossed the provider boundary before a lost or
-        // malformed reply. Keep the Run unknown and never retry the queue job.
+        // A broker outage without a correlated durable result remains unknown.
         await this.finish(link.run.id, begun.generation, { status: 'unknown' });
         return;
       }
@@ -200,6 +201,38 @@ export class SyntheticBrokerRunCoordinator {
       request: link.binding,
       renderedRequest,
     });
+  }
+
+  private async executeWithRecovery(
+    taskId: string,
+    request: SyntheticTaskRunRequest,
+  ): Promise<SyntheticTaskRunResponse> {
+    const deadline = Date.now() + this.recoveryTimeoutMs;
+    let latest: SyntheticTaskRunResponse | undefined;
+    for (;;) {
+      try {
+        const response = SyntheticTaskRunResponseSchema.parse(
+          await this.broker.execute(taskId, request),
+        );
+        if (['completed', 'failed', 'interrupted'].includes(response.status)) return response;
+        latest = response;
+      } catch {
+        if (Date.now() >= deadline) throw new Error('Synthetic broker recovery was not confirmed.');
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      await delay(Math.min(250, remaining));
+    }
+    if (latest) {
+      return SyntheticTaskRunResponseSchema.parse({
+        ...latest,
+        status: 'unknown',
+        submitted: true,
+        usage: { kind: 'unknown', reason: 'submission_uncertain', billingExposure: 'unknown' },
+        responseText: undefined,
+      });
+    }
+    throw new Error('Synthetic broker recovery was not confirmed.');
   }
 
   private async finish(

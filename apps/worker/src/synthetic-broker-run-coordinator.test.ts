@@ -87,6 +87,8 @@ function coordinator(
   options: {
     brokerResult?: unknown;
     brokerError?: boolean;
+    brokerSequence?: Array<unknown | Error>;
+    recoveryTimeoutMs?: number;
     taskOverride?: Task;
     profileVersion?: number;
   } = {},
@@ -95,6 +97,7 @@ function coordinator(
   const brokerRequests: SyntheticTaskRunRequest[] = [];
   const resultCalls: unknown[] = [];
   const executionOrder: string[] = [];
+  let brokerCall = 0;
   const store = {
     getSyntheticBrokerRun: async () => link,
     getSyntheticBrokerRunByAuthorization: async () => link,
@@ -142,6 +145,9 @@ function coordinator(
       execute: async (_taskId, request) => {
         executionOrder.push('broker-execute');
         brokerRequests.push(request);
+        const sequenceResult = options.brokerSequence?.[brokerCall++];
+        if (sequenceResult instanceof Error) throw sequenceResult;
+        if (sequenceResult !== undefined) return sequenceResult as SyntheticTaskRunResponse;
         if (options.brokerError) throw new Error('synthetic broker response lost');
         return (options.brokerResult ?? {
           version: 'omnis.synthetic-task-run.v1',
@@ -162,6 +168,7 @@ function coordinator(
       return `job-${data.runId}`;
     },
     publish: () => {},
+    recoveryTimeoutMs: options.recoveryTimeoutMs ?? 50,
   });
   return { instance, calls, brokerRequests, resultCalls, executionOrder, store };
 }
@@ -194,11 +201,44 @@ describe('synthetic broker task run coordinator', () => {
     });
   });
 
-  it('keeps a lost broker response unknown and never changes the retry identity', async () => {
-    const fixture = coordinator({ brokerError: true });
+  it('recovers a lost broker response using the same authorization and request identity', async () => {
+    const result = {
+      version: 'omnis.synthetic-task-run.v1',
+      taskId: task.id,
+      authorizationId: link.authorizationId,
+      requestId: link.requestId,
+      correlationId: link.correlationId,
+      attemptId: '44444444-4444-4444-8444-444444444444',
+      status: 'completed',
+      submitted: true,
+      usage: { kind: 'unknown', reason: 'not_reported', billingExposure: 'unknown' },
+      responseText: 'Recovered result',
+    };
+    const fixture = coordinator({
+      brokerSequence: [new Error('synthetic broker response lost'), result],
+      recoveryTimeoutMs: 1_000,
+    });
+    await fixture.instance.handleQueueJob({ runId: run.id });
+    assert.deepEqual(fixture.resultCalls, [
+      {
+        generation: 1,
+        result: {
+          attemptId: result.attemptId,
+          status: 'completed',
+          responseText: 'Recovered result',
+        },
+      },
+    ]);
+    assert.equal(fixture.brokerRequests.length, 2);
+    assert.deepEqual(fixture.brokerRequests[0], fixture.brokerRequests[1]);
+  });
+
+  it('leaves the Run unknown after bounded broker recovery cannot confirm an outcome', async () => {
+    const fixture = coordinator({ brokerError: true, recoveryTimeoutMs: 300 });
     await fixture.instance.handleQueueJob({ runId: run.id });
     assert.deepEqual(fixture.resultCalls, [{ generation: 1, result: { status: 'unknown' } }]);
-    assert.equal(fixture.brokerRequests.length, 1);
+    assert.ok(fixture.brokerRequests.length > 1);
+    assert.ok(fixture.brokerRequests.every((request) => request === fixture.brokerRequests[0]));
   });
 
   it('rejects changed immutable inputs before the broker call', async () => {

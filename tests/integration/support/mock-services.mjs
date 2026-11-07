@@ -691,6 +691,7 @@ async function startSyntheticBrokerCompose({
     ...(process.env.DOCKER_HOST ? { DOCKER_HOST: process.env.DOCKER_HOST } : {}),
     ...(process.env.DOCKER_CONFIG ? { DOCKER_CONFIG: process.env.DOCKER_CONFIG } : {}),
     OMNIS_FAKE_PROVIDER_TOKEN_FILE: providerTokenPath,
+    OMNIS_BROKER_TEST_PROVIDER_FIXTURES: JSON.stringify({ default: 'delayed-events' }),
     OMNIS_BROKER_TEST_TRUST_ANCHORS: trustAnchors,
     OMNIS_BROKER_TEST_SOCKET_DIRECTORY: brokerSocketDirectory,
     OMNIS_BROKER_TEST_AUTHORIZER_DIRECTORY: brokerAuthorizerDirectory,
@@ -718,6 +719,55 @@ async function startSyntheticBrokerCompose({
         const response = await socketRequest(brokerSocketPath, '/health');
         if ([401, 404].includes(response.status)) {
           return {
+            async interruptAfterAcceptedAttempt(auditPool, createdAfter) {
+              const acceptedDeadline = Date.now() + 30_000;
+              let attemptId;
+              while (Date.now() < acceptedDeadline) {
+                const accepted = await auditPool.query(
+                  `SELECT id
+                     FROM omnis.connector_execution_attempts
+                    WHERE status = 'accepted'
+                      AND provider_submission_id IS NOT NULL
+                      AND created_at >= $1
+                    ORDER BY created_at DESC
+                    LIMIT 1`,
+                  [createdAfter],
+                );
+                attemptId = accepted.rows[0]?.id;
+                if (attemptId) break;
+                await delay(100);
+              }
+              if (!attemptId)
+                throw new Error(
+                  'No accepted synthetic attempt appeared before the broker restart deadline.',
+                );
+
+              const killed = runCompose(['kill', '--signal', 'SIGKILL', 'broker-process']);
+              if (killed.error || killed.status !== 0)
+                throw new Error('Disposable synthetic broker process could not be interrupted.');
+              const restarted = runCompose(['up', '--detach', '--no-deps', 'broker-process']);
+              if (restarted.error || restarted.status !== 0)
+                throw new Error('Disposable synthetic broker process did not restart.');
+
+              const recoveryDeadline = Date.now() + 20_000;
+              while (Date.now() < recoveryDeadline) {
+                const response = await socketRequest(brokerSocketPath, '/health').catch(
+                  () => undefined,
+                );
+                if (response && [401, 404].includes(response.status)) break;
+                await delay(100);
+              }
+              const attemptDeadline = Date.now() + 20_000;
+              while (Date.now() < attemptDeadline) {
+                const recovered = await auditPool.query(
+                  'SELECT status FROM omnis.connector_execution_attempts WHERE id = $1',
+                  [attemptId],
+                );
+                if (recovered.rows[0]?.status === 'completed') return;
+                await delay(100);
+              }
+              throw new Error('Broker restart did not reconcile the accepted synthetic attempt.');
+            },
             close() {
               const stopped = runCompose(['down', '--volumes', '--remove-orphans']);
               if (stopped.error || stopped.status !== 0) {

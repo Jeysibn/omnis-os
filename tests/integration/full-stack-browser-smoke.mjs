@@ -14,6 +14,7 @@ const startedAt = Date.now();
 const stages = [];
 let services;
 let browserRunner;
+let brokerRecovery;
 let timedOut = false;
 let interrupted = false;
 const handleParentSignal = () => {
@@ -53,6 +54,10 @@ try {
     stdio: 'inherit',
   });
 
+  brokerRecovery = services.syntheticBrokerCompose.interruptAfterAcceptedAttempt(
+    services.auditPool,
+    new Date(),
+  );
   const exit = await waitForBrowserRunner(browserRunner, 180_000);
   if (exit.timedOut) {
     timedOut = true;
@@ -61,6 +66,8 @@ try {
   if (exit.signal) throw new Error(`The full-stack browser runner exited from ${exit.signal}.`);
   if (exit.code !== 0)
     throw new Error(`The full-stack browser runner exited with code ${exit.code}.`);
+  await brokerRecovery;
+  stages.push('broker-restart-reconciled-accepted-attempt');
   stages.push('real-browser-standard-and-synthetic-run-smoke-passed');
 } catch (error) {
   const message = error instanceof Error ? error.message : 'Unknown integration smoke failure.';
@@ -73,6 +80,7 @@ try {
   process.exitCode = 1;
 } finally {
   await stopBrowserRunner(browserRunner);
+  await brokerRecovery?.catch(() => undefined);
   await services?.cleanup();
   process.off('SIGINT', handleParentSignal);
   process.off('SIGTERM', handleParentSignal);

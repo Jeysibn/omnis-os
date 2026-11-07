@@ -9,7 +9,7 @@ services:
     user: '10002:10002'
     environment:
       OMNIS_FAKE_PROVIDER_TOKEN_FILE: /run/secrets/fake-provider-token
-      OMNIS_FAKE_PROVIDER_FIXTURES: '{}'
+      OMNIS_FAKE_PROVIDER_FIXTURES: '${OMNIS_BROKER_TEST_PROVIDER_FIXTURES:-{}}'
       OMNIS_FAKE_PROVIDER_TRUST_ANCHORS: '${OMNIS_BROKER_TEST_TRUST_ANCHORS:-[]}'
     secrets: [fake-provider-token]
     read_only: true
