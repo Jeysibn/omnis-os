@@ -915,9 +915,9 @@ test.describe('persisted authorization audit history', () => {
           events: [
             {
               attemptId: 'b70ef09b-b357-4da9-89c9-981eb90a0b05',
-              sequence: 1,
+              sequence: 2,
               eventType: 'connector.execution_completed',
-              outcome: 'denied',
+              outcome: 'recorded',
               revocationGeneration: 0,
               occurredAt: now,
             },
