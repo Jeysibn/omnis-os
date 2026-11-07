@@ -1,4 +1,5 @@
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
+import { RunSchema } from '@omnis/contracts';
 import {
   ConnectorAuthorizationSchema,
   createRenderedRequestDigest,
@@ -6,8 +7,8 @@ import {
 import {
   SyntheticTaskRunCancellationResponseSchema,
   SyntheticTaskRunDetailSchema,
+  SyntheticTaskRunAdmissionResponseSchema,
   SyntheticTaskRunRequestSchema,
-  SyntheticTaskRunResponseSchema,
 } from '@omnis/contracts/synthetic-task-run';
 
 type Forwarder = <TResult>(
@@ -75,7 +76,7 @@ export function registerSyntheticTaskRunRoutes(
           },
         });
       }
-      if (authorization.consumedAt !== null) {
+      if (authorization.consumedAt !== null && authorization.consumedRequestId !== requestId) {
         return reply.code(409).send({
           error: {
             code: 'request_already_consumed',
@@ -83,69 +84,35 @@ export function registerSyntheticTaskRunRoutes(
           },
         });
       }
-      let result: ReturnType<typeof SyntheticTaskRunResponseSchema.parse>;
+      let result: ReturnType<typeof SyntheticTaskRunAdmissionResponseSchema.parse>;
       try {
         result = await toWorker(
           `/internal/v1/tasks/${encodeURIComponent(taskId)}/synthetic-runs`,
           {
             method: 'POST',
             headers: { 'idempotency-key': requestId },
-            body: JSON.stringify(body.data),
+            body: JSON.stringify({ ...body.data, correlationId: authorization.correlationId }),
           },
-          (value) => SyntheticTaskRunResponseSchema.parse(value),
+          (value) => SyntheticTaskRunAdmissionResponseSchema.parse(value),
         );
       } catch {
         return reply.code(503).send({
           error: {
-            code: 'synthetic_worker_outcome_unknown',
+            code: 'synthetic_run_admission_unknown',
             message:
-              'The worker did not confirm the execution outcome. Read the durable execution status before retrying.',
+              'The worker did not confirm durable Run admission. Retry only with the same request identity or read its status.',
           },
         });
       }
-      if (result.correlationId !== authorization.correlationId) {
+      if (result.run.id !== authorization.correlationId || result.run.taskId !== taskId) {
         return reply.code(503).send({
           error: {
-            code: 'synthetic_broker_correlation_unknown',
-            message: 'The synthetic broker did not confirm the authorized run correlation.',
+            code: 'synthetic_run_binding_mismatch',
+            message: 'The worker Run did not match the approved task correlation.',
           },
         });
       }
-      let execution: ReturnType<typeof SyntheticTaskRunDetailSchema.parse>;
-      try {
-        execution = await toAuthorizer(
-          `/internal/v1/connector-authorizations/${encodeURIComponent(authorizationId)}/execution`,
-          {},
-          (value) => SyntheticTaskRunDetailSchema.parse(value),
-        );
-      } catch {
-        return reply.code(503).send({
-          error: {
-            code: 'synthetic_execution_state_unknown',
-            message:
-              'The durable execution state could not be confirmed. Read the execution status before retrying.',
-          },
-        });
-      }
-      const attempt = execution.attempt;
-      if (
-        execution.taskId !== taskId ||
-        attempt.authorizationId !== authorizationId ||
-        attempt.requestId !== requestId ||
-        attempt.id !== result.attemptId ||
-        attempt.status !== result.status ||
-        hasSubmissionEvidence(attempt) !== result.submitted ||
-        (attempt.responseText ?? undefined) !== result.responseText
-      ) {
-        return reply.code(503).send({
-          error: {
-            code: 'synthetic_broker_state_mismatch',
-            message:
-              'The broker result did not match durable execution state. Read the execution status before retrying.',
-          },
-        });
-      }
-      return reply.send({ ...result, usage: execution.usage });
+      return reply.code(result.created ? 202 : 200).send(result.run);
     },
   );
 
@@ -159,19 +126,33 @@ export function registerSyntheticTaskRunRoutes(
         {},
         (value) => ConnectorAuthorizationSchema.parse(value),
       );
-      if (authorization.taskId !== request.params.taskId || authorization.status !== 'authorized') {
+      const canCancel =
+        authorization.status === 'authorized' ||
+        authorization.status === 'revoked' ||
+        (authorization.status === 'expired' && authorization.consumedAt !== null);
+      if (authorization.taskId !== request.params.taskId || !canCancel) {
         return reply.code(409).send({
           error: {
             code: 'authorization_mismatch',
-            message: 'The active connector grant does not belong to this task.',
+            message: 'The connector grant does not identify a cancellable run for this task.',
           },
         });
       }
-      await toAuthorizer(
-        `/internal/v1/connector-authorizations/${encodeURIComponent(request.params.authorizationId)}/revoke`,
-        { method: 'POST' },
-        (value) => ConnectorAuthorizationSchema.parse(value),
-      );
+      if (authorization.status === 'authorized') {
+        await toAuthorizer(
+          `/internal/v1/connector-authorizations/${encodeURIComponent(request.params.authorizationId)}/revoke`,
+          { method: 'POST' },
+          (value) => ConnectorAuthorizationSchema.parse(value),
+        );
+      }
+      await toWorker(
+        `/internal/v1/synthetic-runs/${encodeURIComponent(authorization.correlationId)}/cancel`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ taskId, authorizationId: authorization.id }),
+        },
+        () => undefined,
+      ).catch(() => undefined);
       return reply.send(
         SyntheticTaskRunCancellationResponseSchema.parse({
           requested: true,
@@ -200,22 +181,61 @@ export function registerSyntheticTaskRunRoutes(
           error: { code: 'not_found', message: 'Synthetic task run was not found.' },
         });
       }
-      return toAuthorizer(
-        `/internal/v1/connector-authorizations/${encodeURIComponent(request.params.authorizationId)}/execution`,
-        {},
-        (value) => SyntheticTaskRunDetailSchema.parse(value),
-      );
+      let execution: ReturnType<typeof SyntheticTaskRunDetailSchema.parse> | undefined;
+      try {
+        execution = await toAuthorizer(
+          `/internal/v1/connector-authorizations/${encodeURIComponent(request.params.authorizationId)}/execution`,
+          {},
+          (value) => SyntheticTaskRunDetailSchema.parse(value),
+        );
+      } catch (error) {
+        if (!isAuthorizerNotFound(error)) throw error;
+      }
+      let run: ReturnType<typeof RunSchema.parse> | undefined;
+      let runLookupUnavailable = false;
+      try {
+        run = await toWorker(
+          `/internal/v1/runs/${encodeURIComponent(authorization.correlationId)}`,
+          {},
+          (value) => RunSchema.parse(value),
+        );
+      } catch (error) {
+        runLookupUnavailable = !isNotFound(error);
+      }
+      if (run && (run.id !== authorization.correlationId || run.taskId !== authorization.taskId)) {
+        return reply.code(503).send({
+          error: {
+            code: 'synthetic_run_binding_mismatch',
+            message: 'The persisted Run did not match the authorized task correlation.',
+          },
+        });
+      }
+      if (!execution && !run) {
+        if (runLookupUnavailable) {
+          return reply.code(503).send({
+            error: {
+              code: 'synthetic_run_status_unknown',
+              message: 'The durable task Run status is temporarily unavailable.',
+            },
+          });
+        }
+        return reply.code(404).send({
+          error: { code: 'not_found', message: 'Synthetic task run was not found.' },
+        });
+      }
+      return SyntheticTaskRunDetailSchema.parse({
+        version: 'omnis.synthetic-task-run.v1',
+        taskId: authorization.taskId,
+        ...(execution?.attempt ? { attempt: execution.attempt } : {}),
+        usage: execution?.usage ?? {
+          kind: 'unknown',
+          reason: run?.status === 'unknown' ? 'submission_uncertain' : 'not_reported',
+          billingExposure: 'unknown',
+        },
+        ...(run ? { run } : {}),
+      });
     },
   );
-}
-
-function hasSubmissionEvidence(
-  attempt: ReturnType<typeof SyntheticTaskRunDetailSchema.parse>['attempt'],
-): boolean {
-  if (attempt.status === 'admitted') return false;
-  if (attempt.status === 'failed') return attempt.providerSubmissionId != null;
-  if (attempt.status === 'interrupted') return attempt.submissionStartedAt != null;
-  return true;
 }
 
 function matchesApprovedTask(
@@ -260,4 +280,14 @@ function uuid(value: string | string[] | undefined): string | undefined {
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
     ? value
     : undefined;
+}
+
+function isAuthorizerNotFound(error: unknown): boolean {
+  return isNotFound(error);
+}
+
+function isNotFound(error: unknown): boolean {
+  return (
+    typeof error === 'object' && error !== null && 'statusCode' in error && error.statusCode === 404
+  );
 }

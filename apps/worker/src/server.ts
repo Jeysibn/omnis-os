@@ -26,6 +26,7 @@ import { SandboxedMockRuntimeAdapter } from './sandboxed-mock-runtime.ts';
 import { UnixMockSandboxLauncherClient } from './sandbox-launcher-client.ts';
 import { streamPersistedRunEvents } from './reliable-event-stream.ts';
 import { SyntheticBrokerClient } from './synthetic-broker-client.ts';
+import { SyntheticBrokerRunCoordinator } from './synthetic-broker-run-coordinator.ts';
 import { registerSyntheticTaskRunRoute } from './synthetic-task-run-routes.ts';
 
 const host = process.env.OMNIS_WORKER_HOST ?? '127.0.0.1';
@@ -82,9 +83,36 @@ if (!launcherSocket || !launcherSocket.startsWith('/')) {
 const runtime = new SandboxedMockRuntimeAdapter(new UnixMockSandboxLauncherClient(launcherSocket));
 const authorizationStore = new PostgresRuntimeAuthorizationReader(pool);
 const coordinator = new RunCoordinator(store, boss, runtime, authorizationStore);
+let syntheticBrokerCoordinator: SyntheticBrokerRunCoordinator | undefined;
+if (syntheticBrokerTestMode) {
+  const brokerSocket = process.env.OMNIS_SYNTHETIC_BROKER_SOCKET;
+  const brokerToken = process.env.OMNIS_SYNTHETIC_BROKER_TEST_TOKEN;
+  if (!brokerSocket || !brokerToken) {
+    throw new Error('Synthetic broker test IPC requires its socket and disposable test token.');
+  }
+  syntheticBrokerCoordinator = new SyntheticBrokerRunCoordinator({
+    store,
+    profiles: agentProfiles,
+    broker: new SyntheticBrokerClient(brokerSocket, brokerToken),
+    enqueue: (db, data) =>
+      boss.send(queueName, data, {
+        retryLimit: 0,
+        retryDelay: 0,
+        expireInSeconds: 60,
+        heartbeatSeconds: 10,
+        db,
+      }),
+    publish: (events) => coordinator.publishExternalEvents(events),
+  });
+}
 await coordinator.reconcileExpiredRuns();
 await boss.work(queueName, { batchSize: 1, localConcurrency: 1 }, async ([job]) => {
-  if (job) await coordinator.handleQueueJob(job.data, job.signal);
+  if (!job) return;
+  if (syntheticBrokerCoordinator && (await syntheticBrokerCoordinator.isSyntheticJob(job.data))) {
+    await syntheticBrokerCoordinator.handleQueueJob(job.data, job.signal);
+    return;
+  }
+  await coordinator.handleQueueJob(job.data, job.signal);
 });
 
 const recoveryTimer = setInterval(() => {
@@ -115,17 +143,15 @@ app.addHook('preHandler', async (request, reply) => {
 });
 
 if (syntheticBrokerTestMode) {
-  const brokerSocket = process.env.OMNIS_SYNTHETIC_BROKER_SOCKET;
-  const brokerToken = process.env.OMNIS_SYNTHETIC_BROKER_TEST_TOKEN;
-  if (!brokerSocket || !brokerToken) {
-    throw new Error('Synthetic broker test IPC requires its socket and disposable test token.');
-  }
+  if (!syntheticBrokerCoordinator)
+    throw new Error('Synthetic broker test coordinator is unavailable.');
   registerSyntheticTaskRunRoute(app, {
     authenticate: async () => {},
     enabled: true,
     store,
     profiles: agentProfiles,
-    broker: new SyntheticBrokerClient(brokerSocket, brokerToken),
+    admit: (input) => syntheticBrokerCoordinator!.admit(input),
+    cancel: (input) => syntheticBrokerCoordinator!.cancel(input),
   });
 }
 

@@ -292,6 +292,21 @@ BEGIN
 END
 $project_epic_acl$;
 GRANT USAGE, SELECT ON SEQUENCE omnis.run_id_seq TO omnis_runtime;
+DO $synthetic_run_projection_acl$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+      FROM information_schema.columns
+     WHERE table_schema = 'omnis'
+       AND table_name = 'runs'
+       AND column_name = 'connector_authorization_id'
+  ) THEN
+    EXECUTE 'GRANT INSERT (connector_authorization_id, connector_request_id,
+      connector_correlation_id, connector_request_binding) ON omnis.runs TO omnis_runtime';
+    EXECUTE 'GRANT UPDATE (connector_attempt_id) ON omnis.runs TO omnis_runtime';
+  END IF;
+END
+$synthetic_run_projection_acl$;
 DO $task_project_acl$
 BEGIN
   IF pg_catalog.to_regprocedure('omnis.create_task(text,text,text,uuid,bytea)') IS NOT NULL THEN

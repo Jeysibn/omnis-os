@@ -259,6 +259,13 @@ const allowed = [
     true,
   ),
   acl('column', 'omnis', 'tasks', 'UPDATE', 'status'),
+  ...[
+    'connector_authorization_id',
+    'connector_request_id',
+    'connector_correlation_id',
+    'connector_request_binding',
+  ].map((column) => acl('column', 'omnis', 'runs', 'INSERT', column)),
+  acl('column', 'omnis', 'runs', 'UPDATE', 'connector_attempt_id'),
   acl('sequence', 'omnis', 'run_id_seq', 'SELECT'),
   acl(
     'routine',
@@ -301,6 +308,16 @@ describe('post-restore PostgreSQL ACL integrity', () => {
       acl('column', 'omnis', 'tasks', 'INSERT', 'id'),
       acl('column', 'omnis', 'tasks', 'UPDATE', 'project_id'),
       acl('sequence', 'omnis', 'task_id_seq', 'USAGE'),
+    ]) {
+      assert.throws(() => assertRuntimeAclPolicy([...allowed, entry]));
+    }
+  });
+
+  it('allows only non-authoritative synthetic Run projection references', () => {
+    for (const entry of [
+      acl('column', 'omnis', 'runs', 'UPDATE', 'connector_authorization_id'),
+      acl('column', 'omnis', 'runs', 'UPDATE', 'connector_request_binding'),
+      acl('column', 'omnis', 'runs', 'INSERT', 'connector_attempt_id'),
     ]) {
       assert.throws(() => assertRuntimeAclPolicy([...allowed, entry]));
     }

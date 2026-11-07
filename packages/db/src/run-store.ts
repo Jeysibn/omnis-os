@@ -18,6 +18,14 @@ import {
 import type { Pool, PoolClient, QueryResultRow } from 'pg';
 import { asPgBossTransaction, inTransaction, type PgBossTransaction } from './database.ts';
 import { createHmac, createHash, hkdfSync, randomUUID, timingSafeEqual } from 'node:crypto';
+import {
+  ConnectorAuthorizationRequestSchema,
+  type ConnectorAuthorizationRequest,
+} from '@omnis/contracts/connector-authorization';
+import {
+  ConnectorExecutionStatusSchema,
+  type ConnectorExecutionStatus,
+} from '@omnis/contracts/connector-broker';
 
 export type StoreErrorCode =
   | 'invalid_input'
@@ -60,6 +68,11 @@ type RunRow = QueryResultRow & {
   runtime_kind: 'mock';
   synthetic: true;
   usage: Run['usage'];
+  connector_authorization_id?: string | null;
+  connector_request_id?: string | null;
+  connector_correlation_id?: string | null;
+  connector_request_binding?: unknown;
+  connector_attempt_id?: string | null;
   created_at: Date | string;
   updated_at: Date | string;
 };
@@ -101,6 +114,21 @@ export type EnqueueRun = (
   transaction: PgBossTransaction,
   data: { runId: string },
 ) => Promise<string | null>;
+
+export type SyntheticBrokerRun = {
+  run: Run;
+  authorizationId: string;
+  requestId: string;
+  correlationId: string;
+  binding: ConnectorAuthorizationRequest;
+  attemptId: string | null;
+};
+
+export type SyntheticBrokerRunResult = {
+  attemptId?: string;
+  status: ConnectorExecutionStatus;
+  responseText?: string;
+};
 
 const admissionLock = '70463909136524';
 // Interrupted is terminal: its attempt will never be replayed, but a fresh explicit
@@ -472,6 +500,352 @@ export class PostgresRunStore {
     });
   }
 
+  /**
+   * Creates only a canonical Run projection and a durable queue job. The
+   * connector grant and attempt remain authoritative in the authorizer store.
+   */
+  async admitSyntheticBrokerRun(
+    input: {
+      runId: string;
+      taskId: string;
+      authorizationId: string;
+      requestId: string;
+      correlationId: string;
+      binding: ConnectorAuthorizationRequest;
+    },
+    enqueue: EnqueueRun,
+  ): Promise<{ run: Run; created: boolean; events: DurableEvent[] }> {
+    const binding = ConnectorAuthorizationRequestSchema.safeParse(input.binding);
+    if (
+      !isUuid(input.runId) ||
+      !isUuid(input.authorizationId) ||
+      !isUuid(input.requestId) ||
+      !isUuid(input.correlationId) ||
+      !binding.success ||
+      input.runId !== input.correlationId ||
+      binding.data.taskId !== input.taskId
+    ) {
+      throw new StoreError('invalid_input', 'Synthetic Run binding is invalid.', 400);
+    }
+    if (input.requestId.length < 16 || input.requestId.length > 128) {
+      throw new StoreError('invalid_input', 'Idempotency-Key is invalid.', 400);
+    }
+    const fingerprint = JSON.stringify({
+      kind: 'synthetic-broker-run-v1',
+      runId: input.runId,
+      taskId: input.taskId,
+      authorizationId: input.authorizationId,
+      requestId: input.requestId,
+      correlationId: input.correlationId,
+      binding: binding.data,
+    });
+
+    return inTransaction(this.pool, async (client) => {
+      await client.query("SET LOCAL lock_timeout = '3s'");
+      await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [admissionLock]);
+      const previous = await client.query<
+        QueryResultRow & { request_fingerprint: string; run_id: string }
+      >(
+        'SELECT request_fingerprint, run_id FROM omnis.run_idempotency WHERE idempotency_key = $1',
+        [input.requestId],
+      );
+      if (previous.rows[0]) {
+        if (
+          previous.rows[0].request_fingerprint !== fingerprint ||
+          previous.rows[0].run_id !== input.runId
+        ) {
+          throw new StoreError(
+            'conflict',
+            'Idempotency key was already used for another run.',
+            409,
+          );
+        }
+        const existing = await client.query<RunRow>(`${runSelect} WHERE r.id = $1`, [input.runId]);
+        if (!existing.rows[0])
+          throw new StoreError('conflict', 'Prior run state is unavailable.', 409);
+        return { run: mapRun(existing.rows[0]), created: false, events: [] };
+      }
+
+      const taskResult = await client.query<TaskRow>(
+        'SELECT id, title, detail, status, created_at, project_id, association_revision FROM omnis.tasks WHERE id = $1 FOR UPDATE',
+        [input.taskId],
+      );
+      const task = taskResult.rows[0];
+      if (!task) throw new StoreError('not_found', 'Task was not found.', 404);
+      if (
+        task.project_id !== binding.data.projectId ||
+        Number(task.association_revision) !== binding.data.taskRevision ||
+        task.status === 'completed'
+      ) {
+        throw new StoreError('conflict', 'The approved task context has changed.', 409);
+      }
+
+      const active = await client.query(
+        'SELECT id FROM omnis.runs WHERE status = ANY($1::text[]) LIMIT 1',
+        [activeStatuses],
+      );
+      if (active.rowCount) {
+        throw new StoreError(
+          'concurrency_limit',
+          'A run is active or needs interruption review.',
+          409,
+        );
+      }
+
+      const created = await client.query<RunRow>(
+        `INSERT INTO omnis.runs
+           (id, task_id, task_title, connector_authorization_id, connector_request_id,
+            connector_correlation_id, connector_request_binding)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+         RETURNING ${runColumns}`,
+        [
+          input.runId,
+          task.id,
+          task.title,
+          input.authorizationId,
+          input.requestId,
+          input.correlationId,
+          JSON.stringify(binding.data),
+        ],
+      );
+      const run = mapRun(created.rows[0]!);
+      const event = await appendEvent(
+        client,
+        run.id,
+        'run.queued',
+        'Queued as a synthetic broker run. No real provider or runtime is connected.',
+      );
+      const jobId = await enqueue(asPgBossTransaction(client), { runId: run.id });
+      if (!jobId)
+        throw new StoreError('conflict', 'The durable synthetic job was not admitted.', 409);
+      await client.query('UPDATE omnis.runs SET pg_boss_job_id = $2 WHERE id = $1', [
+        run.id,
+        jobId,
+      ]);
+      await client.query(
+        'INSERT INTO omnis.run_idempotency (idempotency_key, request_fingerprint, run_id) VALUES ($1, $2, $3)',
+        [input.requestId, fingerprint, run.id],
+      );
+      await client.query("UPDATE omnis.tasks SET status = 'in_progress' WHERE id = $1", [task.id]);
+      return { run, created: true, events: [{ runId: run.id, event }] };
+    });
+  }
+
+  async getSyntheticBrokerRun(runId: string): Promise<SyntheticBrokerRun | undefined> {
+    const result = await this.pool.query<RunRow>(`${runSelect} WHERE r.id = $1`, [runId]);
+    const row = result.rows[0];
+    if (!row || !row.connector_authorization_id) return undefined;
+    const binding = ConnectorAuthorizationRequestSchema.parse(row.connector_request_binding);
+    if (
+      !row.connector_request_id ||
+      !row.connector_correlation_id ||
+      row.connector_correlation_id !== row.id ||
+      binding.taskId !== row.task_id
+    ) {
+      throw new StoreError('conflict', 'Persisted synthetic Run binding is invalid.', 409);
+    }
+    return {
+      run: mapRun(row),
+      authorizationId: row.connector_authorization_id,
+      requestId: row.connector_request_id,
+      correlationId: row.connector_correlation_id,
+      binding,
+      attemptId: row.connector_attempt_id ?? null,
+    };
+  }
+
+  async getSyntheticBrokerRunByAuthorization(
+    authorizationId: string,
+  ): Promise<SyntheticBrokerRun | undefined> {
+    const result = await this.pool.query<RunRow>(
+      `${runSelect} WHERE r.connector_authorization_id = $1`,
+      [authorizationId],
+    );
+    const row = result.rows[0];
+    return row ? this.getSyntheticBrokerRun(row.id) : undefined;
+  }
+
+  async beginSyntheticBrokerRun(
+    runId: string,
+    workerId: string,
+    leaseSeconds: number,
+  ): Promise<{ run: Run; started: boolean; events: DurableEvent[]; generation: number }> {
+    return inTransaction(this.pool, async (client) => {
+      const current = await lockRun(client, runId);
+      if (!current.connector_authorization_id) {
+        throw new StoreError('invalid_transition', 'The run is not a synthetic broker run.', 409);
+      }
+      if (current.status === 'stopping') {
+        const cancelled = await client.query<RunRow>(
+          `UPDATE omnis.runs SET status='cancelled', lease_owner=NULL, lease_expires_at=NULL,
+             updated_at=now() WHERE id=$1 RETURNING ${runColumns}`,
+          [runId],
+        );
+        await client.query("UPDATE omnis.tasks SET status='open' WHERE id=$1", [current.task_id]);
+        const event = await appendEvent(
+          client,
+          runId,
+          'run.cancelled',
+          'Cancellation was confirmed before the synthetic broker job started.',
+        );
+        return {
+          run: mapRun(cancelled.rows[0]!),
+          started: false,
+          events: [{ runId, event }],
+          generation: current.execution_generation,
+        };
+      }
+      if (current.status !== 'queued') {
+        return {
+          run: mapRun(current),
+          started: false,
+          events: [],
+          generation: current.execution_generation,
+        };
+      }
+      const updated = await client.query<RunRow>(
+        `UPDATE omnis.runs SET status='running', lease_owner=$2,
+           lease_expires_at=now()+($3::text || ' seconds')::interval,
+           execution_generation=execution_generation+1, updated_at=now()
+         WHERE id=$1 RETURNING ${runColumns}`,
+        [runId, workerId, leaseSeconds],
+      );
+      const event = await appendEvent(
+        client,
+        runId,
+        'run.started',
+        'Synthetic broker execution started.',
+      );
+      return {
+        run: mapRun(updated.rows[0]!),
+        started: true,
+        generation: updated.rows[0]!.execution_generation,
+        events: [{ runId, event }],
+      };
+    });
+  }
+
+  async renewSyntheticBrokerLease(
+    runId: string,
+    workerId: string,
+    generation: number,
+    leaseSeconds: number,
+  ): Promise<'renewed' | 'stop_requested' | false> {
+    const result = await this.pool.query<QueryResultRow & { status: string }>(
+      `UPDATE omnis.runs SET lease_expires_at=now()+($4::text || ' seconds')::interval,
+         updated_at=now()
+       WHERE id=$1 AND connector_authorization_id IS NOT NULL AND lease_owner=$2
+         AND execution_generation=$3 AND status IN ('running','stopping')
+         AND lease_expires_at > now()
+       RETURNING status`,
+      [runId, workerId, generation, leaseSeconds],
+    );
+    if (!result.rows[0]) return false;
+    return result.rows[0].status === 'stopping' ? 'stop_requested' : 'renewed';
+  }
+
+  async requestSyntheticBrokerStop(
+    runId: string,
+    authorizationId: string,
+  ): Promise<{ run: Run; events: DurableEvent[] }> {
+    return inTransaction(this.pool, async (client) => {
+      const current = await lockRun(client, runId);
+      if (current.connector_authorization_id !== authorizationId) {
+        throw new StoreError('not_found', 'Synthetic Run was not found.', 404);
+      }
+      if (terminalStatuses.has(current.status)) return { run: mapRun(current), events: [] };
+      if (current.status === 'stopping') return { run: mapRun(current), events: [] };
+      const updated = await client.query<RunRow>(
+        `UPDATE omnis.runs SET status='stopping', updated_at=now()
+         WHERE id=$1 RETURNING ${runColumns}`,
+        [runId],
+      );
+      const event = await appendEvent(
+        client,
+        runId,
+        'run.stop_requested',
+        'Owner cancellation was requested; provider termination is not yet confirmed.',
+      );
+      return { run: mapRun(updated.rows[0]!), events: [{ runId, event }] };
+    });
+  }
+
+  async finishSyntheticBrokerRun(
+    runId: string,
+    workerId: string,
+    generation: number,
+    result: SyntheticBrokerRunResult,
+  ): Promise<{ run: Run; events: DurableEvent[] }> {
+    if (!ConnectorExecutionStatusSchema.safeParse(result.status).success) {
+      throw new StoreError('invalid_input', 'Synthetic broker result is invalid.', 400);
+    }
+    return inTransaction(this.pool, async (client) => {
+      const current = await lockRun(client, runId);
+      if (
+        !current.connector_authorization_id ||
+        current.lease_owner !== workerId ||
+        current.execution_generation !== generation ||
+        !['running', 'stopping'].includes(current.status)
+      ) {
+        throw new StoreError('conflict', 'The worker no longer owns this synthetic Run.', 409);
+      }
+      const nextStatus: Run['status'] =
+        result.status === 'completed'
+          ? 'completed'
+          : result.status === 'failed'
+            ? 'failed'
+            : result.status === 'interrupted'
+              ? current.status === 'stopping'
+                ? 'cancelled'
+                : 'interrupted'
+              : 'unknown';
+      const updated = await client.query<RunRow>(
+        `UPDATE omnis.runs SET status=$4, result_output=$5,
+           connector_attempt_id=COALESCE($6, connector_attempt_id),
+           lease_owner=NULL, lease_expires_at=NULL, updated_at=now()
+         WHERE id=$1 AND lease_owner=$2 AND execution_generation=$3
+           AND lease_expires_at > now()
+         RETURNING ${runColumns}`,
+        [
+          runId,
+          workerId,
+          generation,
+          nextStatus,
+          nextStatus === 'completed' ? (result.responseText ?? null) : null,
+          result.attemptId ?? null,
+        ],
+      );
+      if (!updated.rows[0]) throw new StoreError('conflict', 'The worker lost its Run lease.', 409);
+      if (nextStatus === 'completed') {
+        await client.query("UPDATE omnis.tasks SET status='completed' WHERE id=$1", [
+          current.task_id,
+        ]);
+      } else if (nextStatus !== 'unknown') {
+        await client.query("UPDATE omnis.tasks SET status='open' WHERE id=$1", [current.task_id]);
+      }
+      const eventType: RunEventType =
+        nextStatus === 'completed'
+          ? 'run.completed'
+          : nextStatus === 'failed'
+            ? 'run.failed'
+            : nextStatus === 'cancelled'
+              ? 'run.cancelled'
+              : 'run.interrupted';
+      const message =
+        nextStatus === 'completed'
+          ? (result.responseText ?? 'Synthetic broker run completed.')
+          : nextStatus === 'failed'
+            ? 'Synthetic broker execution failed; see the authorized attempt record for details.'
+            : nextStatus === 'cancelled'
+              ? 'The synthetic provider confirmed interruption.'
+              : nextStatus === 'interrupted'
+                ? 'Synthetic broker execution stopped before a terminal result was confirmed.'
+                : 'The broker outcome is unknown. Do not resubmit this request.';
+      const event = await appendEvent(client, runId, eventType, message);
+      return { run: mapRun(updated.rows[0]), events: [{ runId, event }] };
+    });
+  }
+
   async getRun(runId: string): Promise<Run | undefined> {
     const result = await this.pool.query<RunRow>(`${runSelect} WHERE r.id = $1`, [runId]);
     return result.rows[0] ? mapRun(result.rows[0]) : undefined;
@@ -669,6 +1043,13 @@ export class PostgresRunStore {
   async requestStop(runId: string): Promise<{ run: Run; events: DurableEvent[] }> {
     return inTransaction(this.pool, async (client) => {
       const current = await lockRun(client, runId);
+      if (current.connector_authorization_id) {
+        throw new StoreError(
+          'invalid_transition',
+          'Synthetic broker runs must be cancelled through owner grant revocation.',
+          409,
+        );
+      }
       if (terminalStatuses.has(current.status)) {
         throw new StoreError('invalid_transition', `Cannot stop a ${current.status} run.`, 409);
       }
@@ -911,20 +1292,25 @@ export class PostgresRunStore {
       );
       const events: DurableEvent[] = [];
       for (const row of expired.rows) {
+        const nextStatus = row.connector_authorization_id ? 'unknown' : 'interrupted';
         await client.query(
           `
-            UPDATE omnis.runs SET status = 'interrupted', lease_owner = NULL,
+            UPDATE omnis.runs SET status = $2, lease_owner = NULL,
               lease_expires_at = NULL, updated_at = now()
             WHERE id = $1
           `,
-          [row.id],
+          [row.id, nextStatus],
         );
-        await client.query("UPDATE omnis.tasks SET status = 'open' WHERE id = $1", [row.task_id]);
+        if (nextStatus !== 'unknown') {
+          await client.query("UPDATE omnis.tasks SET status = 'open' WHERE id = $1", [row.task_id]);
+        }
         const event = await appendEvent(
           client,
           row.id,
           'run.interrupted',
-          'The execution lease expired. It was not retried automatically.',
+          row.connector_authorization_id
+            ? 'The worker lease expired before the broker result was confirmed. The attempt was not retried; reconcile its authorizer record.'
+            : 'The execution lease expired. It was not retried automatically.',
         );
         events.push({ runId: row.id, event });
       }
@@ -938,6 +1324,7 @@ export class PostgresRunStore {
       `
         SELECT id FROM omnis.runs
         WHERE status IN ('running', 'stopping') AND lease_expires_at > now()
+          AND connector_authorization_id IS NULL
           AND ($1::text[] IS NULL OR id = ANY($1::text[]))
         ORDER BY lease_expires_at ASC
       `,
@@ -1022,7 +1409,8 @@ export class PostgresRunStore {
       'run.cancelled',
       'Mock worker acknowledged cancellation.',
     );
-    await appendRunAuthorizationAudit(client, current.id, 'operation.cancelled');
+    if (!current.connector_authorization_id)
+      await appendRunAuthorizationAudit(client, current.id, 'operation.cancelled');
     return { run: mapRun(updated.rows[0]!), events: [{ runId: current.id, event }] };
   }
 }
@@ -1051,7 +1439,8 @@ async function appendRunAuthorizationAudit(
 }
 
 const runColumns = `id, task_id, task_title, status, lease_owner, lease_expires_at, execution_generation,
-  runtime_kind, synthetic, usage, created_at, updated_at`;
+  runtime_kind, synthetic, usage, created_at, updated_at, connector_authorization_id,
+  connector_request_id, connector_correlation_id, connector_request_binding, connector_attempt_id`;
 const runSelect = `SELECT ${runColumns} FROM omnis.runs r`;
 
 async function lockRun(client: PoolClient, runId: string): Promise<RunRow> {

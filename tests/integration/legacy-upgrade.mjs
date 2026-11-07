@@ -146,13 +146,13 @@ try {
         'unsafeRunStates', (SELECT count(*) FROM omnis.runs
           WHERE status IN ('queued', 'running', 'stopping', 'unknown')),
         'recordFingerprints', json_build_object(
-          'runs', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(r)::text), ':' ORDER BY r.id), '')) FROM omnis.runs r),
           'events', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(e)::text), ':' ORDER BY e.run_id, e.sequence), '')) FROM omnis.run_events e),
           'idempotency', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(i)::text), ':' ORDER BY i.idempotency_key), '')) FROM omnis.run_idempotency i)
         )
       )
     `)
   ).rows[0].json_build_object;
+  const beforeRunCoreFingerprint = await runCoreFingerprint(databaseAdminPool);
   const beforeTaskCoreFingerprint = await taskCoreFingerprint(databaseAdminPool);
   assert.equal(beforeUpgrade.tasks, 3);
   assert.equal(beforeUpgrade.runs, 3);
@@ -177,6 +177,11 @@ try {
   for (const [table, fingerprint] of Object.entries(beforeUpgrade.recordFingerprints)) {
     assert.equal(afterUpgrade.recordFingerprints[table], fingerprint);
   }
+  assert.equal(
+    await runCoreFingerprint(databaseAdminPool),
+    beforeRunCoreFingerprint,
+    'the migration may add projection columns but must preserve pre-existing Run fields',
+  );
   assert.equal(
     await taskCoreFingerprint(databaseAdminPool),
     beforeTaskCoreFingerprint,
@@ -205,6 +210,7 @@ try {
     '0020_epic_task_association',
     '0022_synthetic_connector_authorization',
     '0023_synthetic_broker_submission_lifecycle',
+    '0024_synthetic_task_run_projection',
   ];
   if (afterUpgrade.migrations.includes('0021_mission_lane_events')) {
     expectedMigrations.splice(
@@ -697,7 +703,7 @@ async function verifyPost0005ProvenanceUpgrade() {
       "SELECT id, length(checksum) AS checksum_length FROM omnis.schema_migrations WHERE id LIKE '00%' ORDER BY id",
     );
     assert.deepEqual(migrationRows.rows.at(-1), {
-      id: '0023_synthetic_broker_submission_lifecycle',
+      id: '0024_synthetic_task_run_projection',
       checksum_length: 64,
     });
   } finally {
@@ -724,6 +730,34 @@ async function taskCoreFingerprint(pool) {
           'created_at', task.created_at
         )::text), ':' ORDER BY task.id), '')) AS fingerprint
       FROM omnis.tasks AS task
+    `)
+  ).rows[0].fingerprint;
+}
+
+async function runCoreFingerprint(pool) {
+  return (
+    await pool.query(`
+      SELECT md5(COALESCE(string_agg(md5(jsonb_build_object(
+        'id', run.id,
+        'task_id', run.task_id,
+        'task_title', run.task_title,
+        'status', run.status,
+        'runtime_kind', run.runtime_kind,
+        'synthetic', run.synthetic,
+        'usage', run.usage,
+        'created_at', run.created_at,
+        'updated_at', run.updated_at,
+        'result_output', run.result_output,
+        'result_evidence_refs', run.result_evidence_refs,
+        'retry_count', run.retry_count,
+        'retry_policy', run.retry_policy,
+        'execution_generation', run.execution_generation,
+        'lease_owner', run.lease_owner,
+        'lease_expires_at', run.lease_expires_at,
+        'pg_boss_job_id', run.pg_boss_job_id,
+        'last_event_sequence', run.last_event_sequence
+      )::text), ':' ORDER BY run.id), '')) AS fingerprint
+      FROM omnis.runs AS run
     `)
   ).rows[0].fingerprint;
 }
