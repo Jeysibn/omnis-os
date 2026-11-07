@@ -174,6 +174,15 @@ test('owner sees an authorized synthetic broker Run, ordered events, result and 
   expect(profileResponse.status).toBe(200);
   const profileVersion = profileResponse.body.version;
 
+  // Exercise the owner assignment interface against the real API and PostgreSQL store before
+  // asking the independently authorized synthetic connector to consume the profile.
+  await page.reload();
+  await expect(page.getByLabel('Agent profile')).toBeVisible();
+  await page.getByLabel('Agent profile').selectOption(agentId);
+  await expect(page.getByLabel('Runtime')).toHaveValue('mock');
+  await page.getByRole('button', { name: 'Save assignment', exact: true }).click();
+  await expect(page.getByText('Synthetic mock assignment saved.')).toBeVisible();
+
   const renderedRequest = JSON.stringify({
     version: 'omnis.synthetic-connector-request.v1',
     task: { id: assigned.body.id, title: assigned.body.title, detail: assigned.body.detail },
