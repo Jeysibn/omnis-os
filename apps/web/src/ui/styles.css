@@ -1988,6 +1988,15 @@ button:disabled {
 .agents-profile > p {
   margin: 0;
 }
+.agents-archive-action {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.agents-archive-action p {
+  margin: 0;
+}
 .agents-profile-layout {
   display: grid;
   grid-template-columns: 200px minmax(0, 1fr);
