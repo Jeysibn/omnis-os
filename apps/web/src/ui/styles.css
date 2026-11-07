@@ -716,6 +716,7 @@ button:disabled {
 }
 .task-composer input,
 .task-composer textarea,
+.task-composer select,
 .auth-form input {
   width: 100%;
   border: 1px solid #d6dee8;
@@ -725,6 +726,10 @@ button:disabled {
   outline: none;
 }
 .task-composer input {
+  height: 42px;
+  padding: 0 12px;
+}
+.task-composer select {
   height: 42px;
   padding: 0 12px;
 }
@@ -740,9 +745,32 @@ button:disabled {
 }
 .task-composer input:focus,
 .task-composer textarea:focus,
+.task-composer select:focus,
 .auth-form input:focus {
   border-color: #6b89d4;
   box-shadow: 0 0 0 3px #6b89d421;
+}
+.task-project-error {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  color: #8d3e3e;
+  font-size: 12px;
+}
+.task-project-error button {
+  border: 0;
+  padding: 0;
+  color: #355bb1;
+  background: transparent;
+  font: inherit;
+  font-weight: 620;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.task-project-error button:focus-visible {
+  outline: 2px solid #6b89d4;
+  outline-offset: 2px;
 }
 .composer-footer {
   display: flex;
