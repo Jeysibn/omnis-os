@@ -301,6 +301,10 @@ test('owner sees an authorized synthetic broker Run, ordered events, result and 
   });
 
   await page.goto(`/#runs/${runId}`);
+  // The task and run were created through direct owner requests above, so the
+  // browser's workspace cache predates this Run. Reload to verify that the
+  // persisted run list and SSE replay restore its durable event history.
+  await page.reload();
   const inspector = page.getByRole('region', { name: `Event history for ${runTaskTitle}` });
   await expect(inspector).toContainText('queued');
   await expect(inspector).toContainText('started');
