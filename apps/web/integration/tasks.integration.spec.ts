@@ -218,6 +218,7 @@ test('owner sees an authorized synthetic broker Run, ordered events, result and 
   };
   const authorizationResponse = await ownerRequest(page, '/api/v1/connector-authorizations', {
     method: 'POST',
+    idempotencyKey: randomUUID(),
     body: authorizationInput,
   });
   expect(authorizationResponse.status).toBe(201);
