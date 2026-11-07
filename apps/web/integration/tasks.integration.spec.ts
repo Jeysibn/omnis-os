@@ -134,6 +134,7 @@ test('owner sees an authorized synthetic broker Run, ordered events, result and 
   expect(project.status).toBe('active');
   const assigned = await ownerRequest(page, `/api/v1/tasks/${createdTask.id}/project`, {
     method: 'PUT',
+    idempotencyKey: randomUUID(),
     body: { projectId: project.id, expectedAssociationRevision: createdTask.associationRevision },
   });
   expect(assigned.status).toBe(200);
