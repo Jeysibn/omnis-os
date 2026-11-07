@@ -1176,7 +1176,9 @@ function App() {
             onStop={(run) => void stopRun(run)}
           />
         )}
-        {page === 'agents' && <AgentsWorkspace onUnauthorized={expireSessionIfNeeded} />}
+        {page === 'agents' && (
+          <AgentsWorkspace onUnauthorized={expireSessionIfNeeded} csrfToken={csrfToken} />
+        )}
         {page === 'departments' && (
           <DepartmentsWorkspace
             onUnauthorized={expireSessionIfNeeded}

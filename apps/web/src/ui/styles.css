@@ -1674,6 +1674,53 @@ button:disabled {
   font: inherit;
   font-size: 14px;
 }
+.agents-create-form {
+  display: grid;
+  gap: 14px;
+  margin: 0 0 18px;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.agents-create-form h3,
+.agents-create-form p {
+  margin: 0;
+}
+.agents-create-form > p {
+  color: var(--muted);
+}
+.agents-create-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.agents-create-form .agents-field input {
+  min-width: 0;
+  min-height: 40px;
+  padding: 0 10px;
+  border: 1px solid #c9d2df;
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+}
+.agents-create-form .agents-field input:focus {
+  outline: 3px solid var(--blue);
+  outline-offset: 2px;
+}
+.agents-create-error {
+  color: var(--red);
+}
+.agents-create-actions,
+.agents-directory-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
 .agents-check {
   display: flex;
   align-items: center;
@@ -2000,6 +2047,9 @@ button:disabled {
   }
 }
 @media (max-width: 639px) {
+  .agents-create-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
   .agents-grid,
   .agents-facts {
     grid-template-columns: minmax(0, 1fr);

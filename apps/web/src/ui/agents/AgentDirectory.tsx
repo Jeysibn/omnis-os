@@ -32,9 +32,11 @@ function matches(agent: AgentSummary, terms: string[]) {
 export function AgentDirectory({
   directory,
   initialFilters,
+  onCreate,
 }: {
   directory: AgentDirectoryResponse;
   initialFilters: DirectoryFilters;
+  onCreate: () => void;
 }) {
   const [filters, setFilters] = useState(initialFilters);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -95,13 +97,22 @@ export function AgentDirectory({
 
   if (agents.length === 0)
     return (
-      <Notice title="No agents yet." detail="Agent creation isn't available in this release." />
+      <Notice title="No agents yet." detail="Create an agent identity, then define its profile.">
+        <button type="button" className="primary-button" onClick={onCreate}>
+          Create agent
+        </button>
+      </Notice>
     );
 
   const allArchived = eligible.length === 0;
 
   return (
     <div className="agents-directory">
+      <div className="agents-directory-actions">
+        <button type="button" className="primary-button" onClick={onCreate}>
+          Create agent
+        </button>
+      </div>
       <form className="agents-toolbar" role="search" onSubmit={(event) => event.preventDefault()}>
         <div className="agents-field agents-field-grow">
           <label htmlFor={ids.search}>Search agents</label>

@@ -116,13 +116,16 @@ type Options = {
   versionBody?: (agentId: string, versionNo: number) => unknown;
   profileBody?: (agentId: string) => unknown;
   signedOut?: boolean;
+  createResponseLosses?: number;
 };
 
 function createApi(page: Page) {
   let options: Options = {};
   let fixtures = defaultFixtures;
   let historyFailures = 0;
+  let createResponseLosses = 0;
   const requests: Array<{ method: string; path: string; search: string }> = [];
+  const createRequests: Array<{ body: unknown; key: string | undefined }> = [];
   const unexpected: string[] = [];
 
   const error = (route: Route, status: number, code = 'error', message = 'Fixture error.') =>
@@ -134,6 +137,37 @@ function createApi(page: Page) {
     const { pathname: path, search } = url;
     const method = request.method();
     requests.push({ method, path, search });
+
+    if (method === 'POST' && path === '/api/v1/agents') {
+      const body = request.postDataJSON() as { name?: string; slug?: string };
+      const key = request.headers()['idempotency-key'];
+      createRequests.push({ body, key });
+      if (request.headers()['x-omnis-csrf'] !== 'csrf-fixture' || !key)
+        return error(route, 403, 'invalid_csrf', 'Mutation protection failed.');
+      if (createResponseLosses > 0) {
+        createResponseLosses -= 1;
+        return route.abort();
+      }
+      const created = agent('agent-created', body.name ?? 'New Agent', {
+        lifecycle: 'draft',
+        department: null,
+      });
+      created.summary.slug = body.slug ?? 'new-agent';
+      fixtures = [...fixtures, created];
+      return route.fulfill({
+        status: 201,
+        json: {
+          requestId: key,
+          operation: 'agent.created',
+          agentId: created.summary.id,
+          lifecycle: 'draft',
+          versionId: null,
+          versionNo: null,
+          draftRevision: 0,
+          occurredAt: later,
+        },
+      });
+    }
 
     if (path === '/api/v1/auth/csrf') return route.fulfill({ json: { csrfToken: 'csrf-fixture' } });
     if (path === '/api/v1/me')
@@ -237,10 +271,13 @@ function createApi(page: Page) {
       options = { ...next };
       fixtures = next.agents ?? defaultFixtures;
       historyFailures = next.historyFailures ?? 0;
+      createResponseLosses = next.createResponseLosses ?? 0;
       requests.length = 0;
+      createRequests.length = 0;
     },
     requests,
     unexpected,
+    createRequests,
     heal() {
       options.directoryFailures = 0;
       delete options.directoryStatus;
@@ -292,6 +329,48 @@ const card = (page: Page, name: string) =>
   page.getByRole('listitem').filter({ has: page.getByRole('link', { name, exact: true }) });
 
 test.describe('Agent Directory', () => {
+  test('creates a draft identity with an explicit idempotency key and opens its profile', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ agents: [] });
+    await openAgents(page);
+    await page.getByRole('button', { name: 'Create agent' }).click();
+    await page.getByLabel('Name', { exact: true }).fill('Orion');
+    await page.getByLabel('Slug', { exact: true }).fill('orion-ops');
+    await page.getByRole('button', { name: 'Create draft agent' }).click();
+
+    await expect(page.getByRole('heading', { name: 'Orion' })).toBeVisible();
+    await expect(page.getByText('No published version yet.').first()).toBeVisible();
+    expect(api.createRequests).toHaveLength(1);
+    expect(api.createRequests[0]?.key).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(api.createRequests[0]?.body).toEqual({
+      name: 'Orion',
+      slug: 'orion-ops',
+      departmentId: null,
+    });
+  });
+
+  test('an uncertain create can retry only the identical request and key', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ agents: [], createResponseLosses: 1 });
+    await openAgents(page);
+    await page.getByRole('button', { name: 'Create agent' }).click();
+    await page.getByLabel('Name', { exact: true }).fill('Orion');
+    await page.getByLabel('Slug', { exact: true }).fill('orion-ops');
+    await page.getByRole('button', { name: 'Create draft agent' }).click();
+
+    await expect(page.getByText(/create result is unknown/i)).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Retry same request' })).toBeVisible();
+    expect(api.createRequests).toHaveLength(1);
+    await page.getByRole('button', { name: 'Retry same request' }).click();
+    await expect(page.getByRole('heading', { name: 'Orion' })).toBeVisible();
+    expect(api.createRequests).toHaveLength(2);
+    expect(api.createRequests[1]).toEqual(api.createRequests[0]);
+  });
+
   test('lists real API agents with identity, profile status and no runtime claims', async ({
     page,
     api,

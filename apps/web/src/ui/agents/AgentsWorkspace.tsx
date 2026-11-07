@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { AgentDirectory } from './AgentDirectory.js';
+import { AgentCreateForm } from './AgentCreateForm.js';
 import { AgentProfile } from './AgentProfile.js';
 import { fetchDirectory, fetchProfile, fetchVersion, useAgentResource } from './data.js';
 import { directoryHash, parseAgentsHash, profileHash, type AgentsRoute } from './route.js';
@@ -33,7 +34,13 @@ function notFoundBack() {
   );
 }
 
-export function AgentsWorkspace({ onUnauthorized }: { onUnauthorized: (cause: unknown) => void }) {
+export function AgentsWorkspace({
+  onUnauthorized,
+  csrfToken,
+}: {
+  onUnauthorized: (cause: unknown) => void;
+  csrfToken: string;
+}) {
   const [route, setRoute] = useState<AgentsRoute>(currentRoute);
   // Bumped on every hashchange so the directory re-reads filters from the URL.
   const [navigation, setNavigation] = useState(0);
@@ -85,6 +92,7 @@ export function AgentsWorkspace({ onUnauthorized }: { onUnauthorized: (cause: un
           route={route}
           headingRef={headingRef}
           onUnauthorized={onUnauthorized}
+          csrfToken={csrfToken}
         />
       )}
       {route.kind === 'profile' && (
@@ -115,8 +123,12 @@ function DirectoryScreen({
   route,
   headingRef,
   onUnauthorized,
-}: ScreenProps<Extract<AgentsRoute, { kind: 'directory' }>>) {
+  csrfToken,
+}: ScreenProps<Extract<AgentsRoute, { kind: 'directory' }>> & {
+  csrfToken: string;
+}) {
   const [state, retry] = useAgentResource('directory', fetchDirectory, onUnauthorized);
+  const [creating, setCreating] = useState(false);
   return (
     <>
       <div className="agents-head-row">
@@ -127,12 +139,23 @@ function DirectoryScreen({
           Manage departments
         </a>
       </div>
+      {creating && (
+        <AgentCreateForm
+          csrfToken={csrfToken}
+          onUnauthorized={onUnauthorized}
+          onCancel={() => setCreating(false)}
+        />
+      )}
       {state.status === 'loading' && <Loading resource="agents" />}
       {state.status === 'error' && (
         <ErrorState resource="Agents" error={state.error} onRetry={retry} />
       )}
       {state.status === 'ready' && (
-        <AgentDirectory directory={state.data} initialFilters={route.filters} />
+        <AgentDirectory
+          directory={state.data}
+          initialFilters={route.filters}
+          onCreate={() => setCreating(true)}
+        />
       )}
     </>
   );
