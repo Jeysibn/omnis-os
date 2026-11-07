@@ -916,7 +916,7 @@ const postgresSuite = describe(
       assert.match((await store.getEvents(runId)).at(-1)!.message, /Do not resubmit/);
     });
 
-    it('reconciles an expired synthetic worker lease as unknown without replay', async () => {
+    it('reconciles an expired synthetic worker lease after submission as unknown without replay', async () => {
       const fixture = await connectorFixture();
       const grant = await fixture.authorizations.request(fixture.request, randomUUID());
       await fixture.authorizations.decide(grant.id, 'owner', {
@@ -936,6 +936,7 @@ const postgresSuite = describe(
         async () => 'synthetic-job',
       );
       const claim = await store.beginSyntheticBrokerRun(admitted.run.id, 'old-worker', 1);
+      await store.recordSyntheticBrokerSubmissionRequested(runId, 'old-worker', claim.generation);
       await pool!.query(
         "UPDATE omnis.runs SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
         [runId],
@@ -955,6 +956,39 @@ const postgresSuite = describe(
       assert.equal((await store.getTask(fixture.task.id))?.status, 'in_progress');
       assert.equal(events[0]?.event.type, 'run.outcome_unknown');
       assert.equal((await store.listActiveRunIds([runId])).includes(runId), false);
+    });
+
+    it('interrupts an expired synthetic worker lease before broker submission', async () => {
+      const fixture = await connectorFixture();
+      const grant = await fixture.authorizations.request(fixture.request, randomUUID());
+      await fixture.authorizations.decide(grant.id, 'owner', {
+        decision: 'approve',
+        promptDigestConfirmation: fixture.request.promptDigest,
+      });
+      const runId = randomUUID();
+      const admitted = await store.admitSyntheticBrokerRun(
+        {
+          runId,
+          taskId: fixture.task.id,
+          authorizationId: grant.id,
+          requestId: randomUUID(),
+          correlationId: runId,
+          binding: fixture.request,
+        },
+        async () => 'synthetic-job',
+      );
+      await store.beginSyntheticBrokerRun(admitted.run.id, 'old-worker', 1);
+      await pool!.query(
+        "UPDATE omnis.runs SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
+        [runId],
+      );
+
+      const events = await store.reconcileExpiredRuns();
+
+      assert.equal((await store.getRun(runId))?.status, 'interrupted');
+      assert.equal((await store.getTask(fixture.task.id))?.status, 'open');
+      assert.equal(events[0]?.event.type, 'run.interrupted');
+      assert.match(events[0]?.event.message ?? '', /before broker submission began/);
     });
 
     it('confirms cancellation before the queued synthetic Run can begin', async () => {

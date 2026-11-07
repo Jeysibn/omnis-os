@@ -1329,7 +1329,21 @@ export class PostgresRunStore {
       );
       const events: DurableEvent[] = [];
       for (const row of expired.rows) {
-        const nextStatus = row.connector_authorization_id ? 'unknown' : 'interrupted';
+        const submission = row.connector_authorization_id
+          ? await client.query<{ requested: boolean }>(
+              `SELECT EXISTS (
+                 SELECT 1 FROM omnis.run_events
+                 WHERE run_id = $1 AND event_type = 'run.provider_submission_requested'
+               ) AS requested`,
+              [row.id],
+            )
+          : undefined;
+        const submissionRequested = submission?.rows[0]?.requested ?? false;
+        const nextStatus = submissionRequested
+          ? 'unknown'
+          : row.status === 'stopping'
+            ? 'cancelled'
+            : 'interrupted';
         await client.query(
           `
             UPDATE omnis.runs SET status = $2, lease_owner = NULL,
@@ -1344,10 +1358,16 @@ export class PostgresRunStore {
         const event = await appendEvent(
           client,
           row.id,
-          row.connector_authorization_id ? 'run.outcome_unknown' : 'run.interrupted',
-          row.connector_authorization_id
+          nextStatus === 'unknown'
+            ? 'run.outcome_unknown'
+            : nextStatus === 'cancelled'
+              ? 'run.cancelled'
+              : 'run.interrupted',
+          nextStatus === 'unknown'
             ? 'The worker lease expired before the broker result was confirmed. The attempt was not retried; reconcile its authorizer record.'
-            : 'The execution lease expired. It was not retried automatically.',
+            : nextStatus === 'cancelled'
+              ? 'Cancellation was confirmed before broker submission began.'
+              : 'The worker lease expired before broker submission began. The execution was not retried automatically.',
         );
         events.push({ runId: row.id, event });
       }
