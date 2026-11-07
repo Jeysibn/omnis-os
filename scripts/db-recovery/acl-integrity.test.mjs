@@ -243,6 +243,15 @@ const allowed = [
   acl(
     'routine',
     'omnis',
+    'update_agent_identity(p_agent_id text, p_expected_revision bigint, p_name text, p_slug text, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
+    'EXECUTE',
+    null,
+    'omnis_authorizer',
+    true,
+  ),
+  acl(
+    'routine',
+    'omnis',
     'lock_active_run_authorization(p_run_id text)',
     'EXECUTE',
     null,

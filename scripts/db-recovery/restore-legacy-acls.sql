@@ -165,6 +165,10 @@ BEGIN
     EXECUTE 'REVOKE ALL ON FUNCTION omnis.archive_agent(text,uuid,integer,bytea) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
     EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.archive_agent(text,uuid,integer,bytea) TO omnis_authorizer';
   END IF;
+  IF pg_catalog.to_regprocedure('omnis.update_agent_identity(text,bigint,text,text,uuid,integer,bytea)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.update_agent_identity(text,bigint,text,text,uuid,integer,bytea) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.update_agent_identity(text,bigint,text,text,uuid,integer,bytea) TO omnis_authorizer';
+  END IF;
   IF pg_catalog.to_regprocedure('omnis.reject_agent_management_audit_mutation()') IS NOT NULL THEN
     EXECUTE 'REVOKE ALL ON FUNCTION omnis.reject_agent_management_audit_mutation() FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
   END IF;
