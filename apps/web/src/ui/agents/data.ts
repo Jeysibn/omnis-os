@@ -1,10 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AgentDirectoryResponseSchema,
+  AgentMutationReceiptSchema,
+  AgentProfileDraftResponseSchema,
   AgentProfileResponseSchema,
   AgentProfileVersionResponseSchema,
   AgentProfileVersionsResponseSchema,
   type AgentDirectoryResponse,
+  type AgentMutationReceipt,
+  type AgentProfileDraftResponse,
+  type AgentProfileWriteInput,
   type AgentProfileResponse,
   type AgentProfileVersionResponse,
   type AgentProfileVersionSummary,
@@ -49,6 +54,73 @@ export const fetchProfile = (agentId: string, signal: AbortSignal): Promise<Agen
     if (result.agent.id !== agentId) mismatch();
     return result;
   });
+
+export const fetchDraft = (
+  agentId: string,
+  signal: AbortSignal,
+): Promise<AgentProfileDraftResponse> =>
+  request(`/api/v1/agents/${encodeURIComponent(agentId)}/draft-profile`, { signal }, (value) => {
+    const result = AgentProfileDraftResponseSchema.parse(value);
+    if (result.agentId !== agentId) mismatch();
+    return result;
+  });
+
+export const saveDraft = (
+  agentId: string,
+  input: {
+    expectedDraftRevision: number;
+    baseVersionNo: number | null;
+    profile: AgentProfileWriteInput;
+  },
+  csrfToken: string,
+  requestId: string,
+): Promise<AgentMutationReceipt> =>
+  request(
+    `/api/v1/agents/${encodeURIComponent(agentId)}/draft-profile`,
+    {
+      method: 'PUT',
+      headers: { 'x-omnis-csrf': csrfToken, 'idempotency-key': requestId },
+      body: JSON.stringify(input),
+    },
+    (value) => {
+      const result = AgentMutationReceiptSchema.parse(value);
+      if (
+        result.requestId !== requestId ||
+        result.operation !== 'profile.draft_saved' ||
+        result.agentId !== agentId ||
+        result.draftRevision !== input.expectedDraftRevision + 1
+      )
+        mismatch();
+      return result;
+    },
+  );
+
+export const publishDraft = (
+  agentId: string,
+  input: { expectedVersionNo: number | null; expectedDraftRevision: number },
+  csrfToken: string,
+  requestId: string,
+): Promise<AgentMutationReceipt> =>
+  request(
+    `/api/v1/agents/${encodeURIComponent(agentId)}/publish`,
+    {
+      method: 'POST',
+      headers: { 'x-omnis-csrf': csrfToken, 'idempotency-key': requestId },
+      body: JSON.stringify(input),
+    },
+    (value) => {
+      const result = AgentMutationReceiptSchema.parse(value);
+      if (
+        result.requestId !== requestId ||
+        result.operation !== 'profile.published' ||
+        result.agentId !== agentId ||
+        result.lifecycle !== 'available' ||
+        result.versionNo !== (input.expectedVersionNo ?? 0) + 1
+      )
+        mismatch();
+      return result;
+    },
+  );
 
 export const fetchVersion = (
   agentId: string,

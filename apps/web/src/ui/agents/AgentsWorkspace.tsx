@@ -96,7 +96,12 @@ export function AgentsWorkspace({
         />
       )}
       {route.kind === 'profile' && (
-        <ProfileScreen route={route} headingRef={headingRef} onUnauthorized={onUnauthorized} />
+        <ProfileScreen
+          route={route}
+          headingRef={headingRef}
+          onUnauthorized={onUnauthorized}
+          csrfToken={csrfToken}
+        />
       )}
       {route.kind === 'version' && (
         <VersionScreen route={route} headingRef={headingRef} onUnauthorized={onUnauthorized} />
@@ -165,7 +170,9 @@ function ProfileScreen({
   route,
   headingRef,
   onUnauthorized,
-}: ScreenProps<Extract<AgentsRoute, { kind: 'profile' }>>) {
+  csrfToken,
+}: ScreenProps<Extract<AgentsRoute, { kind: 'profile' }>> & { csrfToken: string }) {
+  const [notice, setNotice] = useState('');
   const [state, retry] = useAgentResource(
     `profile:${route.agentId}`,
     (signal) => fetchProfile(route.agentId, signal),
@@ -176,6 +183,7 @@ function ProfileScreen({
       <h2 ref={headingRef} tabIndex={-1}>
         {state.status === 'ready' ? <Text>{state.data.agent.name}</Text> : 'Agent profile'}
       </h2>
+      {notice && <p role="status">{notice}</p>}
       {state.status === 'loading' && <Loading resource="agent profile" />}
       {state.status === 'error' &&
         (state.error.kind === 'not-found' ? (
@@ -187,7 +195,10 @@ function ProfileScreen({
         <AgentProfile
           key={state.data.agent.id}
           profile={state.data}
+          csrfToken={csrfToken}
           onUnauthorized={onUnauthorized}
+          onReload={retry}
+          onPublished={() => setNotice('A new immutable profile version was published.')}
         />
       )}
     </>

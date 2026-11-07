@@ -2,16 +2,18 @@ import AxeBuilder from '@axe-core/playwright';
 import { expect, test as base, type Page, type Route } from '@playwright/test';
 import {
   AgentDirectoryResponseSchema,
+  AgentProfileDraftResponseSchema,
   AgentProfileResponseSchema,
   AgentProfileVersionResponseSchema,
   AgentProfileVersionsResponseSchema,
   AgentSummarySchema,
   type AgentProfileVersion,
+  type AgentProfileWriteInput,
   type AgentSummary,
 } from '@omnis/contracts';
 
 /**
- * Browser tests for the read-only Agents & Profiles screens. Every response is a strictly
+ * Browser tests for the Agents & Profiles screens. Every response is a strictly
  * contract-parsed synthetic fixture; nothing here exercises the real backend or real agents.
  */
 
@@ -104,6 +106,13 @@ const draft = agent('agent-draft', 'Nova Draft', { lifecycle: 'draft', departmen
 const archived = agent('agent-old', 'Old Timer', { lifecycle: 'archived', versionCount: 2 });
 const defaultFixtures = [atlas, mira, draft, archived];
 
+function cloneFixture(source: Fixture): Fixture {
+  return {
+    summary: structuredClone(source.summary),
+    versions: source.versions.map((item) => structuredClone(item)),
+  };
+}
+
 type Options = {
   agents?: Fixture[];
   directoryStatus?: number;
@@ -117,6 +126,7 @@ type Options = {
   profileBody?: (agentId: string) => unknown;
   signedOut?: boolean;
   createResponseLosses?: number;
+  mutationResponseLosses?: number;
 };
 
 function createApi(page: Page) {
@@ -124,8 +134,19 @@ function createApi(page: Page) {
   let fixtures = defaultFixtures;
   let historyFailures = 0;
   let createResponseLosses = 0;
+  let mutationResponseLosses = 0;
+  const drafts = new Map<
+    string,
+    { revision: number; baseVersionNo: number | null; profile: AgentProfileWriteInput | null }
+  >();
   const requests: Array<{ method: string; path: string; search: string }> = [];
   const createRequests: Array<{ body: unknown; key: string | undefined }> = [];
+  const mutationRequests: Array<{
+    method: string;
+    path: string;
+    body: unknown;
+    key: string | undefined;
+  }> = [];
   const unexpected: string[] = [];
 
   const error = (route: Route, status: number, code = 'error', message = 'Fixture error.') =>
@@ -154,6 +175,7 @@ function createApi(page: Page) {
       });
       created.summary.slug = body.slug ?? 'new-agent';
       fixtures = [...fixtures, created];
+      drafts.set(created.summary.id, { revision: 0, baseVersionNo: null, profile: null });
       return route.fulfill({
         status: 201,
         json: {
@@ -164,6 +186,73 @@ function createApi(page: Page) {
           versionId: null,
           versionNo: null,
           draftRevision: 0,
+          occurredAt: later,
+        },
+      });
+    }
+
+    const draftMatch = path.match(/^\/api\/v1\/agents\/([^/]+)\/draft-profile$/);
+    const publishMatch = path.match(/^\/api\/v1\/agents\/([^/]+)\/publish$/);
+    if ((method === 'PUT' && draftMatch) || (method === 'POST' && publishMatch)) {
+      const agentId = decodeURIComponent((draftMatch ?? publishMatch)![1]!);
+      const key = request.headers()['idempotency-key'];
+      const body = request.postDataJSON() as Record<string, unknown>;
+      mutationRequests.push({ method, path, body, key });
+      if (request.headers()['x-omnis-csrf'] !== 'csrf-fixture' || !key)
+        return error(route, 403, 'invalid_csrf', 'Mutation protection failed.');
+      if (mutationResponseLosses > 0) {
+        mutationResponseLosses -= 1;
+        return route.abort();
+      }
+      const fixture = fixtures.find((item) => item.summary.id === agentId);
+      if (!fixture) return error(route, 404, 'not_found', 'Agent not found.');
+      const previous = drafts.get(agentId) ?? {
+        revision: 0,
+        baseVersionNo: null,
+        profile: null,
+      };
+      if (method === 'PUT') {
+        const next = {
+          revision: previous.revision + 1,
+          baseVersionNo: body.baseVersionNo as number | null,
+          profile: body.profile as AgentProfileWriteInput,
+        };
+        drafts.set(agentId, next);
+        return route.fulfill({
+          json: {
+            requestId: key,
+            operation: 'profile.draft_saved',
+            agentId,
+            lifecycle: fixture.summary.lifecycle,
+            versionId: null,
+            versionNo: null,
+            draftRevision: next.revision,
+            occurredAt: later,
+          },
+        });
+      }
+      const nextVersionNo = (fixture.versions.at(-1)?.versionNo ?? 0) + 1;
+      const published = version(agentId, nextVersionNo, {
+        ...previous.profile!,
+        createdAt: later,
+      });
+      fixture.versions.push(published);
+      fixture.summary.lifecycle = 'available';
+      fixture.summary.currentVersion = {
+        versionNo: nextVersionNo,
+        profession: published.profession,
+        seniority: published.seniority,
+      };
+      drafts.delete(agentId);
+      return route.fulfill({
+        json: {
+          requestId: key,
+          operation: 'profile.published',
+          agentId,
+          lifecycle: 'available',
+          versionId: published.versionId,
+          versionNo: nextVersionNo,
+          draftRevision: previous.revision,
           occurredAt: later,
         },
       });
@@ -208,6 +297,23 @@ function createApi(page: Page) {
     const fixture = fixtures.find((item) => item.summary.id === decodeURIComponent(parts[0]!));
     if (!fixture) return error(route, 404, 'not_found', 'Agent not found.');
     const current = fixture.versions[fixture.versions.length - 1] ?? null;
+
+    if (parts[1] === 'draft-profile' && parts.length === 2) {
+      const draftState = drafts.get(fixture.summary.id) ?? {
+        revision: 0,
+        baseVersionNo: null,
+        profile: null,
+      };
+      return route.fulfill({
+        json: AgentProfileDraftResponseSchema.parse({
+          agentId: fixture.summary.id,
+          draftRevision: draftState.revision,
+          baseVersionNo: draftState.baseVersionNo,
+          profile: draftState.profile,
+          updatedAt: draftState.profile ? later : null,
+        }),
+      });
+    }
 
     if (parts.length === 1 && options.profileBody)
       return route.fulfill({ json: options.profileBody(fixture.summary.id) });
@@ -269,15 +375,19 @@ function createApi(page: Page) {
   return {
     configure(next: Options = {}) {
       options = { ...next };
-      fixtures = next.agents ?? defaultFixtures;
+      fixtures = (next.agents ?? defaultFixtures).map(cloneFixture);
       historyFailures = next.historyFailures ?? 0;
       createResponseLosses = next.createResponseLosses ?? 0;
+      mutationResponseLosses = next.mutationResponseLosses ?? 0;
       requests.length = 0;
       createRequests.length = 0;
+      mutationRequests.length = 0;
+      drafts.clear();
     },
     requests,
     unexpected,
     createRequests,
+    mutationRequests,
     heal() {
       options.directoryFailures = 0;
       delete options.directoryStatus;
@@ -401,11 +511,15 @@ test.describe('Agent Directory', () => {
       await expect(page.locator('.agents-workspace').getByText(word, { exact: true })).toHaveCount(
         0,
       );
-    // Read-only: one directory request, no query string, no mutation, no event stream.
+    // The directory read has no filters in its API query; draft and history reads are separate.
     const directoryRequests = api.requests.filter((entry) => entry.path === '/api/v1/agents');
     expect(directoryRequests.length).toBeGreaterThanOrEqual(1);
     expect(directoryRequests.every((entry) => entry.search === '')).toBe(true);
-    expect(api.requests.every((entry) => entry.method === 'GET')).toBe(true);
+    expect(
+      api.requests
+        .filter((entry) => entry.path === '/api/v1/agents')
+        .every((entry) => entry.method === 'GET'),
+    ).toBe(true);
     expect(api.count((path) => path.includes('/events'))).toBe(0);
   });
 
@@ -413,8 +527,10 @@ test.describe('Agent Directory', () => {
     api.configure({ agents: [] });
     await openAgents(page);
     await expect(page.getByText('No agents yet.')).toBeVisible();
-    await expect(page.getByText("Agent creation isn't available in this release.")).toBeVisible();
-    await expect(page.getByRole('button', { name: /create|new|add/i })).toHaveCount(0);
+    await expect(
+      page.getByText('Create an agent identity, then define its profile.'),
+    ).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Create agent' })).toBeVisible();
   });
 
   test('an unavailable API shows an error with Retry, never a fabricated empty directory', async ({
@@ -607,6 +723,59 @@ test.describe('Agent Directory', () => {
 });
 
 test.describe('Agent Profile', () => {
+  test('saves a draft and publishes a new immutable profile version', async ({ page, api }) => {
+    api.configure();
+    await openAgents(page, '#agents/agent-atlas');
+    await expect(page.getByRole('heading', { name: 'Profile management' })).toBeVisible();
+    await page.getByRole('button', { name: 'Create next draft' }).click();
+    const editor = page.locator('.agents-profile-editor');
+    await editor.getByLabel('Profession', { exact: true }).fill('Platform Reliability Lead');
+    await page.getByRole('button', { name: 'Save draft' }).click();
+    await expect(
+      page.getByText('The server confirmed that the profile draft was saved.'),
+    ).toBeVisible();
+    await expect(page.getByText('Draft revision 1')).toBeVisible();
+    await page.getByRole('button', { name: 'Publish immutable version' }).click();
+    await expect(
+      page.getByText('A new immutable profile version was published.', { exact: true }),
+    ).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Version 4' })).toHaveCount(2);
+    await expect(page.getByText('Platform Reliability Lead', { exact: true })).toBeVisible();
+    expect(api.mutationRequests.map(({ method, path, key }) => ({ method, path, key }))).toEqual([
+      {
+        method: 'PUT',
+        path: '/api/v1/agents/agent-atlas/draft-profile',
+        key: expect.stringMatching(/^[0-9a-f-]{36}$/i),
+      },
+      {
+        method: 'POST',
+        path: '/api/v1/agents/agent-atlas/publish',
+        key: expect.stringMatching(/^[0-9a-f-]{36}$/i),
+      },
+    ]);
+  });
+
+  test('an uncertain draft save retries the identical payload and idempotency key', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ mutationResponseLosses: 1 });
+    await openAgents(page, '#agents/agent-atlas');
+    await page.getByRole('button', { name: 'Create next draft' }).click();
+    await page
+      .locator('.agents-profile-editor')
+      .getByLabel('Profession', { exact: true })
+      .fill('Platform Reliability Lead');
+    await page.getByRole('button', { name: 'Save draft' }).click();
+    await expect(page.getByText(/save result is unknown/i)).toBeVisible();
+    await page.getByRole('button', { name: 'Retry same request' }).click();
+    await expect(
+      page.getByText('The server confirmed that the profile draft was saved.'),
+    ).toBeVisible();
+    expect(api.mutationRequests).toHaveLength(2);
+    expect(api.mutationRequests[1]).toEqual(api.mutationRequests[0]);
+  });
+
   test('renders identity, snapshot sections, safe text and the permissions note', async ({
     page,
     api,
@@ -653,7 +822,7 @@ test.describe('Agent Profile', () => {
       'href',
       '#agents/agent-atlas/v/3',
     );
-    await expect(page.getByText(/Nov 4, 2026, 4:30 pm/i)).toBeVisible(); // 08:30Z in Asia/Manila
+    await expect(page.getByText('Nov 4, 2026, 4:30 PM', { exact: true }).first()).toBeVisible(); // 08:30Z in Asia/Manila
     await expect(page.getByText('Online', { exact: true })).toHaveCount(0);
   });
 
@@ -981,6 +1150,15 @@ test.describe('Routing', () => {
 });
 
 test.describe('Responsive and accessibility', () => {
+  test('profile editor stays within a narrow mobile viewport', async ({ page, api }) => {
+    api.configure();
+    await page.setViewportSize({ width: 320, height: 740 });
+    await openAgents(page, '#agents/agent-atlas');
+    await page.getByRole('button', { name: 'Create next draft' }).click();
+    await expect(page.locator('.agents-profile-editor-fields')).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+  });
+
   for (const viewport of widths) {
     test(`no horizontal overflow and a reachable 4-link nav (inline or menu) at ${viewport.name}`, async ({
       page,

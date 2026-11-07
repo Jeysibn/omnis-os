@@ -54,7 +54,11 @@ export function AgentCreateForm({
         },
         (value) => AgentMutationReceiptSchema.parse(value),
       );
-      if (receipt.operation !== 'agent.created' || receipt.lifecycle !== 'draft')
+      if (
+        receipt.requestId !== current.key ||
+        receipt.operation !== 'agent.created' ||
+        receipt.lifecycle !== 'draft'
+      )
         throw new Error('The create response did not confirm a draft agent.');
       window.location.hash = profileHash(receipt.agentId);
     } catch (cause) {
@@ -62,9 +66,7 @@ export function AgentCreateForm({
         onUnauthorized(cause);
       } else if (cause instanceof ApiRequestError && cause.outcome !== 'rejected') {
         setUnknown(true);
-        setError(
-          'The create result is unknown. Retry this exact request or edit its values first.',
-        );
+        setError('The create result is unknown. Retry this exact request before starting another.');
       } else {
         setUnknown(false);
         setOperation(null);
@@ -124,20 +126,6 @@ export function AgentCreateForm({
         <button type="button" className="secondary-button" disabled={busy} onClick={onCancel}>
           Cancel
         </button>
-        {unknown && (
-          <button
-            type="button"
-            className="secondary-button"
-            disabled={busy}
-            onClick={() => {
-              setOperation(null);
-              setUnknown(false);
-              setError('');
-            }}
-          >
-            Edit values
-          </button>
-        )}
         <button type="submit" className="primary-button" disabled={busy || !csrfToken}>
           {busy ? 'Creating…' : unknown ? 'Retry same request' : 'Create draft agent'}
         </button>

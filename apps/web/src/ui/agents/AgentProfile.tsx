@@ -1,6 +1,7 @@
 import { useRef } from 'react';
 import type { AgentProfileResponse } from '@omnis/contracts';
 import { useVersionHistory } from './data.js';
+import { AgentProfileEditor } from './AgentProfileEditor.js';
 import { PermissionsNote, Section, SnapshotSections } from './ProfileSections.js';
 import { versionHash } from './route.js';
 import {
@@ -25,10 +26,16 @@ const sections = [
 
 export function AgentProfile({
   profile,
+  csrfToken,
   onUnauthorized,
+  onReload,
+  onPublished,
 }: {
   profile: AgentProfileResponse;
+  csrfToken: string;
   onUnauthorized: (cause: unknown) => void;
+  onReload: () => void;
+  onPublished: () => void;
 }) {
   const { agent, currentVersion } = profile;
   const history = useVersionHistory(agent.id, onUnauthorized);
@@ -61,6 +68,16 @@ export function AgentProfile({
           </ul>
         </nav>
         <div className="agents-profile-content">
+          <AgentProfileEditor
+            profile={profile}
+            csrfToken={csrfToken}
+            onUnauthorized={onUnauthorized}
+            onPublished={() => {
+              onPublished();
+              onReload();
+              history.reload();
+            }}
+          />
           <Section id="identity" title="Identity">
             <dl className="agents-facts">
               <div className="agents-fact">
