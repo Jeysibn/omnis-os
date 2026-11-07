@@ -275,6 +275,12 @@ function App() {
   const approvalTrigger = useRef<HTMLButtonElement | null>(null);
   const focusRunInspector = useRef(false);
   const sessionRecoveryInFlight = useRef(false);
+  const ownerRef = useRef(owner);
+  const pendingTaskCreateRef = useRef(pendingTaskCreate);
+  const pendingTaskCreateOwnerIdRef = useRef(pendingTaskCreateOwnerId);
+  ownerRef.current = owner;
+  pendingTaskCreateRef.current = pendingTaskCreate;
+  pendingTaskCreateOwnerIdRef.current = pendingTaskCreateOwnerId;
   // False until the first in-app hash navigation, so a direct load of a screen never steals focus.
   const navigatedInApp = useRef(false);
   const stopInFlight = useRef(new Set<string>());
@@ -335,9 +341,9 @@ function App() {
       setApprovalTask(null);
       setApprovalOperation(null);
       const keepPendingTaskCreate =
-        pendingTaskCreate !== null &&
-        pendingTaskCreateOwnerId !== null &&
-        owner?.id === pendingTaskCreateOwnerId;
+        pendingTaskCreateRef.current !== null &&
+        pendingTaskCreateOwnerIdRef.current !== null &&
+        ownerRef.current?.id === pendingTaskCreateOwnerIdRef.current;
       if (!keepPendingTaskCreate) {
         setPendingTaskCreate(null);
         setPendingTaskCreateOwnerId(null);
@@ -357,7 +363,7 @@ function App() {
       }
       return true;
     },
-    [owner?.id, pendingTaskCreate, pendingTaskCreateOwnerId, refreshCsrf],
+    [refreshCsrf],
   );
 
   const loadTasks = useCallback(async () => {
@@ -500,7 +506,7 @@ function App() {
         setChecking(false);
       }
     })();
-  }, [loadWorkspace, pendingTaskCreateOwnerId, refreshCsrf, restoredTaskCreate]);
+  }, [loadWorkspace, refreshCsrf, restoredTaskCreate]);
 
   useEffect(() => {
     if (!owner || page !== 'runs' || !selectedRunId || !selectedRunExists) {
