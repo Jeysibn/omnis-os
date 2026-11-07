@@ -1341,7 +1341,7 @@ export class PostgresRunStore {
         const submissionRequested = submission?.rows[0]?.requested ?? false;
         const nextStatus = submissionRequested
           ? 'unknown'
-          : row.status === 'stopping'
+          : row.connector_authorization_id && row.status === 'stopping'
             ? 'cancelled'
             : 'interrupted';
         await client.query(

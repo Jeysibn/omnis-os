@@ -937,6 +937,7 @@ const postgresSuite = describe(
       );
       const claim = await store.beginSyntheticBrokerRun(admitted.run.id, 'old-worker', 1);
       await store.recordSyntheticBrokerSubmissionRequested(runId, 'old-worker', claim.generation);
+      await store.requestSyntheticBrokerStop(runId, grant.id);
       await pool!.query(
         "UPDATE omnis.runs SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
         [runId],
@@ -955,10 +956,20 @@ const postgresSuite = describe(
       assert.equal((await store.getRun(runId))?.status, 'unknown');
       assert.equal((await store.getTask(fixture.task.id))?.status, 'in_progress');
       assert.equal(events[0]?.event.type, 'run.outcome_unknown');
+      assert.deepEqual(
+        (await store.getEvents(runId)).map((event) => event.type),
+        [
+          'run.queued',
+          'run.started',
+          'run.provider_submission_requested',
+          'run.stop_requested',
+          'run.outcome_unknown',
+        ],
+      );
       assert.equal((await store.listActiveRunIds([runId])).includes(runId), false);
     });
 
-    it('interrupts an expired synthetic worker lease before broker submission', async () => {
+    it('confirms stop for an expired synthetic lease before broker submission', async () => {
       const fixture = await connectorFixture();
       const grant = await fixture.authorizations.request(fixture.request, randomUUID());
       await fixture.authorizations.decide(grant.id, 'owner', {
@@ -978,6 +989,7 @@ const postgresSuite = describe(
         async () => 'synthetic-job',
       );
       await store.beginSyntheticBrokerRun(admitted.run.id, 'old-worker', 1);
+      await store.requestSyntheticBrokerStop(runId, grant.id);
       await pool!.query(
         "UPDATE omnis.runs SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
         [runId],
@@ -985,9 +997,16 @@ const postgresSuite = describe(
 
       const events = await store.reconcileExpiredRuns();
 
-      assert.equal((await store.getRun(runId))?.status, 'interrupted');
+      assert.equal((await store.getRun(runId))?.status, 'cancelled');
       assert.equal((await store.getTask(fixture.task.id))?.status, 'open');
-      assert.equal(events[0]?.event.type, 'run.interrupted');
+      assert.deepEqual(
+        events.map(({ event }) => event.type),
+        ['run.cancelled'],
+      );
+      assert.deepEqual(
+        (await store.getEvents(runId)).map((event) => event.type),
+        ['run.queued', 'run.started', 'run.stop_requested', 'run.cancelled'],
+      );
       assert.match(events[0]?.event.message ?? '', /before broker submission began/);
     });
 
@@ -5812,7 +5831,7 @@ const postgresSuite = describe(
       assert.equal(recovered?.events[0]?.event.type, 'run.cancelled');
     });
 
-    it('recovers an expired execution lease without replay and allows a fresh run', async () => {
+    it('keeps an expired legacy mock stop interrupted until cancellation is confirmed', async () => {
       const task = await store.createTask({
         title: 'Inspect files',
         detail: 'List files read-only.',
@@ -5822,6 +5841,7 @@ const postgresSuite = describe(
         return `job-${runId}`;
       });
       await store.beginExecution(admitted.run.id, 'worker-old', 1);
+      await store.requestStop(admitted.run.id);
       assert.ok((await store.listActiveRunIds()).includes(admitted.run.id));
       await pool!.query(
         "UPDATE omnis.runs SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
