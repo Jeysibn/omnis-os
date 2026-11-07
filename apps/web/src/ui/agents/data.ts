@@ -3,12 +3,14 @@ import {
   AgentDirectoryResponseSchema,
   AgentIdempotencyKeySchema,
   AgentMutationReceiptSchema,
+  AgentIdentityUpdateReceiptSchema,
   AgentProfileDraftResponseSchema,
   AgentProfileResponseSchema,
   AgentProfileVersionResponseSchema,
   AgentProfileVersionsResponseSchema,
   type AgentDirectoryResponse,
   type AgentMutationReceipt,
+  type UpdateAgentIdentityInput,
   type AgentProfileDraftResponse,
   type AgentProfileWriteInput,
   type AgentProfileResponse,
@@ -71,6 +73,36 @@ export const archiveAgent = (agentId: string, requestId: string, csrfToken: stri
         receipt.operation !== 'agent.archived' ||
         receipt.agentId !== agentId ||
         receipt.lifecycle !== 'archived'
+      )
+        mismatch();
+      return receipt;
+    },
+  );
+};
+
+export const updateAgentIdentity = (
+  agentId: string,
+  input: UpdateAgentIdentityInput,
+  csrfToken: string,
+  requestId: string,
+) => {
+  if (!AgentIdempotencyKeySchema.safeParse(requestId).success) mismatch();
+  return request(
+    `/api/v1/agents/${encodeURIComponent(agentId)}/identity`,
+    {
+      method: 'PUT',
+      headers: { 'x-omnis-csrf': csrfToken, 'idempotency-key': requestId },
+      body: JSON.stringify(input),
+    },
+    (value) => {
+      const receipt = AgentIdentityUpdateReceiptSchema.parse(value);
+      if (
+        receipt.requestId !== requestId ||
+        receipt.operation !== 'agent.identity_updated' ||
+        receipt.agentId !== agentId ||
+        receipt.name !== input.name.trim() ||
+        receipt.slug !== input.slug ||
+        receipt.identityRevision !== input.expectedIdentityRevision + 1
       )
         mismatch();
       return receipt;

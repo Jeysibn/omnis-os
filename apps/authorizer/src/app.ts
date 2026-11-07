@@ -13,6 +13,8 @@ import {
   AgentIdSchema,
   AgentIdempotencyKeySchema,
   AgentMutationReceiptSchema,
+  AgentIdentityUpdateReceiptSchema,
+  UpdateAgentIdentityInputSchema,
   AgentProfileDraftResponseSchema,
   CreateAgentInputSchema,
   PublishAgentProfileInputSchema,
@@ -137,6 +139,7 @@ export type AuthorizerStore = {
         saveDraft(agentId: string, input: unknown, requestId: string): Promise<unknown>;
         publish(agentId: string, input: unknown, requestId: string): Promise<unknown>;
         archive(agentId: string, requestId: string): Promise<unknown>;
+        updateIdentity(agentId: string, input: unknown, requestId: string): Promise<unknown>;
       }
     | undefined;
 };
@@ -779,6 +782,29 @@ export function createAuthorizerApp(input: {
       try {
         const result = await requireAgentLifecycle(input.store).archive(id.data, requestId.data);
         return AgentMutationReceiptSchema.parse(result);
+      } catch (error) {
+        return sendAgentLifecycleError(error, reply);
+      }
+    },
+  );
+
+  app.put<{ Params: { agentId: string } }>(
+    '/internal/v1/agents/:agentId/identity',
+    async (request, reply) => {
+      const id = AgentIdSchema.safeParse(request.params.agentId);
+      const body = UpdateAgentIdentityInputSchema.safeParse(request.body);
+      const requestId = AgentIdempotencyKeySchema.safeParse(request.headers['idempotency-key']);
+      if (!id.success || !body.success || !requestId.success)
+        return reply.code(400).send({
+          error: { code: 'invalid_input', message: 'Agent identity input is invalid.' },
+        });
+      try {
+        const result = await requireAgentLifecycle(input.store).updateIdentity(
+          id.data,
+          body.data,
+          requestId.data,
+        );
+        return reply.send(AgentIdentityUpdateReceiptSchema.parse(result));
       } catch (error) {
         return sendAgentLifecycleError(error, reply);
       }

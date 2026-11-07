@@ -16,6 +16,7 @@ const directory = { agents: [], page: { total: 0, complete: true, nextCursor: nu
 const profile = {
   agent: {
     id: 'agt_atlas',
+    identityRevision: 1,
     name: 'Atlas',
     slug: 'atlas',
     department: null,

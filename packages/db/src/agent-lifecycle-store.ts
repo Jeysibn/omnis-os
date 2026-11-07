@@ -2,17 +2,21 @@ import { createHmac, randomUUID } from 'node:crypto';
 import type { Pool } from 'pg';
 import {
   AgentMutationReceiptSchema,
+  AgentIdentityUpdateReceiptSchema,
   AgentProfileDraftResponseSchema,
+  UpdateAgentIdentityInputSchema,
   CreateAgentInputSchema,
   PublishAgentProfileInputSchema,
   SaveAgentProfileDraftInputSchema,
 } from '@omnis/contracts';
 import type {
   AgentMutationReceipt,
+  AgentIdentityUpdateReceipt,
   AgentProfileDraftResponse,
   CreateAgentInput,
   PublishAgentProfileInput,
   SaveAgentProfileDraftInput,
+  UpdateAgentIdentityInput,
 } from '@omnis/contracts';
 import {
   AgentProfileStoreError,
@@ -47,7 +51,9 @@ export class AgentLifecycleStoreError extends Error {
 }
 
 type DbError = { code?: string };
-type JsonRow = { result: AgentMutationReceipt | AgentProfileDraftResponse };
+type JsonRow = {
+  result: AgentMutationReceipt | AgentIdentityUpdateReceipt | AgentProfileDraftResponse;
+};
 
 function safeParse<T>(
   schema: { safeParse(value: unknown): { success: boolean; data?: T } },
@@ -181,6 +187,34 @@ export class PostgresAgentLifecycleStore {
       this.keyVersion,
       fingerprint,
     ]);
+  }
+
+  async updateIdentity(
+    agentId: string,
+    inputValue: UpdateAgentIdentityInput,
+    requestId: string,
+  ): Promise<AgentIdentityUpdateReceipt> {
+    const input = safeParse(UpdateAgentIdentityInputSchema, inputValue);
+    mapWriteValidation(() => assertNoCredentialMaterial(input));
+    const fingerprint = this.fingerprint('agent.identity_updated', agentId, input);
+    try {
+      const result = await this.pool.query<JsonRow>(
+        'SELECT omnis.update_agent_identity($1,$2,$3,$4,$5,$6,$7) AS result',
+        [
+          agentId,
+          input.expectedIdentityRevision,
+          input.name,
+          input.slug,
+          requestId,
+          this.keyVersion,
+          fingerprint,
+        ],
+      );
+      return safeParse(AgentIdentityUpdateReceiptSchema, result.rows[0]?.result);
+    } catch (error) {
+      if (error instanceof AgentLifecycleStoreError) throw error;
+      return mapDatabaseError(error);
+    }
   }
 
   private fingerprint(operation: string, target: string | null, input: unknown): Buffer {

@@ -1,6 +1,7 @@
 import { useRef } from 'react';
 import type { AgentProfileResponse } from '@omnis/contracts';
 import { AgentArchiveAction } from './AgentArchiveAction.js';
+import { AgentIdentityEditor } from './AgentIdentityEditor.js';
 import { useVersionHistory } from './data.js';
 import { AgentProfileEditor } from './AgentProfileEditor.js';
 import { PermissionsNote, Section, SnapshotSections } from './ProfileSections.js';
@@ -93,6 +94,12 @@ export function AgentProfile({
             }}
           />
           <Section id="identity" title="Identity">
+            <AgentIdentityEditor
+              profile={profile}
+              csrfToken={csrfToken}
+              onUnauthorized={onUnauthorized}
+              onSaved={onReload}
+            />
             <dl className="agents-facts">
               <div className="agents-fact">
                 <dt>Name</dt>

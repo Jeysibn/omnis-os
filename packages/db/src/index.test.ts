@@ -3047,7 +3047,9 @@ const postgresSuite = describe(
                has_table_privilege('omnis_authorizer', 'omnis.agent_profile_drafts', 'SELECT') AS authorizer_draft_select,
                has_table_privilege('omnis_authorizer', 'omnis.agent_management_idempotency', 'INSERT') AS authorizer_idempotency_insert,
                has_function_privilege('omnis_authorizer', 'omnis.create_agent(text,text,text,text,uuid,integer,bytea)', 'EXECUTE') AS authorizer_create_agent_function,
-               has_function_privilege('omnis_runtime', 'omnis.create_agent(text,text,text,text,uuid,integer,bytea)', 'EXECUTE') AS runtime_create_agent_function
+               has_function_privilege('omnis_runtime', 'omnis.create_agent(text,text,text,text,uuid,integer,bytea)', 'EXECUTE') AS runtime_create_agent_function,
+               has_function_privilege('omnis_authorizer', 'omnis.update_agent_identity(text,bigint,text,text,uuid,integer,bytea)', 'EXECUTE') AS authorizer_identity_function,
+               has_function_privilege('omnis_runtime', 'omnis.update_agent_identity(text,bigint,text,text,uuid,integer,bytea)', 'EXECUTE') AS runtime_identity_function
       `);
       assert.deepEqual(managementPrivileges.rows[0], {
         runtime_department_insert: false,
@@ -3070,6 +3072,8 @@ const postgresSuite = describe(
         authorizer_idempotency_insert: false,
         authorizer_create_agent_function: true,
         runtime_create_agent_function: false,
+        authorizer_identity_function: true,
+        runtime_identity_function: false,
       });
       const functionPrivilege = await adminPool!.query<{ executable: boolean }>(
         `SELECT has_function_privilege('omnis_runtime',
@@ -3269,6 +3273,32 @@ const postgresSuite = describe(
       assert.equal(replayed.agentId, created.agentId);
       assert.equal(created.lifecycle, 'draft');
       assert.equal(created.versionId, null);
+      const identityInput = {
+        expectedIdentityRevision: 1,
+        name: 'Atlas North',
+        slug: `atlas-north-${randomUUID().slice(0, 8)}`,
+      };
+      const identityRequestId = randomUUID();
+      const identity = await lifecycle.updateIdentity(
+        created.agentId,
+        identityInput,
+        identityRequestId,
+      );
+      assert.equal(identity.identityRevision, 2);
+      assert.equal(identity.name, identityInput.name);
+      assert.equal(
+        (await lifecycle.updateIdentity(created.agentId, identityInput, identityRequestId))
+          .identityRevision,
+        2,
+      );
+      await assert.rejects(
+        lifecycle.updateIdentity(
+          created.agentId,
+          { ...identityInput, name: 'Stale Atlas' },
+          randomUUID(),
+        ),
+        (error: unknown) => error instanceof AgentLifecycleStoreError && error.code === 'conflict',
+      );
       await assert.rejects(
         lifecycle.createAgent({ ...input, name: 'Different Atlas' }, requestId),
         (error: unknown) => error instanceof AgentLifecycleStoreError && error.code === 'conflict',
@@ -3280,6 +3310,7 @@ const postgresSuite = describe(
         profile: null,
         updatedAt: null,
       });
+      assert.equal((await profiles.getAgent(created.agentId))?.agent.identityRevision, 2);
 
       const firstProfile = {
         profession: 'Systems Analyst',
