@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { AgentDirectory } from './AgentDirectory.js';
+import { AgentCreateForm } from './AgentCreateForm.js';
 import { AgentProfile } from './AgentProfile.js';
 import { fetchDirectory, fetchProfile, fetchVersion, useAgentResource } from './data.js';
 import { directoryHash, parseAgentsHash, profileHash, type AgentsRoute } from './route.js';
@@ -33,7 +34,13 @@ function notFoundBack() {
   );
 }
 
-export function AgentsWorkspace({ onUnauthorized }: { onUnauthorized: (cause: unknown) => void }) {
+export function AgentsWorkspace({
+  onUnauthorized,
+  csrfToken,
+}: {
+  onUnauthorized: (cause: unknown) => void;
+  csrfToken: string;
+}) {
   const [route, setRoute] = useState<AgentsRoute>(currentRoute);
   // Bumped on every hashchange so the directory re-reads filters from the URL.
   const [navigation, setNavigation] = useState(0);
@@ -85,10 +92,16 @@ export function AgentsWorkspace({ onUnauthorized }: { onUnauthorized: (cause: un
           route={route}
           headingRef={headingRef}
           onUnauthorized={onUnauthorized}
+          csrfToken={csrfToken}
         />
       )}
       {route.kind === 'profile' && (
-        <ProfileScreen route={route} headingRef={headingRef} onUnauthorized={onUnauthorized} />
+        <ProfileScreen
+          route={route}
+          headingRef={headingRef}
+          onUnauthorized={onUnauthorized}
+          csrfToken={csrfToken}
+        />
       )}
       {route.kind === 'version' && (
         <VersionScreen route={route} headingRef={headingRef} onUnauthorized={onUnauthorized} />
@@ -115,8 +128,12 @@ function DirectoryScreen({
   route,
   headingRef,
   onUnauthorized,
-}: ScreenProps<Extract<AgentsRoute, { kind: 'directory' }>>) {
+  csrfToken,
+}: ScreenProps<Extract<AgentsRoute, { kind: 'directory' }>> & {
+  csrfToken: string;
+}) {
   const [state, retry] = useAgentResource('directory', fetchDirectory, onUnauthorized);
+  const [creating, setCreating] = useState(false);
   return (
     <>
       <div className="agents-head-row">
@@ -127,12 +144,23 @@ function DirectoryScreen({
           Manage departments
         </a>
       </div>
+      {creating && (
+        <AgentCreateForm
+          csrfToken={csrfToken}
+          onUnauthorized={onUnauthorized}
+          onCancel={() => setCreating(false)}
+        />
+      )}
       {state.status === 'loading' && <Loading resource="agents" />}
       {state.status === 'error' && (
         <ErrorState resource="Agents" error={state.error} onRetry={retry} />
       )}
       {state.status === 'ready' && (
-        <AgentDirectory directory={state.data} initialFilters={route.filters} />
+        <AgentDirectory
+          directory={state.data}
+          initialFilters={route.filters}
+          onCreate={() => setCreating(true)}
+        />
       )}
     </>
   );
@@ -142,7 +170,9 @@ function ProfileScreen({
   route,
   headingRef,
   onUnauthorized,
-}: ScreenProps<Extract<AgentsRoute, { kind: 'profile' }>>) {
+  csrfToken,
+}: ScreenProps<Extract<AgentsRoute, { kind: 'profile' }>> & { csrfToken: string }) {
+  const [notice, setNotice] = useState('');
   const [state, retry] = useAgentResource(
     `profile:${route.agentId}`,
     (signal) => fetchProfile(route.agentId, signal),
@@ -153,6 +183,7 @@ function ProfileScreen({
       <h2 ref={headingRef} tabIndex={-1}>
         {state.status === 'ready' ? <Text>{state.data.agent.name}</Text> : 'Agent profile'}
       </h2>
+      {notice && <p role="status">{notice}</p>}
       {state.status === 'loading' && <Loading resource="agent profile" />}
       {state.status === 'error' &&
         (state.error.kind === 'not-found' ? (
@@ -164,7 +195,13 @@ function ProfileScreen({
         <AgentProfile
           key={state.data.agent.id}
           profile={state.data}
+          csrfToken={csrfToken}
           onUnauthorized={onUnauthorized}
+          onReload={retry}
+          onConflict={() =>
+            setNotice('The profile changed on the server. The latest profile was reloaded.')
+          }
+          onPublished={() => setNotice('A new immutable profile version was published.')}
         />
       )}
     </>

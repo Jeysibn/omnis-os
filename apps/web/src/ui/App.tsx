@@ -1176,7 +1176,9 @@ function App() {
             onStop={(run) => void stopRun(run)}
           />
         )}
-        {page === 'agents' && <AgentsWorkspace onUnauthorized={expireSessionIfNeeded} />}
+        {page === 'agents' && (
+          <AgentsWorkspace onUnauthorized={expireSessionIfNeeded} csrfToken={csrfToken} />
+        )}
         {page === 'departments' && (
           <DepartmentsWorkspace
             onUnauthorized={expireSessionIfNeeded}
@@ -1243,7 +1245,7 @@ const pageSubtitles: Record<Page, string> = {
   'command-center': 'Your operational overview for tasks and synthetic runs.',
   tasks: 'Create and review work in your local workspace.',
   runs: 'Follow current and historical mock run activity.',
-  agents: 'Review agent identities and immutable profile versions. Read-only in this release.',
+  agents: 'Manage agent identities and immutable profile versions.',
   departments: 'Create and rename the departments agents belong to.',
   projects: 'Create, edit and archive projects, and follow the tasks and runs inside each one.',
 };

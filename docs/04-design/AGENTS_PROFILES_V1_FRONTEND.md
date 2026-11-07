@@ -1,6 +1,6 @@
 # Agents & Profiles V1 - Frontend Specification
 
-**Status: SPECIFICATION ONLY. No Agents & Profiles UI exists on `main`.** This document is documentation for a future frontend change. Merging it does **not** complete AO-104 or AO-110, and implementation **must not begin** until the read API contracts requested in the [proposed API contract](../02-architecture/AGENTS_READ_API_PROPOSAL.md) are implemented and reviewed (section 12, Phase B).
+**Status:** This is the original read-only presentation specification. The read APIs it required are now implemented. Phase 1 owner mutations are defined separately in [Agent Profile Management V1 — Phase 1 Supplement](AGENT_PROFILE_MANAGEMENT_V1_FRONTEND.md); that supplement supersedes only the old no-create and AP-18 no-mutation rules. This document remains authoritative for read views and their honesty, accessibility, navigation, and security behavior.
 
 **Baseline:** `main` at `81a017a` (Command Center V1, PR #12). Date: 2026-11-04.
 
