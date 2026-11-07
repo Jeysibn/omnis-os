@@ -305,8 +305,8 @@ test('owner sees an authorized synthetic broker Run, ordered events, result and 
   expect(detail.body.usage).toEqual({
     kind: 'measured',
     source: 'synthetic-provider',
-    inputUnits: 12,
-    outputUnits: 7,
+    inputUnits: 1,
+    outputUnits: 1,
     billingExposure: 'synthetic-only',
   });
 

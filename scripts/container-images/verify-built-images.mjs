@@ -22,6 +22,8 @@ const images = [
       '--permission',
       '--allow-fs-read=/app',
       '--allow-fs-read=/run/omnis-synthetic-broker',
+      '--allow-fs-read=/run/omnis-broker-authorizer',
+      '--allow-fs-read=/run/omnis-broker-secrets',
       '--allow-fs-write=/run/omnis-synthetic-broker',
       '--experimental-strip-types',
       'src/server.ts',
