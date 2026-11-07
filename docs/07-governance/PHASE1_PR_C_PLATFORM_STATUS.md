@@ -37,7 +37,7 @@ The Linux UDS gateway checks kernel `SO_PEERCRED` UID and primary GID for each c
 
 The broker uses PR #47's versioned operations: admission, begin-submission, provider-event, and recovery-list. It verifies the authorizer Ed25519 envelope against pinned public anchors, audience/key validity/expiry, attempt/request/authorization/run identity, rendered-request digest, correlation, connector/provider/model/operation, binding revisions, exact limits, and empty capabilities. The authorizer remains the only approval and durable lifecycle source. The broker has no DB access or competing approval store. Caller, authorizer, gateway, and fake-provider tokens are loaded from separate root-managed files; the broker environment contains only file paths and public trust anchors.
 
-The worker-facing socket/gateway is packaged, but `apps/worker` does not call it. No owner-facing API/task/worker execution flow is claimed.
+The worker-facing socket/gateway is packaged. Current `apps/worker` has a broker client only in synthetic test mode; the owner-facing production journey still uses the mock runtime and does not pass through this isolated broker or these gateways. No production synthetic-broker execution flow is claimed.
 
 ## Fake provider and egress
 
@@ -86,7 +86,7 @@ Systemd bounds CPU, memory, tasks/PIDs, descriptors and stop time. Docker tests 
 
 PR #47 resolves the old handoff's authorizer lifecycle IPC, broker-specific authentication, and fake-provider contract gaps. This platform branch reuses those operations and does not change authorization stores, migrations, database semantics, or signing logic.
 
-Codex #1/backend follow-up is needed if direct task/API cancellation must be durable independently of revocation. API/worker-to-broker execution remains a backend integration dependency owned by Codex #1. No API or worker source was changed here.
+Codex #1/backend follow-up is needed if direct task/API cancellation must be durable independently of revocation. Production API/worker-to-broker execution remains a backend integration dependency; existing worker test-mode support is not evidence of production integration. No API or worker source was changed here.
 
 Local evidence on candidate `c4208c1`: Node 24 `pnpm check` and `pnpm build` passed; the synthetic-broker package's three tests and typecheck passed; an entrypoint load check reached the expected missing-configuration Zod failure without a TypeScript strip-syntax or module-load error. The entrypoint check did not start a broker service. The Linux SO_PEERCRED proxy test and prior platform evidence remain as recorded above. The local Docker daemon is unavailable, so disposable Compose networking was validated only in GitHub Actions. Exact-head run [42262045598](https://github.com/Jeysibn/omnis-os/actions/runs/42262045598) failed after its network positive/negative probes passed: the post-run inspect expected two active Docker network peers, but Compose had detached the stopped containers. The probe harness was corrected on the previous branch head; current candidate CI is pending. Container-image build, disposable systemd/peer-gateway checks, PostgreSQL legacy/recovery integration, backup/restore, and browser/full-stack suites passed in the earlier run. Complete broker/authorizer/PostgreSQL/fake process E2E tests, actual broker systemd BPF enforcement verification, and cross-process/database canary coverage are absent. No host provisioning, provider authentication, real credentials, inference or deployment was performed.
 
