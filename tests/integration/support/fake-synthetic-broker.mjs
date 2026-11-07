@@ -66,10 +66,22 @@ const server = createServer((request, response) => {
       renderedRequest: input.renderedRequest,
     });
 
+    const providerSubmissionId = `fixture-${attemptId}`;
+    stage = 'record_provider_acceptance';
+    await authorizerRequest('provider-events', {
+      version: 'omnis.broker-authorizer-ipc.v1',
+      attemptId,
+      event: {
+        eventId: `fixture:${attemptId}:accepted`,
+        status: 'accepted',
+        providerSubmissionId,
+      },
+    });
+    stage = 'record_provider_completion';
     const event = {
       eventId: `fixture:${attemptId}:completed`,
       status: 'completed',
-      providerSubmissionId: `fixture-${attemptId}`,
+      providerSubmissionId,
       usage: {
         kind: 'measured',
         source: 'synthetic-provider',

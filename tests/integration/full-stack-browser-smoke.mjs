@@ -63,8 +63,11 @@ try {
   stages.push('real-browser-standard-and-synthetic-run-smoke-passed');
 } catch (error) {
   const message = error instanceof Error ? error.message : 'Unknown integration smoke failure.';
+  const fixtureStage = services?.syntheticBrokerFixture?.process?.capturedLogs
+    ?.match(/synthetic_broker_fixture_failure:[a-z_]+/g)
+    ?.at(-1);
   process.stderr.write(
-    `Full-stack smoke failed during ${stages.at(-1) ?? 'startup'}: ${message}\n`,
+    `Full-stack smoke failed during ${stages.at(-1) ?? 'startup'}: ${message}${fixtureStage ? `; ${fixtureStage}` : ''}\n`,
   );
   process.exitCode = 1;
 } finally {
