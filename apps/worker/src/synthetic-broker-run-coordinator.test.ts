@@ -90,6 +90,7 @@ function coordinator(
   const calls: unknown[] = [];
   const brokerRequests: SyntheticTaskRunRequest[] = [];
   const resultCalls: unknown[] = [];
+  const executionOrder: string[] = [];
   const store = {
     getSyntheticBrokerRun: async () => link,
     getSyntheticBrokerRunByAuthorization: async () => link,
@@ -100,6 +101,10 @@ function coordinator(
       events: [],
       generation: 1,
     }),
+    recordSyntheticBrokerSubmissionRequested: async () => {
+      executionOrder.push('submission-requested-event');
+      return { run: { ...run, status: 'running' }, events: [] };
+    },
     renewSyntheticBrokerLease: async () => 'renewed',
     finishSyntheticBrokerRun: async (
       _runId: string,
@@ -131,6 +136,7 @@ function coordinator(
     profiles: profiles as never,
     broker: {
       execute: async (_taskId, request) => {
+        executionOrder.push('broker-execute');
         brokerRequests.push(request);
         if (options.brokerError) throw new Error('synthetic broker response lost');
         return (options.brokerResult ?? {
@@ -153,7 +159,7 @@ function coordinator(
     },
     publish: () => {},
   });
-  return { instance, calls, brokerRequests, resultCalls, store };
+  return { instance, calls, brokerRequests, resultCalls, executionOrder, store };
 }
 
 describe('synthetic broker task run coordinator', () => {
@@ -170,6 +176,7 @@ describe('synthetic broker task run coordinator', () => {
     assert.deepEqual(fixture.calls, [{ runId: run.id }]);
 
     await fixture.instance.handleQueueJob({ runId: run.id });
+    assert.deepEqual(fixture.executionOrder, ['submission-requested-event', 'broker-execute']);
     const request = fixture.brokerRequests[0]!;
     assert.equal(request.renderedRequest, renderedRequest);
     assert.equal(request.request.promptDigest, binding.promptDigest);

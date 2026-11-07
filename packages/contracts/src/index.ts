@@ -454,12 +454,14 @@ export type Run = z.infer<typeof RunSchema>;
 export const RunEventTypeSchema = z.enum([
   'run.queued',
   'run.started',
+  'run.provider_submission_requested',
   'run.output',
   'run.stop_requested',
   'run.completed',
   'run.cancelled',
   'run.failed',
   'run.interrupted',
+  'run.outcome_unknown',
 ]);
 export type RunEventType = z.infer<typeof RunEventTypeSchema>;
 

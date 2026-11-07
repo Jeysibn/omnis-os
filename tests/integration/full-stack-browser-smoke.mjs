@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
@@ -29,15 +30,19 @@ try {
   services = await startMockServices({
     origin: frontendOrigin,
     reservedPorts: [frontendPort],
+    requireAuditPool: true,
+    enableSyntheticBrokerTestMode: true,
   });
   if (interrupted) throw new Error('The full-stack smoke was interrupted during service startup.');
   stages.push('api-worker-authorizer-launcher-ready');
+  const syntheticProjectId = await createActiveSyntheticProject(services);
 
   const browserEnvironment = buildBrowserEnvironment(process.env, {
     apiTarget: services.apiUrl,
     frontendOrigin,
     frontendPort,
     ownerPassword: services.password,
+    syntheticProjectId,
   });
 
   browserRunner = spawn('pnpm', ['--filter', '@omnis/web', 'test:e2e:integration'], {
@@ -55,7 +60,7 @@ try {
   if (exit.signal) throw new Error(`The full-stack browser runner exited from ${exit.signal}.`);
   if (exit.code !== 0)
     throw new Error(`The full-stack browser runner exited with code ${exit.code}.`);
-  stages.push('real-browser-task-create-and-reload-passed');
+  stages.push('real-browser-standard-and-synthetic-run-smoke-passed');
 } catch (error) {
   const message = error instanceof Error ? error.message : 'Unknown integration smoke failure.';
   process.stderr.write(
@@ -74,6 +79,56 @@ try {
     timedOut,
     interrupted,
   });
+}
+
+async function createActiveSyntheticProject(services) {
+  const anonymousCsrf = await fetch(`${services.apiUrl}/api/v1/auth/csrf`);
+  const anonymousCookie = cookieFrom(anonymousCsrf);
+  const anonymousToken = (await anonymousCsrf.json()).csrfToken;
+  const login = await fetch(`${services.apiUrl}/api/v1/auth/login`, {
+    method: 'POST',
+    headers: {
+      cookie: anonymousCookie,
+      origin: services.origin,
+      'x-omnis-csrf': anonymousToken,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ password: services.password }),
+  });
+  if (!login.ok)
+    throw new Error('Disposable owner login failed while creating the synthetic fixture.');
+  const ownerCookie = cookieFrom(login);
+  const ownerCsrfResponse = await fetch(`${services.apiUrl}/api/v1/auth/csrf`, {
+    headers: { cookie: ownerCookie },
+  });
+  const ownerCsrf = (await ownerCsrfResponse.json()).csrfToken;
+  const project = await fetch(`${services.apiUrl}/api/v1/projects`, {
+    method: 'POST',
+    headers: {
+      cookie: ownerCookie,
+      origin: services.origin,
+      'x-omnis-csrf': ownerCsrf,
+      'idempotency-key': randomUUID(),
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      key: `SYNTH-${randomUUID().replaceAll('-', '').slice(0, 12).toUpperCase()}`,
+      name: 'Synthetic broker integration fixture',
+      objective: 'Exercise the test-only owner-authorized broker path.',
+    }),
+  });
+  if (!project.ok) throw new Error('Disposable synthetic project creation failed.');
+  const value = await project.json();
+  await services.auditPool.query("UPDATE omnis.projects SET status='active' WHERE id=$1", [
+    value.id,
+  ]);
+  return value.id;
+}
+
+function cookieFrom(response) {
+  const cookie = response.headers.get('set-cookie')?.split(';', 1)[0];
+  if (!cookie) throw new Error('Disposable owner session cookie was not set.');
+  return cookie;
 }
 
 async function waitForBrowserRunner(child, timeoutMs) {

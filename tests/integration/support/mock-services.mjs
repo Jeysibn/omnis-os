@@ -1,10 +1,16 @@
-import { randomBytes, scrypt as scryptCallback } from 'node:crypto';
+import {
+  generateKeyPairSync,
+  randomBytes,
+  randomUUID,
+  scrypt as scryptCallback,
+} from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:net';
 import { request as httpRequest } from 'node:http';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createPool } from '../../../packages/db/src/index.ts';
@@ -13,7 +19,12 @@ const scrypt = promisify(scryptCallback);
 
 export const testOwnerPassword = 'test-owner-password-2026';
 
-export async function startMockServices({ origin, requireAuditPool = false, reservedPorts = [] }) {
+export async function startMockServices({
+  origin,
+  requireAuditPool = false,
+  reservedPorts = [],
+  enableSyntheticBrokerTestMode = false,
+}) {
   const databaseConfig = validateTestDatabaseConfiguration(process.env, {
     requireAdmin: requireAuditPool,
   });
@@ -67,10 +78,20 @@ export async function startMockServices({ origin, requireAuditPool = false, rese
   excludedPorts.add(apiPort);
   const workerPort = await freePort(excludedPorts);
   const authorizerSocket = join(tempDirectory, 'authorizer.sock');
+  const brokerAuthorizerSocket = join(tempDirectory, 'broker-authorizer.sock');
+  const syntheticBrokerSocket = join(tempDirectory, 'synthetic-broker.sock');
   const launcherSocket = join(tempDirectory, 'launcher.sock');
   const salt = randomBytes(16);
   const internalToken = randomBytes(48).toString('hex');
   const authorizerToken = randomBytes(48).toString('hex');
+  const brokerAuthorizerToken = randomBytes(48).toString('hex');
+  const syntheticBrokerTestToken = randomBytes(48).toString('hex');
+  const decisionKeyFile = join(tempDirectory, 'authorizer-ed25519.pem');
+  const decisionKeyNotBefore = new Date(Date.now() - 5_000).toISOString();
+  const decisionKeyNotAfter = new Date(Date.now() + 60 * 60_000).toISOString();
+  const decisionKeyPair = enableSyntheticBrokerTestMode
+    ? generateKeyPairSync('ed25519')
+    : undefined;
   const passwordHash = (await scrypt(testOwnerPassword, salt, 64)).toString('hex');
   const sharedEnvLines = [
     `OMNIS_OWNER_PASSWORD_HASH=${salt.toString('hex')}:${passwordHash}`,
@@ -99,6 +120,13 @@ export async function startMockServices({ origin, requireAuditPool = false, rese
         ),
         `OMNIS_DATABASE_URL=${databaseUrl}`,
         `OMNIS_SANDBOX_LAUNCHER_SOCKET=${launcherSocket}`,
+        ...(enableSyntheticBrokerTestMode
+          ? [
+              'OMNIS_SYNTHETIC_BROKER_TEST_MODE=1',
+              `OMNIS_SYNTHETIC_BROKER_SOCKET=${syntheticBrokerSocket}`,
+              `OMNIS_SYNTHETIC_BROKER_TEST_TOKEN=${syntheticBrokerTestToken}`,
+            ]
+          : []),
       ].join('\n')}\n`,
       { mode: 0o600 },
     );
@@ -111,9 +139,26 @@ export async function startMockServices({ origin, requireAuditPool = false, rese
         `OMNIS_AUTHORIZER_DATABASE_URL=${authorizerUrl}`,
         `OMNIS_AUTHORIZER_SOCKET=${authorizerSocket}`,
         'OMNIS_AUTHORIZER_SOCKET_MODE=600',
+        ...(enableSyntheticBrokerTestMode
+          ? [
+              `OMNIS_BROKER_AUTHORIZER_SOCKET=${brokerAuthorizerSocket}`,
+              `OMNIS_BROKER_AUTHORIZER_TOKEN=${brokerAuthorizerToken}`,
+              `OMNIS_CONNECTOR_DECISION_KEY_FILE=${decisionKeyFile}`,
+              'OMNIS_CONNECTOR_DECISION_KEY_ID=disposable-test-key-v1',
+              `OMNIS_CONNECTOR_DECISION_KEY_NOT_BEFORE=${decisionKeyNotBefore}`,
+              `OMNIS_CONNECTOR_DECISION_KEY_NOT_AFTER=${decisionKeyNotAfter}`,
+            ]
+          : []),
       ].join('\n') + '\n',
       { mode: 0o600 },
     );
+    if (decisionKeyPair) {
+      await writeFile(
+        decisionKeyFile,
+        decisionKeyPair.privateKey.export({ type: 'pkcs8', format: 'pem' }),
+        { mode: 0o600 },
+      );
+    }
     await writeFile(
       launcherEnvPath,
       [
@@ -134,6 +179,8 @@ export async function startMockServices({ origin, requireAuditPool = false, rese
   let authorizer;
   let launcher;
   let api;
+  let syntheticBrokerFixture;
+  let syntheticBrokerProcess;
   let cleanupPromise;
   const startWorker = async () => {
     const env = withoutDatabaseSecrets(process.env);
@@ -141,8 +188,10 @@ export async function startMockServices({ origin, requireAuditPool = false, rese
     delete env.OMNIS_TEST_MIGRATION_DATABASE_URL;
     delete env.OMNIS_TEST_ADMIN_DATABASE_URL;
     env[canaryName] = canary;
-    if (process.env.OMNIS_RECOVERY_INTEGRATION === '1') {
+    if (process.env.OMNIS_RECOVERY_INTEGRATION === '1' || enableSyntheticBrokerTestMode) {
       env.NODE_ENV = 'test';
+    }
+    if (process.env.OMNIS_RECOVERY_INTEGRATION === '1') {
       env.OMNIS_MOCK_TEST_DELAY_MS = '1000';
     }
     return startService('apps/worker', workerEnvPath, env);
@@ -150,6 +199,7 @@ export async function startMockServices({ origin, requireAuditPool = false, rese
   const startApi = async () => {
     const env = withoutDatabaseSecrets(process.env);
     delete env[canaryName];
+    if (enableSyntheticBrokerTestMode) env.NODE_ENV = 'test';
     return startService('apps/api', apiEnvPath, env);
   };
   const startAuthorizer = async () => {
@@ -169,6 +219,7 @@ export async function startMockServices({ origin, requireAuditPool = false, rese
           processes.worker ?? worker,
           processes.launcher ?? launcher,
           processes.authorizer ?? authorizer,
+          syntheticBrokerProcess,
         ]
           .filter(Boolean)
           .map((child) => stopProcess(child)),
@@ -176,6 +227,7 @@ export async function startMockServices({ origin, requireAuditPool = false, rese
       try {
         await auditPool?.end();
       } finally {
+        await syntheticBrokerFixture?.close();
         await rm(tempDirectory, { recursive: true, force: true });
       }
       const failure = stopped.find((result) => result.status === 'rejected');
@@ -185,6 +237,15 @@ export async function startMockServices({ origin, requireAuditPool = false, rese
   };
 
   try {
+    if (enableSyntheticBrokerTestMode) {
+      syntheticBrokerFixture = await startSyntheticBrokerFixture({
+        socketPath: syntheticBrokerSocket,
+        testToken: syntheticBrokerTestToken,
+        authorizerSocket: brokerAuthorizerSocket,
+        authorizerToken: brokerAuthorizerToken,
+      });
+      syntheticBrokerProcess = syntheticBrokerFixture.process;
+    }
     if (adminAuditUrl) {
       auditPool = createPool({
         connectionString: adminAuditUrl,
@@ -233,6 +294,8 @@ export async function startMockServices({ origin, requireAuditPool = false, rese
       launcherEnvPath,
       canaryName,
       canary,
+      syntheticBrokerFixture,
+      syntheticBrokerProcess,
       auditPool,
       api,
       worker,
@@ -367,7 +430,7 @@ function parseTestDatabaseUrl(name, value, expectedUsername) {
 
 export function buildBrowserEnvironment(
   source,
-  { apiTarget, frontendOrigin, frontendPort, ownerPassword },
+  { apiTarget, frontendOrigin, frontendPort, ownerPassword, syntheticProjectId },
 ) {
   const allowed = [
     'PATH',
@@ -399,6 +462,7 @@ export function buildBrowserEnvironment(
     OMNIS_TEST_FRONTEND_ORIGIN: frontendOrigin,
     OMNIS_TEST_FRONTEND_PORT: String(frontendPort),
     OMNIS_TEST_OWNER_PASSWORD: ownerPassword,
+    ...(syntheticProjectId ? { OMNIS_TEST_SYNTHETIC_PROJECT_ID: syntheticProjectId } : {}),
   });
   return environment;
 }
@@ -533,6 +597,53 @@ export function socketRequest(socketPath, requestPath, init = {}) {
     req.setTimeout(3_000, () => req.destroy(new Error('unix_socket_request_timeout')));
     req.end(init.body);
   });
+}
+
+export async function startSyntheticBrokerFixture({
+  socketPath,
+  testToken,
+  authorizerSocket,
+  authorizerToken,
+}) {
+  const inherited = {};
+  for (const name of ['PATH', 'HOME', 'TMPDIR']) {
+    if (typeof process.env[name] === 'string') inherited[name] = process.env[name];
+  }
+  const child = await startManagedProcess(
+    process.execPath,
+    [fileURLToPath(new URL('./fake-synthetic-broker.mjs', import.meta.url))],
+    {
+      env: {
+        ...inherited,
+        NODE_ENV: 'test',
+        OMNIS_TEST_BROKER_SOCKET: socketPath,
+        OMNIS_TEST_BROKER_TOKEN: testToken,
+        OMNIS_TEST_BROKER_AUTHORIZER_SOCKET: authorizerSocket,
+        OMNIS_TEST_BROKER_AUTHORIZER_TOKEN: authorizerToken,
+      },
+      stdio: ['ignore', 'ignore', 'pipe'],
+    },
+  );
+  child.capturedLogs = '';
+  child.stderr?.on('data', (chunk) => {
+    child.capturedLogs = `${child.capturedLogs}${chunk.toString('utf8')}`.slice(-65_536);
+  });
+  const timeoutAt = Date.now() + 5_000;
+  let ready = false;
+  while (Date.now() < timeoutAt && !ready) {
+    if (child.exitCode !== null) throw new Error('Synthetic broker fixture exited during startup.');
+    try {
+      const response = await socketRequest(socketPath, '/health');
+      ready = response.ok;
+    } catch {
+      await delay(50);
+    }
+  }
+  if (!ready) {
+    await stopProcess(child);
+    throw new Error('Synthetic broker fixture health check did not become ready.');
+  }
+  return { process: child, close: () => stopProcess(child) };
 }
 
 function requiredDatabaseUrl(name, username) {

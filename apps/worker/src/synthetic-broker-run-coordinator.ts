@@ -118,6 +118,12 @@ export class SyntheticBrokerRunCoordinator {
         await this.finish(link.run.id, begun.generation, { status: 'failed' });
         return;
       }
+      const submissionRequested = await this.store.recordSyntheticBrokerSubmissionRequested(
+        link.run.id,
+        this.workerId,
+        begun.generation,
+      );
+      this.publish(submissionRequested.events);
       let response: SyntheticTaskRunResponse;
       try {
         response = SyntheticTaskRunResponseSchema.parse(

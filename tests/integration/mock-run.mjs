@@ -732,7 +732,13 @@ async function readThroughTerminalEvent(body) {
         const event = JSON.parse(data);
         events.push(event);
         if (
-          ['run.completed', 'run.cancelled', 'run.failed', 'run.interrupted'].includes(event.type)
+          [
+            'run.completed',
+            'run.cancelled',
+            'run.failed',
+            'run.interrupted',
+            'run.outcome_unknown',
+          ].includes(event.type)
         ) {
           await reader.cancel();
           return events;

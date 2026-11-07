@@ -885,6 +885,13 @@ const postgresSuite = describe(
       const lease = started.started
         ? { workerId: 'synthetic-worker', generation: started.generation }
         : { workerId: 'duplicate-worker', generation: duplicateStart.generation };
+      const submission = await store.recordSyntheticBrokerSubmissionRequested(
+        runId,
+        lease.workerId,
+        lease.generation,
+      );
+      assert.equal(submission.events[0]?.event.type, 'run.provider_submission_requested');
+      assert.match(submission.events[0]?.event.message ?? '', /acceptance is not yet confirmed/);
       await fixture.authorizations.revoke(grant.id, 'owner');
       await store.requestSyntheticBrokerStop(runId, grant.id);
       const unknown = await store.finishSyntheticBrokerRun(
@@ -898,7 +905,13 @@ const postgresSuite = describe(
       assert.equal((await store.getSyntheticBrokerRun(runId))?.attemptId !== null, true);
       assert.deepEqual(
         (await store.getEvents(runId)).map((event) => event.type),
-        ['run.queued', 'run.started', 'run.stop_requested', 'run.interrupted'],
+        [
+          'run.queued',
+          'run.started',
+          'run.provider_submission_requested',
+          'run.stop_requested',
+          'run.outcome_unknown',
+        ],
       );
       assert.match((await store.getEvents(runId)).at(-1)!.message, /Do not resubmit/);
     });
@@ -940,7 +953,7 @@ const postgresSuite = describe(
       const events = await store.reconcileExpiredRuns();
       assert.equal((await store.getRun(runId))?.status, 'unknown');
       assert.equal((await store.getTask(fixture.task.id))?.status, 'in_progress');
-      assert.equal(events[0]?.event.type, 'run.interrupted');
+      assert.equal(events[0]?.event.type, 'run.outcome_unknown');
       assert.equal((await store.listActiveRunIds([runId])).includes(runId), false);
     });
 

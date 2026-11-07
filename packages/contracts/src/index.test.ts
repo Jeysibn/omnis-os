@@ -337,6 +337,28 @@ describe('run contracts', () => {
     assert.equal(event.type, 'run.interrupted');
     assert.equal(RunStatusSchema.parse('interrupted'), 'interrupted');
   });
+
+  it('distinguishes requested provider submission and uncertain outcomes from interruption', () => {
+    const submission = RunEventSchema.parse({
+      id: 'evt-run-0001-0003',
+      runId: 'run-0001',
+      sequence: 3,
+      at: '2026-11-02T00:00:00.000Z',
+      type: 'run.provider_submission_requested',
+      source: 'mock',
+      synthetic: true,
+      message: 'Provider acceptance is not yet confirmed.',
+    });
+    const unknown = RunEventSchema.parse({
+      ...submission,
+      id: 'evt-run-0001-0004',
+      sequence: 4,
+      type: 'run.outcome_unknown',
+      message: 'The provider outcome is unknown. Do not resubmit this request.',
+    });
+    assert.equal(submission.type, 'run.provider_submission_requested');
+    assert.equal(unknown.type, 'run.outcome_unknown');
+  });
 });
 
 describe('project management contracts', () => {
