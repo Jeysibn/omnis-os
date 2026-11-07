@@ -127,6 +127,7 @@ type Options = {
   signedOut?: boolean;
   createResponseLosses?: number;
   createReceiptMismatches?: number;
+  createRetryUnauthorized?: number;
   mutationResponseLosses?: number;
   profileConflict?: boolean;
 };
@@ -137,6 +138,7 @@ function createApi(page: Page) {
   let historyFailures = 0;
   let createResponseLosses = 0;
   let createReceiptMismatches = 0;
+  let createRetryUnauthorized = 0;
   let mutationResponseLosses = 0;
   const drafts = new Map<
     string,
@@ -174,6 +176,10 @@ function createApi(page: Page) {
       if (createResponseLosses > 0) {
         createResponseLosses -= 1;
         return route.abort();
+      }
+      if (createRetryUnauthorized > 0) {
+        createRetryUnauthorized -= 1;
+        return error(route, 401, 'unauthorized', 'Sign in to continue.');
       }
       const created = agent('agent-created', body.name ?? 'New Agent', {
         lifecycle: 'draft',
@@ -396,6 +402,7 @@ function createApi(page: Page) {
       historyFailures = next.historyFailures ?? 0;
       createResponseLosses = next.createResponseLosses ?? 0;
       createReceiptMismatches = next.createReceiptMismatches ?? 0;
+      createRetryUnauthorized = next.createRetryUnauthorized ?? 0;
       mutationResponseLosses = next.mutationResponseLosses ?? 0;
       requests.length = 0;
       createRequests.length = 0;
@@ -539,6 +546,32 @@ test.describe('Agent Directory', () => {
     await expect(page.getByRole('button', { name: 'Cancel' })).toBeDisabled();
     await page.getByRole('button', { name: 'Retry same request' }).click();
     await expect(page.getByRole('heading', { name: 'Orion' })).toBeVisible();
+    expect(api.createRequests).toHaveLength(2);
+    expect(api.createRequests[1]).toEqual(api.createRequests[0]);
+  });
+
+  test('session expiry preserves an already-unknown create for safe recovery', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ agents: [], createResponseLosses: 1, createRetryUnauthorized: 1 });
+    await openAgents(page);
+    await page.getByRole('button', { name: 'Create agent' }).click();
+    await page.getByLabel('Name', { exact: true }).fill('Orion');
+    await page.getByLabel('Slug', { exact: true }).fill('orion-ops');
+    await page.getByRole('button', { name: 'Create draft agent' }).click();
+    await expect(page.getByText(/create result is unknown/i)).toBeVisible();
+    await page.getByRole('button', { name: 'Retry same request' }).click();
+    await expect(
+      page.getByText('Your owner session expired. Sign in again to continue.'),
+    ).toBeVisible();
+    const pending = await page.evaluate(() =>
+      JSON.parse(sessionStorage.getItem('omnis.agent-create.pending.v1') ?? 'null'),
+    );
+    expect(pending).toMatchObject({
+      input: { name: 'Orion', slug: 'orion-ops', departmentId: null },
+    });
+    expect(pending.key).toMatch(/^[0-9a-f-]{36}$/i);
     expect(api.createRequests).toHaveLength(2);
     expect(api.createRequests[1]).toEqual(api.createRequests[0]);
   });

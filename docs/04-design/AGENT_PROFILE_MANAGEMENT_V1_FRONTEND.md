@@ -12,7 +12,7 @@ This is a bounded increment, not full AO-104 completion. The current browser jou
 
 - All reads and mutations use the existing owner session. Mutations carry the session CSRF token and a UUID idempotency key.
 - Parse response bodies with the canonical contracts. Confirm request ID, operation, target identity, lifecycle, revision, and version before reporting success.
-- Before sending, preserve the exact create body and idempotency key in tab-scoped `sessionStorage`. After an uncertain response, lock editing and offer only an explicit retry with the exact same request body and idempotency key, including after a browser refresh. A definite 4xx refusal does not retry. A stale 409 refreshes current profile/history and never reports a publication.
+- Before sending, preserve the exact create body and idempotency key in tab-scoped `sessionStorage`. After an uncertain response, lock editing and offer only an explicit retry with the exact same request body and idempotency key, including after a browser refresh or session expiry. A 401 during same-key recovery preserves the pending request for after sign-in; an initial 401 is a definite refusal. Other definite 4xx refusals do not retry. A stale 409 refreshes current profile/history and never reports a publication.
 - A successful publish refreshes the current profile and version history. Published profile versions are not edited in place.
 - Never send connection credentials or provider secrets in profile fields. Text fields render as text; profile text does not grant authority.
 - Demo/mocked execution labels remain distinct; this management flow makes no runtime or provider activity claim.

@@ -110,9 +110,11 @@ export function AgentCreateForm({
       window.location.hash = profileHash(receipt.agentId);
     } catch (cause) {
       if (cause instanceof ApiRequestError && cause.status === 401) {
-        clearPendingOperation();
-        setOperation(null);
-        setUnknown(false);
+        if (!unknown) {
+          clearPendingOperation();
+          setOperation(null);
+          setUnknown(false);
+        }
         onUnauthorized(cause);
       } else if (cause instanceof ApiRequestError && cause.outcome !== 'rejected') {
         setUnknown(true);
