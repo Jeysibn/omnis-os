@@ -69,6 +69,27 @@ describe('synthetic task-to-broker contract', () => {
     );
   });
 
+  it('requires the persisted correlation identity even for an uncertain response', () => {
+    const response = {
+      version: 'omnis.synthetic-task-run.v1',
+      taskId: 'task-0001',
+      authorizationId: request.authorizationId,
+      requestId: request.requestId,
+      attemptId: '33333333-3333-4333-8333-333333333333',
+      status: 'unknown',
+      submitted: true,
+      usage: { kind: 'unknown', reason: 'submission_uncertain', billingExposure: 'unknown' },
+    };
+    assert.equal(SyntheticTaskRunResponseSchema.safeParse(response).success, false);
+    assert.equal(
+      SyntheticTaskRunResponseSchema.safeParse({
+        ...response,
+        correlationId: '55555555-5555-4555-8555-555555555555',
+      }).success,
+      true,
+    );
+  });
+
   it('keeps broker routes off by default and rejects enabling them outside test mode', () => {
     assert.equal(syntheticTaskRunTestMode({ NODE_ENV: 'production' }), false);
     assert.equal(

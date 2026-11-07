@@ -99,4 +99,31 @@ describe('synthetic broker worker client', () => {
     const client = new SyntheticBrokerClient('/tmp/unused-broker.sock', 'a'.repeat(64));
     await assert.rejects(client.execute('task-0002', request), /task binding failed/);
   });
+
+  it('rejects an uncertain broker response without the persisted correlation identity', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'omnis-broker-worker-'));
+    const socketPath = path.join(directory, 'broker.sock');
+    const server = createServer((_req, res) => {
+      res.writeHead(202, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          attemptId: '44444444-4444-4444-8444-444444444444',
+          status: 'unknown',
+          submitted: true,
+        }),
+      );
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(socketPath, resolve);
+      });
+      await assert.rejects(
+        new SyntheticBrokerClient(socketPath, 'a'.repeat(64)).execute(taskId, request),
+      );
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 });

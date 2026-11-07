@@ -6,6 +6,7 @@ import { renderSyntheticConnectorRequest } from '@omnis/contracts/synthetic-conn
 import {
   SyntheticTaskRunAdmissionRequestSchema,
   SyntheticTaskRunAdmissionResponseSchema,
+  SyntheticRunBindingSchema,
   type SyntheticTaskRunAdmissionRequest,
 } from '@omnis/contracts/synthetic-task-run';
 import type { PostgresAgentProfileStore, PostgresRunStore } from '@omnis/db';
@@ -36,13 +37,32 @@ export function registerSyntheticTaskRunRoute(
   input: {
     authenticate: preHandlerHookHandler;
     enabled: boolean;
-    store: Pick<PostgresRunStore, 'getTask'>;
+    store: Pick<PostgresRunStore, 'getTask' | 'getSyntheticBrokerRun'>;
     profiles: Pick<PostgresAgentProfileStore, 'getVersion'>;
     admit: AdmitSyntheticRun;
     cancel: CancelSyntheticRun;
   },
 ): void {
   if (!input.enabled) return;
+  app.get<{ Params: { runId: string } }>(
+    '/internal/v1/runs/:runId/synthetic-binding',
+    { preHandler: input.authenticate },
+    async (request, reply) => {
+      const run = await input.store.getSyntheticBrokerRun(request.params.runId);
+      if (!run) {
+        return reply.code(404).send({
+          error: { code: 'not_found', message: 'Synthetic task run was not found.' },
+        });
+      }
+      return SyntheticRunBindingSchema.parse({
+        version: 'omnis.synthetic-task-run.v1',
+        runId: run.run.id,
+        taskId: run.run.taskId,
+        authorizationId: run.authorizationId,
+      });
+    },
+  );
+
   app.post<{ Params: { taskId: string } }>(
     '/internal/v1/tasks/:taskId/synthetic-runs',
     { preHandler: input.authenticate },

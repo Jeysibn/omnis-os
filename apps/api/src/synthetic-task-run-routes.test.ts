@@ -77,6 +77,8 @@ function createApp(input: {
   throwWorker?: boolean;
   runOverride?: unknown;
   missingAttempt?: boolean;
+  expiredConsumed?: boolean;
+  activeAttempt?: boolean;
 }) {
   const app = Fastify();
   const calls: string[] = [];
@@ -108,7 +110,7 @@ function createApp(input: {
             id: '44444444-4444-4444-8444-444444444444',
             authorizationId,
             requestId,
-            status: 'completed',
+            status: input.activeAttempt ? 'submitting' : 'completed',
             synthetic: true,
             createdAt: '2026-11-07T00:00:00.000Z',
             responseText: 'Synthetic response',
@@ -121,13 +123,21 @@ function createApp(input: {
           ? { ...grant, status: 'revoked' }
           : input.authorized === false
             ? { ...grant, status: 'revoked' }
-            : input.consumedBy
+            : input.expiredConsumed
               ? {
                   ...grant,
+                  status: 'expired',
+                  expiresAt: '2020-01-01T00:00:00.000Z',
                   consumedAt: '2026-11-07T00:01:00.000Z',
-                  consumedRequestId: input.consumedBy,
+                  consumedRequestId: requestId,
                 }
-              : grant
+              : input.consumedBy
+                ? {
+                    ...grant,
+                    consumedAt: '2026-11-07T00:01:00.000Z',
+                    consumedRequestId: input.consumedBy,
+                  }
+                : grant
       ) as TResult;
     },
     forwardWorker: async <TResult>(path: string, init: RequestInit): Promise<TResult> => {
@@ -274,6 +284,19 @@ describe('owner synthetic task run routes', () => {
     });
     assert.equal(response.statusCode, 200);
     assert.equal(fixture.revokeCount(), 0);
+    assert.equal(fixture.workerCancelCount(), 1);
+    await fixture.app.close();
+  });
+
+  it('revokes an expired grant when its durable attempt is still active', async () => {
+    const fixture = createApp({ expiredConsumed: true, activeAttempt: true });
+    const response = await fixture.app.inject({
+      method: 'POST',
+      url: `/api/v1/tasks/${taskId}/synthetic-runs/${authorizationId}/cancel`,
+      headers: { origin: 'http://localhost' },
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(fixture.revokeCount(), 1);
     assert.equal(fixture.workerCancelCount(), 1);
     await fixture.app.close();
   });

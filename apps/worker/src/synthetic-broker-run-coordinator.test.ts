@@ -204,7 +204,7 @@ describe('synthetic broker task run coordinator', () => {
     assert.deepEqual(fixture.resultCalls, [{ generation: 1, result: { status: 'failed' } }]);
   });
 
-  it('accepts a missing correlation only for a submitted unknown outcome', async () => {
+  it('keeps an unknown response without correlation uncertain and does not bind its attempt', async () => {
     const fixture = coordinator({
       brokerResult: {
         version: 'omnis.synthetic-task-run.v1',
@@ -218,9 +218,25 @@ describe('synthetic broker task run coordinator', () => {
       },
     });
     await fixture.instance.handleQueueJob({ runId: run.id });
-    assert.equal(
-      (fixture.resultCalls[0] as { result: { status: string } }).result.status,
-      'unknown',
-    );
+    assert.deepEqual(fixture.resultCalls, [{ generation: 1, result: { status: 'unknown' } }]);
+  });
+
+  it('does not persist a completed result with a different correlation identity', async () => {
+    const fixture = coordinator({
+      brokerResult: {
+        version: 'omnis.synthetic-task-run.v1',
+        taskId: task.id,
+        authorizationId: link.authorizationId,
+        requestId: link.requestId,
+        correlationId: '55555555-5555-4555-8555-555555555555',
+        attemptId: '44444444-4444-4444-8444-444444444444',
+        status: 'completed',
+        submitted: true,
+        usage: { kind: 'unknown', reason: 'not_reported', billingExposure: 'unknown' },
+        responseText: 'Unbound response',
+      },
+    });
+    await fixture.instance.handleQueueJob({ runId: run.id });
+    assert.deepEqual(fixture.resultCalls, [{ generation: 1, result: { status: 'unknown' } }]);
   });
 });

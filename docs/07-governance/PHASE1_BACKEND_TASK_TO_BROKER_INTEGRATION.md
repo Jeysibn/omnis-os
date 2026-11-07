@@ -34,6 +34,11 @@ merged migration 0023 and does not edit deferred PR #41's 0021 or merged 0022/00
   `unknown`; it never requeues a request that may have reached the provider. The authorizer
   attempt remains the source for `accepted`, `running`, final status, cancellation acknowledgement,
   and usage provenance.
+- Every broker response, including an uncertain HTTP 202, must carry the exact persisted grant
+  `correlationId`. The worker rejects missing or mismatched correlation instead of attaching an
+  attempt or result to the Run, and records the Run as `unknown`. PR #46's current platform branch
+  omits this field in its uncertain response; Codex #3 must return the correlation UUID from the
+  verified decision envelope before process-level E2E acceptance.
 - A worker restart does not submit again. An expired broker Run lease becomes unknown and is
   excluded from normal mock-run recovery. The API status route still reports the authorizer
   attempt. The platform broker currently owns its own attempt recovery; this backend does not

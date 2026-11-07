@@ -88,6 +88,13 @@ function createApp(
         options.taskExists === false
           ? undefined
           : ({ ...task, id: options.taskIdOverride ?? task.id } as Task),
+      getSyntheticBrokerRun: async (runId: string) =>
+        runId === correlationId
+          ? {
+              run: { id: correlationId, taskId },
+              authorizationId,
+            }
+          : undefined,
     } as never,
     profiles: {
       getVersion: async () =>
@@ -121,6 +128,37 @@ function createApp(
 }
 
 describe('worker synthetic task run admission', () => {
+  it('returns only the persisted synthetic Run binding to an authenticated internal caller', async () => {
+    const { app } = createApp();
+    const response = await app.inject({
+      method: 'GET',
+      url: `/internal/v1/runs/${correlationId}/synthetic-binding`,
+    });
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(response.json(), {
+      version: 'omnis.synthetic-task-run.v1',
+      runId: correlationId,
+      taskId,
+      authorizationId,
+    });
+    const missing = await app.inject({
+      method: 'GET',
+      url: `/internal/v1/runs/${requestId}/synthetic-binding`,
+    });
+    assert.equal(missing.statusCode, 404);
+    await app.close();
+  });
+
+  it('requires internal worker authentication to read the synthetic Run binding', async () => {
+    const { app } = createApp({ authenticated: false });
+    const response = await app.inject({
+      method: 'GET',
+      url: `/internal/v1/runs/${correlationId}/synthetic-binding`,
+    });
+    assert.equal(response.statusCode, 401);
+    await app.close();
+  });
+
   it('requires the internal worker credential before admission', async () => {
     const { app, getCalled } = createApp({ authenticated: false });
     const response = await app.inject({

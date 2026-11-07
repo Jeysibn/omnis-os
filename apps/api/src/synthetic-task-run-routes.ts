@@ -144,6 +144,19 @@ export function registerSyntheticTaskRunRoutes(
           { method: 'POST' },
           (value) => ConnectorAuthorizationSchema.parse(value),
         );
+      } else if (authorization.status === 'expired' && authorization.consumedAt !== null) {
+        const execution = await toAuthorizer(
+          `/internal/v1/connector-authorizations/${encodeURIComponent(request.params.authorizationId)}/execution`,
+          {},
+          (value) => SyntheticTaskRunDetailSchema.parse(value),
+        );
+        if (hasActiveAttempt(execution)) {
+          await toAuthorizer(
+            `/internal/v1/connector-authorizations/${encodeURIComponent(request.params.authorizationId)}/revoke`,
+            { method: 'POST' },
+            (value) => ConnectorAuthorizationSchema.parse(value),
+          );
+        }
       }
       await toWorker(
         `/internal/v1/synthetic-runs/${encodeURIComponent(authorization.correlationId)}/cancel`,
@@ -289,5 +302,12 @@ function isAuthorizerNotFound(error: unknown): boolean {
 function isNotFound(error: unknown): boolean {
   return (
     typeof error === 'object' && error !== null && 'statusCode' in error && error.statusCode === 404
+  );
+}
+
+function hasActiveAttempt(value: ReturnType<typeof SyntheticTaskRunDetailSchema.parse>): boolean {
+  return (
+    value.attempt !== undefined &&
+    ['admitted', 'submitting', 'accepted', 'running', 'unknown'].includes(value.attempt.status)
   );
 }
