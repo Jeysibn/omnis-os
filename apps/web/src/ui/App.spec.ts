@@ -355,7 +355,9 @@ function createMockApi(page: Page) {
     if (path === '/api/v1/tasks' && method === 'POST') {
       if (
         options.taskMutationStatus &&
-        (taskMutationFailures > 0 || options.taskMutationFailures === undefined)
+        (taskMutationFailures > 0 ||
+          options.taskMutationFailures === undefined ||
+          (taskMutationFailures === 0 && options.taskMutationRetryStatus !== undefined))
       ) {
         const status =
           options.taskMutationFailures !== undefined &&
