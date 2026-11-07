@@ -1,4 +1,11 @@
-import { useId, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode } from 'react';
+import {
+  useId,
+  type ButtonHTMLAttributes,
+  type InputHTMLAttributes,
+  type ReactNode,
+  type SelectHTMLAttributes,
+  type TextareaHTMLAttributes,
+} from 'react';
 import './design.css';
 
 type ButtonProps = Omit<ButtonHTMLAttributes<HTMLButtonElement>, 'className'> & {
@@ -78,4 +85,14 @@ export function Field({ label, hint, error, children }: FieldProps) {
 /** A text input styled for NEXUS. Use it inside `Field` and spread the control props onto it. */
 export function NxInput(props: Omit<InputHTMLAttributes<HTMLInputElement>, 'className'>) {
   return <input {...props} className="nx-input" />;
+}
+
+/** A multi-line text control. Use it inside `Field` and spread the control props onto it. */
+export function NxTextarea(props: Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, 'className'>) {
+  return <textarea {...props} className="nx-textarea" />;
+}
+
+/** A native select. Use it inside `Field`; pass `<option>` children. */
+export function NxSelect(props: Omit<SelectHTMLAttributes<HTMLSelectElement>, 'className'>) {
+  return <select {...props} className="nx-select" />;
 }

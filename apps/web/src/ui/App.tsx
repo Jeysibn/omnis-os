@@ -10,6 +10,7 @@ import {
 import {
   Activity,
   ArrowRight,
+  Briefcase,
   Check,
   CircleStop,
   Clock3,
@@ -38,11 +39,12 @@ import {
 import { ApiRequestError, request } from './api.js';
 import { AgentsWorkspace } from './agents/AgentsWorkspace.js';
 import { DepartmentsWorkspace } from './departments/DepartmentsWorkspace.js';
+import { ProjectsWorkspace } from './projects/ProjectsWorkspace.js';
 import { AppHeader } from './shell/AppHeader.js';
 import { SyntheticAuditHistory } from './SyntheticAuditHistory.js';
 
 type Owner = { id: string; displayName: string };
-type Page = 'command-center' | 'tasks' | 'runs' | 'agents' | 'departments';
+type Page = 'command-center' | 'tasks' | 'runs' | 'agents' | 'departments' | 'projects';
 type StreamState = 'connecting' | 'connected' | 'reconnecting' | 'closed' | 'ended';
 type ApprovalOperation = {
   taskId: string;
@@ -918,6 +920,14 @@ function App() {
             arrivedByNavigation={navigatedInApp.current}
           />
         )}
+        {page === 'projects' && (
+          <ProjectsWorkspace
+            onUnauthorized={expireSessionIfNeeded}
+            csrfToken={csrfToken}
+            refreshCsrf={refreshCsrf}
+            arrivedByNavigation={navigatedInApp.current}
+          />
+        )}
         <footer className="page-foot">
           <ShieldCheck size={14} />
           <span>
@@ -954,6 +964,7 @@ const navItems = [
   { id: 'tasks' as const, label: 'Tasks', icon: ListChecks },
   { id: 'runs' as const, label: 'Runs', icon: FolderKanban },
   { id: 'agents' as const, label: 'Agents', icon: Users },
+  { id: 'projects' as const, label: 'Projects', icon: Briefcase },
 ];
 const pageTitles: Record<Page, string> = {
   'command-center': 'Command Center',
@@ -961,6 +972,7 @@ const pageTitles: Record<Page, string> = {
   runs: 'Runs',
   agents: 'Agents & Profiles',
   departments: 'Departments',
+  projects: 'Projects',
 };
 const pageSubtitles: Record<Page, string> = {
   'command-center': 'Your operational overview for tasks and synthetic runs.',
@@ -968,6 +980,7 @@ const pageSubtitles: Record<Page, string> = {
   runs: 'Follow current and historical mock run activity.',
   agents: 'Review agent identities and immutable profile versions. Read-only in this release.',
   departments: 'Create and rename the departments agents belong to.',
+  projects: 'Create, edit and archive projects, and follow the tasks and runs inside each one.',
 };
 
 // The app uses hash routing, so the default `#main-content` anchor jump would replace
@@ -993,6 +1006,7 @@ function readRoute(): { page: Page; runId?: string } {
   const destination = head.split('?', 1)[0];
   if (destination === 'agents') return { page: 'agents' };
   if (destination === 'departments') return { page: 'departments' };
+  if (destination === 'projects') return { page: 'projects' };
   if (destination === 'tasks') return { page: 'tasks' };
   if (destination === 'runs') {
     if (!encodedRunId) return { page: 'runs' };

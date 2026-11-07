@@ -698,14 +698,14 @@ test.describe('Department directory', () => {
 });
 
 test.describe('Routing, navigation and focus', () => {
-  test('direct navigation and reload work; the primary nav keeps four links and marks none current', async ({
+  test('direct navigation and reload work; the primary nav keeps its five links and marks none current', async ({
     page,
     api,
   }) => {
     api.configure();
     await openDepartments(page);
     const nav = page.getByRole('navigation', { name: 'Primary navigation' });
-    await expect(nav.getByRole('link')).toHaveCount(4);
+    await expect(nav.getByRole('link')).toHaveCount(5);
     await expect(nav.locator('[aria-current]')).toHaveCount(0);
     await page.reload();
     await expect(row(page, 'Engineering')).toBeVisible();
@@ -1834,8 +1834,8 @@ test.describe('Responsive, reflow and accessibility', () => {
       await expect(menu).toHaveAttribute('aria-expanded', 'true');
     }
     const primary = page.getByRole('navigation', { name: 'Primary navigation' });
-    await expect(primary.getByRole('link')).toHaveCount(4);
-    for (const name of ['Command Center', 'Tasks', 'Runs', 'Agents']) {
+    await expect(primary.getByRole('link')).toHaveCount(5);
+    for (const name of ['Command Center', 'Tasks', 'Runs', 'Agents', 'Projects']) {
       const link = primary.getByRole('link', { name, exact: true });
       await expect(link).toBeVisible();
       await expect(link).toBeInViewport({ ratio: 1 });

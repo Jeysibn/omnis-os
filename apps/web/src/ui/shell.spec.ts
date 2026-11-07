@@ -18,8 +18,9 @@ const routes = [
   { hash: '#tasks', heading: 'Tasks' },
   { hash: '#runs', heading: 'Runs' },
   { hash: '#agents', heading: 'Agents & Profiles' },
+  { hash: '#projects', heading: 'Projects' },
 ] as const;
-const linkNames = ['Command Center', 'Tasks', 'Runs', 'Agents'] as const;
+const linkNames = ['Command Center', 'Tasks', 'Runs', 'Agents', 'Projects'] as const;
 
 async function installApi(page: Page, ownerName = 'Director') {
   let signedOut = false;
@@ -271,13 +272,13 @@ test.describe('navigation: discoverable at every width', () => {
     }
   });
 
-  test('extra destinations such as Projects fit without another layout change', async ({
+  test('extra destinations beyond the real ones fit without another layout change', async ({
     page,
   }) => {
     await installApi(page);
     await page.setViewportSize({ width: 1440, height: 900 });
     await open(page);
-    const extras = ['Projects', 'Milestones']; // stand-ins for entries added later
+    const extras = ['Milestones', 'Reports']; // stand-ins for entries added later
     const baseline = await page.evaluate(
       () => document.querySelector('nav.primary-nav')!.querySelectorAll('a').length,
     );
@@ -659,7 +660,7 @@ test.describe('disclosed menu: state, keyboard and focus', () => {
 
 test.describe('existing navigation keeps working', () => {
   for (const viewport of [viewports[1]!, viewports[5]!]) {
-    test(`Command Center, Tasks, Runs and Agents all navigate at ${viewport.name}`, async ({
+    test(`Command Center, Tasks, Runs, Agents and Projects all navigate at ${viewport.name}`, async ({
       page,
     }) => {
       await installApi(page);
@@ -735,6 +736,9 @@ test.describe('genuine browser zoom', () => {
         );
         for (const route of routes) {
           await open(page, route.hash);
+          // Hash navigation keeps the scroll position, and the previous route's link check scrolls
+          // down at this height. Start each route at the top so the header is what is measured.
+          await page.evaluate(() => window.scrollTo(0, 0));
           await expectContained(page, `${route.hash} ${label}`);
           const primary = await revealNavigation(page);
           for (const name of linkNames) {
