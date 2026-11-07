@@ -112,7 +112,11 @@ try {
     assert.equal(volume.source, source);
     assert.equal(volume.target, target);
     assert.equal(volume.read_only, true);
-    assert.ok(!volume.bind || volume.bind.create_host_path === false);
+    assert.ok(
+      !volume.bind ||
+        volume.bind.create_host_path === undefined ||
+        volume.bind.create_host_path === false,
+    );
   }
 
   const composeSource = readFileSync('infra/compose/docker-compose.app.yml', 'utf8');

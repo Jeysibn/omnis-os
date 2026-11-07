@@ -6,10 +6,10 @@ The `edge` and `data` networks are Docker internal networks. Web is attached onl
 
 ## First startup
 
-This topology is for a private Linux deployment, not a command to run on an unreviewed host. Start PostgreSQL first so roles and migrations can be provisioned before the API and worker processes are launched:
+This topology is for a private Linux deployment, not a command to run on an unreviewed host. Run these provisioning commands from a root shell so Docker can access its daemon and the tools can read owner-only environment files. Start PostgreSQL first so roles and migrations can be provisioned before the API and worker processes are launched:
 
 ```sh
-docker compose --env-file .env.db-admin -f infra/compose/docker-compose.yml up -d postgres
+sudo docker compose --env-file .env.db-admin -f infra/compose/docker-compose.yml up -d postgres
 pnpm db:roles
 pnpm db:migrate
 ```
@@ -18,7 +18,7 @@ pnpm db:migrate
 
 After PostgreSQL is healthy and migrations are applied, install and review the existing service identities, secret files, and systemd units using the approved host procedure. Start only the authorizer and restricted launcher as host services; Compose owns the web, API, worker, and PostgreSQL processes.
 
-1. Generate owner secrets and install the service-specific files using the existing reviewed host procedure. Keep `.env.db-admin`, `/etc/omnis/api.env`, and `/etc/omnis/worker.env` owner-only. The Compose command must run as root because Docker control is root-equivalent and the service env files are deliberately not readable by an ordinary account.
+1. Generate owner secrets and install the service-specific files using the existing reviewed host procedure. Keep `.env.db-admin`, `/etc/omnis/api.env`, and `/etc/omnis/worker.env` owner-only. Docker Compose and the database provisioning tools must run as root because Docker control is root-equivalent and the service env files are deliberately not readable by an ordinary account.
 2. Set `OMNIS_ALLOWED_ORIGIN` in `/etc/omnis/api.env` to the exact HTTPS origin served by the private reverse proxy and set `OMNIS_SECURE_COOKIES=true`. Configure the proxy to forward requests to `127.0.0.1:8080`; it must preserve `Origin`, `Cookie`, and `Set-Cookie` and support long-lived SSE responses. The proxy, TLS certificate, DNS, and private ingress are outside this Compose file.
 3. Copy `.env.compose.example` to `.env.compose`. Set the authorizer and launcher socket group IDs to the numeric IDs of `omnis-authorizer-socket` and `omnis-launcher-socket` on that host. The file contains topology values only, no credentials.
 4. Verify that the host authorizer and restricted launcher are active, their Unix sockets have the expected group access, the secret files are private, and their socket group IDs match the Compose settings:

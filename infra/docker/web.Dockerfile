@@ -11,7 +11,7 @@ FROM node:24.22.1-bookworm-slim@sha256:be8204d4bd327363357f532187b752ff62759c31b
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=build --chown=10001:10001 /workspace/apps/web/dist/ ./dist/
-COPY --chown=10001:10001 apps/web/server.mjs ./server.mjs
+COPY --from=build --chown=10001:10001 /workspace/apps/web/server-dist/server.js ./server.js
 USER 10001:10001
 EXPOSE 8080
-CMD ["node", "server.mjs"]
+CMD ["node", "server.js"]

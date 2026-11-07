@@ -1,5 +1,11 @@
 import { createReadStream, statSync } from 'node:fs';
-import { createServer, request as requestUpstream } from 'node:http';
+import {
+  createServer,
+  request as requestUpstream,
+  type IncomingMessage,
+  type OutgoingHttpHeaders,
+  type ServerResponse,
+} from 'node:http';
 import process from 'node:process';
 import path from 'node:path';
 import { fileURLToPath, URL } from 'node:url';
@@ -42,7 +48,7 @@ const forwardedResponseHeaders = [
   'www-authenticate',
 ];
 
-const server = createServer((incoming, response) => {
+const server = createServer((incoming: IncomingMessage, response: ServerResponse) => {
   const requestUrl = new URL(incoming.url ?? '/', 'http://omnis.local');
   if (requestUrl.pathname === '/health') {
     response.writeHead(200, {
@@ -72,8 +78,12 @@ server.headersTimeout = 10_000;
 server.keepAliveTimeout = 5_000;
 server.listen(port, '0.0.0.0');
 
-function proxyApiRequest(incoming, response, requestUrl) {
-  const headers = {};
+function proxyApiRequest(
+  incoming: IncomingMessage,
+  response: ServerResponse,
+  requestUrl: URL,
+): void {
+  const headers: OutgoingHttpHeaders = {};
   for (const name of forwardedRequestHeaders) {
     const value = incoming.headers[name];
     if (value !== undefined) headers[name] = value;
@@ -88,7 +98,7 @@ function proxyApiRequest(incoming, response, requestUrl) {
       timeout: 0,
     },
     (upstreamResponse) => {
-      const responseHeaders = { 'x-content-type-options': 'nosniff' };
+      const responseHeaders: OutgoingHttpHeaders = { 'x-content-type-options': 'nosniff' };
       for (const name of forwardedResponseHeaders) {
         const value = upstreamResponse.headers[name];
         if (value !== undefined) responseHeaders[name] = value;
@@ -109,7 +119,7 @@ function proxyApiRequest(incoming, response, requestUrl) {
   incoming.pipe(upstream);
 }
 
-function serveStatic(requestPath, headOnly, response) {
+function serveStatic(requestPath: string, headOnly: boolean, response: ServerResponse): void {
   let decodedPath;
   try {
     decodedPath = decodeURIComponent(requestPath);

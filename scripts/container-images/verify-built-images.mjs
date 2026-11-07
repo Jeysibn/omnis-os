@@ -17,7 +17,7 @@ const images = [
   {
     name: 'omnis-web:ci',
     user: '10001:10001',
-    command: ['node', 'server.mjs'],
+    command: ['node', 'server.js'],
   },
   { name: 'omnis-web-assets:ci', user: '65532:65532', command: null },
 ];
