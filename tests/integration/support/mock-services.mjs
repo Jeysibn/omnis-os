@@ -108,7 +108,14 @@ export async function startMockServices({
   ];
 
   try {
-    await writeFile(apiEnvPath, `${sharedEnvLines.join('\n')}\n`, { mode: 0o600 });
+    await writeFile(
+      apiEnvPath,
+      `${[
+        ...sharedEnvLines,
+        ...(enableSyntheticBrokerTestMode ? ['OMNIS_SYNTHETIC_BROKER_TEST_MODE=1'] : []),
+      ].join('\n')}\n`,
+      { mode: 0o600 },
+    );
     await writeFile(
       workerEnvPath,
       `${[
