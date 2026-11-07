@@ -1,0 +1,914 @@
+/* OMNIS NEXUS — scoped to the Command Center. Other screens keep the existing light theme. */
+body:has(.nexus) {
+  background: #060c0e;
+}
+
+.nexus {
+  --nx-void: #060c0e;
+  --nx-slate: #101c20;
+  --nx-edge: #28433e;
+  --nx-jade: #91f2cd;
+  --nx-amber: #f0bd76;
+  --nx-frost: #eaf4ee;
+  --nx-muted: #a3b8b0;
+  --nx-quiet: #8fa69e;
+  --nx-red: #ff7a7a;
+  --nx-focus: #648df6;
+  --nx-display: 'Space Grotesk', Inter, ui-sans-serif, system-ui, sans-serif;
+  --nx-sans: Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --nx-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --nx-left: 252px;
+  --nx-right: 332px;
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  grid-template-rows: 58px minmax(0, 1fr);
+  grid-template-areas: 'top top' 'rail body';
+  height: 100dvh;
+  overflow: hidden;
+  color: var(--nx-frost);
+  font-family: var(--nx-sans);
+  font-size: 14px;
+  line-height: 1.45;
+  background:
+    radial-gradient(ellipse 60% 55% at 50% 46%, rgb(23 58 50 / 0.5), transparent 70%),
+    var(--nx-void);
+}
+.nexus *,
+.nexus *::before,
+.nexus *::after {
+  box-sizing: border-box;
+}
+.nexus :focus-visible {
+  outline: 2px solid var(--nx-focus);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+:where(.nexus) button {
+  font: inherit;
+  color: inherit;
+}
+:where(.nexus) :is(h1, h2, h3, p, dl, dd, ul, ol) {
+  margin: 0;
+  padding: 0;
+}
+:where(.nexus) :is(ul, ol) {
+  list-style: none;
+}
+.nx-skip {
+  background: var(--nx-slate);
+  color: var(--nx-frost);
+  border: 1px solid var(--nx-jade);
+}
+
+/* Shared type */
+.nx-label {
+  font-family: var(--nx-mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--nx-quiet);
+}
+.nx-mono {
+  font-family: var(--nx-mono);
+  font-size: 12px;
+}
+.nx-quiet {
+  color: var(--nx-muted);
+  font-size: 13px;
+}
+.nx-fine {
+  font-size: 12px;
+  margin-top: 8px;
+}
+.nx-break {
+  overflow-wrap: anywhere;
+}
+
+/* Top command bar */
+.nx-top {
+  grid-area: top;
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 0 16px 0 20px;
+  border-bottom: 1px solid var(--nx-edge);
+  background: rgb(6 12 14 / 0.9);
+  min-width: 0;
+}
+.nx-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--nx-frost);
+  text-decoration: none;
+  font-family: var(--nx-display);
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  font-size: 15px;
+  white-space: nowrap;
+}
+.nx-brand i {
+  font-style: normal;
+  color: var(--nx-jade);
+  font-weight: 500;
+}
+.nx-status-strip {
+  display: flex;
+  flex: 1;
+  gap: 22px;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--nx-muted);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.nx-status-strip .nx-label {
+  margin-right: 6px;
+}
+.nx-status-strip li[data-problem='true'] {
+  color: var(--nx-red);
+  font-weight: 600;
+}
+.nx-top-right {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.nx-clock {
+  display: inline-flex;
+  gap: 8px;
+  align-items: baseline;
+  font-family: var(--nx-mono);
+  font-size: 13px;
+  color: var(--nx-frost);
+}
+.nx-owner {
+  font-size: 13px;
+  color: var(--nx-muted);
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Buttons: quiet hairline controls; one primary action */
+.nx-btn,
+.nx-icon-btn,
+.nx-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--nx-edge);
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  font-size: 13px;
+  transition:
+    border-color 0.15s,
+    background-color 0.15s;
+}
+.nx-btn:hover,
+.nx-icon-btn:hover {
+  border-color: var(--nx-jade);
+  background: rgb(145 242 205 / 0.07);
+}
+.nx-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.nx-icon-btn {
+  width: 34px;
+  padding: 0;
+}
+.nx-btn-amber {
+  border-color: rgb(240 189 118 / 0.6);
+  color: var(--nx-amber);
+}
+.nx-btn-danger {
+  border-color: rgb(255 122 122 / 0.55);
+  color: var(--nx-red);
+}
+.nx-primary {
+  min-height: 44px;
+  padding: 0 24px;
+  border-color: var(--nx-jade);
+  background: var(--nx-jade);
+  color: #04100c;
+  font-weight: 650;
+  font-size: 14px;
+}
+.nx-primary:hover {
+  background: #b4f8dd;
+}
+
+/* Navigation rail */
+.nx-rail {
+  grid-area: rail;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 6px;
+  border-right: 1px solid var(--nx-edge);
+}
+.nx-rail a {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 2px;
+  border-radius: 6px;
+  color: var(--nx-muted);
+  text-decoration: none;
+  font-size: 11px;
+  line-height: 1.2;
+  text-align: center;
+  border-left: 2px solid transparent;
+}
+.nx-rail a:hover {
+  color: var(--nx-frost);
+  background: rgb(145 242 205 / 0.06);
+}
+.nx-rail a.is-active {
+  color: var(--nx-jade);
+  border-left-color: var(--nx-jade);
+  background: rgb(145 242 205 / 0.08);
+}
+
+/* Body grid */
+.nx-body {
+  grid-area: body;
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  grid-template-columns: var(--nx-left) minmax(0, 1fr) var(--nx-right);
+  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-areas: 'left stage right' 'lane lane lane';
+}
+.nx-left {
+  grid-area: left;
+}
+.nx-right {
+  grid-area: right;
+}
+.nx-side {
+  min-height: 0;
+  overflow: auto;
+  padding: 18px 18px 14px;
+}
+.nx-left {
+  border-right: 1px solid var(--nx-edge);
+}
+.nx-right {
+  border-left: 1px solid var(--nx-edge);
+}
+.nx-heading {
+  margin-bottom: 12px;
+}
+.nx-attention-title {
+  color: var(--nx-amber);
+}
+
+/* Left vitals */
+.nx-vitals {
+  display: grid;
+  gap: 2px;
+}
+.nx-vital {
+  padding: 9px 0;
+  border-bottom: 1px solid rgb(40 67 62 / 0.6);
+}
+.nx-vital dt {
+  font-size: 12px;
+  color: var(--nx-muted);
+}
+.nx-vital dd button {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  text-align: left;
+}
+.nx-value {
+  font-family: var(--nx-display);
+  font-size: 26px;
+  font-weight: 500;
+  line-height: 1.15;
+}
+.nx-vital dd[data-state='error'] .nx-value,
+.nx-vital dd[data-state='loading'] .nx-value {
+  font-size: 15px;
+  color: var(--nx-muted);
+  font-family: var(--nx-sans);
+}
+.nx-source {
+  font-size: 12px;
+  color: var(--nx-quiet);
+}
+.nx-vital dd button:hover .nx-source {
+  color: var(--nx-jade);
+}
+.nx-context {
+  margin-top: 22px;
+}
+.nx-kv {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 6px 14px;
+  font-size: 13px;
+}
+.nx-kv dt {
+  color: var(--nx-quiet);
+}
+.nx-kv dd {
+  color: var(--nx-frost);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Center stage */
+.nx-stage {
+  grid-area: stage;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  padding: 14px 18px 10px;
+  outline-offset: -3px;
+}
+.nx-stage-head {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+}
+.nx-stage-head h1 {
+  color: var(--nx-frost);
+  font-family: var(--nx-display);
+  font-weight: 500;
+  font-size: 19px;
+  letter-spacing: 0.04em;
+}
+.nx-readout {
+  text-align: center;
+  padding: 2px 0 10px;
+}
+.nx-readout-label {
+  font-family: var(--nx-display);
+  font-size: 22px;
+  font-weight: 500;
+  letter-spacing: 0.05em;
+  color: var(--nx-frost);
+}
+.nexus[data-reactor-state='approval'] .nx-readout-label {
+  color: var(--nx-amber);
+}
+.nexus[data-reactor-state='failed'] .nx-readout-label {
+  color: var(--nx-red);
+}
+.nx-deck {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+.nx-unavailable {
+  font-size: 12px;
+  color: var(--nx-quiet);
+  padding: 0 6px;
+}
+.nx-foot {
+  margin-top: 10px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--nx-quiet);
+}
+
+/* Reactor */
+.reactor {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 220px;
+  margin: 4px 0;
+  overflow: hidden;
+}
+.reactor-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.reactor-fallback {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+.reactor-fallback.is-dim {
+  opacity: 0.45;
+}
+.reactor-grid {
+  position: absolute;
+  left: -15%;
+  right: -15%;
+  bottom: 0;
+  height: 52%;
+  background-image:
+    linear-gradient(rgb(145 242 205 / 0.13) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(145 242 205 / 0.13) 1px, transparent 1px);
+  background-size: 52px 52px;
+  transform: perspective(520px) rotateX(64deg);
+  transform-origin: 50% 100%;
+  mask-image: linear-gradient(to top, #000, transparent 80%);
+  pointer-events: none;
+}
+.reactor::before,
+.reactor::after {
+  content: '';
+  position: absolute;
+  top: 6px;
+  width: 18px;
+  height: 18px;
+  border-top: 1px solid var(--nx-edge);
+  pointer-events: none;
+}
+.reactor::before {
+  left: 0;
+  border-left: 1px solid var(--nx-edge);
+}
+.reactor::after {
+  right: 0;
+  border-right: 1px solid var(--nx-edge);
+}
+.reactor-note {
+  position: absolute;
+  left: 50%;
+  bottom: 8px;
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: 92%;
+  text-align: center;
+  font-size: 13px;
+  color: var(--nx-amber);
+}
+
+/* Attention panel */
+.nx-block {
+  padding: 14px 0;
+  border-top: 1px solid var(--nx-edge);
+}
+.nx-block:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+}
+.nx-block h3 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  font-family: var(--nx-display);
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+}
+.nx-count {
+  min-width: 24px;
+  padding: 1px 8px;
+  border: 1px solid var(--nx-edge);
+  border-radius: 99px;
+  font-family: var(--nx-mono);
+  font-size: 12px;
+  text-align: center;
+}
+.nx-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+.nx-list li {
+  display: grid;
+  gap: 6px;
+}
+.nx-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-left: 2px solid var(--nx-edge);
+  border-radius: 0 6px 6px 0;
+  background: rgb(16 28 32 / 0.7);
+  cursor: pointer;
+  text-align: left;
+}
+.nx-row:hover,
+.nx-row[aria-pressed='true'] {
+  border-color: var(--nx-edge);
+  border-left-color: var(--nx-jade);
+}
+.nx-row time {
+  grid-column: 2 / -1;
+  margin: 0;
+}
+.nx-item-title {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+.nx-status {
+  font-size: 12px;
+  color: var(--nx-muted);
+}
+.nx-empty-line {
+  font-size: 13px;
+  color: var(--nx-muted);
+  margin-top: 8px;
+}
+.nx-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+.nx-failure {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px 10px;
+  padding: 10px;
+  border: 1px solid rgb(255 122 122 / 0.5);
+  border-radius: 6px;
+  color: var(--nx-red);
+  font-size: 13px;
+}
+.nx-failure p {
+  color: var(--nx-muted);
+}
+.nx-failure .nx-btn {
+  grid-column: 2;
+  justify-self: start;
+}
+.nx-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0;
+  padding: 8px 10px;
+  border: 1px solid rgb(255 122 122 / 0.5);
+  border-radius: 6px;
+  color: var(--nx-red);
+  font-size: 13px;
+}
+.nx-notice span {
+  flex: 1;
+  color: var(--nx-frost);
+}
+
+/* Status glyph colors (shape also encodes state) */
+.nx-glyph {
+  flex: none;
+  color: var(--nx-jade);
+}
+.nx-glyph-failed {
+  color: var(--nx-red);
+}
+.nx-glyph-interrupted,
+.nx-glyph-stopping {
+  color: var(--nx-amber);
+}
+.nx-glyph-queued {
+  color: var(--nx-frost);
+}
+.nx-glyph-cancelled,
+.nx-glyph-unknown {
+  color: var(--nx-muted);
+}
+
+/* Mission lane */
+.nx-lane {
+  grid-area: lane;
+  min-width: 0;
+  padding: 10px 18px 12px;
+  border-top: 1px solid var(--nx-edge);
+  background: linear-gradient(to bottom, rgb(145 242 205 / 0.04), transparent), var(--nx-void);
+}
+.nx-lane-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 8px;
+}
+.nx-lane-head .nx-heading {
+  margin-bottom: 2px;
+}
+.nx-lane-head p {
+  font-size: 12px;
+}
+.nx-lane-actions {
+  display: flex;
+  gap: 8px;
+  flex: none;
+}
+.nx-lane-list {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  padding: 2px 2px 6px;
+  scroll-behavior: auto;
+  border-top: 1px solid rgb(40 67 62 / 0.5);
+  padding-top: 10px;
+}
+.nx-node {
+  position: relative; /* contains the screen-reader message */
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-areas: 'glyph label' 'time time' 'title title';
+  justify-content: start;
+  align-items: center;
+  gap: 2px 8px;
+  width: 190px;
+  padding: 7px 10px;
+  border: 1px solid var(--nx-edge);
+  border-top: 2px solid var(--nx-edge);
+  border-radius: 0 0 6px 6px;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+.nx-node:hover,
+.nx-node[aria-pressed='true'] {
+  border-color: var(--nx-jade);
+  background: rgb(145 242 205 / 0.07);
+}
+.nx-node[data-status='failed'] {
+  border-top-color: var(--nx-red);
+}
+.nx-node[data-status='interrupted'],
+.nx-node[data-status='stopping'] {
+  border-top-color: var(--nx-amber);
+}
+.nx-node[data-status='running'] {
+  border-top-color: var(--nx-jade);
+}
+.nx-node .nx-glyph {
+  grid-area: glyph;
+}
+.nx-node-label {
+  grid-area: label;
+  font-size: 13px;
+  font-weight: 600;
+}
+.nx-node-time {
+  grid-area: time;
+  color: var(--nx-muted);
+}
+.nx-node-title {
+  grid-area: title;
+  font-size: 12px;
+  color: var(--nx-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nx-lane[data-expanded='true'] .nx-lane-list {
+  flex-direction: column;
+  max-height: 34dvh;
+  overflow-y: auto;
+}
+.nx-lane[data-expanded='true'] .nx-node {
+  width: 100%;
+  grid-template-columns: auto 90px 170px minmax(0, 1fr);
+  grid-template-areas: 'glyph label time title';
+  border-top-width: 1px;
+  border-left: 2px solid var(--nx-edge);
+  border-radius: 0 6px 6px 0;
+}
+.nx-empty {
+  padding: 12px 0;
+  font-size: 13px;
+  color: var(--nx-muted);
+}
+
+/* Entrance: opacity only, never blocks controls. Motion lives on the reactor. */
+@media (prefers-reduced-motion: no-preference) {
+  .nx-top,
+  .nx-rail,
+  .nx-side,
+  .nx-lane {
+    animation: nx-in 0.6s ease 0.15s both;
+  }
+  @keyframes nx-in {
+    from {
+      opacity: 0;
+    }
+  }
+}
+
+/* Compact desktop */
+@media (max-width: 1279px) {
+  .nexus {
+    --nx-left: 200px;
+    --nx-right: 288px;
+  }
+  .nx-context {
+    display: none;
+  }
+  .nx-status-strip {
+    gap: 14px;
+  }
+  .nx-top {
+    gap: 14px;
+  }
+}
+
+/* Tablet and below: center-first, page scrolls, attention precedes vitals */
+@media (max-width: 1023px) {
+  .nexus {
+    display: flex;
+    flex-direction: column;
+    height: auto;
+    min-height: 100dvh;
+    overflow: visible;
+  }
+  .nx-top {
+    flex-wrap: wrap;
+    height: auto;
+    padding: 10px 16px;
+    gap: 8px 16px;
+  }
+  .nx-status-strip {
+    order: 3;
+    flex: 1 0 100%;
+    flex-wrap: wrap;
+    gap: 4px 16px;
+    white-space: normal;
+    overflow: visible;
+  }
+  .nx-top-right {
+    margin-left: auto;
+  }
+  .nx-rail {
+    flex-direction: row;
+    overflow-x: auto;
+    padding: 6px 10px;
+    border-right: 0;
+    border-bottom: 1px solid var(--nx-edge);
+  }
+  .nx-rail a {
+    flex-direction: row;
+    gap: 8px;
+    padding: 10px 14px;
+    font-size: 13px;
+    white-space: nowrap;
+    border-left: 0;
+    border-bottom: 2px solid transparent;
+  }
+  .nx-rail a.is-active {
+    border-bottom-color: var(--nx-jade);
+  }
+  .nx-body {
+    display: flex;
+    flex-direction: column;
+  }
+  .nx-stage {
+    order: 1;
+    margin-inline: 4px; /* keeps the focus ring of the focusable main inside the viewport */
+    padding: 14px 12px;
+  }
+  .nx-right {
+    order: 2;
+  }
+  .nx-left {
+    order: 3;
+  }
+  .nx-lane {
+    order: 4;
+  }
+  .nx-side {
+    overflow: visible;
+    border: 0;
+    border-top: 1px solid var(--nx-edge);
+  }
+  .nx-vitals {
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    column-gap: 20px;
+  }
+  .nx-context {
+    display: block;
+  }
+  .reactor {
+    flex: none;
+    height: clamp(300px, 52vw, 480px);
+  }
+}
+
+@media (max-width: 767px) {
+  .reactor {
+    height: 280px;
+  }
+  .nx-owner,
+  .nx-top-right > .nx-btn {
+    display: none;
+  }
+  .nx-lane-head {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .nx-lane-list,
+  .nx-lane[data-expanded='true'] .nx-lane-list {
+    flex-direction: column;
+    max-height: 60dvh;
+    overflow-y: auto;
+  }
+  .nx-node,
+  .nx-lane[data-expanded='true'] .nx-node {
+    width: 100%;
+    grid-template-columns: auto auto minmax(0, 1fr);
+    grid-template-areas: 'glyph label time' 'title title title';
+    border-top-width: 1px;
+    border-left: 2px solid var(--nx-edge);
+    border-radius: 0 6px 6px 0;
+  }
+  .nx-lane-toggle {
+    display: none;
+  }
+  .nx-deck .nx-primary {
+    flex: 1 0 100%;
+  }
+}
+
+@media (max-width: 400px) {
+  .nx-top-right {
+    gap: 8px;
+  }
+  .nx-brand {
+    letter-spacing: 0.08em;
+    font-size: 14px;
+  }
+  .nx-lane-actions {
+    flex-wrap: wrap;
+  }
+}
+
+.nx-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.nx-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.nx-note svg {
+  flex: none;
+  margin-top: 3px;
+}
+.nx-context .nx-kv {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+}
+.nx-context .nx-kv dt {
+  font-size: 12px;
+  margin-top: 8px;
+}
+@media (min-width: 1024px) and (max-height: 820px) {
+  .nx-context {
+    display: none;
+  }
+}
+
+@media (min-width: 1024px) and (max-width: 1179px) {
+  .nx-status-strip li:last-child {
+    display: none; /* avoid a clipped label; runtime is also stated in System context and Mode */
+  }
+}
+
+.nx-lane-status {
+  margin: 2px 0 0;
+  font-size: 0.8rem;
+  color: var(--nx-frost);
+}
+.nx-lane-status[data-lane-status='live'] {
+  color: var(--nx-jade);
+}
+.nx-lane-status[data-lane-status='reconnecting'],
+.nx-lane-status[data-lane-status='disconnected'],
+.nx-lane-status[data-lane-status='unavailable'] {
+  color: var(--nx-amber);
+}
