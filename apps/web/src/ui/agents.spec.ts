@@ -520,6 +520,29 @@ test.describe('Agent Directory', () => {
     await expect(page.getByRole('heading', { level: 3, name: 'Orion' })).toHaveCount(1);
   });
 
+  test('an unknown create survives a browser refresh and resumes its exact retry', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ agents: [], createResponseLosses: 1 });
+    await openAgents(page);
+    await page.getByRole('button', { name: 'Create agent' }).click();
+    await page.getByLabel('Name', { exact: true }).fill('Orion');
+    await page.getByLabel('Slug', { exact: true }).fill('orion-ops');
+    await page.getByRole('button', { name: 'Create draft agent' }).click();
+    await expect(page.getByText(/create result is unknown/i)).toBeVisible();
+    await page.reload();
+
+    await page.getByRole('button', { name: 'Create agent' }).click();
+    await expect(page.getByLabel('Name', { exact: true })).toHaveValue('Orion');
+    await expect(page.getByLabel('Slug', { exact: true })).toHaveValue('orion-ops');
+    await expect(page.getByRole('button', { name: 'Cancel' })).toBeDisabled();
+    await page.getByRole('button', { name: 'Retry same request' }).click();
+    await expect(page.getByRole('heading', { name: 'Orion' })).toBeVisible();
+    expect(api.createRequests).toHaveLength(2);
+    expect(api.createRequests[1]).toEqual(api.createRequests[0]);
+  });
+
   test('lists real API agents with identity, profile status and no runtime claims', async ({
     page,
     api,

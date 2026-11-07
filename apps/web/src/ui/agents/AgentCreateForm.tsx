@@ -1,5 +1,6 @@
 import { useId, useState } from 'react';
 import {
+  AgentIdempotencyKeySchema,
   AgentMutationReceiptSchema,
   CreateAgentInputSchema,
   type CreateAgentInput,
@@ -8,6 +9,38 @@ import { ApiRequestError, request } from '../api.js';
 import { profileHash } from './route.js';
 
 type Operation = { input: CreateAgentInput; key: string };
+const pendingStorageKey = 'omnis.agent-create.pending.v1';
+
+function restorePendingOperation(): Operation | null {
+  try {
+    const raw = sessionStorage.getItem(pendingStorageKey);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
+    const value = parsed as Record<string, unknown>;
+    if (Object.keys(value).length !== 2 || !('input' in value) || !('key' in value)) {
+      sessionStorage.removeItem(pendingStorageKey);
+      return null;
+    }
+    const input = CreateAgentInputSchema.safeParse(value.input);
+    const key = AgentIdempotencyKeySchema.safeParse(value.key);
+    if (!input.success || !key.success) {
+      sessionStorage.removeItem(pendingStorageKey);
+      return null;
+    }
+    return { input: input.data, key: key.data };
+  } catch {
+    return null;
+  }
+}
+
+function clearPendingOperation() {
+  try {
+    sessionStorage.removeItem(pendingStorageKey);
+  } catch {
+    // The operation state will still be discarded locally; storage cleanup is best effort.
+  }
+}
 
 export function AgentCreateForm({
   csrfToken,
@@ -19,12 +52,16 @@ export function AgentCreateForm({
   onCancel: () => void;
 }) {
   const ids = { name: useId(), slug: useId() };
-  const [name, setName] = useState('');
-  const [slug, setSlug] = useState('');
-  const [operation, setOperation] = useState<Operation | null>(null);
+  const [operation, setOperation] = useState<Operation | null>(restorePendingOperation);
+  const [name, setName] = useState(() => operation?.input.name ?? '');
+  const [slug, setSlug] = useState(() => operation?.input.slug ?? '');
   const [busy, setBusy] = useState(false);
-  const [unknown, setUnknown] = useState(false);
-  const [error, setError] = useState('');
+  const [unknown, setUnknown] = useState(() => operation !== null);
+  const [error, setError] = useState(() =>
+    operation
+      ? 'The create result is unknown. Retry this exact request before starting another.'
+      : '',
+  );
 
   async function submit(retry = false) {
     setError('');
@@ -39,6 +76,12 @@ export function AgentCreateForm({
     }
     const current =
       retry && operation ? operation : { input: parsed.data, key: crypto.randomUUID() };
+    try {
+      sessionStorage.setItem(pendingStorageKey, JSON.stringify(current));
+    } catch {
+      setError('This tab cannot preserve a safe retry, so agent creation is paused.');
+      return;
+    }
     setOperation(current);
     setBusy(true);
     try {
@@ -63,14 +106,19 @@ export function AgentCreateForm({
           return result;
         },
       );
+      clearPendingOperation();
       window.location.hash = profileHash(receipt.agentId);
     } catch (cause) {
       if (cause instanceof ApiRequestError && cause.status === 401) {
+        clearPendingOperation();
+        setOperation(null);
+        setUnknown(false);
         onUnauthorized(cause);
       } else if (cause instanceof ApiRequestError && cause.outcome !== 'rejected') {
         setUnknown(true);
         setError('The create result is unknown. Retry this exact request before starting another.');
       } else {
+        clearPendingOperation();
         setUnknown(false);
         setOperation(null);
         setError(cause instanceof ApiRequestError ? cause.message : 'Agent could not be created.');
