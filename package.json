@@ -17,6 +17,8 @@
     "prepare": "node --experimental-strip-types scripts/configure-hooks.ts",
     "db:up": "docker compose --env-file .env.db-admin -f infra/compose/docker-compose.yml up -d postgres",
     "db:down": "docker compose --env-file .env.db-admin -f infra/compose/docker-compose.yml down",
+    "compose:config:test": "node scripts/compose/verify-app-config.mjs",
+    "compose:preflight": "node scripts/compose/check-host-prerequisites.mjs",
     "db:roles": "node --env-file=.env.worker --env-file=.env.authorizer --env-file=.env.sandbox-launcher --env-file=.env.migration --env-file=.env.db-admin --experimental-strip-types packages/db/src/provision.ts",
     "db:migrate": "pnpm --filter @omnis/worker db:migrate",
     "sandbox:image:pull": "docker pull node@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85",
@@ -31,9 +33,9 @@
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
     "lint": "eslint apps packages scripts",
-    "format:check": "prettier --check \"apps/**/*.{ts,tsx,css,html,json}\" \"packages/**/*.ts\" \"scripts/**/*.{ts,mjs}\" \"tests/**/*.mjs\" \"infra/**/*.yml\" \"*.json\" \"*.yaml\" \"*.mjs\"",
-    "format": "prettier --write \"apps/**/*.{ts,tsx,css,html,json}\" \"packages/**/*.ts\" \"scripts/**/*.{ts,mjs}\" \"tests/**/*.mjs\" \"infra/**/*.yml\" \"*.json\" \"*.yaml\" \"*.mjs\"",
-    "test": "pnpm -r test && node --test scripts/db-recovery/*.test.mjs && node --test scripts/container-images/*.test.mjs",
+    "format:check": "prettier --check \"apps/**/*.{ts,tsx,mjs,css,html,json}\" \"packages/**/*.ts\" \"scripts/**/*.{ts,mjs}\" \"tests/**/*.mjs\" \"infra/**/*.yml\" \"*.json\" \"*.yaml\" \"*.mjs\"",
+    "format": "prettier --write \"apps/**/*.{ts,tsx,mjs,css,html,json}\" \"packages/**/*.ts\" \"scripts/**/*.{ts,mjs}\" \"tests/**/*.mjs\" \"infra/**/*.yml\" \"*.json\" \"*.yaml\" \"*.mjs\"",
+    "test": "pnpm -r test && node --test scripts/db-recovery/*.test.mjs scripts/compose/*.test.mjs && node --test scripts/container-images/*.test.mjs",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test"
   },
   "devDependencies": {

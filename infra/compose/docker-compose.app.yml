@@ -1,0 +1,152 @@
+name: omnis-os
+
+services:
+  postgres:
+    networks:
+      - data
+
+  api:
+    user: '10001:10001'
+    build:
+      context: ../..
+      dockerfile: infra/docker/api.Dockerfile
+    env_file:
+      - '${OMNIS_API_ENV_FILE:-/etc/omnis/api.env}'
+    environment:
+      OMNIS_API_HOST: 0.0.0.0
+      OMNIS_AUTHORIZER_SOCKET: /run/omnis-authorizer/authorizer.sock
+      OMNIS_COMPOSE_PRIVATE: 'true'
+      OMNIS_WORKER_HOST: worker
+    group_add:
+      - '${OMNIS_AUTHORIZER_SOCKET_GID:-10001}'
+    volumes:
+      - type: bind
+        source: /run/omnis-authorizer
+        target: /run/omnis-authorizer
+        read_only: true
+        bind:
+          create_host_path: false
+    networks:
+      - edge
+      - data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      worker:
+        condition: service_healthy
+    restart: unless-stopped
+    stop_grace_period: 30s
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 768m
+    cpus: 1.0
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:4100/api/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+
+  worker:
+    user: '10001:10001'
+    build:
+      context: ../..
+      dockerfile: infra/docker/worker.Dockerfile
+    env_file:
+      - '${OMNIS_WORKER_ENV_FILE:-/etc/omnis/worker.env}'
+    environment:
+      OMNIS_COMPOSE_PRIVATE: 'true'
+      OMNIS_DB_HOST: postgres
+      OMNIS_SANDBOX_LAUNCHER_SOCKET: /run/omnis-sandbox/launcher.sock
+      OMNIS_WORKER_HOST: 0.0.0.0
+    group_add:
+      - '${OMNIS_LAUNCHER_SOCKET_GID:-10002}'
+    volumes:
+      - type: bind
+        source: /run/omnis-sandbox
+        target: /run/omnis-sandbox
+        read_only: true
+        bind:
+          create_host_path: false
+    networks:
+      - data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    stop_grace_period: 30s
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 256
+    mem_limit: 1g
+    cpus: 1.5
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:4101/internal/v1/health',{headers:{'x-omnis-internal-token':process.env.OMNIS_INTERNAL_TOKEN}}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 20s
+
+  web:
+    user: '10001:10001'
+    build:
+      context: ../..
+      dockerfile: infra/docker/web.Dockerfile
+    environment:
+      OMNIS_API_URL: http://api:4100
+      OMNIS_WEB_PORT: 8080
+    networks:
+      - edge
+    ports:
+      - '127.0.0.1:${OMNIS_WEB_PORT:-8080}:8080'
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    stop_grace_period: 5s
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 0.5
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
+
+networks:
+  edge:
+    internal: true
+  data:
+    internal: true

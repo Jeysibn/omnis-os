@@ -20,6 +20,8 @@ Run `scripts/host-security/verify-worker-boundary.sh` only in the reviewed Linux
 2. **CI:** ephemeral PostgreSQL + pinned mock sandbox image, no OAuth credentials, no paid inference, migrations, sandbox negative tests and Playwright smoke tests.
 3. **Private deployment (after gated testing):** Docker Compose on a self-hosted Linux machine with protected persistent database storage, private DNS and device-trusted TLS/CA, and no publicly exposed runtime or database endpoints. Kubernetes and k3s are outside the deployment target.
 
+The app Compose overlay now defines web, API, worker, and PostgreSQL services. The authorizer and restricted Docker launcher remain host-managed systemd services; API and worker containers receive separate read-only mounts for their Unix sockets. See [the private Compose topology and verification boundary](../../infra/compose/README.md). Static CI checks do not establish target-host socket, TLS ingress, backup schedule, restore, or restart readiness.
+
 No permanent staging required initially. Isolated local/CI test data must never point at production runtime homes or production database.
 
 ## Suggested baseline dependencies (version selection in Phase 0)

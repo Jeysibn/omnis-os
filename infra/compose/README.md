@@ -1,0 +1,47 @@
+# Private Docker Compose application topology
+
+The application overlay runs PostgreSQL, API, worker, and the Omnis OS web gateway with Docker Compose. The existing host systemd authorizer and restricted sandbox launcher remain host-managed because the launcher has tightly constrained access to the Docker daemon. The API and worker receive only their respective read-only Unix socket mounts; neither receives the Docker socket. Docker-group access remains host-root-equivalent and is confined to the launcher.
+
+The `edge` and `data` networks are Docker internal networks. Web is attached only to `edge`; the worker and database are attached only to `data`; API bridges both so the browser gateway can reach the API and the API can reach the worker. API and worker have no published ports. Web and PostgreSQL publish only to host loopback. The web gateway serves the built SPA and proxies `/api/*` requests, including SSE streams, to the internal API while preserving browser origin, cookies, CSRF, and idempotency headers.
+
+## Host prerequisites
+
+This topology is for a private Linux deployment, not a command to run on an unreviewed host. Install and review the existing service identities, secret files, and systemd units first. Start only the authorizer and restricted launcher as host services; Compose owns the web, API, worker, and PostgreSQL processes.
+
+1. Generate owner secrets and install the service-specific files using the existing reviewed host procedure. Keep `.env.db-admin`, `/etc/omnis/api.env`, and `/etc/omnis/worker.env` owner-only. The Compose command must run as root because Docker control is root-equivalent and the service env files are deliberately not readable by an ordinary account.
+2. Set `OMNIS_ALLOWED_ORIGIN` in `/etc/omnis/api.env` to the exact HTTPS origin served by the private reverse proxy and set `OMNIS_SECURE_COOKIES=true`. Configure the proxy to forward requests to `127.0.0.1:8080`; it must preserve `Origin`, `Cookie`, and `Set-Cookie` and support long-lived SSE responses. The proxy, TLS certificate, DNS, and private ingress are outside this Compose file.
+3. Copy `.env.compose.example` to `.env.compose`. Set the authorizer and launcher socket group IDs to the numeric IDs of `omnis-authorizer-socket` and `omnis-launcher-socket` on that host. The file contains topology values only, no credentials.
+4. Verify that the host authorizer and restricted launcher are active, their Unix sockets have the expected group access, the secret files are private, and their socket group IDs match the Compose settings:
+
+   ```sh
+   sudo node scripts/compose/check-host-prerequisites.mjs
+   ```
+
+The preflight is read-only. It does not install host identities, modify systemd, alter firewall rules, change Docker, or start services.
+
+## First startup
+
+Provision the database roles and apply migrations before starting API or worker processes:
+
+```sh
+docker compose --env-file .env.db-admin -f infra/compose/docker-compose.yml up -d postgres
+pnpm db:roles
+pnpm db:migrate
+sudo docker compose --env-file .env.db-admin --env-file .env.compose \
+  -f infra/compose/docker-compose.yml \
+  -f infra/compose/docker-compose.app.yml up -d --build
+```
+
+The database's only host-published port is `127.0.0.1:5432` for the host-managed authorizer, launcher, and migration tools. The API and worker listen on their private Docker networks. The web gateway listens on `127.0.0.1:${OMNIS_WEB_PORT:-8080}` for a separate private HTTPS proxy. No internet-facing ingress or database port is configured here.
+
+## Health, persistence, and recovery
+
+- Compose waits for PostgreSQL health before starting worker, then waits for worker and API health before starting web. Host socket readiness is checked separately by the preflight.
+- PostgreSQL state lives in the existing named `omnis-postgres-data` volume. API, worker, and web containers are read-only, non-root, capability-free, bounded by CPU/memory/PID limits, and restart under Compose. Their durable task, assignment, authorization, Run, and event state remains in PostgreSQL.
+- Worker startup reconciles expired leases and uncertain submissions through the existing durable lifecycle. Compose restart does not authorize replay of uncertain external work. The runtime remains mock-only.
+- Use the existing `pnpm db:backup` and `pnpm db:restore:verify` flows against the private database. Backup data, encryption keys, owner secrets, and host service credentials require separate protected storage. A passing disposable backup test is not a backup schedule or a target-host restore drill.
+- To stop app containers while keeping PostgreSQL, use `sudo docker compose` with both files and `stop web api worker`. Preserve the database volume. Do not use `down --volumes` for an operational deployment.
+
+## Verification boundary
+
+`pnpm compose:config:test` validates the rendered service topology, internal networks, published-port bindings, resource bounds, service identities, and socket mount allowlist using disposable environment files. Container CI builds the web gateway and probes static delivery, API proxying, cookies, SSE, and path traversal with a local fake API. These checks do not prove compatibility with a particular Linux kernel or Docker daemon, actual host systemd socket permissions, private TLS ingress, scheduled backup, target-host restore, or host restart recovery. Those checks remain required before treating a private deployment as operational. Do not run deployment commands against the owner's machine without separate authorization.
