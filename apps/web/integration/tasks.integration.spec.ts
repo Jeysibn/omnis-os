@@ -141,6 +141,7 @@ test('owner sees an authorized synthetic broker Run, ordered events, result and 
 
   const agentCreated = await ownerRequest(page, '/api/v1/agents', {
     method: 'POST',
+    idempotencyKey: randomUUID(),
     body: {
       name: 'Synthetic broker integration agent',
       slug: `synthetic-broker-${randomUUID().slice(0, 8)}`,
@@ -159,11 +160,13 @@ test('owner sees an authorized synthetic broker Run, ordered events, result and 
   };
   const savedProfile = await ownerRequest(page, `/api/v1/agents/${agentId}/draft-profile`, {
     method: 'PUT',
+    idempotencyKey: randomUUID(),
     body: { expectedDraftRevision: 0, baseVersionNo: null, profile },
   });
   expect(savedProfile.status).toBe(200);
   const published = await ownerRequest(page, `/api/v1/agents/${agentId}/publish`, {
     method: 'POST',
+    idempotencyKey: randomUUID(),
     body: { expectedVersionNo: null, expectedDraftRevision: 1 },
   });
   expect(published.status).toBe(201);
