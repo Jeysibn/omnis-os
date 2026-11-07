@@ -92,7 +92,7 @@ const postgresSuite = describe(
         'GRANT SELECT, INSERT, UPDATE, DELETE ON omnis.test_queue_outbox TO omnis_runtime',
       );
       await adminPool!.query(
-        'TRUNCATE omnis.test_queue_outbox, omnis.connector_authorization_audit, omnis.connector_execution_attempts, omnis.connector_authorizations, omnis.task_project_management_idempotency, omnis.task_epic_management_audit, omnis.task_epic_associations, omnis.task_project_management_audit, omnis.project_epic_management_audit, omnis.project_epics, omnis.project_milestone_management_audit, omnis.project_milestones, omnis.project_management_idempotency, omnis.project_management_audit, omnis.projects, omnis.agent_management_idempotency, omnis.agent_management_audit, omnis.agent_profile_drafts, omnis.department_management_audit, omnis.agent_profile_versions, omnis.agents, omnis.departments, omnis.mock_sandbox_launches, omnis.legacy_unscoped_runs, omnis.authorization_audit, omnis.runtime_authorizations, omnis.run_idempotency, omnis.run_events, omnis.runs, omnis.tasks',
+        'TRUNCATE omnis.test_queue_outbox, omnis.connector_authorization_audit, omnis.connector_execution_attempts, omnis.connector_authorizations, omnis.task_execution_assignment_idempotency, omnis.task_execution_assignment_audit, omnis.task_project_management_idempotency, omnis.task_epic_management_audit, omnis.task_epic_associations, omnis.task_project_management_audit, omnis.project_epic_management_audit, omnis.project_epics, omnis.project_milestone_management_audit, omnis.project_milestones, omnis.project_management_idempotency, omnis.project_management_audit, omnis.projects, omnis.agent_management_idempotency, omnis.agent_management_audit, omnis.agent_profile_drafts, omnis.department_management_audit, omnis.agent_profile_versions, omnis.agents, omnis.departments, omnis.mock_sandbox_launches, omnis.legacy_unscoped_runs, omnis.authorization_audit, omnis.runtime_authorizations, omnis.run_idempotency, omnis.run_events, omnis.runs, omnis.tasks',
       );
       await adminPool!.query('ALTER SEQUENCE omnis.task_id_seq RESTART WITH 1');
       await adminPool!.query('ALTER SEQUENCE omnis.run_id_seq RESTART WITH 1');
@@ -772,11 +772,21 @@ const postgresSuite = describe(
         { expectedVersionNo: null, expectedDraftRevision: 1 },
         randomUUID(),
       );
-      const task = await store.createTask(
+      const createdTask = await store.createTask(
         {
           title: 'Synthetic connector authorization task',
           detail: 'A bounded synthetic task used only for authorization tests.',
           projectId: project.id,
+        },
+        randomUUID(),
+      );
+      const task = await store.setTaskExecutionAssignment(
+        createdTask.id,
+        {
+          agentId: agent.agentId,
+          profileVersion: published.versionNo,
+          runtimeId: 'mock',
+          expectedAssignmentRevision: createdTask.assignmentRevision ?? 1,
         },
         randomUUID(),
       );
@@ -1285,6 +1295,146 @@ const postgresSuite = describe(
       });
       await assert.rejects(
         pool!.query('UPDATE omnis.tasks SET project_id = NULL'),
+        /permission denied/,
+      );
+    });
+
+    it('persists owner task execution assignment with idempotency, immutable profiles, and restricted audit', async () => {
+      const lifecycle = new PostgresAgentLifecycleStore(authorizerPool!, Buffer.alloc(32, 43));
+      const agent = await lifecycle.createAgent(
+        {
+          name: 'Assigned synthetic agent',
+          slug: `assigned-${randomUUID().slice(0, 8)}`,
+          departmentId: null,
+        },
+        randomUUID(),
+      );
+      await lifecycle.saveDraft(
+        agent.agentId,
+        {
+          expectedDraftRevision: 0,
+          baseVersionNo: null,
+          profile: {
+            profession: 'Synthetic analyst',
+            seniority: null,
+            specialties: ['verification'],
+            personality: { traits: ['careful'], tone: null, principles: ['verify'] },
+            behavior: { autonomy: null, escalation: null },
+            instructions: 'Use only the deterministic mock runtime.',
+          },
+        },
+        randomUUID(),
+      );
+      await lifecycle.publish(
+        agent.agentId,
+        { expectedVersionNo: null, expectedDraftRevision: 1 },
+        randomUUID(),
+      );
+      const task = await store.createTask({
+        title: 'Assign a synthetic profile',
+        detail: 'Persist a supported mock runtime assignment before authorization.',
+      });
+      assert.deepEqual(
+        {
+          agentId: task.agentId,
+          profileVersion: task.profileVersion,
+          runtimeId: task.runtimeId,
+          assignmentRevision: task.assignmentRevision,
+        },
+        { agentId: null, profileVersion: null, runtimeId: null, assignmentRevision: 1 },
+      );
+      const input = {
+        agentId: agent.agentId,
+        profileVersion: 1,
+        runtimeId: 'mock' as const,
+        expectedAssignmentRevision: 1,
+      };
+      const requestId = randomUUID();
+      const assigned = await store.setTaskExecutionAssignment(task.id, input, requestId);
+      assert.equal(assigned.agentId, agent.agentId);
+      assert.equal(assigned.profileVersion, 1);
+      assert.equal(assigned.runtimeId, 'mock');
+      assert.equal(assigned.assignmentRevision, 2);
+      assert.deepEqual(await store.setTaskExecutionAssignment(task.id, input, requestId), assigned);
+      assert.deepEqual(await store.getTask(task.id), assigned);
+      await assert.rejects(
+        store.setTaskExecutionAssignment(task.id, input, randomUUID()),
+        (error: unknown) => error instanceof StoreError && error.code === 'conflict',
+      );
+      const cleared = await store.setTaskExecutionAssignment(
+        task.id,
+        {
+          agentId: null,
+          profileVersion: null,
+          runtimeId: null,
+          expectedAssignmentRevision: 2,
+        },
+        randomUUID(),
+      );
+      assert.equal(cleared.assignmentRevision, 3);
+      assert.equal(cleared.agentId, null);
+
+      const authorization = await authorizations.request(task.id, 'owner');
+      await assert.rejects(
+        store.setTaskExecutionAssignment(
+          task.id,
+          {
+            ...input,
+            expectedAssignmentRevision: 3,
+          },
+          randomUUID(),
+        ),
+        (error: unknown) => error instanceof StoreError && error.code === 'conflict',
+      );
+      assert.equal((await authorizations.get(authorization.id))?.status, 'pending');
+
+      const audit = await adminPool!.query<{
+        previous_agent_id: string | null;
+        agent_id: string | null;
+        profile_version_no: number;
+        runtime_id: string;
+        actor_id: string;
+      }>(
+        `SELECT previous_agent_id, agent_id, profile_version_no, runtime_id, actor_id
+           FROM omnis.task_execution_assignment_audit WHERE task_id = $1 ORDER BY occurred_at, id`,
+        [task.id],
+      );
+      assert.deepEqual(audit.rows, [
+        {
+          previous_agent_id: null,
+          agent_id: agent.agentId,
+          profile_version_no: 1,
+          runtime_id: 'mock',
+          actor_id: 'owner',
+        },
+        {
+          previous_agent_id: agent.agentId,
+          agent_id: null,
+          profile_version_no: null,
+          runtime_id: null,
+          actor_id: 'owner',
+        },
+      ]);
+
+      const privileges = await adminPool!.query<{
+        runtime_audit_insert: boolean;
+        runtime_assignment_execute: boolean;
+        authorizer_assignment_execute: boolean;
+      }>(`
+        SELECT has_table_privilege('omnis_runtime', 'omnis.task_execution_assignment_audit', 'INSERT') AS runtime_audit_insert,
+               has_function_privilege('omnis_runtime', 'omnis.set_task_execution_assignment(text,integer,text,integer,text,uuid,bytea)', 'EXECUTE') AS runtime_assignment_execute,
+               has_function_privilege('omnis_authorizer', 'omnis.set_task_execution_assignment(text,integer,text,integer,text,uuid,bytea)', 'EXECUTE') AS authorizer_assignment_execute
+      `);
+      assert.deepEqual(privileges.rows[0], {
+        runtime_audit_insert: false,
+        runtime_assignment_execute: true,
+        authorizer_assignment_execute: false,
+      });
+      await assert.rejects(
+        pool!.query(
+          'INSERT INTO omnis.task_execution_assignment_audit(id, task_id, actor_id, request_id) VALUES ($1,$2,$3,$4)',
+          [`tea_${randomUUID().replaceAll('-', '')}`, task.id, 'owner', randomUUID()],
+        ),
         /permission denied/,
       );
     });
@@ -5897,6 +6047,8 @@ const postgresSuite = describe(
         await adminPool!.query(`
         TRUNCATE omnis.test_queue_outbox, omnis.connector_authorization_audit,
           omnis.connector_execution_attempts, omnis.connector_authorizations,
+          omnis.task_execution_assignment_idempotency,
+          omnis.task_execution_assignment_audit,
           omnis.task_project_management_idempotency,
           omnis.task_epic_management_audit, omnis.task_epic_associations,
           omnis.task_project_management_audit, omnis.project_management_idempotency,

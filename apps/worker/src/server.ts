@@ -7,6 +7,7 @@ import {
   AgentVersionRouteParamSchema,
   ProjectIdSchema,
   ProjectWorkspaceQuerySchema,
+  SetTaskExecutionAssignmentSchema,
   SetTaskProjectSchema,
   TaskIdSchema,
 } from '@omnis/contracts';
@@ -316,6 +317,27 @@ app.put<{ Params: { taskId: string } }>(
       });
     try {
       return await coordinator.setTaskProject(taskId.data, body.data, requestId);
+    } catch (error) {
+      if (error instanceof CoordinatorError)
+        return reply
+          .code(error.statusCode)
+          .send({ error: { code: error.code, message: error.message } });
+      throw error;
+    }
+  },
+);
+app.put<{ Params: { taskId: string } }>(
+  '/internal/v1/tasks/:taskId/execution-assignment',
+  async (request, reply) => {
+    const taskId = TaskIdSchema.safeParse(request.params.taskId);
+    const body = SetTaskExecutionAssignmentSchema.safeParse(request.body);
+    const requestId = taskIdempotencyKey(request.headers['idempotency-key']);
+    if (!taskId.success || !body.success || !requestId)
+      return reply.code(400).send({
+        error: { code: 'invalid_input', message: 'Task execution assignment input is invalid.' },
+      });
+    try {
+      return await coordinator.setTaskExecutionAssignment(taskId.data, body.data, requestId);
     } catch (error) {
       if (error instanceof CoordinatorError)
         return reply

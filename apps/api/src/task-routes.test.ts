@@ -142,4 +142,44 @@ describe('owner task routes', () => {
       await app.close();
     }
   });
+
+  it('requires owner protection and a key for execution assignment, then forwards the exact request', async () => {
+    const calls: Array<{ path: string; init?: RequestInit }> = [];
+    const anonymous = createApp(false, calls);
+    const owner = createApp(true, calls);
+    const payload = {
+      agentId: 'agent-001',
+      profileVersion: 2,
+      runtimeId: 'mock',
+      expectedAssignmentRevision: 1,
+    };
+    try {
+      const unauthorized = await anonymous.inject({
+        method: 'PUT',
+        url: `/api/v1/tasks/${task.id}/execution-assignment`,
+        headers: protectedHeaders,
+        payload,
+      });
+      assert.equal(unauthorized.statusCode, 401);
+      const invalidRuntime = await owner.inject({
+        method: 'PUT',
+        url: `/api/v1/tasks/${task.id}/execution-assignment`,
+        headers: protectedHeaders,
+        payload: { ...payload, runtimeId: 'codex' },
+      });
+      assert.equal(invalidRuntime.statusCode, 400);
+      const assigned = await owner.inject({
+        method: 'PUT',
+        url: `/api/v1/tasks/${task.id}/execution-assignment`,
+        headers: protectedHeaders,
+        payload,
+      });
+      assert.equal(assigned.statusCode, 200);
+      assert.equal(calls.at(-1)?.path, `/internal/v1/tasks/${task.id}/execution-assignment`);
+      assert.deepEqual(calls.at(-1)?.init?.headers, { 'idempotency-key': idempotencyKey });
+      assert.equal(calls.at(-1)?.init?.body, JSON.stringify(payload));
+    } finally {
+      await Promise.all([anonymous.close(), owner.close()]);
+    }
+  });
 });

@@ -108,6 +108,9 @@ export function registerConnectorAuthorizationRoutes(
         project.data.status !== 'active' ||
         task.data.projectId !== binding.projectId ||
         task.data.associationRevision !== binding.taskRevision ||
+        task.data.agentId !== binding.agentId ||
+        task.data.profileVersion !== binding.profileVersion ||
+        task.data.runtimeId !== 'mock' ||
         project.data.revision !== binding.projectRevision ||
         profile.data.agentId !== binding.agentId ||
         profile.data.versionNo !== binding.profileVersion

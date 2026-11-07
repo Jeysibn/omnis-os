@@ -46,6 +46,7 @@ import { ProjectsWorkspace } from './projects/ProjectsWorkspace.js';
 import { parseProjectList } from './projects/data.js';
 import { AppHeader } from './shell/AppHeader.js';
 import { SyntheticAuditHistory } from './SyntheticAuditHistory.js';
+import { TaskExecutionAssignmentEditor } from './TaskExecutionAssignmentEditor.js';
 
 type Owner = { id: string; displayName: string };
 type Page = 'command-center' | 'tasks' | 'runs' | 'agents' | 'departments' | 'projects';
@@ -1131,6 +1132,13 @@ function App() {
             projectId={taskProjectId}
             pendingTaskCreate={pendingTaskCreate}
             selectedTask={selectedTask}
+            csrfToken={csrfToken}
+            onSessionExpired={expireSessionIfNeeded}
+            onTaskUpdated={(updated) => {
+              setTasks((current) =>
+                current.map((task) => (task.id === updated.id ? updated : task)),
+              );
+            }}
             onTitle={setTitle}
             onDetail={setDetail}
             onProjectId={(value) => {
@@ -1531,6 +1539,9 @@ function TasksWorkspace({
   projectId,
   pendingTaskCreate,
   selectedTask,
+  csrfToken,
+  onSessionExpired,
+  onTaskUpdated,
   onTitle,
   onDetail,
   onProjectId,
@@ -1557,6 +1568,9 @@ function TasksWorkspace({
   projectId: string;
   pendingTaskCreate: TaskCreateOperation | null;
   selectedTask: Task | null;
+  csrfToken: string;
+  onSessionExpired: (cause: unknown) => boolean;
+  onTaskUpdated: (task: Task) => void;
   onTitle: (value: string) => void;
   onDetail: (value: string) => void;
   onProjectId: (value: string) => void;
@@ -1773,6 +1787,12 @@ function TasksWorkspace({
                 <dd>{runs.filter((run) => run.taskId === selectedTask.id).length}</dd>
               </div>
             </dl>
+            <TaskExecutionAssignmentEditor
+              task={selectedTask}
+              csrfToken={csrfToken}
+              onSessionExpired={onSessionExpired}
+              onTaskUpdated={onTaskUpdated}
+            />
           </>
         ) : (
           <EmptyState

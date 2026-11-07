@@ -17,6 +17,7 @@ import {
   CreateProjectSchema,
   CreateTaskSchema,
   SetTaskProjectSchema,
+  SetTaskExecutionAssignmentSchema,
   TaskSchema,
   UpdateProjectSchema,
   ArchiveProjectSchema,
@@ -254,6 +255,10 @@ describe('task project association contracts', () => {
       ...task,
       projectId: null,
       associationRevision: 1,
+      agentId: null,
+      profileVersion: null,
+      runtimeId: null,
+      assignmentRevision: 1,
     });
   });
 
@@ -280,6 +285,49 @@ describe('task project association contracts', () => {
     assert.equal(
       SetTaskProjectSchema.safeParse({ projectId, expectedAssociationRevision: 1, extra: true })
         .success,
+      false,
+    );
+  });
+
+  it('accepts only a complete, explicitly synthetic task execution assignment', () => {
+    const assigned = {
+      agentId: 'agent-001',
+      profileVersion: 2,
+      runtimeId: 'mock',
+      assignmentRevision: 3,
+    };
+    assert.deepEqual(TaskSchema.parse({ ...task, ...assigned }), { ...task, ...assigned });
+    assert.equal(
+      TaskSchema.safeParse({ ...task, agentId: 'agent-001', profileVersion: 2 }).success,
+      false,
+    );
+    assert.equal(TaskSchema.safeParse({ ...task, ...assigned, runtimeId: 'codex' }).success, false);
+    assert.equal(
+      SetTaskExecutionAssignmentSchema.safeParse({
+        agentId: 'agent-001',
+        profileVersion: 2,
+        runtimeId: 'mock',
+        expectedAssignmentRevision: 3,
+      }).success,
+      true,
+    );
+    assert.equal(
+      SetTaskExecutionAssignmentSchema.safeParse({
+        agentId: 'agent-001',
+        profileVersion: 2,
+        runtimeId: null,
+        expectedAssignmentRevision: 3,
+      }).success,
+      false,
+    );
+    assert.equal(
+      SetTaskExecutionAssignmentSchema.safeParse({
+        agentId: null,
+        profileVersion: null,
+        runtimeId: null,
+        expectedAssignmentRevision: 3,
+        extra: 'rejected',
+      }).success,
       false,
     );
   });

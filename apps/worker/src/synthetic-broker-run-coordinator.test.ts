@@ -21,6 +21,10 @@ const task: Task = {
   createdAt: '2026-11-07T00:00:00.000Z',
   projectId: `prj_${'a'.repeat(32)}`,
   associationRevision: 1,
+  agentId: 'fixture-agent',
+  profileVersion: 1,
+  runtimeId: 'mock',
+  assignmentRevision: 1,
 };
 const profile = {
   versionId: 'profile_version_1',

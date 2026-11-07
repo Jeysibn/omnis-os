@@ -328,6 +328,20 @@ $task_project_acl$;
 REVOKE ALL ON TABLE omnis.task_project_management_audit,
   omnis.task_project_management_idempotency FROM PUBLIC, omnis_runtime,
   omnis_authorizer, omnis_launcher;
+DO $task_execution_assignment_acl$
+BEGIN
+  IF pg_catalog.to_regclass('omnis.task_execution_assignment_audit') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON omnis.task_execution_assignment_audit FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+  IF pg_catalog.to_regclass('omnis.task_execution_assignment_idempotency') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON omnis.task_execution_assignment_idempotency FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.set_task_execution_assignment(text,integer,text,integer,text,uuid,bytea)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.set_task_execution_assignment(text,integer,text,integer,text,uuid,bytea) FROM PUBLIC, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.set_task_execution_assignment(text,integer,text,integer,text,uuid,bytea) TO omnis_runtime';
+  END IF;
+END
+$task_execution_assignment_acl$;
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA pgboss TO omnis_runtime;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA pgboss TO omnis_runtime;

@@ -79,6 +79,53 @@ describe('durable mock run coordinator', () => {
     );
   });
 
+  it('validates and persists only supported task execution assignments', async () => {
+    const calls: Array<{ taskId: string; input: unknown; requestId: string }> = [];
+    const task: Task = {
+      id: 'task-0001',
+      title: 'Assign a profile',
+      detail: 'Persist a supported mock profile before authorization.',
+      status: 'open',
+      createdAt: '2026-11-07T00:00:00.000Z',
+      agentId: null,
+      profileVersion: null,
+      runtimeId: null,
+      assignmentRevision: 1,
+    };
+    const coordinator = testCoordinator(
+      {
+        setTaskExecutionAssignment: async (taskId: string, input: unknown, requestId: string) => {
+          calls.push({ taskId, input, requestId });
+          return {
+            ...task,
+            agentId: 'agent-001',
+            profileVersion: 2,
+            runtimeId: 'mock',
+            assignmentRevision: 2,
+          };
+        },
+      } as unknown as PostgresRunStore,
+      { send: async () => null, findJobs: async () => [] },
+      new MockRuntimeAdapter(),
+    );
+    const input = {
+      agentId: 'agent-001',
+      profileVersion: 2,
+      runtimeId: 'mock',
+      expectedAssignmentRevision: 1,
+    };
+    const assigned = await coordinator.setTaskExecutionAssignment('task-0001', input, authId);
+    assert.equal(assigned.assignmentRevision, 2);
+    assert.deepEqual(calls, [{ taskId: 'task-0001', input, requestId: authId }]);
+    await assert.rejects(
+      coordinator.setTaskExecutionAssignment('task-0001', { ...input, runtimeId: 'codex' }, authId),
+      (error: unknown) =>
+        error instanceof CoordinatorError &&
+        error.statusCode === 400 &&
+        error.code === 'invalid_input',
+    );
+  });
+
   it('translates archived-project admission failures into a stable conflict', async () => {
     const denials: string[] = [];
     const coordinator = testCoordinator(
@@ -383,6 +430,10 @@ describe('durable mock run coordinator', () => {
       detail: 'List files without changing them.',
       status: 'open',
       createdAt: now,
+      agentId: null,
+      profileVersion: null,
+      runtimeId: null,
+      assignmentRevision: 1,
     };
     let cancellationAcknowledged = false;
     const store = {
@@ -722,6 +773,10 @@ const lifecycleTask: Task = {
   detail: 'Read-only mock task input.',
   status: 'open',
   createdAt: lifecycleRun.createdAt,
+  agentId: null,
+  profileVersion: null,
+  runtimeId: null,
+  assignmentRevision: 1,
 };
 
 function failingRuntime(error: Error): RuntimeAdapter {
