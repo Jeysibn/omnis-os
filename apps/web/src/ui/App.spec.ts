@@ -207,6 +207,7 @@ function createMockApi(page: Page) {
   const runDetailGets = new Map<string, number>();
   let createdTaskCount = 0;
   let taskMutationFailures = 0;
+  let taskMutationRetryUsed = false;
 
   const configure = (next: FixtureOptions = {}) => {
     options = next;
@@ -228,6 +229,7 @@ function createMockApi(page: Page) {
     stopMutationFailures = options.stopMutationFailures ?? 0;
     createdTaskCount = 0;
     taskMutationFailures = options.taskMutationFailures ?? 0;
+    taskMutationRetryUsed = false;
   };
 
   const fulfillError = (route: Route, status: number, code: string, message: string) =>
@@ -357,7 +359,9 @@ function createMockApi(page: Page) {
         options.taskMutationStatus &&
         (taskMutationFailures > 0 ||
           options.taskMutationFailures === undefined ||
-          (taskMutationFailures === 0 && options.taskMutationRetryStatus !== undefined))
+          (taskMutationFailures === 0 &&
+            options.taskMutationRetryStatus !== undefined &&
+            !taskMutationRetryUsed))
       ) {
         const status =
           options.taskMutationFailures !== undefined &&
@@ -366,6 +370,7 @@ function createMockApi(page: Page) {
             ? options.taskMutationRetryStatus
             : options.taskMutationStatus;
         if (taskMutationFailures > 0) taskMutationFailures -= 1;
+        else if (options.taskMutationRetryStatus !== undefined) taskMutationRetryUsed = true;
         if (status === 401) {
           authenticated = false;
           currentCsrfToken = 'csrf-recovered-fixture-token';
@@ -1192,6 +1197,50 @@ test('a definitive rejection of a recovered request unlocks the form for correct
   await expect(page.getByLabel('Task detail')).not.toHaveAttribute('readonly', '');
   await expect(page.getByText('The project task request may have been accepted')).toHaveCount(0);
   await expect(page.getByRole('alert')).toContainText('Task could not be created.');
+  expect(
+    await page.evaluate(() => sessionStorage.getItem('omnis.pending-task-create.v1')),
+  ).toBeNull();
+});
+
+test('a retry 401 preserves an uncertain task request for same-owner explicit retry', async ({
+  page,
+  api,
+}) => {
+  api.configure({
+    taskMutationStatus: 503,
+    taskMutationFailures: 1,
+    taskMutationRetryStatus: 401,
+  });
+  await openWorkspace(page, '#tasks');
+  await page.getByRole('button', { name: 'Load available projects' }).click();
+  await expect(page.getByRole('option', { name: 'Operations (OPS)' })).toBeAttached();
+  await page.getByLabel('Project').selectOption(`prj_${'a'.repeat(32)}`);
+  await page.getByLabel('Task title').fill('Review the deployment plan');
+  await page.getByLabel('Task detail').fill('Read the deployment plan and report its next action.');
+  await page.getByRole('button', { name: 'Create task' }).click();
+  await page.getByRole('button', { name: 'Retry same request' }).click();
+  await expect(page.getByRole('heading', { name: 'Welcome back.' })).toBeVisible();
+  await expect(page.getByRole('alert')).toContainText('session expired');
+  expect(
+    await page.evaluate(() => sessionStorage.getItem('omnis.pending-task-create.v1')),
+  ).not.toBeNull();
+
+  await page.getByLabel('Owner password').fill('fixture-owner-password');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await expect(page.getByRole('button', { name: 'Retry same request' })).toBeVisible();
+  await expect(page.getByLabel('Task title')).toHaveValue('Review the deployment plan');
+  await expect(page.getByLabel('Task detail')).toHaveValue(
+    'Read the deployment plan and report its next action.',
+  );
+  await page.getByRole('button', { name: 'Retry same request' }).click();
+  await expect(page.getByRole('heading', { name: 'Review the deployment plan' })).toBeVisible();
+
+  const creates = api.requests.filter(
+    (entry) => entry.path === '/api/v1/tasks' && entry.method === 'POST',
+  );
+  expect(creates).toHaveLength(3);
+  expect(new Set(creates.map((entry) => entry.headers['idempotency-key'])).size).toBe(1);
+  expect(new Set(creates.map((entry) => JSON.stringify(entry.body))).size).toBe(1);
   expect(
     await page.evaluate(() => sessionStorage.getItem('omnis.pending-task-create.v1')),
   ).toBeNull();

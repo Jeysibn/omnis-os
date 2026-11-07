@@ -334,9 +334,15 @@ function App() {
       setEvents([]);
       setApprovalTask(null);
       setApprovalOperation(null);
-      setPendingTaskCreate(null);
-      setPendingTaskCreateOwnerId(null);
-      storePendingTaskCreate(null, null);
+      const keepPendingTaskCreate =
+        pendingTaskCreate !== null &&
+        pendingTaskCreateOwnerId !== null &&
+        owner?.id === pendingTaskCreateOwnerId;
+      if (!keepPendingTaskCreate) {
+        setPendingTaskCreate(null);
+        setPendingTaskCreateOwnerId(null);
+        storePendingTaskCreate(null, null);
+      }
       setApprovalExpiry('');
       setPassword('');
       setError('Your owner session expired. Sign in again to continue.');
@@ -351,7 +357,7 @@ function App() {
       }
       return true;
     },
-    [refreshCsrf],
+    [owner?.id, pendingTaskCreate, pendingTaskCreateOwnerId, refreshCsrf],
   );
 
   const loadTasks = useCallback(async () => {
@@ -494,7 +500,7 @@ function App() {
         setChecking(false);
       }
     })();
-  }, [loadWorkspace, refreshCsrf, restoredTaskCreate]);
+  }, [loadWorkspace, pendingTaskCreateOwnerId, refreshCsrf, restoredTaskCreate]);
 
   useEffect(() => {
     if (!owner || page !== 'runs' || !selectedRunId || !selectedRunExists) {
@@ -606,7 +612,10 @@ function App() {
       setPassword('');
       const token = await refreshCsrf();
       const currentOwner = await request('/api/v1/me', {}, parseOwner);
-      if (restoredTaskCreate && restoredTaskCreate.ownerId !== currentOwner.id) {
+      if (
+        (restoredTaskCreate && restoredTaskCreate.ownerId !== currentOwner.id) ||
+        (pendingTaskCreateOwnerId !== null && pendingTaskCreateOwnerId !== currentOwner.id)
+      ) {
         setPendingTaskCreate(null);
         setPendingTaskCreateOwnerId(null);
         setTitle('');
@@ -665,10 +674,9 @@ function App() {
       setPendingTaskCreateOwnerId(null);
       storePendingTaskCreate(null, null);
     } catch (cause) {
-      if (expireSessionIfNeeded(cause)) {
-        setPendingTaskCreate(null);
-        setPendingTaskCreateOwnerId(null);
-        storePendingTaskCreate(null, null);
+      const sessionExpired = expireSessionIfNeeded(cause);
+      if (sessionExpired) {
+        // Keep a same-owner uncertain operation for explicit retry after sign-in.
       } else if (
         operation.projectId &&
         !(cause instanceof ApiRequestError && cause.outcome === 'rejected')
