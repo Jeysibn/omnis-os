@@ -211,6 +211,7 @@ try {
     '0022_synthetic_connector_authorization',
     '0023_synthetic_broker_submission_lifecycle',
     '0024_synthetic_task_run_projection',
+    '0025_synthetic_run_event_semantics',
   ];
   if (afterUpgrade.migrations.includes('0021_mission_lane_events')) {
     expectedMigrations.splice(
