@@ -107,6 +107,7 @@ describe('synthetic broker submission boundary', () => {
     };
     const recordedEvents: string[] = [];
     let providerCalls = 0;
+    let replayAttempt = false;
     const app = createSyntheticBrokerApp({
       callerToken: 'a'.repeat(96),
       verificationKeys: [
@@ -119,13 +120,21 @@ describe('synthetic broker submission boundary', () => {
       ],
       authorizer: {
         async admit() {
-          return { version: 'omnis.broker-authorizer-ipc.v1' as const, attempt, envelope };
+          return {
+            version: 'omnis.broker-authorizer-ipc.v1' as const,
+            attempt: replayAttempt
+              ? { ...attempt, status: 'unknown' as const, submissionStartedAt: now.toISOString() }
+              : attempt,
+            envelope,
+          };
         },
         async begin() {
+          assert.equal(replayAttempt, false, 'Unknown attempts must not begin another submission.');
           return { ...attempt, status: 'submitting' as const };
         },
         async record(_id, event) {
           recordedEvents.push(event.eventId);
+          replayAttempt = true;
           return { ...attempt, status: event.status };
         },
       },
@@ -149,6 +158,20 @@ describe('synthetic broker submission boundary', () => {
       });
       assert.equal(response.statusCode, 202);
       assert.deepEqual(response.json(), {
+        attemptId,
+        correlationId,
+        status: 'unknown',
+        submitted: true,
+      });
+
+      const replay = await app.inject({
+        method: 'POST',
+        url: '/internal/broker/v1/submit',
+        headers: { authorization: `Bearer ${'a'.repeat(96)}` },
+        payload: request,
+      });
+      assert.equal(replay.statusCode, 202);
+      assert.deepEqual(replay.json(), {
         attemptId,
         correlationId,
         status: 'unknown',
