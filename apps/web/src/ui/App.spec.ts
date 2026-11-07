@@ -879,7 +879,33 @@ test.describe('persisted authorization audit history', () => {
     const pending = new Promise<void>((resolve) => {
       releasePending = resolve;
     });
+    let signalPageRequest!: () => void;
+    const pageRequested = new Promise<void>((resolve) => {
+      signalPageRequest = resolve;
+    });
     await page.route(`**/synthetic-runs/${authorizationId}/events**`, async (route) => {
+      const after = new URL(route.request().url()).searchParams.get('after');
+      if (after !== '1') {
+        return route.fulfill({
+          json: {
+            version: 'omnis.synthetic-task-run-events.v1',
+            authorizationId,
+            taskId: 'task-open',
+            events: [
+              {
+                attemptId: 'b70ef09b-b357-4da9-89c9-981eb90a0b05',
+                sequence: 1,
+                eventType: 'connector.authorization_consumed',
+                outcome: 'recorded',
+                revocationGeneration: 0,
+                occurredAt: now,
+              },
+            ],
+            page: { nextAfter: 1 },
+          },
+        });
+      }
+      signalPageRequest();
       await pending;
       await route.fulfill({
         json: {
@@ -890,7 +916,7 @@ test.describe('persisted authorization audit history', () => {
             {
               attemptId: 'b70ef09b-b357-4da9-89c9-981eb90a0b05',
               sequence: 1,
-              eventType: 'connector.execution_failed',
+              eventType: 'connector.execution_completed',
               outcome: 'denied',
               revocationGeneration: 0,
               occurredAt: now,
@@ -902,12 +928,14 @@ test.describe('persisted authorization audit history', () => {
     });
     await openWorkspace(page, '#runs/run-audit-a');
     await expect(page.getByRole('heading', { name: 'Authorization audit' })).toBeVisible();
+    await page.getByRole('button', { name: 'Load more authorization events' }).click();
+    await pageRequested;
     await page.evaluate(() => {
       window.location.hash = '#runs/run-audit-b';
     });
     await expect(page.getByText('authorization consumed')).toBeVisible();
     releasePending();
-    await expect(page.getByText('execution failed')).toHaveCount(0);
+    await expect(page.getByText('execution completed')).toHaveCount(0);
     await expect(page.getByText('authorization consumed')).toBeVisible();
   });
 
