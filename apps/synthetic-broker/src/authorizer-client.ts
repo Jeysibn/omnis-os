@@ -13,10 +13,13 @@ import type {
 const version = 'omnis.broker-authorizer-ipc.v1' as const;
 
 export class AuthorizerClient {
-  constructor(
-    private readonly socketPath: string,
-    private readonly token: string,
-  ) {}
+  private readonly socketPath: string;
+  private readonly token: string;
+
+  constructor(socketPath: string, token: string) {
+    this.socketPath = socketPath;
+    this.token = token;
+  }
 
   async admit(authorizationId: string, requestId: string, request: ConnectorAuthorizationRequest) {
     const body = await this.post('/internal/broker/v1/admissions', {

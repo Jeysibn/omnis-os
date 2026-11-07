@@ -9,13 +9,20 @@ import type { ConnectorDecisionEnvelope } from '@omnis/contracts/connector-broke
 const origin = 'http://omnis-synthetic-provider:8787';
 
 export class FakeProviderResponseError extends Error {
-  constructor(readonly status: number) {
+  readonly status: number;
+
+  constructor(status: number) {
     super(`Fake provider returned status ${status}.`);
+    this.status = status;
   }
 }
 
 export class FakeProviderClient {
-  constructor(private readonly token: string) {}
+  private readonly token: string;
+
+  constructor(token: string) {
+    this.token = token;
+  }
 
   async submit(attemptId: string, envelope: ConnectorDecisionEnvelope, renderedRequest: string) {
     const response = await this.send(
