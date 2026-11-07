@@ -6,6 +6,7 @@ import {
   type CreateAgentInput,
 } from '@omnis/contracts';
 import { ApiRequestError, request } from '../api.js';
+import { AgentDepartmentSelect } from './AgentDepartmentSelect.js';
 import { profileHash } from './route.js';
 
 type Operation = { input: CreateAgentInput; key: string };
@@ -55,6 +56,9 @@ export function AgentCreateForm({
   const [operation, setOperation] = useState<Operation | null>(restorePendingOperation);
   const [name, setName] = useState(() => operation?.input.name ?? '');
   const [slug, setSlug] = useState(() => operation?.input.slug ?? '');
+  const [departmentId, setDepartmentId] = useState<string | null>(
+    () => operation?.input.departmentId ?? null,
+  );
   const [busy, setBusy] = useState(false);
   const [unknown, setUnknown] = useState(() => operation !== null);
   const [error, setError] = useState(() =>
@@ -62,13 +66,12 @@ export function AgentCreateForm({
       ? 'The create result is unknown. Retry this exact request before starting another.'
       : '',
   );
-
   async function submit(retry = false) {
     setError('');
     const parsed = CreateAgentInputSchema.safeParse({
       name,
       slug,
-      departmentId: null,
+      departmentId,
     });
     if (!parsed.success) {
       setError('Enter a name and a lowercase slug using letters, numbers, and single hyphens.');
@@ -169,6 +172,13 @@ export function AgentCreateForm({
             onChange={(event) => setSlug(event.target.value)}
           />
         </div>
+        <AgentDepartmentSelect
+          value={departmentId}
+          pendingDepartmentId={operation?.input.departmentId ?? null}
+          disabled={locked}
+          onChange={setDepartmentId}
+          onUnauthorized={onUnauthorized}
+        />
       </div>
       {error && (
         <p className="agents-create-error" role="alert">
