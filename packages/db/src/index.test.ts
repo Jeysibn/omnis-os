@@ -5851,6 +5851,8 @@ const postgresSuite = describe(
       const recovered = await store.reconcileExpiredRuns();
       assert.equal((await store.getRun(admitted.run.id))?.status, 'interrupted');
       assert.equal(recovered[0]?.event.type, 'run.interrupted');
+      assert.match(recovered[0]?.event.message ?? '', /execution lease expired/i);
+      assert.doesNotMatch(recovered[0]?.event.message ?? '', /broker submission/i);
       assert.equal((await store.getTask(task.id))?.status, 'open');
       assert.equal((await store.listActiveRunIds()).includes(admitted.run.id), false);
 

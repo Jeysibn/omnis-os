@@ -1367,7 +1367,9 @@ export class PostgresRunStore {
             ? 'The worker lease expired before the broker result was confirmed. The attempt was not retried; reconcile its authorizer record.'
             : nextStatus === 'cancelled'
               ? 'Cancellation was confirmed before broker submission began.'
-              : 'The worker lease expired before broker submission began. The execution was not retried automatically.',
+              : row.connector_authorization_id
+                ? 'The worker lease expired before broker submission began. The execution was not retried automatically.'
+                : 'The execution lease expired. The run was not replayed automatically.',
         );
         events.push({ runId: row.id, event });
       }
