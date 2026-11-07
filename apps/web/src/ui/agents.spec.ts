@@ -7,6 +7,8 @@ import {
   AgentProfileVersionResponseSchema,
   AgentProfileVersionsResponseSchema,
   AgentSummarySchema,
+  DepartmentSchema,
+  type Department,
   type AgentProfileVersion,
   type AgentProfileWriteInput,
   type AgentSummary,
@@ -19,6 +21,17 @@ import {
 
 const stamp = '2026-11-03T10:00:00.000Z';
 const later = '2026-11-04T08:30:00.000Z';
+const testDepartment = (id: string, name: string): Department =>
+  DepartmentSchema.parse({
+    id,
+    slug: id.replaceAll('_', '-'),
+    name,
+    archivedAt: null,
+    createdAt: stamp,
+    updatedAt: stamp,
+  });
+const engineeringDepartment = testDepartment('dep_eng', 'Engineering');
+const researchDepartment = testDepartment('dep_res', 'Research');
 
 type Fixture = {
   summary: AgentSummary;
@@ -133,6 +146,8 @@ type Options = {
   archiveResponseLosses?: number;
   archiveNoApplyResponseLosses?: number;
   archiveRetryUnauthorized?: number;
+  departments?: Department[];
+  departmentListFailures?: number;
 };
 
 function createApi(page: Page) {
@@ -146,6 +161,8 @@ function createApi(page: Page) {
   let archiveResponseLosses = 0;
   let archiveNoApplyResponseLosses = 0;
   let archiveRetryUnauthorized = 0;
+  let departments: Department[] = [engineeringDepartment, researchDepartment];
+  let departmentListFailures = 0;
   let signedOut = false;
   const drafts = new Map<
     string,
@@ -219,7 +236,11 @@ function createApi(page: Page) {
     }
 
     if (method === 'POST' && path === '/api/v1/agents') {
-      const body = request.postDataJSON() as { name?: string; slug?: string };
+      const body = request.postDataJSON() as {
+        name?: string;
+        slug?: string;
+        departmentId?: string | null;
+      };
       const key = request.headers()['idempotency-key'];
       createRequests.push({ body, key });
       if (request.headers()['x-omnis-csrf'] !== 'csrf-fixture' || !key)
@@ -234,9 +255,20 @@ function createApi(page: Page) {
         createRetryUnauthorized -= 1;
         return error(route, 401, 'unauthorized', 'Sign in to continue.');
       }
+      const selectedDepartment = body.departmentId
+        ? departments.find((item) => item.id === body.departmentId)
+        : undefined;
+      if (body.departmentId && !selectedDepartment)
+        return error(route, 422, 'department_not_available', 'Department is not available.');
       const created = agent('agent-created', body.name ?? 'New Agent', {
         lifecycle: 'draft',
-        department: null,
+        department: selectedDepartment
+          ? {
+              id: selectedDepartment.id,
+              slug: selectedDepartment.slug,
+              name: selectedDepartment.name,
+            }
+          : null,
       });
       created.summary.slug = body.slug ?? 'new-agent';
       fixtures = [...fixtures, created];
@@ -345,6 +377,13 @@ function createApi(page: Page) {
         : route.fulfill({ json: { id: 'owner', displayName: 'Director' } });
     if (path === '/api/v1/tasks') return route.fulfill({ json: [] });
     if (path === '/api/v1/runs') return route.fulfill({ json: [] });
+    if (method === 'GET' && path === '/api/v1/departments') {
+      if (departmentListFailures > 0) {
+        departmentListFailures -= 1;
+        return error(route, 503, 'temporary_failure', 'Departments are temporarily unavailable.');
+      }
+      return route.fulfill({ json: { departments, total: departments.length } });
+    }
     if (method !== 'GET' || !path.startsWith('/api/v1/agents')) {
       unexpected.push(`${method} ${path}`);
       return error(route, 500, 'fixture_contract_violation', `Unexpected ${method} ${path}`);
@@ -465,6 +504,10 @@ function createApi(page: Page) {
       archiveResponseLosses = next.archiveResponseLosses ?? 0;
       archiveNoApplyResponseLosses = next.archiveNoApplyResponseLosses ?? 0;
       archiveRetryUnauthorized = next.archiveRetryUnauthorized ?? 0;
+      departments = (next.departments ?? [engineeringDepartment, researchDepartment]).map((item) =>
+        DepartmentSchema.parse(item),
+      );
+      departmentListFailures = next.departmentListFailures ?? 0;
       requests.length = 0;
       createRequests.length = 0;
       createReceipts.clear();
@@ -550,6 +593,45 @@ test.describe('Agent Directory', () => {
     });
   });
 
+  test('creates a draft identity in a selected active department', async ({ page, api }) => {
+    api.configure({ agents: [], departments: [researchDepartment] });
+    await openAgents(page);
+    await page.getByRole('button', { name: 'Create agent' }).click();
+    await page.getByLabel('Department', { exact: true }).selectOption('dep_res');
+    await page.getByLabel('Name', { exact: true }).fill('Orion');
+    await page.getByLabel('Slug', { exact: true }).fill('orion-ops');
+    await page.getByRole('button', { name: 'Create draft agent' }).click();
+
+    await expect(page.getByRole('heading', { name: 'Orion' })).toBeVisible();
+    await expect(page.getByText('Research', { exact: true })).toBeVisible();
+    expect(api.createRequests[0]?.body).toEqual({
+      name: 'Orion',
+      slug: 'orion-ops',
+      departmentId: 'dep_res',
+    });
+  });
+
+  test('department load failure is explicit and still allows creating without assignment', async ({
+    page,
+    api,
+  }) => {
+    await openAgents(page);
+    api.configure({ agents: [], departmentListFailures: 2 });
+    await page.getByRole('button', { name: 'Create agent' }).click();
+    const form = page.getByRole('form', { name: 'Create agent identity' });
+    await expect(page.getByText(/Departments could not be loaded/)).toBeVisible();
+    await expect(form.getByLabel('Department', { exact: true })).toHaveValue('');
+    await form.getByLabel('Name', { exact: true }).fill('Orion');
+    await form.getByLabel('Slug', { exact: true }).fill('orion-ops');
+    await page.getByRole('button', { name: 'Create draft agent' }).click();
+    await expect(page.getByRole('heading', { name: 'Orion' })).toBeVisible();
+    expect(api.createRequests[0]?.body).toEqual({
+      name: 'Orion',
+      slug: 'orion-ops',
+      departmentId: null,
+    });
+  });
+
   test('an uncertain create can retry only the identical request and key', async ({
     page,
     api,
@@ -557,6 +639,7 @@ test.describe('Agent Directory', () => {
     api.configure({ agents: [], createResponseLosses: 1 });
     await openAgents(page);
     await page.getByRole('button', { name: 'Create agent' }).click();
+    await page.getByLabel('Department', { exact: true }).selectOption('dep_res');
     await page.getByLabel('Name', { exact: true }).fill('Orion');
     await page.getByLabel('Slug', { exact: true }).fill('orion-ops');
     await page.getByRole('button', { name: 'Create draft agent' }).click();
@@ -564,6 +647,11 @@ test.describe('Agent Directory', () => {
     await expect(page.getByText(/create result is unknown/i)).toBeVisible();
     await expect(page.getByRole('button', { name: 'Retry same request' })).toBeVisible();
     expect(api.createRequests).toHaveLength(1);
+    expect(api.createRequests[0]?.body).toEqual({
+      name: 'Orion',
+      slug: 'orion-ops',
+      departmentId: 'dep_res',
+    });
     await page.getByRole('button', { name: 'Retry same request' }).click();
     await expect(page.getByRole('heading', { name: 'Orion' })).toBeVisible();
     expect(api.createRequests).toHaveLength(2);
