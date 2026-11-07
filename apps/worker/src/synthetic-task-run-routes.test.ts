@@ -2,11 +2,36 @@ import assert from 'node:assert/strict';
 import Fastify from 'fastify';
 import { describe, it } from 'node:test';
 import type { Task } from '@omnis/contracts';
+import { createRenderedRequestDigest } from '@omnis/contracts/connector-authorization';
+import { renderSyntheticConnectorRequest } from '@omnis/contracts/synthetic-connector-prompt';
 import { registerSyntheticTaskRunRoute } from './synthetic-task-run-routes.ts';
 
 const taskId = 'task-0001';
 const requestId = '22222222-2222-4222-8222-222222222222';
 const authorizationId = '11111111-1111-4111-8111-111111111111';
+const task = {
+  id: taskId,
+  title: 'Synthetic task',
+  detail: 'Return a synthetic response.',
+  status: 'open',
+  createdAt: '2026-11-06T00:00:00.000Z',
+  projectId: `prj_${'a'.repeat(32)}`,
+  associationRevision: 1,
+};
+const profile = {
+  versionId: 'profile_version_1',
+  agentId: 'fixture-agent',
+  versionNo: 1,
+  profession: 'Synthetic assistant',
+  seniority: null,
+  specialties: ['testing'],
+  personality: { traits: ['careful'], tone: 'plain', principles: [] },
+  behavior: { autonomy: 'No external actions.', escalation: null },
+  instructions: 'Return only a synthetic answer.',
+  createdBy: { id: 'owner', displayName: 'Owner' },
+  createdAt: '2026-11-06T00:00:00.000Z',
+};
+const renderedRequest = renderSyntheticConnectorRequest(task, profile);
 const input = {
   version: 'omnis.synthetic-task-run.v1',
   authorizationId,
@@ -32,9 +57,9 @@ const input = {
       maxUsageUnits: 100,
       maxCostMicrousd: 100,
     },
-    promptDigest: `sha256:${'b'.repeat(64)}`,
+    promptDigest: createRenderedRequestDigest(renderedRequest),
   },
-  renderedRequest: 'synthetic task run',
+  renderedRequest,
 };
 
 function createApp(
@@ -43,6 +68,8 @@ function createApp(
     taskExists?: boolean;
     throwBroker?: boolean;
     authenticated?: boolean;
+    profileVersion?: number;
+    taskIdOverride?: string;
   } = {},
 ) {
   const app = Fastify();
@@ -55,8 +82,19 @@ function createApp(
     },
     enabled: options.enabled ?? true,
     store: {
-      getTask: async () => (options.taskExists === false ? undefined : ({ id: taskId } as Task)),
+      getTask: async () =>
+        options.taskExists === false
+          ? undefined
+          : ({ ...task, id: options.taskIdOverride ?? task.id } as Task),
     } as never,
+    profiles: {
+      getVersion: async () =>
+        ({
+          agent: { id: profile.agentId },
+          version: { ...profile, versionNo: options.profileVersion ?? profile.versionNo },
+          isCurrent: true,
+        }) as never,
+    },
     broker: {
       execute: async (_id, request) => {
         called += 1;
@@ -148,5 +186,53 @@ describe('worker synthetic task broker dispatch', () => {
     assert.equal(response.statusCode, 503);
     assert.equal(unavailable.getCalled(), 1);
     await unavailable.app.close();
+  });
+
+  it('reconstructs the approved prompt from persisted task and immutable profile content', async () => {
+    const { app, getCalled } = createApp();
+    const alteredPrompt = await app.inject({
+      method: 'POST',
+      url: `/internal/v1/tasks/${taskId}/synthetic-runs`,
+      headers: { 'idempotency-key': requestId },
+      payload: { ...input, renderedRequest: `${renderedRequest} altered` },
+    });
+    assert.equal(alteredPrompt.statusCode, 409);
+    assert.equal(getCalled(), 0);
+
+    const canonical = await app.inject({
+      method: 'POST',
+      url: `/internal/v1/tasks/${taskId}/synthetic-runs`,
+      headers: { 'idempotency-key': requestId },
+      payload: input,
+    });
+    assert.equal(canonical.statusCode, 200);
+    assert.equal(getCalled(), 1);
+    await app.close();
+  });
+
+  it('rejects a changed immutable profile version before broker dispatch', async () => {
+    const { app, getCalled } = createApp({ profileVersion: 2 });
+    const response = await app.inject({
+      method: 'POST',
+      url: `/internal/v1/tasks/${taskId}/synthetic-runs`,
+      headers: { 'idempotency-key': requestId },
+      payload: input,
+    });
+    assert.equal(response.statusCode, 409);
+    assert.equal(getCalled(), 0);
+    await app.close();
+  });
+
+  it('rejects a persisted task with an unexpected identity before broker dispatch', async () => {
+    const { app, getCalled } = createApp({ taskIdOverride: 'task-foreign' });
+    const response = await app.inject({
+      method: 'POST',
+      url: `/internal/v1/tasks/${taskId}/synthetic-runs`,
+      headers: { 'idempotency-key': requestId },
+      payload: input,
+    });
+    assert.equal(response.statusCode, 409);
+    assert.equal(getCalled(), 0);
+    await app.close();
   });
 });

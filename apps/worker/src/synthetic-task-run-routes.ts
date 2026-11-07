@@ -1,6 +1,9 @@
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
+import { createRenderedRequestDigest } from '@omnis/contracts/connector-authorization';
+import { AgentProfileVersionSchema } from '@omnis/contracts';
+import { renderSyntheticConnectorRequest } from '@omnis/contracts/synthetic-connector-prompt';
 import { SyntheticTaskRunRequestSchema } from '@omnis/contracts/synthetic-task-run';
-import type { PostgresRunStore } from '@omnis/db';
+import type { PostgresAgentProfileStore, PostgresRunStore } from '@omnis/db';
 import type { SyntheticBrokerExecutor } from './synthetic-broker-client.ts';
 
 export function registerSyntheticTaskRunRoute(
@@ -9,6 +12,7 @@ export function registerSyntheticTaskRunRoute(
     authenticate: preHandlerHookHandler;
     enabled: boolean;
     store: Pick<PostgresRunStore, 'getTask'>;
+    profiles: Pick<PostgresAgentProfileStore, 'getVersion'>;
     broker: SyntheticBrokerExecutor;
   },
 ): void {
@@ -35,8 +39,50 @@ export function registerSyntheticTaskRunRoute(
           error: { code: 'not_found', message: 'Task was not found.' },
         });
       }
+      const profileResponse = await input.profiles.getVersion(
+        parsed.data.request.agentId,
+        parsed.data.request.profileVersion,
+      );
+      const profile = profileResponse
+        ? AgentProfileVersionSchema.safeParse(profileResponse.version)
+        : undefined;
+      if (
+        !profile?.success ||
+        task.id !== request.params.taskId ||
+        task.status === 'completed' ||
+        profile.data.agentId !== parsed.data.request.agentId ||
+        profile.data.versionNo !== parsed.data.request.profileVersion ||
+        task.projectId !== parsed.data.request.projectId ||
+        task.associationRevision !== parsed.data.request.taskRevision
+      ) {
+        return reply.code(409).send({
+          error: {
+            code: 'authorization_context_changed',
+            message: 'The task or immutable agent profile no longer matches the approved request.',
+          },
+        });
+      }
+      let renderedRequest: string;
       try {
-        return await input.broker.execute(task.id, parsed.data);
+        renderedRequest = renderSyntheticConnectorRequest(task, profile.data);
+      } catch {
+        return reply.code(400).send({
+          error: { code: 'invalid_rendered_request', message: 'The request cannot be rendered.' },
+        });
+      }
+      if (
+        renderedRequest !== parsed.data.renderedRequest ||
+        createRenderedRequestDigest(renderedRequest) !== parsed.data.request.promptDigest
+      ) {
+        return reply.code(409).send({
+          error: {
+            code: 'request_binding_failed',
+            message: 'The rendered request does not match the canonical approved task and profile.',
+          },
+        });
+      }
+      try {
+        return await input.broker.execute(task.id, { ...parsed.data, renderedRequest });
       } catch {
         return reply.code(503).send({
           error: {

@@ -124,6 +124,7 @@ if (syntheticBrokerTestMode) {
     authenticate: async () => {},
     enabled: true,
     store,
+    profiles: agentProfiles,
     broker: new SyntheticBrokerClient(brokerSocket, brokerToken),
   });
 }
@@ -138,6 +139,17 @@ app.get('/internal/v1/health', async () => ({
   queueName,
 }));
 app.get('/internal/v1/tasks', async () => coordinator.listTasks());
+app.get<{ Params: { taskId: string } }>('/internal/v1/tasks/:taskId', async (request, reply) => {
+  const taskId = TaskIdSchema.safeParse(request.params.taskId);
+  if (!taskId.success)
+    return reply.code(422).send({
+      error: { code: 'invalid_input', message: 'Task identifier is invalid.' },
+    });
+  const task = await store.getTask(taskId.data);
+  return (
+    task ?? reply.code(404).send({ error: { code: 'not_found', message: 'Task was not found.' } })
+  );
+});
 app.get<{ Params: { projectId: string }; Querystring: { cursor?: string; limit?: string } }>(
   '/internal/v1/projects/:projectId/tasks',
   async (request, reply) => {
