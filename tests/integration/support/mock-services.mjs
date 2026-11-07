@@ -691,7 +691,9 @@ async function startSyntheticBrokerCompose({
     ...(process.env.DOCKER_HOST ? { DOCKER_HOST: process.env.DOCKER_HOST } : {}),
     ...(process.env.DOCKER_CONFIG ? { DOCKER_CONFIG: process.env.DOCKER_CONFIG } : {}),
     OMNIS_FAKE_PROVIDER_TOKEN_FILE: providerTokenPath,
-    OMNIS_BROKER_TEST_PROVIDER_FIXTURES: JSON.stringify({ default: 'delayed-events' }),
+    OMNIS_BROKER_TEST_PROVIDER_FIXTURES: JSON.stringify({
+      default: 'delayed-cancel-confirmed-events',
+    }),
     OMNIS_BROKER_TEST_TRUST_ANCHORS: trustAnchors,
     OMNIS_BROKER_TEST_SOCKET_DIRECTORY: brokerSocketDirectory,
     OMNIS_BROKER_TEST_AUTHORIZER_DIRECTORY: brokerAuthorizerDirectory,
@@ -767,6 +769,69 @@ async function startSyntheticBrokerCompose({
                 await delay(100);
               }
               throw new Error('Broker restart did not reconcile the accepted synthetic attempt.');
+            },
+            async restartAfterAcceptedCancellation(auditPool, createdAfter) {
+              const cancellationDeadline = Date.now() + 60_000;
+              let attemptId;
+              let runId;
+              while (Date.now() < cancellationDeadline) {
+                const cancellation = await auditPool.query(
+                  `SELECT attempt.id, run.id AS run_id
+                     FROM omnis.connector_execution_attempts AS attempt
+                     JOIN omnis.runs AS run
+                       ON run.connector_authorization_id = attempt.authorization_id
+                    WHERE attempt.status = 'accepted'
+                      AND attempt.provider_submission_id IS NOT NULL
+                      AND attempt.cancel_requested_at IS NOT NULL
+                      AND run.status = 'stopping'
+                      AND attempt.created_at >= $1
+                    ORDER BY attempt.created_at DESC
+                    LIMIT 1`,
+                  [createdAfter],
+                );
+                attemptId = cancellation.rows[0]?.id;
+                runId = cancellation.rows[0]?.run_id;
+                if (attemptId && runId) break;
+                await delay(100);
+              }
+              if (!attemptId || !runId)
+                throw new Error('No accepted, owner-cancelled attempt appeared before restart.');
+
+              const killed = runCompose(['kill', '--signal', 'SIGKILL', 'broker-process']);
+              if (killed.error || killed.status !== 0)
+                throw new Error(
+                  'Disposable broker process could not be interrupted during cancellation.',
+                );
+              const restarted = runCompose(['up', '--detach', '--no-deps', 'broker-process']);
+              if (restarted.error || restarted.status !== 0)
+                throw new Error('Disposable broker process did not restart during cancellation.');
+
+              const recoveryDeadline = Date.now() + 20_000;
+              while (Date.now() < recoveryDeadline) {
+                const response = await socketRequest(brokerSocketPath, '/health').catch(
+                  () => undefined,
+                );
+                if (response && [401, 404].includes(response.status)) break;
+                await delay(100);
+              }
+              const terminalDeadline = Date.now() + 20_000;
+              while (Date.now() < terminalDeadline) {
+                const recovered = await auditPool.query(
+                  `SELECT attempt.status AS attempt_status, run.status AS run_status
+                     FROM omnis.connector_execution_attempts AS attempt
+                     JOIN omnis.runs AS run
+                       ON run.connector_authorization_id = attempt.authorization_id
+                    WHERE attempt.id = $1 AND run.id = $2`,
+                  [attemptId, runId],
+                );
+                if (
+                  recovered.rows[0]?.attempt_status === 'interrupted' &&
+                  recovered.rows[0]?.run_status === 'cancelled'
+                )
+                  return;
+                await delay(100);
+              }
+              throw new Error('Broker restart did not reconcile the owner cancellation.');
             },
             close() {
               const stopped = runCompose(['down', '--volumes', '--remove-orphans']);

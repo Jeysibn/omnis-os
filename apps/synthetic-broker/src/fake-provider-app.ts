@@ -16,6 +16,7 @@ export const FakeProviderFixturesSchema = z.record(
   z.enum([
     'completed',
     'delayed-events',
+    'delayed-cancel-confirmed-events',
     'rejected',
     'delayed',
     'timeout',
@@ -162,7 +163,10 @@ export function createSyntheticFakeProviderServer(input: {
         JSON.stringify(item.response).includes(providerSubmissionId ?? ''),
       );
       if (!found) return send(response, 404, { error: 'unknown_submission' });
-      if (found.fixture === 'delayed-events' && found.eventReads === 0) {
+      if (
+        ['delayed-events', 'delayed-cancel-confirmed-events'].includes(found.fixture) &&
+        found.eventReads === 0
+      ) {
         found.eventReads += 1;
         await new Promise((resolve) => setTimeout(resolve, 8_000));
       } else {
@@ -180,9 +184,17 @@ export function createSyntheticFakeProviderServer(input: {
       if (!submission) return send(response, 404, { error: 'unknown_submission' });
       if (submission.providerSubmissionId !== cancelMatch[1])
         return send(response, 409, { error: 'provider_submission_mismatch' });
-      if (submission.fixture === 'delayed-cancel-confirmed')
-        await new Promise((resolve) => setTimeout(resolve, 250));
-      if (['cancel-confirmed', 'delayed-cancel-confirmed'].includes(submission.fixture)) {
+      if (
+        ['delayed-cancel-confirmed', 'delayed-cancel-confirmed-events'].includes(submission.fixture)
+      )
+        await new Promise((resolve) => setTimeout(resolve, 1_500));
+      if (
+        [
+          'cancel-confirmed',
+          'delayed-cancel-confirmed',
+          'delayed-cancel-confirmed-events',
+        ].includes(submission.fixture)
+      ) {
         return send(response, 200, {
           version: 'omnis.fake-provider.v1',
           attemptId: parsed.data.attemptId,
