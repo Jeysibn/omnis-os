@@ -17,4 +17,4 @@
 - [x] Unit/contracts, disposable PostgreSQL backup/restore, ACL fixtures, and rejection-path tests pass.
 - [ ] Browser owner journey, cancellation, refresh, and persisted recovery pass.
 - [ ] Docker process-boundary and restart evidence is current; boundary script is restricted to disposable root Linux CI.
-- [ ] Exact-head GitHub CI result for the local candidate; current #58 result predates local commit `3ff3e60`.
+- [x] Exact-head GitHub CI passed for Draft PR #59 at `583224a` (run `42350161214`, all eight jobs).
