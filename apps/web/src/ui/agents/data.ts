@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AgentDirectoryResponseSchema,
+  AgentIdempotencyKeySchema,
   AgentMutationReceiptSchema,
   AgentProfileDraftResponseSchema,
   AgentProfileResponseSchema,
@@ -54,6 +55,28 @@ export const fetchProfile = (agentId: string, signal: AbortSignal): Promise<Agen
     if (result.agent.id !== agentId) mismatch();
     return result;
   });
+
+export const archiveAgent = (agentId: string, requestId: string, csrfToken: string) => {
+  if (!AgentIdempotencyKeySchema.safeParse(requestId).success) mismatch();
+  return request(
+    `/api/v1/agents/${encodeURIComponent(agentId)}/archive`,
+    {
+      method: 'POST',
+      headers: { 'x-omnis-csrf': csrfToken, 'idempotency-key': requestId },
+    },
+    (value) => {
+      const receipt = AgentMutationReceiptSchema.parse(value);
+      if (
+        receipt.requestId !== requestId ||
+        receipt.operation !== 'agent.archived' ||
+        receipt.agentId !== agentId ||
+        receipt.lifecycle !== 'archived'
+      )
+        mismatch();
+      return receipt;
+    },
+  );
+};
 
 export const fetchDraft = (
   agentId: string,

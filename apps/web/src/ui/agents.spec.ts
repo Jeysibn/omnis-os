@@ -130,6 +130,8 @@ type Options = {
   createRetryUnauthorized?: number;
   mutationResponseLosses?: number;
   profileConflict?: boolean;
+  archiveResponseLosses?: number;
+  archiveNoApplyResponseLosses?: number;
 };
 
 function createApi(page: Page) {
@@ -140,6 +142,8 @@ function createApi(page: Page) {
   let createReceiptMismatches = 0;
   let createRetryUnauthorized = 0;
   let mutationResponseLosses = 0;
+  let archiveResponseLosses = 0;
+  let archiveNoApplyResponseLosses = 0;
   const drafts = new Map<
     string,
     { revision: number; baseVersionNo: number | null; profile: AgentProfileWriteInput | null }
@@ -153,6 +157,11 @@ function createApi(page: Page) {
     body: unknown;
     key: string | undefined;
   }> = [];
+  const archiveRequests: Array<{
+    path: string;
+    key: string | undefined;
+    csrf: string | undefined;
+  }> = [];
   const unexpected: string[] = [];
 
   const error = (route: Route, status: number, code = 'error', message = 'Fixture error.') =>
@@ -164,6 +173,42 @@ function createApi(page: Page) {
     const { pathname: path, search } = url;
     const method = request.method();
     requests.push({ method, path, search });
+
+    const archiveMatch = path.match(/^\/api\/v1\/agents\/([^/]+)\/archive$/);
+    if (method === 'POST' && archiveMatch) {
+      const agentId = decodeURIComponent(archiveMatch[1]!);
+      const key = request.headers()['idempotency-key'];
+      const csrf = request.headers()['x-omnis-csrf'];
+      archiveRequests.push({ path, key, csrf });
+      if (csrf !== 'csrf-fixture' || !key)
+        return error(route, 403, 'invalid_csrf', 'Mutation protection failed.');
+      const fixture = fixtures.find((item) => item.summary.id === agentId);
+      if (!fixture) return error(route, 404, 'not_found', 'Agent not found.');
+      if (archiveResponseLosses > 0) {
+        archiveResponseLosses -= 1;
+        if (archiveNoApplyResponseLosses > 0) {
+          archiveNoApplyResponseLosses -= 1;
+        } else {
+          fixture.summary.lifecycle = 'archived';
+          fixture.summary.archivedAt = later;
+        }
+        return route.abort();
+      }
+      fixture.summary.lifecycle = 'archived';
+      fixture.summary.archivedAt = later;
+      return route.fulfill({
+        json: {
+          requestId: key,
+          operation: 'agent.archived',
+          agentId,
+          lifecycle: 'archived',
+          versionId: null,
+          versionNo: null,
+          draftRevision: 0,
+          occurredAt: later,
+        },
+      });
+    }
 
     if (method === 'POST' && path === '/api/v1/agents') {
       const body = request.postDataJSON() as { name?: string; slug?: string };
@@ -404,16 +449,20 @@ function createApi(page: Page) {
       createReceiptMismatches = next.createReceiptMismatches ?? 0;
       createRetryUnauthorized = next.createRetryUnauthorized ?? 0;
       mutationResponseLosses = next.mutationResponseLosses ?? 0;
+      archiveResponseLosses = next.archiveResponseLosses ?? 0;
+      archiveNoApplyResponseLosses = next.archiveNoApplyResponseLosses ?? 0;
       requests.length = 0;
       createRequests.length = 0;
       createReceipts.clear();
       mutationRequests.length = 0;
+      archiveRequests.length = 0;
       drafts.clear();
     },
     requests,
     unexpected,
     createRequests,
     mutationRequests,
+    archiveRequests,
     heal() {
       options.directoryFailures = 0;
       delete options.directoryStatus;
@@ -818,6 +867,80 @@ test.describe('Agent Directory', () => {
 });
 
 test.describe('Agent Profile', () => {
+  test('archiving requires confirmation and reloads the authoritative archived profile', async ({
+    page,
+    api,
+  }) => {
+    api.configure();
+    await openAgents(page, '#agents/agent-atlas');
+    await page.getByRole('button', { name: 'Archive agent' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Archive this agent?' });
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toContainText('Profile history is preserved');
+    await expect(dialog).toContainText('There is no restore action.');
+    await expectNoSeriousAxeViolations(page);
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    expect(api.archiveRequests).toHaveLength(0);
+
+    await page.getByRole('button', { name: 'Archive agent' }).click();
+    await page
+      .getByRole('dialog', { name: 'Archive this agent?' })
+      .getByRole('button', { name: 'Archive agent' })
+      .click();
+    await expect(page.getByText(/This agent is archived/)).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Archive agent' })).toHaveCount(0);
+    expect(api.archiveRequests).toHaveLength(1);
+    expect(api.archiveRequests[0]).toMatchObject({
+      path: '/api/v1/agents/agent-atlas/archive',
+      csrf: 'csrf-fixture',
+      key: expect.stringMatching(/^[0-9a-f-]{36}$/i),
+    });
+  });
+
+  test('a lost archive response is reconciled from the persisted profile state', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ archiveResponseLosses: 1 });
+    await openAgents(page, '#agents/agent-atlas');
+    await page.getByRole('button', { name: 'Archive agent' }).click();
+    await page
+      .getByRole('dialog', { name: 'Archive this agent?' })
+      .getByRole('button', { name: 'Archive agent' })
+      .click();
+
+    await expect(page.getByText(/This agent is archived/)).toBeVisible();
+    expect(api.archiveRequests).toHaveLength(1);
+    expect(api.count((path) => path === '/api/v1/agents/agent-atlas')).toBeGreaterThanOrEqual(2);
+  });
+
+  test('an unapplied uncertain archive retries with the same idempotency key', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ archiveResponseLosses: 1, archiveNoApplyResponseLosses: 1 });
+    await openAgents(page, '#agents/agent-atlas');
+    await page.getByRole('button', { name: 'Archive agent' }).click();
+    await page
+      .getByRole('dialog', { name: 'Archive this agent?' })
+      .getByRole('button', { name: 'Archive agent' })
+      .click();
+    await expect(page.getByRole('button', { name: 'Retry same request' })).toBeVisible();
+    expect(api.archiveRequests).toHaveLength(1);
+
+    await page.getByRole('button', { name: 'Retry same request' }).click();
+    await expect(page.getByText(/This agent is archived/)).toBeVisible();
+    expect(api.archiveRequests).toHaveLength(2);
+    expect(api.archiveRequests[1]?.key).toBe(api.archiveRequests[0]?.key);
+  });
+
+  test('a draft agent cannot be archived', async ({ page, api }) => {
+    api.configure();
+    await openAgents(page, '#agents/agent-draft');
+    await expect(page.getByRole('button', { name: 'Archive agent' })).toHaveCount(0);
+    expect(api.archiveRequests).toHaveLength(0);
+  });
+
   test('saves a draft and publishes a new immutable profile version', async ({ page, api }) => {
     api.configure();
     await openAgents(page, '#agents/agent-atlas');

@@ -1,5 +1,6 @@
 import { useRef } from 'react';
 import type { AgentProfileResponse } from '@omnis/contracts';
+import { AgentArchiveAction } from './AgentArchiveAction.js';
 import { useVersionHistory } from './data.js';
 import { AgentProfileEditor } from './AgentProfileEditor.js';
 import { PermissionsNote, Section, SnapshotSections } from './ProfileSections.js';
@@ -56,6 +57,12 @@ export function AgentProfile({
           ← Agents
         </a>
       </p>
+      <AgentArchiveAction
+        profile={profile}
+        csrfToken={csrfToken}
+        onUnauthorized={onUnauthorized}
+        onArchived={onReload}
+      />
       {agent.lifecycle === 'archived' && <ArchivedBanner />}
       <div className="agents-profile-layout">
         <nav className="agents-section-nav" aria-label="Profile sections">
