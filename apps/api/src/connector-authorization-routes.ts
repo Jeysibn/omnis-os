@@ -6,6 +6,8 @@ import {
   CreateConnectorAuthorizationSchema,
   createRenderedRequestDigest,
 } from '@omnis/contracts/connector-authorization';
+import { AgentProfileVersionSchema, ProjectSchema, TaskSchema } from '@omnis/contracts';
+import { renderSyntheticConnectorRequest } from '@omnis/contracts/synthetic-connector-prompt';
 
 type AuthorizerForwarder = <T>(
   path: string,
@@ -13,12 +15,25 @@ type AuthorizerForwarder = <T>(
   parse: (value: unknown) => T,
 ) => Promise<T>;
 
+type AuthorizationContext = {
+  task: unknown;
+  project: unknown;
+  profile: unknown;
+};
+type ContextLoader = (binding: {
+  taskId: string;
+  projectId: string;
+  agentId: string;
+  profileVersion: number;
+}) => Promise<AuthorizationContext | undefined>;
+
 export function registerConnectorAuthorizationRoutes(
   app: FastifyInstance,
   guards: {
     requireOwner: preHandlerHookHandler;
     requireMutationProtection: preHandlerHookHandler;
     forward?: AuthorizerForwarder;
+    loadContext?: ContextLoader;
   },
 ): void {
   const forward: AuthorizerForwarder =
@@ -27,6 +42,26 @@ export function registerConnectorAuthorizationRoutes(
       import('./authorizer-client.ts').then(({ authorizerRequest }) =>
         authorizerRequest(path, init, parse),
       ));
+  const loadContext: ContextLoader =
+    guards.loadContext ??
+    (async (binding) => {
+      const [{ workerRequest, parseTask, parseAgentVersion }, { authorizerRequest }] =
+        await Promise.all([import('./worker-client.ts'), import('./authorizer-client.ts')]);
+      const [task, project, profile] = await Promise.all([
+        workerRequest(`/internal/v1/tasks/${encodeURIComponent(binding.taskId)}`, {}, parseTask),
+        authorizerRequest(
+          `/internal/v1/projects/${encodeURIComponent(binding.projectId)}`,
+          {},
+          (value) => ProjectSchema.parse(value),
+        ),
+        workerRequest(
+          `/internal/v1/agents/${encodeURIComponent(binding.agentId)}/versions/${binding.profileVersion}`,
+          {},
+          parseAgentVersion,
+        ),
+      ]);
+      return { task, project, profile: profile.version };
+    });
   app.get<{ Params: { authorizationId: string } }>(
     '/api/v1/connector-authorizations/:authorizationId',
     { preHandler: guards.requireOwner },
@@ -59,9 +94,53 @@ export function registerConnectorAuthorizationRoutes(
         });
       }
       const { renderedRequest, ...binding } = parsed.data;
+      const context = await loadContext(binding);
+      const task = context ? TaskSchema.safeParse(context.task) : undefined;
+      const project = context ? ProjectSchema.safeParse(context.project) : undefined;
+      const profile = context ? AgentProfileVersionSchema.safeParse(context.profile) : undefined;
+      if (
+        !task?.success ||
+        !project?.success ||
+        !profile?.success ||
+        task.data.id !== binding.taskId ||
+        project.data.id !== binding.projectId ||
+        task.data.status === 'completed' ||
+        project.data.status !== 'active' ||
+        task.data.projectId !== binding.projectId ||
+        task.data.associationRevision !== binding.taskRevision ||
+        task.data.agentId !== binding.agentId ||
+        task.data.profileVersion !== binding.profileVersion ||
+        task.data.runtimeId !== 'mock' ||
+        project.data.revision !== binding.projectRevision ||
+        profile.data.agentId !== binding.agentId ||
+        profile.data.versionNo !== binding.profileVersion
+      ) {
+        return reply.code(409).send({
+          error: {
+            code: 'authorization_context_changed',
+            message: 'The task, project, or immutable profile version no longer matches.',
+          },
+        });
+      }
+      let canonicalRequest: string;
+      try {
+        canonicalRequest = renderSyntheticConnectorRequest(task.data, profile.data);
+      } catch {
+        return reply.code(400).send({
+          error: { code: 'invalid_rendered_request', message: 'The request cannot be rendered.' },
+        });
+      }
+      if (renderedRequest !== canonicalRequest) {
+        return reply.code(409).send({
+          error: {
+            code: 'request_binding_failed',
+            message: 'The rendered request does not match the canonical task and profile.',
+          },
+        });
+      }
       const authorizationRequest = ConnectorAuthorizationRequestSchema.parse({
         ...binding,
-        promptDigest: createRenderedRequestDigest(renderedRequest),
+        promptDigest: createRenderedRequestDigest(canonicalRequest),
       });
       const authorization = await forward(
         '/internal/v1/connector-authorizations',

@@ -11,6 +11,10 @@ import {
   createRenderedRequestDigest,
 } from '@omnis/contracts/connector-authorization';
 import {
+  SyntheticTaskRunEventSchema,
+  type SyntheticTaskRunEvent,
+} from '@omnis/contracts/synthetic-audit-history';
+import {
   ConnectorDecisionEnvelopeSchema,
   canonicalizeConnectorDecisionClaims,
   digestConnectorDecisionEnvelope,
@@ -62,6 +66,7 @@ type AuthorizationRow = QueryResultRow & {
   limits: ConnectorAuthorizationRequest['limits'];
   prompt_digest: string;
   status: 'pending' | 'authorized' | 'denied' | 'revoked' | 'expired';
+  stored_status?: 'pending' | 'authorized' | 'denied' | 'revoked';
   policy_version: 'r1p1-synthetic-connector-v1';
   created_at: Date | string;
   consented_at: Date | string | null;
@@ -104,6 +109,10 @@ export type BrokerAdmission = {
   attempt: ConnectorExecutionAttempt;
   envelope: ConnectorDecisionEnvelope;
 };
+export type SyntheticTaskRunEventPage = {
+  events: SyntheticTaskRunEvent[];
+  nextAfter: number | null;
+};
 export type ConnectorDecisionSigner = (claims: unknown) => ConnectorDecisionEnvelope;
 const selectAuthorization = `
   SELECT id, request_id, request_fingerprint, correlation_id, requesting_actor,
@@ -112,6 +121,7 @@ const selectAuthorization = `
     limits, prompt_digest,
     CASE WHEN status IN ('pending', 'authorized') AND expires_at <= now()
       THEN 'expired' ELSE status END AS status,
+    status AS stored_status,
     policy_version, created_at, consented_at, decided_at, decided_by, revoked_at,
     revoked_by, revocation_generation, expires_at, consumed_at, consumed_request_id
   FROM omnis.connector_authorizations`;
@@ -223,6 +233,99 @@ export class PostgresConnectorAuthorizationStore {
     return result.rows[0] ? mapAuthorization(result.rows[0]) : undefined;
   }
 
+  async getExecutionForAuthorization(
+    authorizationId: string,
+  ): Promise<{ attempt: ConnectorExecutionAttempt; usage: UsageProvenance } | undefined> {
+    if (!isUuid(authorizationId)) {
+      throw new ConnectorAuthorizationStoreError(
+        'invalid_input',
+        'Connector authorization ID is invalid.',
+        400,
+      );
+    }
+    const result = await this.authorizer.query<AttemptRow>(
+      `SELECT id, authorization_id, request_id, status, synthetic, created_at, updated_at,
+              submission_started_at, provider_submission_id, cancel_requested_at,
+              usage_provenance, response_text
+         FROM omnis.connector_execution_attempts
+        WHERE authorization_id = $1`,
+      [authorizationId],
+    );
+    const row = result.rows[0];
+    return row
+      ? {
+          attempt: mapAttempt(row),
+          usage: UsageProvenanceSchema.parse(row.usage_provenance),
+        }
+      : undefined;
+  }
+
+  /** Reads the existing append-only audit stream for this grant's persisted attempt. */
+  async listSyntheticTaskRunEvents(
+    authorizationId: string,
+    afterSequence: number,
+    limit: number,
+  ): Promise<SyntheticTaskRunEventPage> {
+    if (!isUuid(authorizationId)) {
+      throw new ConnectorAuthorizationStoreError(
+        'invalid_input',
+        'Connector authorization ID is invalid.',
+        400,
+      );
+    }
+    if (
+      !Number.isSafeInteger(afterSequence) ||
+      afterSequence < 0 ||
+      !Number.isSafeInteger(limit) ||
+      limit < 1 ||
+      limit > 100
+    ) {
+      throw new ConnectorAuthorizationStoreError(
+        'invalid_input',
+        'Synthetic task-run event page is invalid.',
+        400,
+      );
+    }
+    const result = await this.authorizer.query<
+      QueryResultRow & {
+        attempt_id: string;
+        sequence: number;
+        event_type: string;
+        outcome: string;
+        revocation_generation: number;
+        occurred_at: Date | string;
+      }
+    >(
+      `SELECT audit.attempt_id, audit.sequence, audit.event_type, audit.outcome,
+              audit.revocation_generation, audit.occurred_at
+         FROM omnis.connector_authorization_audit AS audit
+         JOIN omnis.connector_execution_attempts AS attempt
+           ON attempt.id = audit.attempt_id
+          AND attempt.authorization_id = audit.authorization_id
+        WHERE audit.authorization_id = $1 AND audit.attempt_id IS NOT NULL
+          AND audit.sequence > $2
+        ORDER BY audit.sequence ASC
+        LIMIT $3`,
+      [authorizationId, afterSequence, limit + 1],
+    );
+    const hasMore = result.rows.length > limit;
+    const rows = result.rows.slice(0, limit);
+    const events = rows.map((row) =>
+      SyntheticTaskRunEventSchema.parse({
+        attemptId: row.attempt_id,
+        sequence: row.sequence,
+        eventType: row.event_type,
+        outcome: row.outcome,
+        revocationGeneration: row.revocation_generation,
+        occurredAt: toIso(row.occurred_at),
+      }),
+    );
+    return {
+      events,
+      nextAfter: hasMore ? (rows.at(-1)?.sequence ?? null) : null,
+    };
+  }
+
   async decide(id: string, actor: 'owner', input: unknown): Promise<ConnectorAuthorization> {
     const parsed = ConnectorAuthorizationDecisionSchema.safeParse(input);
     if (!isUuid(id) || !parsed.success) {
@@ -298,8 +401,22 @@ export class PostgresConnectorAuthorizationStore {
       );
       const current = result.rows[0];
       if (!current) throw notFound();
-      if (current.status === 'revoked') return mapAuthorization(current);
-      if (current.status !== 'authorized' || toEpoch(current.expires_at) <= Date.now()) {
+      const storedStatus = current.stored_status ?? current.status;
+      if (storedStatus === 'revoked') return mapAuthorization(current);
+      const isExpired = toEpoch(current.expires_at) <= Date.now();
+      let hasActiveAttempt = false;
+      if (storedStatus === 'authorized' && isExpired) {
+        const activeAttempt = await client.query(
+          `SELECT 1 FROM omnis.connector_execution_attempts
+            WHERE authorization_id = $1
+              AND status = ANY($2::text[])
+            LIMIT 1
+            FOR UPDATE`,
+          [id, ['admitted', 'submitting', 'accepted', 'running', 'unknown']],
+        );
+        hasActiveAttempt = activeAttempt.rows.length > 0;
+      }
+      if (storedStatus !== 'authorized' || (isExpired && !hasActiveAttempt)) {
         throw invalidTransition('Only an active connector authorization can be revoked.');
       }
       const updated = await client.query<AuthorizationRow>(

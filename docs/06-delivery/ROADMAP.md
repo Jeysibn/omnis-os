@@ -42,7 +42,7 @@ Exit: scene matches backend state after reload/outage; delegation bounded and at
 
 ## Phase 6 - Production operations
 
-Deliverables: backup/restore drill, secrets handling, private DNS/CA/TLS, k3s deployment, worker isolation, database migrations, observability, load testing, regression security audit and rollback procedure.
+Deliverables: backup/restore drill, secrets handling, private DNS/CA/TLS, hardened Docker Compose deployment on private Linux, worker isolation, database migrations, observability, load testing, regression security audit and rollback procedure.
 
 Exit: documented production readiness checklist passes; no runtime or DB ports publicly exposed.
 
@@ -52,7 +52,7 @@ Exit: documented production readiness checklist passes; no runtime or DB ports p
 - Real scheduling cannot precede durable task admission/recovery and provider background-use verification.
 - Skill marketplace cannot precede a content quarantine/scanning and approval flow.
 - Multi-agent delegation cannot precede run cost attribution, scopes and approval enforcement.
-- k3s deployment cannot precede local rollback and backup/restore tests.
+- Docker Compose deployment cannot precede local rollback and backup/restore tests.
 
 ## Release labels
 

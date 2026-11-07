@@ -3,9 +3,49 @@ import { randomUUID } from 'node:crypto';
 import { describe, it } from 'node:test';
 import Fastify from 'fastify';
 import { createRenderedRequestDigest } from '@omnis/contracts/connector-authorization';
+import { renderSyntheticConnectorRequest } from '@omnis/contracts/synthetic-connector-prompt';
 import { registerConnectorAuthorizationRoutes } from './connector-authorization-routes.ts';
 
 const ownerId = 'prj_0123456789abcdef0123456789abcdef';
+const task = {
+  id: 'task-0001',
+  title: 'Synthetic fixture task',
+  detail: 'Return a concise synthetic result for this task.',
+  status: 'open',
+  createdAt: '2026-11-06T00:00:00.000Z',
+  projectId: ownerId,
+  associationRevision: 3,
+  agentId: 'agent_0001',
+  profileVersion: 4,
+  runtimeId: 'mock',
+  assignmentRevision: 2,
+};
+const project = {
+  id: ownerId,
+  ownerId: 'owner',
+  key: 'SYNTHETIC',
+  name: 'Synthetic project',
+  objective: 'Exercise the synthetic connector authorization path.',
+  status: 'active',
+  priority: 'normal',
+  revision: 2,
+  createdAt: '2026-11-06T00:00:00.000Z',
+  updatedAt: '2026-11-06T00:00:00.000Z',
+};
+const profile = {
+  versionId: 'profile_version_0004',
+  agentId: 'agent_0001',
+  versionNo: 4,
+  profession: 'Synthetic assistant',
+  seniority: null,
+  specialties: ['testing'],
+  personality: { traits: ['careful'], tone: 'plain', principles: ['Do not invent facts.'] },
+  behavior: { autonomy: 'No external actions.', escalation: null },
+  instructions: 'Respond only with a synthetic result.',
+  createdBy: { id: 'owner', displayName: 'Owner' },
+  createdAt: '2026-11-06T00:00:00.000Z',
+};
+const renderedRequest = renderSyntheticConnectorRequest(task, profile);
 const input = {
   projectId: ownerId,
   projectRevision: 2,
@@ -27,10 +67,17 @@ const input = {
     maxUsageUnits: 10_000,
     maxCostMicrousd: 1_000_000,
   },
-  renderedRequest: 'Synthetic rendered request for authorization test.',
+  renderedRequest,
 };
 
-function createTestApp(calls: Array<{ path: string; init: RequestInit }>) {
+function createTestApp(
+  calls: Array<{ path: string; init: RequestInit }>,
+  context: { task: unknown; project: unknown; profile: unknown } | undefined = {
+    task,
+    project,
+    profile,
+  },
+) {
   const app = Fastify();
   registerConnectorAuthorizationRoutes(app, {
     requireOwner: async (request, reply) => {
@@ -43,6 +90,7 @@ function createTestApp(calls: Array<{ path: string; init: RequestInit }>) {
         await reply.code(403).send({ error: { code: 'csrf_rejected', message: 'Retry.' } });
       }
     },
+    loadContext: async () => context,
     async forward<T>(path: string, init: RequestInit, parse: (value: unknown) => T): Promise<T> {
       calls.push({ path, init });
       const { renderedRequest, ...binding } = input;
@@ -134,6 +182,113 @@ describe('connector authorization API routes', () => {
       assert.equal(calls.length, 0);
     } finally {
       await app.close();
+    }
+  });
+
+  it('rejects a caller-rendered request that differs from persisted task and profile content', async () => {
+    const calls: Array<{ path: string; init: RequestInit }> = [];
+    const app = createTestApp(calls);
+    const requestId = randomUUID();
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/v1/connector-authorizations',
+        headers: { ...ownerHeaders, 'idempotency-key': requestId },
+        payload: { ...input, renderedRequest: `${input.renderedRequest} altered` },
+      });
+      assert.equal(response.statusCode, 409);
+      assert.equal(calls.length, 0);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('fails closed when immutable authorization context no longer matches the request', async () => {
+    const calls: Array<{ path: string; init: RequestInit }> = [];
+    const app = createTestApp(calls, {
+      task: { ...task, associationRevision: task.associationRevision + 1 },
+      project,
+      profile,
+    });
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/v1/connector-authorizations',
+        headers: { ...ownerHeaders, 'idempotency-key': randomUUID() },
+        payload: input,
+      });
+      assert.equal(response.statusCode, 409);
+      assert.equal(calls.length, 0);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('fails closed when a task has no matching persisted execution assignment', async () => {
+    for (const assignedTask of [
+      { ...task, agentId: null, profileVersion: null, runtimeId: null },
+      { ...task, agentId: 'agent_0002' },
+      { ...task, profileVersion: 5 },
+      { ...task, runtimeId: null },
+    ]) {
+      const calls: Array<{ path: string; init: RequestInit }> = [];
+      const app = createTestApp(calls, { task: assignedTask, project, profile });
+      try {
+        const response = await app.inject({
+          method: 'POST',
+          url: '/api/v1/connector-authorizations',
+          headers: { ...ownerHeaders, 'idempotency-key': randomUUID() },
+          payload: input,
+        });
+        assert.equal(response.statusCode, 409);
+        assert.equal(calls.length, 0);
+      } finally {
+        await app.close();
+      }
+    }
+  });
+
+  it('does not request a connector grant for a completed task or inactive project', async () => {
+    for (const context of [
+      { task: { ...task, status: 'completed' }, project, profile },
+      { task, project: { ...project, status: 'archived' }, profile },
+    ]) {
+      const calls: Array<{ path: string; init: RequestInit }> = [];
+      const app = createTestApp(calls, context);
+      try {
+        const response = await app.inject({
+          method: 'POST',
+          url: '/api/v1/connector-authorizations',
+          headers: { ...ownerHeaders, 'idempotency-key': randomUUID() },
+          payload: input,
+        });
+        assert.equal(response.statusCode, 409);
+        assert.equal(calls.length, 0);
+      } finally {
+        await app.close();
+      }
+    }
+  });
+
+  it('rejects persisted task or project records with unexpected identities', async () => {
+    for (const context of [
+      { task: { ...task, id: 'task-foreign' }, project, profile },
+      { task, project: { ...project, id: `prj_${'b'.repeat(32)}` }, profile },
+    ]) {
+      const calls: Array<{ path: string; init: RequestInit }> = [];
+      const app = createTestApp(calls, context);
+      try {
+        const response = await app.inject({
+          method: 'POST',
+          url: '/api/v1/connector-authorizations',
+          headers: { ...ownerHeaders, 'idempotency-key': randomUUID() },
+          payload: input,
+        });
+        assert.equal(response.statusCode, 409);
+        assert.equal(calls.length, 0);
+      } finally {
+        await app.close();
+      }
     }
   });
 

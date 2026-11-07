@@ -17,6 +17,7 @@ import {
   CreateProjectSchema,
   CreateTaskSchema,
   SetTaskProjectSchema,
+  SetTaskExecutionAssignmentSchema,
   TaskSchema,
   UpdateProjectSchema,
   ArchiveProjectSchema,
@@ -254,6 +255,10 @@ describe('task project association contracts', () => {
       ...task,
       projectId: null,
       associationRevision: 1,
+      agentId: null,
+      profileVersion: null,
+      runtimeId: null,
+      assignmentRevision: 1,
     });
   });
 
@@ -280,6 +285,49 @@ describe('task project association contracts', () => {
     assert.equal(
       SetTaskProjectSchema.safeParse({ projectId, expectedAssociationRevision: 1, extra: true })
         .success,
+      false,
+    );
+  });
+
+  it('accepts only a complete, explicitly synthetic task execution assignment', () => {
+    const assigned = {
+      agentId: 'agent-001',
+      profileVersion: 2,
+      runtimeId: 'mock',
+      assignmentRevision: 3,
+    };
+    assert.deepEqual(TaskSchema.parse({ ...task, ...assigned }), { ...task, ...assigned });
+    assert.equal(
+      TaskSchema.safeParse({ ...task, agentId: 'agent-001', profileVersion: 2 }).success,
+      false,
+    );
+    assert.equal(TaskSchema.safeParse({ ...task, ...assigned, runtimeId: 'codex' }).success, false);
+    assert.equal(
+      SetTaskExecutionAssignmentSchema.safeParse({
+        agentId: 'agent-001',
+        profileVersion: 2,
+        runtimeId: 'mock',
+        expectedAssignmentRevision: 3,
+      }).success,
+      true,
+    );
+    assert.equal(
+      SetTaskExecutionAssignmentSchema.safeParse({
+        agentId: 'agent-001',
+        profileVersion: 2,
+        runtimeId: null,
+        expectedAssignmentRevision: 3,
+      }).success,
+      false,
+    );
+    assert.equal(
+      SetTaskExecutionAssignmentSchema.safeParse({
+        agentId: null,
+        profileVersion: null,
+        runtimeId: null,
+        expectedAssignmentRevision: 3,
+        extra: 'rejected',
+      }).success,
       false,
     );
   });
@@ -323,6 +371,27 @@ describe('run contracts', () => {
     );
   });
 
+  it('carries a nullable authorization identity for linked Run audit history', () => {
+    const run = {
+      id: 'run-0001',
+      taskId: 'task-0001',
+      taskTitle: 'Read the file list',
+      status: 'queued',
+      runtimeKind: 'mock',
+      synthetic: true,
+      usage: { quality: 'unknown', inputTokens: null, outputTokens: null, cost: null },
+      createdAt: '2026-11-02T00:00:00.000Z',
+      updatedAt: '2026-11-02T00:00:00.000Z',
+    };
+    assert.equal(
+      RunSchema.parse({ ...run, authorizationId: 'b7cece2c-2e6f-4b3b-92da-f0352c24debb' })
+        .authorizationId,
+      'b7cece2c-2e6f-4b3b-92da-f0352c24debb',
+    );
+    assert.equal(RunSchema.parse({ ...run, authorizationId: null }).authorizationId, null);
+    assert.equal(RunSchema.safeParse({ ...run, authorizationId: 'invalid' }).success, false);
+  });
+
   it('represents interrupted execution explicitly and as synthetic mock evidence', () => {
     const event = RunEventSchema.parse({
       id: 'evt-run-0001-0004',
@@ -336,6 +405,28 @@ describe('run contracts', () => {
     });
     assert.equal(event.type, 'run.interrupted');
     assert.equal(RunStatusSchema.parse('interrupted'), 'interrupted');
+  });
+
+  it('distinguishes requested provider submission and uncertain outcomes from interruption', () => {
+    const submission = RunEventSchema.parse({
+      id: 'evt-run-0001-0003',
+      runId: 'run-0001',
+      sequence: 3,
+      at: '2026-11-02T00:00:00.000Z',
+      type: 'run.provider_submission_requested',
+      source: 'mock',
+      synthetic: true,
+      message: 'Provider acceptance is not yet confirmed.',
+    });
+    const unknown = RunEventSchema.parse({
+      ...submission,
+      id: 'evt-run-0001-0004',
+      sequence: 4,
+      type: 'run.outcome_unknown',
+      message: 'The provider outcome is unknown. Do not resubmit this request.',
+    });
+    assert.equal(submission.type, 'run.provider_submission_requested');
+    assert.equal(unknown.type, 'run.outcome_unknown');
   });
 });
 

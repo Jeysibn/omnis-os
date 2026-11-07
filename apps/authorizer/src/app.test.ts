@@ -276,6 +276,132 @@ describe('independent authorizer service boundary', () => {
     }
   });
 
+  it('exposes synthetic execution status only behind the authorizer service token', async () => {
+    const { store } = makeStore();
+    const authorizationId = '11111111-1111-4111-8111-111111111111';
+    const connectorStore: ConnectorAuthorizerStore = {
+      async request() {
+        throw new Error('not used');
+      },
+      async get() {
+        return {
+          id: authorizationId,
+          requestId: '22222222-2222-4222-8222-222222222222',
+          correlationId: '33333333-3333-4333-8333-333333333333',
+          requestingActor: 'owner',
+          projectId: `prj_${'a'.repeat(32)}`,
+          projectRevision: 1,
+          taskId: 'task-0001',
+          taskRevision: 1,
+          agentId: 'fixture-agent',
+          profileVersion: 1,
+          connectorId: 'synthetic.codex.fixture',
+          connectorVersion: '0.0.0-synthetic.1',
+          providerId: 'synthetic',
+          modelId: 'synthetic-text-only-v1',
+          operation: 'connector.respond',
+          capabilities: [],
+          limits: {
+            maxInputTokens: 10,
+            maxOutputTokens: 10,
+            maxDurationSeconds: 10,
+            maxConcurrentRuns: 1,
+            maxUsageUnits: 10,
+            maxCostMicrousd: 10,
+          },
+          promptDigest: `sha256:${'a'.repeat(64)}`,
+          status: 'authorized',
+          policyVersion: 'r1p1-synthetic-connector-v1',
+          createdAt: '2026-11-07T00:00:00.000Z',
+          consentedAt: '2026-11-07T00:00:00.000Z',
+          decidedAt: '2026-11-07T00:00:00.000Z',
+          decidedBy: 'owner',
+          revokedAt: null,
+          revokedBy: null,
+          revocationGeneration: 0,
+          expiresAt: '2999-01-01T00:00:00.000Z',
+          consumedAt: null,
+          consumedRequestId: null,
+          synthetic: true,
+        };
+      },
+      async getExecutionForAuthorization() {
+        return {
+          attempt: {
+            id: '44444444-4444-4444-8444-444444444444',
+            authorizationId,
+            requestId: '55555555-5555-4555-8555-555555555555',
+            status: 'completed',
+            synthetic: true,
+            createdAt: '2026-11-07T00:00:00.000Z',
+            responseText: 'Synthetic result',
+          },
+          usage: { kind: 'unknown', reason: 'not_reported', billingExposure: 'unknown' },
+        };
+      },
+      async listSyntheticTaskRunEvents(_authorizationId, after, limit) {
+        assert.equal(after, 2);
+        assert.equal(limit, 10);
+        return {
+          events: [
+            {
+              attemptId: '44444444-4444-4444-8444-444444444444',
+              sequence: 3,
+              eventType: 'connector.execution_completed',
+              outcome: 'recorded',
+              revocationGeneration: 0,
+              occurredAt: '2026-11-07T00:00:03.000Z',
+            },
+          ],
+          nextAfter: null,
+        };
+      },
+      async decide() {
+        throw new Error('not used');
+      },
+      async revoke() {
+        throw new Error('not used');
+      },
+    };
+    const app = createAuthorizerApp({
+      store,
+      connectorStore,
+      serviceToken,
+      checkDatabase: async () => undefined,
+    });
+    try {
+      const url = `/internal/v1/connector-authorizations/${authorizationId}/execution`;
+      assert.equal((await app.inject({ method: 'GET', url })).statusCode, 401);
+      const response = await app.inject({
+        method: 'GET',
+        url,
+        headers: { 'x-omnis-authorizer-token': serviceToken },
+      });
+      assert.equal(response.statusCode, 200);
+      assert.equal(response.json().taskId, 'task-0001');
+      assert.equal(response.json().attempt.status, 'completed');
+      assert.equal(response.json().usage.kind, 'unknown');
+      const eventsUrl = `/internal/v1/connector-authorizations/${authorizationId}/events?after=2&limit=10`;
+      assert.equal((await app.inject({ method: 'GET', url: eventsUrl })).statusCode, 401);
+      const events = await app.inject({
+        method: 'GET',
+        url: eventsUrl,
+        headers: { 'x-omnis-authorizer-token': serviceToken },
+      });
+      assert.equal(events.statusCode, 200);
+      assert.equal(events.json().taskId, 'task-0001');
+      assert.equal(events.json().events[0].attemptId, '44444444-4444-4444-8444-444444444444');
+      const invalidPage = await app.inject({
+        method: 'GET',
+        url: `/internal/v1/connector-authorizations/${authorizationId}/events?limit=101`,
+        headers: { 'x-omnis-authorizer-token': serviceToken },
+      });
+      assert.equal(invalidPage.statusCode, 400);
+    } finally {
+      await app.close();
+    }
+  });
+
   it('keeps milestone operations behind the service token and validates internal contracts', async () => {
     const { store, calls } = makeStore();
     const app = createAuthorizerApp({ store, serviceToken, checkDatabase: async () => undefined });

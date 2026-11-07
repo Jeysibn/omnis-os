@@ -7,7 +7,7 @@
     "db:migrate": "node --experimental-strip-types --env-file=../../.env.migration src/migrate.ts",
     "build": "pnpm typecheck",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --experimental-strip-types --test src/run-coordinator.test.ts src/reliable-event-stream.test.ts src/sandbox-launcher-client.test.ts src/runtime-selection.test.ts",
+    "test": "node --experimental-strip-types --test src/run-coordinator.test.ts src/reliable-event-stream.test.ts src/sandbox-launcher-client.test.ts src/runtime-selection.test.ts src/synthetic-task-run-routes.test.ts src/synthetic-broker-client.test.ts src/synthetic-broker-run-coordinator.test.ts src/deployment-config.test.ts",
     "test:sandbox": "pnpm --filter @omnis/sandbox-launcher test:sandbox"
   },
   "dependencies": {

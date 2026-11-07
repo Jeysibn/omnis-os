@@ -5,13 +5,16 @@ import { expect, test as base, type Page, type Route } from '@playwright/test';
 import {
   AuthorizationDecisionSchema,
   AuthorizationSchema,
+  AgentDirectoryResponseSchema,
   CreateAuthorizationSchema,
   CreateRunSchema,
   CreateTaskSchema,
   RunEventSchema,
   RunSchema,
+  SetTaskExecutionAssignmentSchema,
   TaskSchema,
   type Authorization,
+  type ProjectSummary,
   type Run,
   type RunEvent,
   type Task,
@@ -27,6 +30,10 @@ const makeTask = (id: string, title: string, status: Task['status'] = 'open'): T
   detail: `Read the notes for ${title.toLowerCase()} and report the next action.`,
   status,
   createdAt: now,
+  agentId: null,
+  profileVersion: null,
+  runtimeId: null,
+  assignmentRevision: 1,
 });
 
 const makeRun = (
@@ -34,10 +41,12 @@ const makeRun = (
   taskId: string,
   taskTitle: string,
   status: Run['status'] = 'completed',
+  linkedAuthorizationId?: string,
 ): Run => ({
   id,
   taskId,
   taskTitle,
+  ...(linkedAuthorizationId ? { authorizationId: linkedAuthorizationId } : {}),
   status,
   runtimeKind: 'mock',
   synthetic: true,
@@ -50,6 +59,26 @@ const defaultTasks = [
   makeTask('task-open', 'Review launch checklist'),
   makeTask('task-done', 'Audit access notes', 'completed'),
 ];
+const makeProject = (
+  id: string,
+  key: string,
+  name: string,
+  status: ProjectSummary['status'] = 'active',
+): ProjectSummary => ({
+  id,
+  ownerId: 'owner',
+  key,
+  name,
+  status,
+  priority: 'normal',
+  revision: 1,
+  createdAt: now,
+  updatedAt: now,
+});
+const defaultProjects = [
+  makeProject(`prj_${'a'.repeat(32)}`, 'OPS', 'Operations'),
+  makeProject(`prj_${'b'.repeat(32)}`, 'ARCHIVED', 'Archived project', 'archived'),
+];
 const defaultRuns = [
   makeRun('run-active', 'task-open', 'Review launch checklist', 'running'),
   makeRun('run-old', 'task-done', 'Audit access notes'),
@@ -58,12 +87,17 @@ const defaultRuns = [
 type FixtureOptions = {
   tasks?: Task[];
   runs?: Run[];
+  projects?: ProjectSummary[];
   signedOut?: boolean;
   csrfBootstrapFailures?: number;
   taskGetFailures?: number;
+  projectGetFailures?: number;
   runGetFailures?: number;
   taskDelayMs?: number;
   taskMutationStatus?: number;
+  taskMutationFailures?: number;
+  taskMutationRetryStatus?: number;
+  assignmentFailures?: number;
   authorizationDisconnects?: number;
   decisionDisconnects?: number;
   runDisconnects?: number;
@@ -148,10 +182,12 @@ function createMockApi(page: Page) {
   let options: FixtureOptions = {};
   let currentTasks = [...defaultTasks];
   let currentRuns = [...defaultRuns];
+  let currentProjects = [...defaultProjects];
   let currentAuthorization: Authorization | null = null;
   let authenticated = true;
   let currentCsrfToken = csrfToken;
   let taskGetFailures = 0;
+  let projectGetFailures = 0;
   let runGetFailures = 0;
   let detailFailures = 0;
   let authorizationDisconnects = 0;
@@ -177,15 +213,33 @@ function createMockApi(page: Page) {
   let scenario: EventScenarioServer | undefined;
   const runDetailGets = new Map<string, number>();
   let createdTaskCount = 0;
+  let taskMutationFailures = 0;
+  let taskMutationRetryUsed = false;
+  let assignmentFailures = 0;
+  const assignmentWrites: Array<{ taskId: string; key: string; body: unknown }> = [];
+  const fixtureAgent = {
+    id: 'agent-analyst',
+    name: 'Research Analyst',
+    slug: 'research-analyst',
+    department: null,
+    lifecycle: 'available' as const,
+    archivedAt: null,
+    currentVersion: { versionNo: 3, profession: 'Research Analyst', seniority: 'senior' },
+    provenance: 'owner_created' as const,
+    createdAt: now,
+    updatedAt: now,
+  };
 
   const configure = (next: FixtureOptions = {}) => {
     options = next;
     currentTasks = [...(options.tasks ?? defaultTasks)];
     currentRuns = [...(options.runs ?? defaultRuns)];
+    currentProjects = [...(options.projects ?? defaultProjects)];
     currentAuthorization = null;
     authenticated = !options.signedOut;
     currentCsrfToken = csrfToken;
     taskGetFailures = options.taskGetFailures ?? 0;
+    projectGetFailures = options.projectGetFailures ?? 0;
     runGetFailures = options.runGetFailures ?? 0;
     detailFailures = options.detailFailures ?? 0;
     authorizationDisconnects = options.authorizationDisconnects ?? 0;
@@ -195,6 +249,10 @@ function createMockApi(page: Page) {
     csrfBootstrapFailures = 0;
     stopMutationFailures = options.stopMutationFailures ?? 0;
     createdTaskCount = 0;
+    taskMutationFailures = options.taskMutationFailures ?? 0;
+    taskMutationRetryUsed = false;
+    assignmentFailures = options.assignmentFailures ?? 0;
+    assignmentWrites.length = 0;
   };
 
   const fulfillError = (route: Route, status: number, code: string, message: string) =>
@@ -272,7 +330,10 @@ function createMockApi(page: Page) {
     const body = request.postDataJSON?.() ?? null;
     requests.push({ method, path, headers, body });
 
-    if (method === 'POST' && headers['x-omnis-csrf'] !== currentCsrfToken) {
+    if (
+      ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method) &&
+      headers['x-omnis-csrf'] !== currentCsrfToken
+    ) {
       return fulfillError(route, 403, 'csrf_rejected', 'A valid CSRF header is required.');
     }
 
@@ -288,6 +349,14 @@ function createMockApi(page: Page) {
         ? route.fulfill({ json: { id: 'owner', displayName: 'Director' } })
         : fulfillError(route, 401, 'unauthorized', 'Sign in to continue.');
     }
+    if (path === '/api/v1/agents' && method === 'GET') {
+      return route.fulfill({
+        json: AgentDirectoryResponseSchema.parse({
+          agents: [fixtureAgent],
+          page: { total: 1, complete: true, nextCursor: null },
+        }),
+      });
+    }
     if (path === '/api/v1/auth/login' && method === 'POST') {
       authenticated = true;
       return route.fulfill({ json: { authenticated: true } });
@@ -295,6 +364,20 @@ function createMockApi(page: Page) {
     if (path === '/api/v1/auth/logout' && method === 'POST') {
       authenticated = false;
       return route.fulfill({ status: 204, body: '' });
+    }
+    if (path === '/api/v1/projects' && method === 'GET') {
+      if (projectGetFailures > 0) {
+        projectGetFailures -= 1;
+        return fulfillError(
+          route,
+          503,
+          'projects_unavailable',
+          'Projects are temporarily unavailable.',
+        );
+      }
+      return route.fulfill({
+        json: { projects: currentProjects, total: currentProjects.length, complete: true },
+      });
     }
     if (path === '/api/v1/tasks' && method === 'GET') {
       if (options.taskDelayMs)
@@ -306,18 +389,28 @@ function createMockApi(page: Page) {
       return route.fulfill({ json: currentTasks.map((task) => TaskSchema.parse(task)) });
     }
     if (path === '/api/v1/tasks' && method === 'POST') {
-      if (options.taskMutationStatus) {
-        if (options.taskMutationStatus === 401) {
+      if (
+        options.taskMutationStatus &&
+        (taskMutationFailures > 0 ||
+          options.taskMutationFailures === undefined ||
+          (taskMutationFailures === 0 &&
+            options.taskMutationRetryStatus !== undefined &&
+            !taskMutationRetryUsed))
+      ) {
+        const status =
+          options.taskMutationFailures !== undefined &&
+          taskMutationFailures === 0 &&
+          options.taskMutationRetryStatus
+            ? options.taskMutationRetryStatus
+            : options.taskMutationStatus;
+        if (taskMutationFailures > 0) taskMutationFailures -= 1;
+        else if (options.taskMutationRetryStatus !== undefined) taskMutationRetryUsed = true;
+        if (status === 401) {
           authenticated = false;
           currentCsrfToken = 'csrf-recovered-fixture-token';
           csrfBootstrapFailures = options.csrfBootstrapFailures ?? 0;
         }
-        return fulfillError(
-          route,
-          options.taskMutationStatus,
-          'task_write_failed',
-          'Task could not be created.',
-        );
+        return fulfillError(route, status, 'task_write_failed', 'Task could not be created.');
       }
       const parsed = CreateTaskSchema.safeParse(body);
       if (!parsed.success)
@@ -331,12 +424,60 @@ function createMockApi(page: Page) {
       currentTasks = [created, ...currentTasks];
       return route.fulfill({ status: 201, json: created });
     }
+    const assignmentMatch = path.match(/^\/api\/v1\/tasks\/([^/]+)\/execution-assignment$/);
+    if (assignmentMatch && method === 'PUT') {
+      const parsed = SetTaskExecutionAssignmentSchema.safeParse(body);
+      const key = headers['idempotency-key'] ?? '';
+      if (!parsed.success || !zodUuid(key))
+        return fulfillError(route, 400, 'invalid_input', 'Task assignment input is invalid.');
+      assignmentWrites.push({ taskId: assignmentMatch[1]!, key, body });
+      if (assignmentFailures > 0) {
+        assignmentFailures -= 1;
+        return fulfillError(
+          route,
+          503,
+          'assignment_unknown',
+          'Task assignment outcome is unknown.',
+        );
+      }
+      const existing = currentTasks.find((task) => task.id === assignmentMatch[1]);
+      if (!existing) return fulfillError(route, 404, 'not_found', 'Task was not found.');
+      const updated = TaskSchema.parse({
+        ...existing,
+        agentId: parsed.data.agentId,
+        profileVersion: parsed.data.profileVersion,
+        runtimeId: parsed.data.runtimeId,
+        assignmentRevision: existing.assignmentRevision + 1,
+      });
+      currentTasks = currentTasks.map((task) => (task.id === updated.id ? updated : task));
+      return route.fulfill({ json: updated });
+    }
     if (path === '/api/v1/runs' && method === 'GET') {
       if (runGetFailures > 0) {
         runGetFailures -= 1;
         return fulfillError(route, 503, 'runs_unavailable', 'Runs are temporarily unavailable.');
       }
       return route.fulfill({ json: currentRuns.map((run) => RunSchema.parse(run)) });
+    }
+    const auditMatch = path.match(/^\/api\/v1\/tasks\/([^/]+)\/synthetic-runs\/([^/]+)\/events$/);
+    if (auditMatch && method === 'GET') {
+      const auditEvent = {
+        attemptId: 'b70ef09b-b357-4da9-89c9-981eb90a0b05',
+        sequence: 1,
+        eventType: 'connector.authorization_consumed',
+        outcome: 'recorded',
+        revocationGeneration: 0,
+        occurredAt: now,
+      };
+      return route.fulfill({
+        json: {
+          version: 'omnis.synthetic-task-run-events.v1',
+          authorizationId: auditMatch[2],
+          taskId: auditMatch[1],
+          events: [auditEvent],
+          page: { nextAfter: null },
+        },
+      });
     }
     if (path === '/api/v1/authorizations' && method === 'POST') {
       const key = headers['idempotency-key'] ?? '';
@@ -531,6 +672,7 @@ function createMockApi(page: Page) {
     releaseReconnect: () => scenario?.release(),
     dispose: async () => scenario?.close(),
     runDetailGets,
+    assignmentWrites,
     get tasks() {
       return currentTasks;
     },
@@ -807,6 +949,215 @@ test('loads tasks and runs independently and retries without false empty states'
   await expect(page.getByRole('heading', { name: 'Review launch checklist' })).toBeVisible();
 });
 
+test('assigns an available immutable profile to a task on the synthetic runtime', async ({
+  page,
+  api,
+}) => {
+  api.configure({ runs: [] });
+  await openWorkspace(page, '#tasks');
+  await expect(page.getByRole('heading', { name: 'Review launch checklist' })).toBeVisible();
+  await expect(page.getByLabel('Agent profile')).toBeVisible();
+  await page.getByLabel('Agent profile').selectOption('agent-analyst');
+  await expect(page.getByLabel('Runtime')).toHaveValue('mock');
+  await page.getByRole('button', { name: 'Save assignment' }).click();
+  await expect(page.getByText('Synthetic mock assignment saved.')).toBeVisible();
+  await expect(page.getByText(/does not submit profile instructions to a model/)).toBeVisible();
+
+  expect(api.assignmentWrites).toHaveLength(1);
+  expect(api.assignmentWrites[0]).toMatchObject({
+    taskId: 'task-open',
+    body: {
+      agentId: 'agent-analyst',
+      profileVersion: 3,
+      runtimeId: 'mock',
+      expectedAssignmentRevision: 1,
+    },
+  });
+  expect(api.assignmentWrites[0]?.key).toMatch(/^[0-9a-f-]{36}$/i);
+  await expect(page.getByLabel('Agent profile')).toHaveValue('agent-analyst');
+});
+
+test('an uncertain task assignment retries the exact request with the same key', async ({
+  page,
+  api,
+}) => {
+  api.configure({ runs: [], assignmentFailures: 1 });
+  await openWorkspace(page, '#tasks');
+  await expect(page.getByLabel('Agent profile')).toBeVisible();
+  await page.getByLabel('Agent profile').selectOption('agent-analyst');
+  await page.getByRole('button', { name: 'Save assignment' }).click();
+  await expect(page.getByRole('alert')).toHaveText(
+    'The save result is uncertain. Retry the same request to resolve it safely.',
+  );
+  await page.getByRole('button', { name: 'Retry same save' }).click();
+  await expect(page.getByText('Synthetic mock assignment saved.')).toBeVisible();
+
+  expect(api.assignmentWrites).toHaveLength(2);
+  expect(api.assignmentWrites[1]).toEqual(api.assignmentWrites[0]);
+});
+
+test.describe('persisted authorization audit history', () => {
+  test.use({ timezoneId: 'UTC' });
+
+  test('shows history in Asia/Manila time for a linked synthetic run', async ({ page, api }) => {
+    api.configure({
+      runs: [
+        makeRun('run-audit', 'task-open', 'Review launch checklist', 'completed', authorizationId),
+      ],
+    });
+    await openWorkspace(page, '#runs/run-audit');
+    await expect(page.getByRole('heading', { name: 'Authorization audit' })).toBeVisible();
+    await expect(page.getByText('authorization consumed')).toBeVisible();
+    await expect(page.getByText('recorded; revocation generation 0')).toBeVisible();
+    await expect(page.locator('.audit-list time')).toHaveText(/11\/3\/2026, 6:00:00 PM/);
+    expect(api.requests).toContainEqual({
+      method: 'GET',
+      path: `/api/v1/tasks/task-open/synthetic-runs/${authorizationId}/events`,
+      headers: expect.any(Object),
+      body: null,
+    });
+    await assertNoSeriousAxeViolations(page);
+  });
+
+  test('ignores an authorization audit page that resolves after switching Runs', async ({
+    page,
+    api,
+  }) => {
+    const otherAuthorizationId = 'cc62d253-2473-4fbc-bfdc-3f2a050ec778';
+    api.configure({
+      runs: [
+        makeRun(
+          'run-audit-a',
+          'task-open',
+          'Review launch checklist',
+          'completed',
+          authorizationId,
+        ),
+        makeRun(
+          'run-audit-b',
+          'task-open',
+          'Review launch checklist',
+          'completed',
+          otherAuthorizationId,
+        ),
+      ],
+    });
+    let releasePending!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      releasePending = resolve;
+    });
+    let signalPageRequest!: () => void;
+    const pageRequested = new Promise<void>((resolve) => {
+      signalPageRequest = resolve;
+    });
+    await page.route(`**/synthetic-runs/${authorizationId}/events**`, async (route) => {
+      const after = new URL(route.request().url()).searchParams.get('after');
+      if (after !== '1') {
+        return route.fulfill({
+          json: {
+            version: 'omnis.synthetic-task-run-events.v1',
+            authorizationId,
+            taskId: 'task-open',
+            events: [
+              {
+                attemptId: 'b70ef09b-b357-4da9-89c9-981eb90a0b05',
+                sequence: 1,
+                eventType: 'connector.authorization_consumed',
+                outcome: 'recorded',
+                revocationGeneration: 0,
+                occurredAt: now,
+              },
+            ],
+            page: { nextAfter: 1 },
+          },
+        });
+      }
+      signalPageRequest();
+      await pending;
+      await route.fulfill({
+        json: {
+          version: 'omnis.synthetic-task-run-events.v1',
+          authorizationId,
+          taskId: 'task-open',
+          events: [
+            {
+              attemptId: 'b70ef09b-b357-4da9-89c9-981eb90a0b05',
+              sequence: 2,
+              eventType: 'connector.execution_completed',
+              outcome: 'recorded',
+              revocationGeneration: 0,
+              occurredAt: now,
+            },
+          ],
+          page: { nextAfter: null },
+        },
+      });
+    });
+    await openWorkspace(page, '#runs/run-audit-a');
+    await expect(page.getByRole('heading', { name: 'Authorization audit' })).toBeVisible();
+    await page.getByRole('button', { name: 'Load more authorization events' }).click();
+    await pageRequested;
+    await page.evaluate(() => {
+      window.location.hash = '#runs/run-audit-b';
+    });
+    await expect(page.getByText('authorization consumed')).toBeVisible();
+    releasePending();
+    await expect(page.getByText('execution completed')).toHaveCount(0);
+    await expect(page.getByText('authorization consumed')).toBeVisible();
+  });
+
+  test('loads later authorization events in ascending order with an accurate action label', async ({
+    page,
+    api,
+  }) => {
+    api.configure({
+      runs: [
+        makeRun(
+          'run-audit-pages',
+          'task-open',
+          'Review launch checklist',
+          'completed',
+          authorizationId,
+        ),
+      ],
+    });
+    await page.route(`**/synthetic-runs/${authorizationId}/events**`, async (route) => {
+      const after = new URL(route.request().url()).searchParams.get('after');
+      const sequence = after === '1' ? 2 : 1;
+      await route.fulfill({
+        json: {
+          version: 'omnis.synthetic-task-run-events.v1',
+          authorizationId,
+          taskId: 'task-open',
+          events: [
+            {
+              attemptId: 'b70ef09b-b357-4da9-89c9-981eb90a0b05',
+              sequence,
+              eventType:
+                sequence === 1
+                  ? 'connector.authorization_consumed'
+                  : 'connector.submission_started',
+              outcome: 'recorded',
+              revocationGeneration: 0,
+              occurredAt: now,
+            },
+          ],
+          page: { nextAfter: sequence === 1 ? 1 : null },
+        },
+      });
+    });
+    await openWorkspace(page, '#runs/run-audit-pages');
+    await expect(page.getByText('authorization consumed')).toBeVisible();
+    const loadMore = page.getByRole('button', { name: 'Load more authorization events' });
+    await expect(loadMore).toBeVisible();
+    await loadMore.click();
+    await expect(page.getByText('submission started')).toBeVisible();
+    await expect(page.locator('.audit-list li')).toHaveCount(2);
+    await expect(page.locator('.audit-list li').nth(0)).toContainText('authorization consumed');
+    await expect(page.locator('.audit-list li').nth(1)).toContainText('submission started');
+  });
+});
+
 test('shows a real loading state until the delayed task request resolves', async ({
   page,
   api,
@@ -852,6 +1203,228 @@ test('creates a task with CSRF, cancels approval without mutations, then approve
       .every((entry) => entry.headers['x-omnis-csrf'] === csrfToken),
   ).toBe(true);
   await expect(page.getByRole('heading', { name: 'Run inspector' })).toBeFocused();
+});
+
+test('creates a task in the selected active project with an idempotency key', async ({
+  page,
+  api,
+}) => {
+  api.configure({
+    projects: [
+      makeProject(`prj_${'a'.repeat(32)}`, 'OPS', 'Operations'),
+      makeProject(`prj_${'b'.repeat(32)}`, 'PROP', 'Proposed project', 'proposed'),
+      makeProject(`prj_${'c'.repeat(32)}`, 'PAUSE', 'Paused project', 'paused'),
+      makeProject(`prj_${'d'.repeat(32)}`, 'DONE', 'Completed project', 'completed'),
+      makeProject(`prj_${'e'.repeat(32)}`, 'ARCHIVED', 'Archived project', 'archived'),
+    ],
+  });
+  await openWorkspace(page, '#tasks');
+  await page.getByRole('button', { name: 'Load available projects' }).click();
+  await expect(page.getByRole('option', { name: 'Operations (OPS)' })).toBeAttached();
+  for (const unavailable of [
+    'Proposed project',
+    'Paused project',
+    'Completed project',
+    'Archived project',
+  ])
+    await expect(page.getByRole('option', { name: new RegExp(unavailable) })).toHaveCount(0);
+  await page.getByLabel('Project').selectOption(`prj_${'a'.repeat(32)}`);
+  await page.getByLabel('Task title').fill('Review the deployment plan');
+  await page.getByLabel('Task detail').fill('Read the deployment plan and report its next action.');
+  await page.getByRole('button', { name: 'Create task' }).click();
+  await expect(page.getByRole('heading', { name: 'Review the deployment plan' })).toBeVisible();
+  await expect(page.locator('.task-detail-panel .metadata-list')).toContainText('Operations (OPS)');
+
+  const create = api.requests.find(
+    (entry) => entry.path === '/api/v1/tasks' && entry.method === 'POST',
+  );
+  expect(create?.body).toEqual({
+    title: 'Review the deployment plan',
+    detail: 'Read the deployment plan and report its next action.',
+    projectId: `prj_${'a'.repeat(32)}`,
+  });
+  expect(create?.headers['idempotency-key']).toMatch(/^[0-9a-f-]{36}$/i);
+  expect(create?.headers['x-omnis-csrf']).toBe(csrfToken);
+  expect(api.tasks[0]?.projectId).toBe(`prj_${'a'.repeat(32)}`);
+});
+
+test('an uncertain project task create retries the identical request with the same key', async ({
+  page,
+  api,
+}) => {
+  api.configure({ taskMutationStatus: 503, taskMutationFailures: 1 });
+  await openWorkspace(page, '#tasks');
+  await page.getByRole('button', { name: 'Load available projects' }).click();
+  await expect(page.getByRole('option', { name: 'Operations (OPS)' })).toBeAttached();
+  await page.getByLabel('Project').selectOption(`prj_${'a'.repeat(32)}`);
+  await page.getByLabel('Task title').fill('Review the deployment plan');
+  await page.getByLabel('Task detail').fill('Read the deployment plan and report its next action.');
+  await page.getByRole('button', { name: 'Create task' }).click();
+  await expect(page.getByRole('button', { name: 'Retry same request' })).toBeVisible();
+  await expect(page.getByLabel('Task title')).toHaveAttribute('readonly', '');
+  await expect(page.getByLabel('Project')).toBeDisabled();
+  await page.reload();
+  await expect(page.getByRole('button', { name: 'Retry same request' })).toBeVisible();
+  await expect(page.getByLabel('Task title')).toHaveAttribute('readonly', '');
+  await expect(page.getByLabel('Task title')).toHaveValue('Review the deployment plan');
+  await expect(page.getByLabel('Task detail')).toHaveValue(
+    'Read the deployment plan and report its next action.',
+  );
+  await expect(page.getByLabel('Project')).toHaveValue(`prj_${'a'.repeat(32)}`);
+  await expect(page.getByRole('status')).toContainText('unknown outcome');
+  await page.getByRole('button', { name: 'Retry same request' }).click();
+  await expect(page.getByRole('heading', { name: 'Review the deployment plan' })).toBeVisible();
+
+  const creates = api.requests.filter(
+    (entry) => entry.path === '/api/v1/tasks' && entry.method === 'POST',
+  );
+  expect(creates).toHaveLength(2);
+  expect(creates[1]?.body).toEqual(creates[0]?.body);
+  expect(creates[1]?.headers['idempotency-key']).toBe(creates[0]?.headers['idempotency-key']);
+  expect(api.tasks.filter((task) => task.title === 'Review the deployment plan')).toHaveLength(1);
+});
+
+test('a definitive rejection of a recovered request unlocks the form for correction', async ({
+  page,
+  api,
+}) => {
+  api.configure({
+    taskMutationStatus: 503,
+    taskMutationFailures: 1,
+    taskMutationRetryStatus: 409,
+  });
+  await openWorkspace(page, '#tasks');
+  await page.getByRole('button', { name: 'Load available projects' }).click();
+  await expect(page.getByRole('option', { name: 'Operations (OPS)' })).toBeAttached();
+  await page.getByLabel('Project').selectOption(`prj_${'a'.repeat(32)}`);
+  await page.getByLabel('Task title').fill('Review the deployment plan');
+  await page.getByLabel('Task detail').fill('Read the deployment plan and report its next action.');
+  await page.getByRole('button', { name: 'Create task' }).click();
+  await expect(page.getByRole('button', { name: 'Retry same request' })).toBeVisible();
+  await page.getByRole('button', { name: 'Retry same request' }).click();
+  await expect(page.getByRole('button', { name: 'Create task' })).toBeVisible();
+  await expect(page.getByLabel('Task title')).not.toHaveAttribute('readonly', '');
+  await expect(page.getByLabel('Task detail')).not.toHaveAttribute('readonly', '');
+  await expect(page.getByText('The project task request may have been accepted')).toHaveCount(0);
+  await expect(page.getByRole('alert')).toContainText('Task could not be created.');
+  expect(
+    await page.evaluate(() => sessionStorage.getItem('omnis.pending-task-create.v1')),
+  ).toBeNull();
+});
+
+test('a retry 401 preserves an uncertain task request for same-owner explicit retry', async ({
+  page,
+  api,
+}) => {
+  api.configure({
+    taskMutationStatus: 503,
+    taskMutationFailures: 1,
+    taskMutationRetryStatus: 401,
+  });
+  await openWorkspace(page, '#tasks');
+  await page.getByRole('button', { name: 'Load available projects' }).click();
+  await expect(page.getByRole('option', { name: 'Operations (OPS)' })).toBeAttached();
+  await page.getByLabel('Project').selectOption(`prj_${'a'.repeat(32)}`);
+  await page.getByLabel('Task title').fill('Review the deployment plan');
+  await page.getByLabel('Task detail').fill('Read the deployment plan and report its next action.');
+  await page.getByRole('button', { name: 'Create task' }).click();
+  await page.getByRole('button', { name: 'Retry same request' }).click();
+  await expect(page.getByRole('heading', { name: 'Welcome back.' })).toBeVisible();
+  await expect(page.getByRole('alert')).toContainText('session expired');
+  expect(
+    await page.evaluate(() => sessionStorage.getItem('omnis.pending-task-create.v1')),
+  ).not.toBeNull();
+
+  await page.getByLabel('Owner password').fill('fixture-owner-password');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await expect(page.getByRole('button', { name: 'Retry same request' })).toBeVisible();
+  await expect(page.getByLabel('Task title')).toHaveValue('Review the deployment plan');
+  await expect(page.getByLabel('Task detail')).toHaveValue(
+    'Read the deployment plan and report its next action.',
+  );
+  await page.getByRole('button', { name: 'Retry same request' }).click();
+  await expect(page.getByRole('heading', { name: 'Review the deployment plan' })).toBeVisible();
+
+  const creates = api.requests.filter(
+    (entry) => entry.path === '/api/v1/tasks' && entry.method === 'POST',
+  );
+  expect(creates).toHaveLength(3);
+  expect(new Set(creates.map((entry) => entry.headers['idempotency-key'])).size).toBe(1);
+  expect(new Set(creates.map((entry) => JSON.stringify(entry.body))).size).toBe(1);
+  expect(
+    await page.evaluate(() => sessionStorage.getItem('omnis.pending-task-create.v1')),
+  ).toBeNull();
+});
+
+test('does not restore a pending task request for a different owner session', async ({
+  page,
+  api,
+}) => {
+  api.configure();
+  await page.addInitScript(() => {
+    sessionStorage.setItem(
+      'omnis.pending-task-create.v1',
+      JSON.stringify({
+        ownerId: 'another-owner',
+        operation: {
+          title: 'Private task from another owner',
+          detail: 'This task belongs to a different owner session.',
+          projectId: `prj_${'a'.repeat(32)}`,
+          idempotencyKey: 'b7cece2c-2e6f-4b3b-92da-f0352c24debb',
+        },
+      }),
+    );
+  });
+  await openWorkspace(page, '#tasks');
+  await expect(page.getByLabel('Task title')).toHaveValue('');
+  await expect(page.getByLabel('Task title')).not.toHaveAttribute('readonly', '');
+  await expect(page.getByText('Private task from another owner')).toHaveCount(0);
+  expect(
+    await page.evaluate(() => sessionStorage.getItem('omnis.pending-task-create.v1')),
+  ).toBeNull();
+});
+
+test('rejects an invalid project selection before posting a task', async ({ page, api }) => {
+  api.configure();
+  await openWorkspace(page, '#tasks');
+  await page.getByRole('button', { name: 'Load available projects' }).click();
+  await expect(page.getByRole('option', { name: 'Operations (OPS)' })).toBeAttached();
+  await page.locator('#task-project').evaluate((select) => {
+    const invalid = document.createElement('option');
+    invalid.value = 'prj_invalid';
+    invalid.textContent = 'Invalid project';
+    select.append(invalid);
+    (select as HTMLSelectElement).value = invalid.value;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await page.getByLabel('Task title').fill('Review the deployment plan');
+  await page.getByLabel('Task detail').fill('Read the deployment plan and report its next action.');
+  await page.getByRole('button', { name: 'Create task' }).click();
+  await expect(page.getByRole('alert')).toContainText('valid active project');
+  expect(
+    api.requests.filter((entry) => entry.path === '/api/v1/tasks' && entry.method === 'POST'),
+  ).toHaveLength(0);
+});
+
+test('a project-list failure is explicit and unassigned task creation remains available', async ({
+  page,
+  api,
+}) => {
+  api.configure({ projectGetFailures: 1 });
+  await openWorkspace(page, '#tasks');
+  await page.getByRole('button', { name: 'Load available projects' }).click();
+  await expect(page.getByText(/Projects are temporarily unavailable/)).toBeVisible();
+  await page.getByLabel('Task title').fill('Review the deployment plan');
+  await page.getByLabel('Task detail').fill('Read the deployment plan and report its next action.');
+  await page.getByRole('button', { name: 'Create task' }).click();
+  await expect(page.getByRole('heading', { name: 'Review the deployment plan' })).toBeVisible();
+  const create = api.requests.find(
+    (entry) => entry.path === '/api/v1/tasks' && entry.method === 'POST',
+  );
+  expect(create?.body).toEqual({
+    title: 'Review the deployment plan',
+    detail: 'Read the deployment plan and report its next action.',
+  });
 });
 
 test('fixture rejects mutation requests with missing CSRF or invalid UUID idempotency keys', async ({

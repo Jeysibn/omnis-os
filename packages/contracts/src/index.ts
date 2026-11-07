@@ -22,15 +22,32 @@ export const TaskIdSchema = z
   .max(128)
   .refine((value) => !value.includes('\0'));
 
-export const TaskSchema = z.object({
-  id: z.string().min(1),
-  title: z.string().min(1).max(120),
-  detail: z.string().max(2000),
-  status: TaskStatusSchema,
-  createdAt: z.string().datetime(),
-  projectId: ProjectIdSchema.nullable().optional(),
-  associationRevision: z.number().int().positive().safe().optional(),
-});
+export const TaskSchema = z
+  .object({
+    id: z.string().min(1),
+    title: z.string().min(1).max(120),
+    detail: z.string().max(2000),
+    status: TaskStatusSchema,
+    createdAt: z.string().datetime(),
+    projectId: ProjectIdSchema.nullable().optional(),
+    associationRevision: z.number().int().positive().safe().optional(),
+    agentId: z
+      .string()
+      .regex(/^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/)
+      .nullable()
+      .default(null),
+    profileVersion: z.number().int().positive().safe().nullable().default(null),
+    runtimeId: z.literal('mock').nullable().default(null),
+    assignmentRevision: z.number().int().positive().safe().default(1),
+  })
+  .superRefine((task, context) => {
+    const assigned = [task.agentId, task.profileVersion, task.runtimeId].filter(
+      (value) => value !== undefined && value !== null,
+    ).length;
+    if (assigned !== 0 && assigned !== 3) {
+      context.addIssue({ code: 'custom', message: 'Task execution assignment must be complete.' });
+    }
+  });
 export type Task = z.infer<typeof TaskSchema>;
 
 export const CreateTaskSchema = z.object({
@@ -47,6 +64,29 @@ export const SetTaskProjectSchema = z
   })
   .strict();
 export type SetTaskProjectInput = z.infer<typeof SetTaskProjectSchema>;
+
+export const SetTaskExecutionAssignmentSchema = z
+  .object({
+    agentId: z
+      .string()
+      .regex(/^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/)
+      .nullable(),
+    profileVersion: z.number().int().positive().safe().nullable(),
+    runtimeId: z.literal('mock').nullable(),
+    expectedAssignmentRevision: z.number().int().positive().safe(),
+  })
+  .strict()
+  .refine(
+    (assignment) =>
+      (assignment.agentId === null &&
+        assignment.profileVersion === null &&
+        assignment.runtimeId === null) ||
+      (assignment.agentId !== null &&
+        assignment.profileVersion !== null &&
+        assignment.runtimeId !== null),
+    'Task execution assignment must be complete or cleared.',
+  );
+export type SetTaskExecutionAssignmentInput = z.infer<typeof SetTaskExecutionAssignmentSchema>;
 
 export const ProjectStatusSchema = z.enum([
   'proposed',
@@ -442,6 +482,7 @@ export const RunSchema = z.object({
   id: z.string().min(1),
   taskId: z.string().min(1),
   taskTitle: z.string().min(1),
+  authorizationId: z.string().uuid().nullable().optional(),
   status: RunStatusSchema,
   runtimeKind: z.literal('mock'),
   synthetic: z.literal(true),
@@ -454,12 +495,14 @@ export type Run = z.infer<typeof RunSchema>;
 export const RunEventTypeSchema = z.enum([
   'run.queued',
   'run.started',
+  'run.provider_submission_requested',
   'run.output',
   'run.stop_requested',
   'run.completed',
   'run.cancelled',
   'run.failed',
   'run.interrupted',
+  'run.outcome_unknown',
 ]);
 export type RunEventType = z.infer<typeof RunEventTypeSchema>;
 

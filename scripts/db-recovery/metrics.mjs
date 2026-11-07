@@ -29,6 +29,10 @@ export const metricsQuery = `SELECT json_build_object(
     'audits', (SELECT count(*) FROM omnis.task_project_management_audit),
     'idempotency', (SELECT count(*) FROM omnis.task_project_management_idempotency)
   ),
+  'taskExecutionAssignmentCounts', json_build_object(
+    'audits', (SELECT count(*) FROM omnis.task_execution_assignment_audit),
+    'idempotency', (SELECT count(*) FROM omnis.task_execution_assignment_idempotency)
+  ),
   'leasedRuns', (SELECT count(*) FROM omnis.runs WHERE lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL),
   'recordFingerprints', json_build_object(
     'tasks', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(t)::text), ':' ORDER BY t.id), '')) FROM omnis.tasks t),
@@ -45,7 +49,9 @@ export const metricsQuery = `SELECT json_build_object(
     'projectManagementAudit', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(a)::text), ':' ORDER BY a.id), '')) FROM omnis.project_management_audit a),
     'projectManagementIdempotency', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(i)::text), ':' ORDER BY i.request_id), '')) FROM omnis.project_management_idempotency i),
     'taskProjectManagementAudit', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(a)::text), ':' ORDER BY a.id), '')) FROM omnis.task_project_management_audit a),
-    'taskProjectManagementIdempotency', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(i)::text), ':' ORDER BY i.request_id), '')) FROM omnis.task_project_management_idempotency i)
+    'taskProjectManagementIdempotency', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(i)::text), ':' ORDER BY i.request_id), '')) FROM omnis.task_project_management_idempotency i),
+    'taskExecutionAssignmentAudit', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(a)::text), ':' ORDER BY a.id), '')) FROM omnis.task_execution_assignment_audit a),
+    'taskExecutionAssignmentIdempotency', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(i)::text), ':' ORDER BY i.request_id), '')) FROM omnis.task_execution_assignment_idempotency i)
   ),
   'syntheticOnly', (SELECT COALESCE(bool_and(synthetic IS TRUE AND runtime_kind = 'mock'), true) FROM omnis.runs),
   'sequenceInvariants', (
@@ -121,9 +127,11 @@ export function assertValidMetrics(report) {
     !report.migrations.includes('0015_project_management') ||
     !report.migrations.includes('0016_project_lifecycle') ||
     !report.migrations.includes('0017_task_project_admission') ||
+    !report.migrations.includes('0026_task_execution_assignment') ||
     !validAgentManagementCounts(report.agentManagementCounts) ||
     !validProjectManagementCounts(report.projectManagementCounts) ||
     !validTaskProjectManagementCounts(report.taskProjectManagementCounts) ||
+    !validTaskExecutionAssignmentCounts(report.taskExecutionAssignmentCounts) ||
     !validManagementFingerprints(report.recordFingerprints) ||
     report.syntheticOnly !== true ||
     report.sequenceInvariants !== true ||
@@ -143,6 +151,13 @@ function validProjectManagementCounts(value) {
 }
 
 function validTaskProjectManagementCounts(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  return ['audits', 'idempotency'].every(
+    (key) => Number.isSafeInteger(value[key]) && value[key] >= 0,
+  );
+}
+
+function validTaskExecutionAssignmentCounts(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   return ['audits', 'idempotency'].every(
     (key) => Number.isSafeInteger(value[key]) && value[key] >= 0,
@@ -197,6 +212,7 @@ export function metricsMatch(source, restored) {
     'agentManagementCounts',
     'projectManagementCounts',
     'taskProjectManagementCounts',
+    'taskExecutionAssignmentCounts',
     'recordFingerprints',
   ]) {
     if (JSON.stringify(canonical(source[key])) !== JSON.stringify(canonical(restored[key]))) {
@@ -238,6 +254,8 @@ function validManagementFingerprints(value) {
     'projectManagementIdempotency',
     'taskProjectManagementAudit',
     'taskProjectManagementIdempotency',
+    'taskExecutionAssignmentAudit',
+    'taskExecutionAssignmentIdempotency',
   ].every((key) => typeof value[key] === 'string' && /^[a-f0-9]{32}$/.test(value[key]));
 }
 

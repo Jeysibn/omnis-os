@@ -7,9 +7,11 @@ import {
   AgentVersionRouteParamSchema,
   ProjectIdSchema,
   ProjectWorkspaceQuerySchema,
+  SetTaskExecutionAssignmentSchema,
   SetTaskProjectSchema,
   TaskIdSchema,
 } from '@omnis/contracts';
+import { syntheticTaskRunTestMode } from '@omnis/contracts/synthetic-task-run';
 import { PgBoss } from 'pg-boss';
 import {
   createPool,
@@ -24,12 +26,15 @@ import { CoordinatorError, queueName, RunCoordinator } from './run-coordinator.t
 import { SandboxedMockRuntimeAdapter } from './sandboxed-mock-runtime.ts';
 import { UnixMockSandboxLauncherClient } from './sandbox-launcher-client.ts';
 import { streamPersistedRunEvents } from './reliable-event-stream.ts';
+import { SyntheticBrokerClient } from './synthetic-broker-client.ts';
+import { SyntheticBrokerRunCoordinator } from './synthetic-broker-run-coordinator.ts';
+import { registerSyntheticTaskRunRoute } from './synthetic-task-run-routes.ts';
+import { createRuntimeDatabaseUrl, validateWorkerBindHost } from './deployment-config.ts';
 
 const host = process.env.OMNIS_WORKER_HOST ?? '127.0.0.1';
 const port = Number(process.env.OMNIS_WORKER_PORT ?? 4101);
-if (!['127.0.0.1', '::1', 'localhost'].includes(host)) {
-  throw new Error('The initial Omnis OS worker must bind to loopback.');
-}
+const privateCompose = process.env.OMNIS_COMPOSE_PRIVATE === 'true';
+validateWorkerBindHost(host, privateCompose);
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
   throw new Error('OMNIS_WORKER_PORT must be a valid TCP port.');
 }
@@ -50,7 +55,14 @@ for (const forbiddenSecret of [
     );
   }
 }
-const connectionString = getDatabaseUrl();
+const connectionString = createRuntimeDatabaseUrl({
+  databaseUrl: process.env.OMNIS_DATABASE_URL,
+  password: process.env.OMNIS_RUNTIME_DB_PASSWORD,
+  host: process.env.OMNIS_DB_HOST,
+  port: process.env.OMNIS_DB_PORT,
+  database: process.env.OMNIS_DB_NAME,
+  privateCompose,
+});
 const pool = createPool({ connectionString, max: 8, application_name: 'omnis-worker' });
 
 const boss = new PgBoss({
@@ -63,6 +75,7 @@ const boss = new PgBoss({
   createSchema: false,
 });
 const app = Fastify({ logger: { redact: ['req.headers.x-omnis-internal-token'] } });
+const syntheticBrokerTestMode = syntheticTaskRunTestMode(process.env);
 boss.on('error', (error) => {
   app.log.error({ errorType: error.name }, 'Durable queue reported an error.');
 });
@@ -78,9 +91,36 @@ if (!launcherSocket || !launcherSocket.startsWith('/')) {
 const runtime = new SandboxedMockRuntimeAdapter(new UnixMockSandboxLauncherClient(launcherSocket));
 const authorizationStore = new PostgresRuntimeAuthorizationReader(pool);
 const coordinator = new RunCoordinator(store, boss, runtime, authorizationStore);
+let syntheticBrokerCoordinator: SyntheticBrokerRunCoordinator | undefined;
+if (syntheticBrokerTestMode) {
+  const brokerSocket = process.env.OMNIS_SYNTHETIC_BROKER_SOCKET;
+  const brokerToken = process.env.OMNIS_SYNTHETIC_BROKER_TEST_TOKEN;
+  if (!brokerSocket || !brokerToken) {
+    throw new Error('Synthetic broker test IPC requires its socket and disposable test token.');
+  }
+  syntheticBrokerCoordinator = new SyntheticBrokerRunCoordinator({
+    store,
+    profiles: agentProfiles,
+    broker: new SyntheticBrokerClient(brokerSocket, brokerToken),
+    enqueue: (db, data) =>
+      boss.send(queueName, data, {
+        retryLimit: 0,
+        retryDelay: 0,
+        expireInSeconds: 60,
+        heartbeatSeconds: 10,
+        db,
+      }),
+    publish: (events) => coordinator.publishExternalEvents(events),
+  });
+}
 await coordinator.reconcileExpiredRuns();
 await boss.work(queueName, { batchSize: 1, localConcurrency: 1 }, async ([job]) => {
-  if (job) await coordinator.handleQueueJob(job.data, job.signal);
+  if (!job) return;
+  if (syntheticBrokerCoordinator && (await syntheticBrokerCoordinator.isSyntheticJob(job.data))) {
+    await syntheticBrokerCoordinator.handleQueueJob(job.data, job.signal);
+    return;
+  }
+  await coordinator.handleQueueJob(job.data, job.signal);
 });
 
 const recoveryTimer = setInterval(() => {
@@ -110,6 +150,19 @@ app.addHook('preHandler', async (request, reply) => {
       .send({ error: { code: 'unauthorized', message: 'Internal worker authentication failed.' } });
 });
 
+if (syntheticBrokerTestMode) {
+  if (!syntheticBrokerCoordinator)
+    throw new Error('Synthetic broker test coordinator is unavailable.');
+  registerSyntheticTaskRunRoute(app, {
+    authenticate: async () => {},
+    enabled: true,
+    store,
+    profiles: agentProfiles,
+    admit: (input) => syntheticBrokerCoordinator!.admit(input),
+    cancel: (input) => syntheticBrokerCoordinator!.cancel(input),
+  });
+}
+
 app.get('/internal/v1/health', async () => ({
   status: 'ok',
   product: 'Omnis OS',
@@ -120,6 +173,17 @@ app.get('/internal/v1/health', async () => ({
   queueName,
 }));
 app.get('/internal/v1/tasks', async () => coordinator.listTasks());
+app.get<{ Params: { taskId: string } }>('/internal/v1/tasks/:taskId', async (request, reply) => {
+  const taskId = TaskIdSchema.safeParse(request.params.taskId);
+  if (!taskId.success)
+    return reply.code(422).send({
+      error: { code: 'invalid_input', message: 'Task identifier is invalid.' },
+    });
+  const task = await store.getTask(taskId.data);
+  return (
+    task ?? reply.code(404).send({ error: { code: 'not_found', message: 'Task was not found.' } })
+  );
+});
 app.get<{ Params: { projectId: string }; Querystring: { cursor?: string; limit?: string } }>(
   '/internal/v1/projects/:projectId/tasks',
   async (request, reply) => {
@@ -260,6 +324,27 @@ app.put<{ Params: { taskId: string } }>(
       });
     try {
       return await coordinator.setTaskProject(taskId.data, body.data, requestId);
+    } catch (error) {
+      if (error instanceof CoordinatorError)
+        return reply
+          .code(error.statusCode)
+          .send({ error: { code: error.code, message: error.message } });
+      throw error;
+    }
+  },
+);
+app.put<{ Params: { taskId: string } }>(
+  '/internal/v1/tasks/:taskId/execution-assignment',
+  async (request, reply) => {
+    const taskId = TaskIdSchema.safeParse(request.params.taskId);
+    const body = SetTaskExecutionAssignmentSchema.safeParse(request.body);
+    const requestId = taskIdempotencyKey(request.headers['idempotency-key']);
+    if (!taskId.success || !body.success || !requestId)
+      return reply.code(400).send({
+        error: { code: 'invalid_input', message: 'Task execution assignment input is invalid.' },
+      });
+    try {
+      return await coordinator.setTaskExecutionAssignment(taskId.data, body.data, requestId);
     } catch (error) {
       if (error instanceof CoordinatorError)
         return reply
@@ -449,24 +534,4 @@ function taskIdempotencyKey(value: string | string[] | undefined): string | unde
 
 function parseRunInput(body: unknown) {
   return CreateRunSchema.safeParse(body);
-}
-
-function getDatabaseUrl(): string {
-  const configured = process.env.OMNIS_DATABASE_URL;
-  if (configured) {
-    const parsed = new URL(configured);
-    if (!['127.0.0.1', '::1', 'localhost', 'postgres'].includes(parsed.hostname)) {
-      throw new Error(
-        'The initial worker database must be reachable through approved local Compose networking.',
-      );
-    }
-    if (parsed.username !== 'omnis_runtime') {
-      throw new Error('The worker database connection must use the restricted omnis_runtime role.');
-    }
-    return configured;
-  }
-  const password = process.env.OMNIS_RUNTIME_DB_PASSWORD;
-  if (!password)
-    throw new Error('OMNIS_DATABASE_URL or OMNIS_RUNTIME_DB_PASSWORD must be configured.');
-  return `postgresql://omnis_runtime:${encodeURIComponent(password)}@127.0.0.1:5432/omnis`;
 }

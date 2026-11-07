@@ -236,7 +236,7 @@ jobs:
 
   container-images:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -252,12 +252,35 @@ jobs:
           docker build --file infra/docker/api.Dockerfile --tag omnis-api:ci .
           docker build --file infra/docker/worker.Dockerfile --tag omnis-worker:ci .
           docker build --file infra/docker/synthetic-broker.Dockerfile --tag omnis-synthetic-broker:ci .
+          docker build --file infra/docker/web.Dockerfile --tag omnis-web:ci .
           docker build --file infra/docker/web-assets.Dockerfile --tag omnis-web-assets:ci .
+          node scripts/compose/verify-app-config.mjs
           node scripts/container-images/verify-built-images.mjs
       - name: Verify synthetic broker network boundary with positive and negative controls
         run: |
           set -euo pipefail
           node scripts/platform/run-synthetic-egress.mjs
+      - name: Verify disposable Docker privilege, socket, lifecycle, and network boundaries
+        env:
+          OMNIS_DOCKER_TEST_RUN_ID: omnis-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          cleanup() {
+            local status=$?
+            trap - EXIT
+            while IFS= read -r resource; do
+              [[ -z "$resource" ]] || docker rm -f "$resource" >/dev/null || status=1
+            done < <(docker ps -aq --filter "label=com.omnis.docker-boundary.run=$OMNIS_DOCKER_TEST_RUN_ID" 2>/dev/null || true)
+            while IFS= read -r network; do
+              [[ -z "$network" ]] || docker network rm "$network" >/dev/null || status=1
+            done < <(docker network ls -q --filter "label=com.omnis.docker-boundary.run=$OMNIS_DOCKER_TEST_RUN_ID" 2>/dev/null || true)
+            sudo rm -rf -- /tmp/omnis-boundary-"$OMNIS_DOCKER_TEST_RUN_ID"-*
+            exit "$status"
+          }
+          trap cleanup EXIT
+          sudo --preserve-env=PATH env \
+            OMNIS_DOCKER_TEST_RUN_ID="$OMNIS_DOCKER_TEST_RUN_ID" \
+          node scripts/container-boundary/verify-disposable-boundary.mjs
 
   checks:
     if: ${{ always() }}

@@ -51,7 +51,7 @@ The product uses the name **Omnis OS**. Proposed screen aliases are documented i
 - **3D:** Three.js + React Three Fiber + Drei, low-poly environment and a 2D fallback.
 - **Integration:** MCP stdio/remote transport based on tested protocol-version compatibility.
 - **Local execution:** Docker Compose for app/database; isolated workers for tools and native CLI processes.
-- **Target deployment:** Private homelab/k3s after tests and controls; remote access through private networking, not public open ports.
+- **Target deployment:** Docker Compose on a private, self-hosted Linux machine after tests and controls; remote access through private networking, not public open ports. Kubernetes and k3s are outside this project's deployment target.
 - **Operational language:** English first; time and schedules default to `Asia/Manila` (PHT, UTC+8).
 
 These are proposed defaults, **not claims that dependencies are installed or integrations are working**.
@@ -68,7 +68,7 @@ Director -> Web UI -> authenticated Fastify control plane -> authorization and b
 - **Phase 3: Skills/MCP + knowledge.** Approved skill snapshots, scoped tool grants, global/project knowledge and write-review flow.
 - **Phase 4: PM + workflows + automation.** Dependencies, milestones, scheduling, retries, announcements, budget controls.
 - **Phase 5: 3D office integration + teams.** Real-state avatar mapping, departments, delegation, interactive inspector, reduced-motion fallback.
-- **Phase 6: Production hardening.** Threat review, backup/restore drill, CI/CD, auditability, performance and k3s private deployment.
+- **Phase 6: Production hardening.** Threat review, backup/restore drill, CI/CD, auditability, performance, and hardened private Docker Compose deployment on Linux.
 
 A 3D **mock-only prototype** is allowed earlier but must never be confused with a functional runtime.
 

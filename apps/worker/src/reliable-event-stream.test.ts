@@ -108,4 +108,26 @@ describe('persisted SSE replay and live delivery', () => {
     await settle();
     assert.deepEqual(delivered, [1, 2, 3]);
   });
+
+  it('ends replay on an unknown outcome without relabeling it as interruption', async () => {
+    const source = new MemoryEventSource();
+    const unknown = event(1, 'run.outcome_unknown');
+    source.events.push(unknown);
+    const delivered: RunEvent[] = [];
+    let ended = 0;
+    streamPersistedRunEvents({
+      source,
+      runId: 'run-0001',
+      afterSequence: 0,
+      send: (item) => delivered.push(item),
+      end: () => ended++,
+      fail: (error) => assert.fail(String(error)),
+    });
+    await settle();
+    assert.deepEqual(
+      delivered.map((item) => item.type),
+      ['run.outcome_unknown'],
+    );
+    assert.equal(ended, 1);
+  });
 });

@@ -114,6 +114,11 @@ const applicationColumnPrivileges = new Map([
       'INSERT:id',
       'INSERT:task_id',
       'INSERT:task_title',
+      'INSERT:connector_authorization_id',
+      'INSERT:connector_request_id',
+      'INSERT:connector_correlation_id',
+      'INSERT:connector_request_binding',
+      'UPDATE:connector_attempt_id',
       ...[
         'status',
         'execution_generation',
@@ -152,6 +157,7 @@ const approvedSecurityDefinerRoutineArities = new Map([
 const approvedTaskProjectRoutines = new Set([
   'create_task(p_title text, p_detail text, p_project_id text, p_request_id uuid, p_fingerprint bytea)',
   'set_task_project(p_task_id text, p_expected_association_revision integer, p_project_id text, p_request_id uuid, p_fingerprint bytea)',
+  'set_task_execution_assignment(p_task_id text, p_expected_revision integer, p_agent_id text, p_profile_version_no integer, p_runtime_id text, p_request_id uuid, p_fingerprint bytea)',
 ]);
 
 function isApprovedRuntimeSecurityDefiner(entry) {

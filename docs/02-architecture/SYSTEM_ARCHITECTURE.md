@@ -128,8 +128,8 @@ sequenceDiagram
 
 ## Deployment topology
 
-- **Development:** WSL2 Ubuntu or Linux, Docker Compose for PostgreSQL and app services; native model CLI/gateway on trusted host when subscription rules and secret store require it. Avoid Docker-root escalation.
-- **Production proposal:** private k3s namespace, PostgreSQL PVC with backup; dedicated isolated runtime execution node/host as needed; private DNS and certificate; restrict UI with authentication and network policy.
+- **Development:** Linux, Docker Compose for PostgreSQL and app services; native model CLI/gateway on a trusted host only when subscription rules and secret-store requirements permit it. Avoid Docker-root escalation.
+- **Deployment target:** Docker Compose on a private, self-hosted Linux machine, with persistent PostgreSQL storage and backups, private networking, and authenticated access. Kubernetes and k3s are outside this project's deployment target. Real-runtime execution still requires a separately approved isolated host/process and credential design.
 - No internet-facing dashboard or runtime API by default. See `../06-delivery/OPERATIONS.md`.
 
 ## Observability

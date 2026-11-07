@@ -29,11 +29,18 @@ export {
 export type {
   BrokerAdmission,
   ConnectorAuthorizationStoreErrorCode,
+  SyntheticTaskRunEventPage,
 } from './connector-authorization-store.ts';
 export type {
   RuntimeAuthorizationRecord,
   RuntimeAuthorizationReader,
   AuthorizationStatus,
 } from './authorization-store.ts';
-export type { DurableEvent, EnqueueRun, StoreErrorCode } from './run-store.ts';
+export type {
+  DurableEvent,
+  EnqueueRun,
+  StoreErrorCode,
+  SyntheticBrokerRun,
+  SyntheticBrokerRunResult,
+} from './run-store.ts';
 export type { PgBossTransaction, PgTransaction } from './database.ts';

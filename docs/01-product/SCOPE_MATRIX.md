@@ -22,7 +22,7 @@
 | Scheduling and automation | | | | Core | Event-driven | Harden |
 | Usage collection, estimated and actual costs | Event schema | Basic views | | Budgets/reports | | Harden |
 | 3D office | Mock spike only | | | | Real event-driven | Optimize |
-| Private k3s production | | | | | | Core |
+| Private Docker Compose deployment on Linux | | | | | | Core |
 
 ## Important exclusions
 

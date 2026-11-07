@@ -92,7 +92,7 @@ const postgresSuite = describe(
         'GRANT SELECT, INSERT, UPDATE, DELETE ON omnis.test_queue_outbox TO omnis_runtime',
       );
       await adminPool!.query(
-        'TRUNCATE omnis.test_queue_outbox, omnis.connector_authorization_audit, omnis.connector_execution_attempts, omnis.connector_authorizations, omnis.task_project_management_idempotency, omnis.task_epic_management_audit, omnis.task_epic_associations, omnis.task_project_management_audit, omnis.project_epic_management_audit, omnis.project_epics, omnis.project_milestone_management_audit, omnis.project_milestones, omnis.project_management_idempotency, omnis.project_management_audit, omnis.projects, omnis.agent_management_idempotency, omnis.agent_management_audit, omnis.agent_profile_drafts, omnis.department_management_audit, omnis.agent_profile_versions, omnis.agents, omnis.departments, omnis.mock_sandbox_launches, omnis.legacy_unscoped_runs, omnis.authorization_audit, omnis.runtime_authorizations, omnis.run_idempotency, omnis.run_events, omnis.runs, omnis.tasks',
+        'TRUNCATE omnis.test_queue_outbox, omnis.connector_authorization_audit, omnis.connector_execution_attempts, omnis.connector_authorizations, omnis.task_execution_assignment_idempotency, omnis.task_execution_assignment_audit, omnis.task_project_management_idempotency, omnis.task_epic_management_audit, omnis.task_epic_associations, omnis.task_project_management_audit, omnis.project_epic_management_audit, omnis.project_epics, omnis.project_milestone_management_audit, omnis.project_milestones, omnis.project_management_idempotency, omnis.project_management_audit, omnis.projects, omnis.agent_management_idempotency, omnis.agent_management_audit, omnis.agent_profile_drafts, omnis.department_management_audit, omnis.agent_profile_versions, omnis.agents, omnis.departments, omnis.mock_sandbox_launches, omnis.legacy_unscoped_runs, omnis.authorization_audit, omnis.runtime_authorizations, omnis.run_idempotency, omnis.run_events, omnis.runs, omnis.tasks',
       );
       await adminPool!.query('ALTER SEQUENCE omnis.task_id_seq RESTART WITH 1');
       await adminPool!.query('ALTER SEQUENCE omnis.run_id_seq RESTART WITH 1');
@@ -259,6 +259,37 @@ const postgresSuite = describe(
         },
       });
       assert.equal(completed.status, 'completed');
+      const durableExecution = await brokerStore.getExecutionForAuthorization(pending.id);
+      assert.equal(durableExecution?.attempt.id, completed.id);
+      assert.equal(durableExecution?.attempt.responseText, 'Synthetic response fixture.');
+      assert.deepEqual(durableExecution?.usage, {
+        kind: 'measured',
+        source: 'synthetic-provider',
+        inputUnits: 5,
+        outputUnits: 8,
+        billingExposure: 'synthetic-only',
+      });
+      const firstEventPage = await brokerStore.listSyntheticTaskRunEvents(pending.id, 0, 2);
+      assert.deepEqual(
+        firstEventPage.events.map((event) => event.eventType),
+        ['connector.authorization_consumed', 'connector.submission_started'],
+      );
+      assert.equal(firstEventPage.nextAfter, 4);
+      assert.equal('responseText' in firstEventPage.events[0]!, false);
+      const secondEventPage = await brokerStore.listSyntheticTaskRunEvents(
+        pending.id,
+        firstEventPage.nextAfter,
+        2,
+      );
+      assert.deepEqual(
+        secondEventPage.events.map((event) => event.eventType),
+        ['connector.submission_accepted', 'connector.execution_completed'],
+      );
+      assert.equal(secondEventPage.nextAfter, null);
+      await assert.rejects(
+        brokerStore.listSyntheticTaskRunEvents(pending.id, -1, 2),
+        /event page is invalid/,
+      );
       assert.equal(
         (await brokerStore.listBrokerRecoveryCandidates(10, null)).some(
           (candidate) => candidate.id === completed.id,
@@ -350,6 +381,61 @@ const postgresSuite = describe(
           fixture.renderedRequest,
         ),
         /not eligible/,
+      );
+    });
+
+    it('allows owner cancellation of a submitted attempt after its grant expires', async () => {
+      const fixture = await connectorFixture(3);
+      const grant = await fixture.authorizations.request(fixture.request, randomUUID());
+      await fixture.authorizations.decide(grant.id, 'owner', {
+        decision: 'approve',
+        promptDigestConfirmation: fixture.request.promptDigest,
+      });
+      const pair = generateKeyPairSync('ed25519');
+      const signingKey = {
+        keyId: 'test-disposable-expired-cancel',
+        privateKey: pair.privateKey,
+        notBefore: new Date(Date.now() - 60_000).toISOString(),
+        notAfter: new Date(Date.now() + 120_000).toISOString(),
+      };
+      const brokerStore = new PostgresConnectorAuthorizationStore(authorizerPool!, {
+        signDecision: (claims) => signConnectorDecisionEnvelope(claims, signingKey),
+      });
+      const admission = await brokerStore.consumeForBroker(grant.id, fixture.request, randomUUID());
+      await brokerStore.beginSyntheticSubmission(
+        admission.attempt.id,
+        admission.envelope,
+        fixture.renderedRequest,
+      );
+      await delay(3_100);
+
+      const revoked = await fixture.authorizations.revoke(grant.id, 'owner');
+      assert.equal(revoked.status, 'revoked');
+      const execution = await fixture.authorizations.getExecutionForAuthorization(grant.id);
+      assert.ok(execution?.attempt.cancelRequestedAt);
+      assert.equal(execution?.attempt.status, 'submitting');
+      const audit = await authorizerPool!.query<{ event_type: string }>(
+        `SELECT event_type FROM omnis.connector_authorization_audit
+          WHERE authorization_id = $1`,
+        [grant.id],
+      );
+      assert.ok(
+        audit.rows.some((event) => event.event_type === 'connector.cancellation_requested'),
+      );
+    });
+
+    it('does not revoke an expired grant when no active attempt exists', async () => {
+      const fixture = await connectorFixture(1);
+      const grant = await fixture.authorizations.request(fixture.request, randomUUID());
+      await fixture.authorizations.decide(grant.id, 'owner', {
+        decision: 'approve',
+        promptDigestConfirmation: fixture.request.promptDigest,
+      });
+      await delay(1_100);
+      await assert.rejects(
+        fixture.authorizations.revoke(grant.id, 'owner'),
+        (error: unknown) =>
+          error instanceof ConnectorAuthorizationStoreError && error.code === 'invalid_transition',
       );
     });
 
@@ -686,11 +772,21 @@ const postgresSuite = describe(
         { expectedVersionNo: null, expectedDraftRevision: 1 },
         randomUUID(),
       );
-      const task = await store.createTask(
+      const createdTask = await store.createTask(
         {
           title: 'Synthetic connector authorization task',
           detail: 'A bounded synthetic task used only for authorization tests.',
           projectId: project.id,
+        },
+        randomUUID(),
+      );
+      const task = await store.setTaskExecutionAssignment(
+        createdTask.id,
+        {
+          agentId: agent.agentId,
+          profileVersion: published.versionNo,
+          runtimeId: 'mock',
+          expectedAssignmentRevision: createdTask.assignmentRevision ?? 1,
         },
         randomUUID(),
       );
@@ -728,6 +824,250 @@ const postgresSuite = describe(
         }),
       };
     }
+
+    it('admits a canonical synthetic Run once and preserves uncertain broker outcomes', async () => {
+      const fixture = await connectorFixture();
+      const grant = await fixture.authorizations.request(fixture.request, randomUUID());
+      await fixture.authorizations.decide(grant.id, 'owner', {
+        decision: 'approve',
+        promptDigestConfirmation: fixture.request.promptDigest,
+      });
+      const requestId = randomUUID();
+      const runId = randomUUID();
+      let queued = 0;
+      const enqueue = async (tx: PgBossTransaction, data: { runId: string }) => {
+        queued += 1;
+        assert.deepEqual(data, { runId });
+        await tx.executeSql('INSERT INTO omnis.test_queue_outbox (run_id) VALUES ($1)', [
+          data.runId,
+        ]);
+        return `job-${data.runId}`;
+      };
+      const input = {
+        runId,
+        taskId: fixture.task.id,
+        authorizationId: grant.id,
+        requestId,
+        correlationId: runId,
+        binding: fixture.request,
+      };
+      const [admitted, replay] = await Promise.all([
+        store.admitSyntheticBrokerRun(input, enqueue),
+        store.admitSyntheticBrokerRun(input, enqueue),
+      ]);
+      assert.equal(admitted.created, true);
+      assert.equal(replay.created, false);
+      assert.equal(admitted.run.id, runId);
+      assert.equal(admitted.run.authorizationId, grant.id);
+      assert.equal(admitted.run.status, 'queued');
+      assert.equal(queued, 1);
+      const linked = await store.getSyntheticBrokerRun(runId);
+      assert.equal(linked?.authorizationId, grant.id);
+      assert.equal(linked?.requestId, requestId);
+      assert.equal(linked?.binding.promptDigest, fixture.request.promptDigest);
+      assert.equal(
+        (
+          await adminPool!.query(
+            "SELECT connector_request_binding ? 'renderedRequest' AS includes_prompt FROM omnis.runs WHERE id = $1",
+            [runId],
+          )
+        ).rows[0]?.includes_prompt,
+        false,
+      );
+      const projectionPrivileges = await adminPool!.query(
+        `SELECT has_column_privilege('omnis_runtime','omnis.runs','connector_authorization_id','INSERT') AS can_insert_authorization_reference,
+                has_column_privilege('omnis_runtime','omnis.runs','connector_request_binding','INSERT') AS can_insert_binding,
+                has_column_privilege('omnis_runtime','omnis.runs','connector_attempt_id','UPDATE') AS can_update_attempt_reference,
+                has_column_privilege('omnis_runtime','omnis.runs','connector_authorization_id','UPDATE') AS can_rewrite_authorization_reference`,
+      );
+      assert.deepEqual(projectionPrivileges.rows[0], {
+        can_insert_authorization_reference: true,
+        can_insert_binding: true,
+        can_update_attempt_reference: true,
+        can_rewrite_authorization_reference: false,
+      });
+      await assert.rejects(
+        adminPool!.query(
+          `INSERT INTO omnis.runs
+             (id, task_id, task_title, connector_authorization_id, connector_request_id,
+              connector_correlation_id, connector_request_binding)
+           VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
+          [
+            randomUUID(),
+            fixture.task.id,
+            fixture.task.title,
+            randomUUID(),
+            randomUUID(),
+            randomUUID(),
+            JSON.stringify({ taskId: fixture.task.id }),
+          ],
+        ),
+        (error: unknown) =>
+          typeof error === 'object' &&
+          error !== null &&
+          'constraint' in error &&
+          error.constraint === 'runs_connector_projection_complete',
+      );
+
+      const [started, duplicateStart] = await Promise.all([
+        store.beginSyntheticBrokerRun(runId, 'synthetic-worker', 30),
+        store.beginSyntheticBrokerRun(runId, 'duplicate-worker', 30),
+      ]);
+      assert.notEqual(started.started, duplicateStart.started);
+      const lease = started.started
+        ? { workerId: 'synthetic-worker', generation: started.generation }
+        : { workerId: 'duplicate-worker', generation: duplicateStart.generation };
+      const submission = await store.recordSyntheticBrokerSubmissionRequested(
+        runId,
+        lease.workerId,
+        lease.generation,
+      );
+      assert.equal(submission.events[0]?.event.type, 'run.provider_submission_requested');
+      assert.match(submission.events[0]?.event.message ?? '', /acceptance is not yet confirmed/);
+      await fixture.authorizations.revoke(grant.id, 'owner');
+      await store.requestSyntheticBrokerStop(runId, grant.id);
+      const unknown = await store.finishSyntheticBrokerRun(
+        runId,
+        lease.workerId,
+        lease.generation,
+        { attemptId: randomUUID(), status: 'unknown' },
+      );
+      assert.equal(unknown.run.status, 'unknown');
+      assert.equal((await store.getTask(fixture.task.id))?.status, 'in_progress');
+      assert.equal((await store.getSyntheticBrokerRun(runId))?.attemptId !== null, true);
+      assert.deepEqual(
+        (await store.getEvents(runId)).map((event) => event.type),
+        [
+          'run.queued',
+          'run.started',
+          'run.provider_submission_requested',
+          'run.stop_requested',
+          'run.outcome_unknown',
+        ],
+      );
+      assert.match((await store.getEvents(runId)).at(-1)!.message, /Do not resubmit/);
+    });
+
+    it('reconciles an expired synthetic worker lease after submission as unknown without replay', async () => {
+      const fixture = await connectorFixture();
+      const grant = await fixture.authorizations.request(fixture.request, randomUUID());
+      await fixture.authorizations.decide(grant.id, 'owner', {
+        decision: 'approve',
+        promptDigestConfirmation: fixture.request.promptDigest,
+      });
+      const runId = randomUUID();
+      const admitted = await store.admitSyntheticBrokerRun(
+        {
+          runId,
+          taskId: fixture.task.id,
+          authorizationId: grant.id,
+          requestId: randomUUID(),
+          correlationId: runId,
+          binding: fixture.request,
+        },
+        async () => 'synthetic-job',
+      );
+      const claim = await store.beginSyntheticBrokerRun(admitted.run.id, 'old-worker', 1);
+      await store.recordSyntheticBrokerSubmissionRequested(runId, 'old-worker', claim.generation);
+      await store.requestSyntheticBrokerStop(runId, grant.id);
+      await pool!.query(
+        "UPDATE omnis.runs SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
+        [runId],
+      );
+      assert.equal(
+        await store.renewSyntheticBrokerLease(runId, 'old-worker', claim.generation, 30),
+        false,
+      );
+      await assert.rejects(
+        store.finishSyntheticBrokerRun(runId, 'old-worker', claim.generation, {
+          status: 'unknown',
+        }),
+        /lost its Run lease/i,
+      );
+      const events = await store.reconcileExpiredRuns();
+      assert.equal((await store.getRun(runId))?.status, 'unknown');
+      assert.equal((await store.getTask(fixture.task.id))?.status, 'in_progress');
+      assert.equal(events[0]?.event.type, 'run.outcome_unknown');
+      assert.deepEqual(
+        (await store.getEvents(runId)).map((event) => event.type),
+        [
+          'run.queued',
+          'run.started',
+          'run.provider_submission_requested',
+          'run.stop_requested',
+          'run.outcome_unknown',
+        ],
+      );
+      assert.equal((await store.listActiveRunIds([runId])).includes(runId), false);
+    });
+
+    it('confirms stop for an expired synthetic lease before broker submission', async () => {
+      const fixture = await connectorFixture();
+      const grant = await fixture.authorizations.request(fixture.request, randomUUID());
+      await fixture.authorizations.decide(grant.id, 'owner', {
+        decision: 'approve',
+        promptDigestConfirmation: fixture.request.promptDigest,
+      });
+      const runId = randomUUID();
+      const admitted = await store.admitSyntheticBrokerRun(
+        {
+          runId,
+          taskId: fixture.task.id,
+          authorizationId: grant.id,
+          requestId: randomUUID(),
+          correlationId: runId,
+          binding: fixture.request,
+        },
+        async () => 'synthetic-job',
+      );
+      await store.beginSyntheticBrokerRun(admitted.run.id, 'old-worker', 1);
+      await store.requestSyntheticBrokerStop(runId, grant.id);
+      await pool!.query(
+        "UPDATE omnis.runs SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
+        [runId],
+      );
+
+      const events = await store.reconcileExpiredRuns();
+
+      assert.equal((await store.getRun(runId))?.status, 'cancelled');
+      assert.equal((await store.getTask(fixture.task.id))?.status, 'open');
+      assert.deepEqual(
+        events.map(({ event }) => event.type),
+        ['run.cancelled'],
+      );
+      assert.deepEqual(
+        (await store.getEvents(runId)).map((event) => event.type),
+        ['run.queued', 'run.started', 'run.stop_requested', 'run.cancelled'],
+      );
+      assert.match(events[0]?.event.message ?? '', /before broker submission began/);
+    });
+
+    it('confirms cancellation before the queued synthetic Run can begin', async () => {
+      const fixture = await connectorFixture();
+      const grant = await fixture.authorizations.request(fixture.request, randomUUID());
+      await fixture.authorizations.decide(grant.id, 'owner', {
+        decision: 'approve',
+        promptDigestConfirmation: fixture.request.promptDigest,
+      });
+      const runId = randomUUID();
+      const admitted = await store.admitSyntheticBrokerRun(
+        {
+          runId,
+          taskId: fixture.task.id,
+          authorizationId: grant.id,
+          requestId: randomUUID(),
+          correlationId: runId,
+          binding: fixture.request,
+        },
+        async () => 'synthetic-job',
+      );
+      assert.equal(admitted.run.id, runId);
+      await fixture.authorizations.revoke(grant.id, 'owner');
+      await store.requestSyntheticBrokerStop(runId, grant.id);
+      const started = await store.beginSyntheticBrokerRun(runId, 'synthetic-worker', 30);
+      assert.equal(started.started, false);
+      assert.equal(started.run.status, 'cancelled');
+    });
 
     it('returns an honestly empty complete agent directory', async () => {
       const profiles = new PostgresAgentProfileStore(
@@ -955,6 +1295,146 @@ const postgresSuite = describe(
       });
       await assert.rejects(
         pool!.query('UPDATE omnis.tasks SET project_id = NULL'),
+        /permission denied/,
+      );
+    });
+
+    it('persists owner task execution assignment with idempotency, immutable profiles, and restricted audit', async () => {
+      const lifecycle = new PostgresAgentLifecycleStore(authorizerPool!, Buffer.alloc(32, 43));
+      const agent = await lifecycle.createAgent(
+        {
+          name: 'Assigned synthetic agent',
+          slug: `assigned-${randomUUID().slice(0, 8)}`,
+          departmentId: null,
+        },
+        randomUUID(),
+      );
+      await lifecycle.saveDraft(
+        agent.agentId,
+        {
+          expectedDraftRevision: 0,
+          baseVersionNo: null,
+          profile: {
+            profession: 'Synthetic analyst',
+            seniority: null,
+            specialties: ['verification'],
+            personality: { traits: ['careful'], tone: null, principles: ['verify'] },
+            behavior: { autonomy: null, escalation: null },
+            instructions: 'Use only the deterministic mock runtime.',
+          },
+        },
+        randomUUID(),
+      );
+      await lifecycle.publish(
+        agent.agentId,
+        { expectedVersionNo: null, expectedDraftRevision: 1 },
+        randomUUID(),
+      );
+      const task = await store.createTask({
+        title: 'Assign a synthetic profile',
+        detail: 'Persist a supported mock runtime assignment before authorization.',
+      });
+      assert.deepEqual(
+        {
+          agentId: task.agentId,
+          profileVersion: task.profileVersion,
+          runtimeId: task.runtimeId,
+          assignmentRevision: task.assignmentRevision,
+        },
+        { agentId: null, profileVersion: null, runtimeId: null, assignmentRevision: 1 },
+      );
+      const input = {
+        agentId: agent.agentId,
+        profileVersion: 1,
+        runtimeId: 'mock' as const,
+        expectedAssignmentRevision: 1,
+      };
+      const requestId = randomUUID();
+      const assigned = await store.setTaskExecutionAssignment(task.id, input, requestId);
+      assert.equal(assigned.agentId, agent.agentId);
+      assert.equal(assigned.profileVersion, 1);
+      assert.equal(assigned.runtimeId, 'mock');
+      assert.equal(assigned.assignmentRevision, 2);
+      assert.deepEqual(await store.setTaskExecutionAssignment(task.id, input, requestId), assigned);
+      assert.deepEqual(await store.getTask(task.id), assigned);
+      await assert.rejects(
+        store.setTaskExecutionAssignment(task.id, input, randomUUID()),
+        (error: unknown) => error instanceof StoreError && error.code === 'conflict',
+      );
+      const cleared = await store.setTaskExecutionAssignment(
+        task.id,
+        {
+          agentId: null,
+          profileVersion: null,
+          runtimeId: null,
+          expectedAssignmentRevision: 2,
+        },
+        randomUUID(),
+      );
+      assert.equal(cleared.assignmentRevision, 3);
+      assert.equal(cleared.agentId, null);
+
+      const authorization = await authorizations.request(task.id, 'owner');
+      await assert.rejects(
+        store.setTaskExecutionAssignment(
+          task.id,
+          {
+            ...input,
+            expectedAssignmentRevision: 3,
+          },
+          randomUUID(),
+        ),
+        (error: unknown) => error instanceof StoreError && error.code === 'conflict',
+      );
+      assert.equal((await authorizations.get(authorization.id))?.status, 'pending');
+
+      const audit = await adminPool!.query<{
+        previous_agent_id: string | null;
+        agent_id: string | null;
+        profile_version_no: number;
+        runtime_id: string;
+        actor_id: string;
+      }>(
+        `SELECT previous_agent_id, agent_id, profile_version_no, runtime_id, actor_id
+           FROM omnis.task_execution_assignment_audit WHERE task_id = $1 ORDER BY occurred_at, id`,
+        [task.id],
+      );
+      assert.deepEqual(audit.rows, [
+        {
+          previous_agent_id: null,
+          agent_id: agent.agentId,
+          profile_version_no: 1,
+          runtime_id: 'mock',
+          actor_id: 'owner',
+        },
+        {
+          previous_agent_id: agent.agentId,
+          agent_id: null,
+          profile_version_no: null,
+          runtime_id: null,
+          actor_id: 'owner',
+        },
+      ]);
+
+      const privileges = await adminPool!.query<{
+        runtime_audit_insert: boolean;
+        runtime_assignment_execute: boolean;
+        authorizer_assignment_execute: boolean;
+      }>(`
+        SELECT has_table_privilege('omnis_runtime', 'omnis.task_execution_assignment_audit', 'INSERT') AS runtime_audit_insert,
+               has_function_privilege('omnis_runtime', 'omnis.set_task_execution_assignment(text,integer,text,integer,text,uuid,bytea)', 'EXECUTE') AS runtime_assignment_execute,
+               has_function_privilege('omnis_authorizer', 'omnis.set_task_execution_assignment(text,integer,text,integer,text,uuid,bytea)', 'EXECUTE') AS authorizer_assignment_execute
+      `);
+      assert.deepEqual(privileges.rows[0], {
+        runtime_audit_insert: false,
+        runtime_assignment_execute: true,
+        authorizer_assignment_execute: false,
+      });
+      await assert.rejects(
+        pool!.query(
+          'INSERT INTO omnis.task_execution_assignment_audit(id, task_id, actor_id, request_id) VALUES ($1,$2,$3,$4)',
+          [`tea_${randomUUID().replaceAll('-', '')}`, task.id, 'owner', randomUUID()],
+        ),
         /permission denied/,
       );
     });
@@ -5523,7 +6003,7 @@ const postgresSuite = describe(
       assert.equal(recovered?.events[0]?.event.type, 'run.cancelled');
     });
 
-    it('recovers an expired execution lease without replay and allows a fresh run', async () => {
+    it('keeps an expired legacy mock stop interrupted until cancellation is confirmed', async () => {
       const task = await store.createTask({
         title: 'Inspect files',
         detail: 'List files read-only.',
@@ -5533,6 +6013,7 @@ const postgresSuite = describe(
         return `job-${runId}`;
       });
       await store.beginExecution(admitted.run.id, 'worker-old', 1);
+      await store.requestStop(admitted.run.id);
       assert.ok((await store.listActiveRunIds()).includes(admitted.run.id));
       await pool!.query(
         "UPDATE omnis.runs SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
@@ -5542,6 +6023,8 @@ const postgresSuite = describe(
       const recovered = await store.reconcileExpiredRuns();
       assert.equal((await store.getRun(admitted.run.id))?.status, 'interrupted');
       assert.equal(recovered[0]?.event.type, 'run.interrupted');
+      assert.match(recovered[0]?.event.message ?? '', /execution lease expired/i);
+      assert.doesNotMatch(recovered[0]?.event.message ?? '', /broker submission/i);
       assert.equal((await store.getTask(task.id))?.status, 'open');
       assert.equal((await store.listActiveRunIds()).includes(admitted.run.id), false);
 
@@ -5564,6 +6047,8 @@ const postgresSuite = describe(
         await adminPool!.query(`
         TRUNCATE omnis.test_queue_outbox, omnis.connector_authorization_audit,
           omnis.connector_execution_attempts, omnis.connector_authorizations,
+          omnis.task_execution_assignment_idempotency,
+          omnis.task_execution_assignment_audit,
           omnis.task_project_management_idempotency,
           omnis.task_epic_management_audit, omnis.task_epic_associations,
           omnis.task_project_management_audit, omnis.project_management_idempotency,
