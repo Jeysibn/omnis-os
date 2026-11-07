@@ -4,7 +4,11 @@ import {
   ConnectorAuthorizationRequestSchema,
   ConnectorAuthorizationSchema,
 } from '@omnis/contracts/connector-authorization';
-import { SyntheticTaskRunDetailSchema } from '@omnis/contracts/synthetic-task-run';
+import {
+  SyntheticTaskRunDetailSchema,
+  SyntheticTaskRunEventsQuerySchema,
+  SyntheticTaskRunEventsResponseSchema,
+} from '@omnis/contracts/synthetic-task-run';
 import {
   ConnectorAuthorizationStoreError,
   type PostgresConnectorAuthorizationStore,
@@ -14,7 +18,12 @@ export type ConnectorAuthorizerStore = Pick<
   PostgresConnectorAuthorizationStore,
   'request' | 'get' | 'decide' | 'revoke'
 > &
-  Partial<Pick<PostgresConnectorAuthorizationStore, 'getExecutionForAuthorization'>>;
+  Partial<
+    Pick<
+      PostgresConnectorAuthorizationStore,
+      'getExecutionForAuthorization' | 'listSyntheticTaskRunEvents'
+    >
+  >;
 
 export function registerConnectorAuthorizationRoutes(
   app: FastifyInstance,
@@ -84,6 +93,45 @@ export function registerConnectorAuthorizationRoutes(
             });
       },
     );
+  }
+
+  const listSyntheticTaskRunEvents = store.listSyntheticTaskRunEvents;
+  if (listSyntheticTaskRunEvents) {
+    app.get<{
+      Params: { authorizationId: string };
+      Querystring: { after?: string; limit?: string };
+    }>('/internal/v1/connector-authorizations/:authorizationId/events', async (request, reply) => {
+      if (!isUuid(request.params.authorizationId)) {
+        return reply.code(400).send({
+          error: { code: 'invalid_input', message: 'Connector authorization ID is invalid.' },
+        });
+      }
+      const query = SyntheticTaskRunEventsQuerySchema.safeParse(request.query);
+      if (!query.success) {
+        return reply.code(400).send({
+          error: { code: 'invalid_input', message: 'Synthetic task-run event query is invalid.' },
+        });
+      }
+      const authorization = await store.get(request.params.authorizationId);
+      if (!authorization) {
+        return reply.code(404).send({
+          error: { code: 'not_found', message: 'Connector authorization was not found.' },
+        });
+      }
+      const page = await listSyntheticTaskRunEvents.call(
+        store,
+        request.params.authorizationId,
+        query.data.after,
+        query.data.limit,
+      );
+      return SyntheticTaskRunEventsResponseSchema.parse({
+        version: 'omnis.synthetic-task-run-events.v1',
+        authorizationId: authorization.id,
+        taskId: authorization.taskId,
+        events: page.events,
+        page: { nextAfter: page.nextAfter },
+      });
+    });
   }
 
   app.post<{ Params: { authorizationId: string } }>(

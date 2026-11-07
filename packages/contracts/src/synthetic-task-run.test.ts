@@ -3,6 +3,8 @@ import { describe, it } from 'node:test';
 import {
   SyntheticTaskRunRequestSchema,
   SyntheticTaskRunResponseSchema,
+  SyntheticTaskRunEventsQuerySchema,
+  SyntheticTaskRunEventsResponseSchema,
   syntheticTaskRunTestMode,
 } from './synthetic-task-run.ts';
 
@@ -88,6 +90,41 @@ describe('synthetic task-to-broker contract', () => {
       }).success,
       true,
     );
+  });
+
+  it('validates bounded, ordered synthetic task-run event history', () => {
+    const event = {
+      attemptId: '33333333-3333-4333-8333-333333333333',
+      sequence: 4,
+      eventType: 'connector.execution_completed',
+      outcome: 'recorded',
+      revocationGeneration: 0,
+      occurredAt: '2026-11-07T00:00:00.000Z',
+    };
+    const response = {
+      version: 'omnis.synthetic-task-run-events.v1',
+      authorizationId: request.authorizationId,
+      taskId: request.request.taskId,
+      events: [event],
+      page: { nextAfter: null },
+    };
+    assert.equal(SyntheticTaskRunEventsResponseSchema.safeParse(response).success, true);
+    assert.equal(
+      SyntheticTaskRunEventsResponseSchema.safeParse({
+        ...response,
+        events: [{ ...event, prompt: 'must not be exposed' }],
+      }).success,
+      false,
+    );
+    assert.equal(
+      SyntheticTaskRunEventsResponseSchema.safeParse({
+        ...response,
+        events: [event, { ...event, sequence: 3 }],
+      }).success,
+      false,
+    );
+    assert.equal(SyntheticTaskRunEventsQuerySchema.safeParse({ after: '-1' }).success, false);
+    assert.equal(SyntheticTaskRunEventsQuerySchema.safeParse({ limit: '101' }).success, false);
   });
 
   it('keeps broker routes off by default and rejects enabling them outside test mode', () => {

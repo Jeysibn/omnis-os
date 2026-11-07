@@ -23,6 +23,22 @@ authentication, credentials, inference, production broker selection, or deployme
    projection when available. Run usage stays unknown; the API does not infer provider billing
    from tokens.
 
+## Durable connector audit history
+
+The owner may read bounded attempt audit history from
+`GET /api/v1/tasks/:taskId/synthetic-runs/:authorizationId/events?after=:sequence&limit=:count`.
+The API verifies the persisted authorization-to-task binding before forwarding to the
+authorizer's service-token-protected event route. The authorizer reads the existing immutable
+`connector_authorization_audit` records for the persisted attempt; it creates no second event
+table or attempt state machine. The response contains only attempt ID, per-grant sequence, event
+type, outcome, revocation generation, and timestamp. It excludes prompt text, provider payload,
+response text, usage, and credentials.
+
+This audit stream complements the canonical Run event/SSE history and has its own per-grant
+cursor. It does not reconcile an `unknown` Run projection from later attempt state. The
+authorizer attempt remains authoritative; a future reconciliation change needs an explicit
+worker/API contract and must not resubmit the request.
+
 The implementation adds no grant store, attempt ledger, or provider state machine. Migration
 `0024_synthetic_task_run_projection.sql` adds a nullable projection to `omnis.runs`. It follows
 merged migration 0023 and does not edit deferred PR #41's 0021 or merged 0022/0023.
@@ -83,6 +99,13 @@ credential custody.
   The owner status API reads the authorizer attempt directly, while the Run projection remains
   `unknown` after an uncertain worker result. The Run projection must not be treated as a
   reconciliation authority.
+- PR #54's audit-history read is additive to the Run SSE projection. It is based on the same
+  append-only authorizer audit stream and adds no migration. Its older correlation-relaxation
+  behavior is not part of this queue-backed candidate: all broker responses still require the
+  persisted correlation ID.
+- PR #41 remains deferred and nonmergeable. Its migration 0021 changes task/run event writes and
+  runtime table privileges; this candidate must be adapted to those transition functions and
+  re-reviewed before that migration can be integrated.
 
 No tests in this PR establish host isolation, OS peer authentication, network egress enforcement,
 provider cancellation, or real provider compatibility. G4-3 remains Partially Fixed, R1-G5
