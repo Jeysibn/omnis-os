@@ -2,18 +2,19 @@
 
 - [x] Refresh current repository, main, open PRs, branch dependencies, and exact-head CI.
 - [x] Publish initial AO-101–AO-113 completion matrix.
-- [ ] Review #55→#58 diff and findings; decide fixes or integration boundaries.
-- [ ] Review #54 audit overlap and #41 migration/ACL implications.
-- [ ] Implement the next backend vertical-slice gap on a feature branch.
+- [x] Review #55→#58 diff and findings; record the remaining late-outcome and process-boundary gaps.
+- [x] Review #54 audit overlap and #41 migration/ACL implications; selectively implement only the additive audit read path.
+- [x] Implement a local owner-scoped, paginated synthetic execution audit API without adding a second ledger.
 - [ ] Complete minimum owner frontend journey and browser E2E.
-- [ ] Verify Docker Compose readiness and revise Kubernetes/k3s roadmap references.
-- [ ] Document real-runtime blockers and disabled-by-default design; no provider calls.
+- [x] Set Docker Compose/private Linux as the documented deployment target and remove active Kubernetes/k3s roadmap direction.
+- [x] Document real-runtime blockers and disabled-by-default design; no provider calls.
+- [ ] Implement and verify a complete Docker Compose application topology with process/socket boundaries.
 - [ ] Run full exact-candidate verification and prepare a Draft PR.
 
 ## Checkpoint
 
-- [ ] Exact candidate has clean formatting, lint, and TypeScript checks.
-- [ ] Unit/contracts, disposable PostgreSQL, migration/ACL, and negative authorization tests pass.
+- [x] Local candidate has clean formatting, lint, TypeScript, and workspace checks (`pnpm check`).
+- [x] Unit/contracts, disposable PostgreSQL backup/restore, ACL fixtures, and rejection-path tests pass.
 - [ ] Browser owner journey, cancellation, refresh, and persisted recovery pass.
-- [ ] Docker/process-boundary, backup/restore, and restart evidence is current.
-- [ ] Exact-head CI result and all unverified host requirements are recorded.
+- [ ] Docker process-boundary and restart evidence is current; boundary script is restricted to disposable root Linux CI.
+- [ ] Exact-head GitHub CI result for the local candidate; current #58 result predates local commit `3ff3e60`.
