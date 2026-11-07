@@ -35,10 +35,10 @@ export const TaskSchema = z
       .string()
       .regex(/^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/)
       .nullable()
-      .optional(),
-    profileVersion: z.number().int().positive().safe().nullable().optional(),
-    runtimeId: z.literal('mock').nullable().optional(),
-    assignmentRevision: z.number().int().positive().safe().optional(),
+      .default(null),
+    profileVersion: z.number().int().positive().safe().nullable().default(null),
+    runtimeId: z.literal('mock').nullable().default(null),
+    assignmentRevision: z.number().int().positive().safe().default(1),
   })
   .superRefine((task, context) => {
     const assigned = [task.agentId, task.profileVersion, task.runtimeId].filter(

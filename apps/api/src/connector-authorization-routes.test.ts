@@ -15,6 +15,10 @@ const task = {
   createdAt: '2026-11-06T00:00:00.000Z',
   projectId: ownerId,
   associationRevision: 3,
+  agentId: 'agent_0001',
+  profileVersion: 4,
+  runtimeId: 'mock',
+  assignmentRevision: 2,
 };
 const project = {
   id: ownerId,
@@ -217,6 +221,30 @@ describe('connector authorization API routes', () => {
       assert.equal(calls.length, 0);
     } finally {
       await app.close();
+    }
+  });
+
+  it('fails closed when a task has no matching persisted execution assignment', async () => {
+    for (const assignedTask of [
+      { ...task, agentId: null, profileVersion: null, runtimeId: null },
+      { ...task, agentId: 'agent_0002' },
+      { ...task, profileVersion: 5 },
+      { ...task, runtimeId: null },
+    ]) {
+      const calls: Array<{ path: string; init: RequestInit }> = [];
+      const app = createTestApp(calls, { task: assignedTask, project, profile });
+      try {
+        const response = await app.inject({
+          method: 'POST',
+          url: '/api/v1/connector-authorizations',
+          headers: { ...ownerHeaders, 'idempotency-key': randomUUID() },
+          payload: input,
+        });
+        assert.equal(response.statusCode, 409);
+        assert.equal(calls.length, 0);
+      } finally {
+        await app.close();
+      }
     }
   });
 

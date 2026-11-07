@@ -1,5 +1,11 @@
 import type { FastifyInstance } from 'fastify';
-import { CreateTaskSchema, SetTaskProjectSchema, TaskIdSchema, TaskSchema } from '@omnis/contracts';
+import {
+  CreateTaskSchema,
+  SetTaskExecutionAssignmentSchema,
+  SetTaskProjectSchema,
+  TaskIdSchema,
+  TaskSchema,
+} from '@omnis/contracts';
 import { requireMutationProtection, requireOwner } from './auth.ts';
 import { parseTaskList, workerRequest } from './worker-client.ts';
 
@@ -56,6 +62,31 @@ export function registerTaskRoutes(app: FastifyInstance, request: WorkerRequest 
       }
       const task = await request(
         `/internal/v1/tasks/${encodeURIComponent(taskId.data)}/project`,
+        {
+          method: 'PUT',
+          headers: { 'idempotency-key': requestId },
+          body: JSON.stringify(body.data),
+        },
+        (value) => TaskSchema.parse(value),
+      );
+      return reply.send(task);
+    },
+  );
+
+  app.put<{ Params: { taskId: string } }>(
+    '/api/v1/tasks/:taskId/execution-assignment',
+    { preHandler: [requireOwner, requireMutationProtection] },
+    async (httpRequest, reply) => {
+      const taskId = TaskIdSchema.safeParse(httpRequest.params.taskId);
+      const body = SetTaskExecutionAssignmentSchema.safeParse(httpRequest.body);
+      const requestId = parseIdempotencyKey(httpRequest.headers['idempotency-key']);
+      if (!taskId.success || !body.success || !requestId) {
+        return reply.code(400).send({
+          error: { code: 'invalid_input', message: 'Task execution assignment input is invalid.' },
+        });
+      }
+      const task = await request(
+        `/internal/v1/tasks/${encodeURIComponent(taskId.data)}/execution-assignment`,
         {
           method: 'PUT',
           headers: { 'idempotency-key': requestId },

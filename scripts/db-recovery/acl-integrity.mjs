@@ -157,6 +157,7 @@ const approvedSecurityDefinerRoutineArities = new Map([
 const approvedTaskProjectRoutines = new Set([
   'create_task(p_title text, p_detail text, p_project_id text, p_request_id uuid, p_fingerprint bytea)',
   'set_task_project(p_task_id text, p_expected_association_revision integer, p_project_id text, p_request_id uuid, p_fingerprint bytea)',
+  'set_task_execution_assignment(p_task_id text, p_expected_revision integer, p_agent_id text, p_profile_version_no integer, p_runtime_id text, p_request_id uuid, p_fingerprint bytea)',
 ]);
 
 function isApprovedRuntimeSecurityDefiner(entry) {

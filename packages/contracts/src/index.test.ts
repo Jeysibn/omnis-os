@@ -255,6 +255,10 @@ describe('task project association contracts', () => {
       ...task,
       projectId: null,
       associationRevision: 1,
+      agentId: null,
+      profileVersion: null,
+      runtimeId: null,
+      assignmentRevision: 1,
     });
   });
 

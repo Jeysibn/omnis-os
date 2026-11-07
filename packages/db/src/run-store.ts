@@ -5,6 +5,7 @@ import {
   ProjectWorkspaceTaskPageSchema,
   RunEventSchema,
   RunSchema,
+  SetTaskExecutionAssignmentSchema,
   SetTaskProjectSchema,
   TaskIdSchema,
   TaskSchema,
@@ -55,6 +56,10 @@ type TaskRow = QueryResultRow & {
   created_at: Date | string;
   project_id?: string | null;
   association_revision?: number | string;
+  execution_agent_id?: string | null;
+  execution_profile_version_no?: number | string | null;
+  execution_runtime_id?: 'mock' | null;
+  execution_assignment_revision?: number | string;
 };
 
 type RunRow = QueryResultRow & {
@@ -258,6 +263,38 @@ export class PostgresRunStore {
           taskFingerprint('task.project_set', { taskId: parsedTaskId.data, input: parsed.data }),
         ],
       );
+      const current = await this.getTask(parsedTaskId.data);
+      return current ?? TaskSchema.parse(result.rows[0]?.result);
+    } catch (error) {
+      return mapStoreError(error);
+    }
+  }
+
+  async setTaskExecutionAssignment(
+    taskId: string,
+    inputValue: unknown,
+    requestId: string,
+  ): Promise<Task> {
+    const parsedTaskId = TaskIdSchema.safeParse(taskId);
+    const parsed = SetTaskExecutionAssignmentSchema.safeParse(inputValue);
+    if (!parsedTaskId.success || !parsed.success || !isUuid(requestId))
+      throw new StoreError('invalid_input', 'Task execution assignment input is invalid.', 400);
+    try {
+      const result = await this.pool.query<{ result: unknown }>(
+        'SELECT omnis.set_task_execution_assignment($1,$2,$3,$4,$5,$6,$7) AS result',
+        [
+          parsedTaskId.data,
+          parsed.data.expectedAssignmentRevision,
+          parsed.data.agentId,
+          parsed.data.profileVersion,
+          parsed.data.runtimeId,
+          requestId,
+          taskFingerprint('task.execution_assignment_set', {
+            taskId: parsedTaskId.data,
+            input: parsed.data,
+          }),
+        ],
+      );
       return TaskSchema.parse(result.rows[0]?.result);
     } catch (error) {
       return mapStoreError(error);
@@ -266,7 +303,7 @@ export class PostgresRunStore {
 
   async listTasks(): Promise<Task[]> {
     const result = await this.pool.query<TaskRow>(
-      'SELECT id, title, detail, status, created_at, project_id, association_revision FROM omnis.tasks ORDER BY created_at DESC, id DESC',
+      'SELECT id, title, detail, status, created_at, project_id, association_revision, execution_agent_id, execution_profile_version_no, execution_runtime_id, execution_assignment_revision FROM omnis.tasks ORDER BY created_at DESC, id DESC',
     );
     return result.rows.map(mapTask);
   }
@@ -369,7 +406,7 @@ export class PostgresRunStore {
 
   async getTask(taskId: string): Promise<Task | undefined> {
     const result = await this.pool.query<TaskRow>(
-      'SELECT id, title, detail, status, created_at, project_id, association_revision FROM omnis.tasks WHERE id = $1',
+      'SELECT id, title, detail, status, created_at, project_id, association_revision, execution_agent_id, execution_profile_version_no, execution_runtime_id, execution_assignment_revision FROM omnis.tasks WHERE id = $1',
       [taskId],
     );
     return result.rows[0] ? mapTask(result.rows[0]) : undefined;
@@ -1561,6 +1598,11 @@ function mapTask(row: TaskRow): Task {
     createdAt: asIso(row.created_at),
     projectId: row.project_id ?? null,
     associationRevision: Number(row.association_revision ?? 1),
+    agentId: row.execution_agent_id ?? null,
+    profileVersion:
+      row.execution_profile_version_no == null ? null : Number(row.execution_profile_version_no),
+    runtimeId: row.execution_runtime_id ?? null,
+    assignmentRevision: Number(row.execution_assignment_revision ?? 1),
   });
 }
 
@@ -1584,7 +1626,13 @@ function mapStoreError(error: unknown): never {
       409,
     );
   if (code === 'P2002' || code === 'P2003' || code === '23505' || code === '40001')
-    throw new StoreError('conflict', 'Task project association conflicts with current state.', 409);
+    throw new StoreError(
+      'conflict',
+      'Task association or execution assignment conflicts with current state.',
+      409,
+    );
+  if (code === 'P2004')
+    throw new StoreError('conflict', 'Selected agent profile is not currently available.', 409);
   if (code === '22023' || code === '22001' || code === '23514')
     throw new StoreError('invalid_input', 'Task input is invalid.', 400);
   if (code === '55P03')

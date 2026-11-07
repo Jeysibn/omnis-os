@@ -212,6 +212,7 @@ try {
     '0023_synthetic_broker_submission_lifecycle',
     '0024_synthetic_task_run_projection',
     '0025_synthetic_run_event_semantics',
+    '0026_task_execution_assignment',
   ];
   if (afterUpgrade.migrations.includes('0021_mission_lane_events')) {
     expectedMigrations.splice(
@@ -704,7 +705,7 @@ async function verifyPost0005ProvenanceUpgrade() {
       "SELECT id, length(checksum) AS checksum_length FROM omnis.schema_migrations WHERE id LIKE '00%' ORDER BY id",
     );
     assert.deepEqual(migrationRows.rows.at(-1), {
-      id: '0025_synthetic_run_event_semantics',
+      id: '0026_task_execution_assignment',
       checksum_length: 64,
     });
   } finally {
@@ -979,7 +980,11 @@ async function waitForRun(store, runId, expectedStatus) {
     const run = await store.getRun(runId);
     if (run?.status === expectedStatus) return run;
     if (run && ['failed', 'interrupted', 'cancelled'].includes(run.status)) {
-      throw new Error(`Legacy upgrade run ended in ${run.status}.`);
+      const events = await store.getEvents(runId);
+      const latest = events.at(-1);
+      throw new Error(
+        `Legacy upgrade run ended in ${run.status}; latest event: ${latest?.type ?? 'unknown'}: ${latest?.message ?? 'unavailable'}.`,
+      );
     }
     await delay(250);
   }

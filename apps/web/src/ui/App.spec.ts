@@ -5,11 +5,13 @@ import { expect, test as base, type Page, type Route } from '@playwright/test';
 import {
   AuthorizationDecisionSchema,
   AuthorizationSchema,
+  AgentDirectoryResponseSchema,
   CreateAuthorizationSchema,
   CreateRunSchema,
   CreateTaskSchema,
   RunEventSchema,
   RunSchema,
+  SetTaskExecutionAssignmentSchema,
   TaskSchema,
   type Authorization,
   type ProjectSummary,
@@ -28,6 +30,10 @@ const makeTask = (id: string, title: string, status: Task['status'] = 'open'): T
   detail: `Read the notes for ${title.toLowerCase()} and report the next action.`,
   status,
   createdAt: now,
+  agentId: null,
+  profileVersion: null,
+  runtimeId: null,
+  assignmentRevision: 1,
 });
 
 const makeRun = (
@@ -91,6 +97,7 @@ type FixtureOptions = {
   taskMutationStatus?: number;
   taskMutationFailures?: number;
   taskMutationRetryStatus?: number;
+  assignmentFailures?: number;
   authorizationDisconnects?: number;
   decisionDisconnects?: number;
   runDisconnects?: number;
@@ -208,6 +215,20 @@ function createMockApi(page: Page) {
   let createdTaskCount = 0;
   let taskMutationFailures = 0;
   let taskMutationRetryUsed = false;
+  let assignmentFailures = 0;
+  const assignmentWrites: Array<{ taskId: string; key: string; body: unknown }> = [];
+  const fixtureAgent = {
+    id: 'agent-analyst',
+    name: 'Research Analyst',
+    slug: 'research-analyst',
+    department: null,
+    lifecycle: 'available' as const,
+    archivedAt: null,
+    currentVersion: { versionNo: 3, profession: 'Research Analyst', seniority: 'senior' },
+    provenance: 'owner_created' as const,
+    createdAt: now,
+    updatedAt: now,
+  };
 
   const configure = (next: FixtureOptions = {}) => {
     options = next;
@@ -230,6 +251,8 @@ function createMockApi(page: Page) {
     createdTaskCount = 0;
     taskMutationFailures = options.taskMutationFailures ?? 0;
     taskMutationRetryUsed = false;
+    assignmentFailures = options.assignmentFailures ?? 0;
+    assignmentWrites.length = 0;
   };
 
   const fulfillError = (route: Route, status: number, code: string, message: string) =>
@@ -307,7 +330,10 @@ function createMockApi(page: Page) {
     const body = request.postDataJSON?.() ?? null;
     requests.push({ method, path, headers, body });
 
-    if (method === 'POST' && headers['x-omnis-csrf'] !== currentCsrfToken) {
+    if (
+      ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method) &&
+      headers['x-omnis-csrf'] !== currentCsrfToken
+    ) {
       return fulfillError(route, 403, 'csrf_rejected', 'A valid CSRF header is required.');
     }
 
@@ -322,6 +348,14 @@ function createMockApi(page: Page) {
       return authenticated
         ? route.fulfill({ json: { id: 'owner', displayName: 'Director' } })
         : fulfillError(route, 401, 'unauthorized', 'Sign in to continue.');
+    }
+    if (path === '/api/v1/agents' && method === 'GET') {
+      return route.fulfill({
+        json: AgentDirectoryResponseSchema.parse({
+          agents: [fixtureAgent],
+          page: { total: 1, complete: true, nextCursor: null },
+        }),
+      });
     }
     if (path === '/api/v1/auth/login' && method === 'POST') {
       authenticated = true;
@@ -389,6 +423,34 @@ function createMockApi(page: Page) {
       });
       currentTasks = [created, ...currentTasks];
       return route.fulfill({ status: 201, json: created });
+    }
+    const assignmentMatch = path.match(/^\/api\/v1\/tasks\/([^/]+)\/execution-assignment$/);
+    if (assignmentMatch && method === 'PUT') {
+      const parsed = SetTaskExecutionAssignmentSchema.safeParse(body);
+      const key = headers['idempotency-key'] ?? '';
+      if (!parsed.success || !zodUuid(key))
+        return fulfillError(route, 400, 'invalid_input', 'Task assignment input is invalid.');
+      assignmentWrites.push({ taskId: assignmentMatch[1]!, key, body });
+      if (assignmentFailures > 0) {
+        assignmentFailures -= 1;
+        return fulfillError(
+          route,
+          503,
+          'assignment_unknown',
+          'Task assignment outcome is unknown.',
+        );
+      }
+      const existing = currentTasks.find((task) => task.id === assignmentMatch[1]);
+      if (!existing) return fulfillError(route, 404, 'not_found', 'Task was not found.');
+      const updated = TaskSchema.parse({
+        ...existing,
+        agentId: parsed.data.agentId,
+        profileVersion: parsed.data.profileVersion,
+        runtimeId: parsed.data.runtimeId,
+        assignmentRevision: existing.assignmentRevision + 1,
+      });
+      currentTasks = currentTasks.map((task) => (task.id === updated.id ? updated : task));
+      return route.fulfill({ json: updated });
     }
     if (path === '/api/v1/runs' && method === 'GET') {
       if (runGetFailures > 0) {
@@ -610,6 +672,7 @@ function createMockApi(page: Page) {
     releaseReconnect: () => scenario?.release(),
     dispose: async () => scenario?.close(),
     runDetailGets,
+    assignmentWrites,
     get tasks() {
       return currentTasks;
     },
@@ -884,6 +947,53 @@ test('loads tasks and runs independently and retries without false empty states'
   await expect(page.getByRole('heading', { name: 'Review launch checklist' })).toBeVisible();
   await page.getByRole('button', { name: 'Retry tasks' }).first().click();
   await expect(page.getByRole('heading', { name: 'Review launch checklist' })).toBeVisible();
+});
+
+test('assigns an available immutable profile to a task on the synthetic runtime', async ({
+  page,
+  api,
+}) => {
+  api.configure({ runs: [] });
+  await openWorkspace(page, '#tasks');
+  await expect(page.getByRole('heading', { name: 'Review launch checklist' })).toBeVisible();
+  await expect(page.getByLabel('Agent profile')).toBeVisible();
+  await page.getByLabel('Agent profile').selectOption('agent-analyst');
+  await expect(page.getByLabel('Runtime')).toHaveValue('mock');
+  await page.getByRole('button', { name: 'Save assignment' }).click();
+  await expect(page.getByText('Synthetic mock assignment saved.')).toBeVisible();
+  await expect(page.getByText(/does not submit profile instructions to a model/)).toBeVisible();
+
+  expect(api.assignmentWrites).toHaveLength(1);
+  expect(api.assignmentWrites[0]).toMatchObject({
+    taskId: 'task-open',
+    body: {
+      agentId: 'agent-analyst',
+      profileVersion: 3,
+      runtimeId: 'mock',
+      expectedAssignmentRevision: 1,
+    },
+  });
+  expect(api.assignmentWrites[0]?.key).toMatch(/^[0-9a-f-]{36}$/i);
+  await expect(page.getByLabel('Agent profile')).toHaveValue('agent-analyst');
+});
+
+test('an uncertain task assignment retries the exact request with the same key', async ({
+  page,
+  api,
+}) => {
+  api.configure({ runs: [], assignmentFailures: 1 });
+  await openWorkspace(page, '#tasks');
+  await expect(page.getByLabel('Agent profile')).toBeVisible();
+  await page.getByLabel('Agent profile').selectOption('agent-analyst');
+  await page.getByRole('button', { name: 'Save assignment' }).click();
+  await expect(page.getByRole('alert')).toHaveText(
+    'The save result is uncertain. Retry the same request to resolve it safely.',
+  );
+  await page.getByRole('button', { name: 'Retry same save' }).click();
+  await expect(page.getByText('Synthetic mock assignment saved.')).toBeVisible();
+
+  expect(api.assignmentWrites).toHaveLength(2);
+  expect(api.assignmentWrites[1]).toEqual(api.assignmentWrites[0]);
 });
 
 test.describe('persisted authorization audit history', () => {

@@ -9,6 +9,7 @@ const safeSnapshot = {
     '0015_project_management',
     '0016_project_lifecycle',
     '0017_task_project_admission',
+    '0026_task_execution_assignment',
   ],
   agentManagementCounts: {
     departments: 0,
@@ -20,6 +21,7 @@ const safeSnapshot = {
   },
   projectManagementCounts: { projects: 0, managementAudits: 0, managementIdempotency: 0 },
   taskProjectManagementCounts: { audits: 0, idempotency: 0 },
+  taskExecutionAssignmentCounts: { audits: 0, idempotency: 0 },
   recordFingerprints: {
     departments: 'd41d8cd98f00b204e9800998ecf8427e',
     agents: 'd41d8cd98f00b204e9800998ecf8427e',
@@ -32,6 +34,8 @@ const safeSnapshot = {
     projectManagementIdempotency: 'd41d8cd98f00b204e9800998ecf8427e',
     taskProjectManagementAudit: 'd41d8cd98f00b204e9800998ecf8427e',
     taskProjectManagementIdempotency: 'd41d8cd98f00b204e9800998ecf8427e',
+    taskExecutionAssignmentAudit: 'd41d8cd98f00b204e9800998ecf8427e',
+    taskExecutionAssignmentIdempotency: 'd41d8cd98f00b204e9800998ecf8427e',
   },
   syntheticOnly: true,
   sequenceInvariants: true,
@@ -140,5 +144,26 @@ describe('database backup consistency policy', () => {
       agentManagementCounts: { ...source.agentManagementCounts, agents: 1 },
     };
     assert.equal(metricsMatch(source, restored), false);
+  });
+
+  it('requires task assignment audit and retry receipts to survive restore', () => {
+    assert.doesNotThrow(() => assertValidMetrics(safeSnapshot));
+    assert.equal(
+      metricsMatch(safeSnapshot, {
+        ...safeSnapshot,
+        recordFingerprints: {
+          ...safeSnapshot.recordFingerprints,
+          taskExecutionAssignmentAudit: 'e'.repeat(32),
+        },
+      }),
+      false,
+    );
+    assert.equal(
+      metricsMatch(safeSnapshot, {
+        ...safeSnapshot,
+        taskExecutionAssignmentCounts: { audits: 1, idempotency: 0 },
+      }),
+      false,
+    );
   });
 });

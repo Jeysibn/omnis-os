@@ -9,6 +9,7 @@ import {
   RunSchema,
   ProjectWorkspaceQuerySchema,
   ProjectWorkspaceTaskPageSchema,
+  SetTaskExecutionAssignmentSchema,
   type ProjectWorkspaceTaskPage,
   SetTaskProjectSchema,
   TaskSchema,
@@ -105,6 +106,23 @@ export class RunCoordinator {
     if (!parsed.success)
       throw new CoordinatorError('invalid_input', 'Task project input is invalid.', 400);
     return translateStoreError(() => this.store.setTaskProject(taskId, parsed.data, requestId));
+  }
+
+  async setTaskExecutionAssignment(
+    taskId: string,
+    input: unknown,
+    requestId: string,
+  ): Promise<Task> {
+    const parsed = SetTaskExecutionAssignmentSchema.safeParse(input);
+    if (!parsed.success)
+      throw new CoordinatorError(
+        'invalid_input',
+        'Task execution assignment input is invalid.',
+        400,
+      );
+    return translateStoreError(() =>
+      this.store.setTaskExecutionAssignment(taskId, parsed.data, requestId),
+    );
   }
 
   async listTasks(): Promise<Task[]> {

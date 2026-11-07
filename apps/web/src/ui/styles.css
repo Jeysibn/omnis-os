@@ -882,6 +882,29 @@ button:disabled {
   line-height: 1.35;
   letter-spacing: -0.02em;
 }
+.task-assignment {
+  display: grid;
+  gap: 8px;
+  margin-top: 24px;
+  padding-top: 18px;
+  border-top: 1px solid #e5eaf2;
+}
+.task-assignment h4,
+.task-assignment p {
+  margin: 0;
+}
+.task-assignment select {
+  width: 100%;
+}
+.task-assignment-note,
+.task-assignment-profile {
+  color: #5d6b7f;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.task-assignment-error {
+  color: #a32925;
+}
 .detail-copy {
   margin-top: 9px;
   color: #5d6b7f;
