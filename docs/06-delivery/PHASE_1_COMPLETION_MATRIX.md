@@ -28,7 +28,7 @@ Remaining open Draft PRs from the current GitHub inventory:
 
 - #54 — synthetic task/run audit history; open Draft at `28ad025`, based on stale `ac24bc3`; overlaps the merged attempt-history API/UI from #59/#60 and must be reconciled before adoption.
 - #50 — Project Workspace V1 source PR; open Draft at `6a94846`, based on stale `a89982c`; superseded by merged #61.
-- #46 — isolated synthetic broker; open Draft at `2b7c329`, based on current main `6522913`; CI run `42406732296` is running after the documentation-only candidate update. Previous code-equivalent head `a47dbc3` passed all eight jobs in run `42405661752`. Independent review still blocks merge eligibility on missing broker/authorizer/PostgreSQL/fake-provider process E2E, actual broker systemd egress enforcement, and canary coverage.
+- #46 — isolated synthetic broker; open Draft at `2b7c329`, based on current main `6522913`; exact-head CI run `42406732296` passed all eight jobs. Independent review still blocks merge eligibility on missing broker/authorizer/PostgreSQL/fake-provider process E2E, actual broker systemd egress enforcement, and canary coverage.
 - #41 — Mission Lane event persistence and migration 0021; open Draft at `8256c3d`, based on stale `136ed73`; requires current-main migration/API integration and security review before adoption.
 - #31 — cinematic Command Center; open Draft at `de9f3af`, based on stale `136ed73`; deferred in favor of the minimum functional owner journey.
 - #66 — private Docker Compose application topology; merged after independent review and all eight exact-head CI jobs passed on `a7e7bfa` in run `42375456502`. Post-merge main CI also passed. Target-host operation remains unverified.
