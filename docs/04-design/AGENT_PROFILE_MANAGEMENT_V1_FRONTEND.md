@@ -14,7 +14,7 @@ This is a bounded increment, not full AO-104 completion. The browser journey doe
 - Parse response bodies with the canonical contracts. Confirm request ID, operation, target identity, lifecycle, revision, and version before reporting success.
 - Before sending, preserve the exact create body and idempotency key in tab-scoped `sessionStorage`. After an uncertain response, lock editing and offer only an explicit retry with the exact same request body and idempotency key, including after a browser refresh or session expiry. A 401 during same-key recovery preserves the pending request for after sign-in; an initial 401 is a definite refusal. Other definite 4xx refusals do not retry. A stale 409 refreshes current profile/history and never reports a publication.
 - A successful publish refreshes the current profile and version history. Published profile versions are not edited in place.
-- Archiving requires an explicit confirmation. A response with an unknown outcome is checked against the persisted profile; only an explicit retry may resend, using the same idempotency key.
+- Archiving requires an explicit confirmation. A response with an unknown outcome is checked against the persisted profile; only an explicit retry may resend, using the same idempotency key. The pending key is retained in tab-scoped `sessionStorage` so an unknown request remains recoverable after refresh or session expiry.
 - Never send connection credentials or provider secrets in profile fields. Text fields render as text; profile text does not grant authority.
 - Demo/mocked execution labels remain distinct; this management flow makes no runtime or provider activity claim.
 
@@ -27,6 +27,6 @@ This is a bounded increment, not full AO-104 completion. The browser journey doe
 5. Unknown save or publish outcomes offer same-key/same-body retry only. Conflicts refresh state and show an accurate non-success message.
 6. Owner authorization failures, malformed receipts, loading/errors, and session expiry are visible and do not appear as successful mutations.
 7. Keyboard operation, narrow viewport reflow, and accessibility checks pass for the mutation form.
-8. Archiving a published agent requires confirmation, preserves history, reports only a verified archived state, and is hidden for draft or already archived agents.
+8. Archiving a published agent requires confirmation, preserves history, reports only a verified archived state, and is hidden for draft or already archived agents. An unapplied unknown outcome survives refresh and can retry only with the original idempotency key.
 
 The read-only spec's AP-18 assertion (“no non-GET request on any agents route”) and the no-create empty-state rule apply only to the earlier read-only scope. This supplement supersedes those two rules for the management operations listed above; all remaining read-view honesty, accessibility, navigation, and security rules continue to apply.

@@ -914,7 +914,7 @@ test.describe('Agent Profile', () => {
     expect(api.count((path) => path === '/api/v1/agents/agent-atlas')).toBeGreaterThanOrEqual(2);
   });
 
-  test('an unapplied uncertain archive retries with the same idempotency key', async ({
+  test('an unapplied uncertain archive survives refresh and retries with the same idempotency key', async ({
     page,
     api,
   }) => {
@@ -927,11 +927,15 @@ test.describe('Agent Profile', () => {
       .click();
     await expect(page.getByRole('button', { name: 'Retry same request' })).toBeVisible();
     expect(api.archiveRequests).toHaveLength(1);
+    const originalKey = api.archiveRequests[0]?.key;
+
+    await page.reload();
+    await expect(page.getByRole('button', { name: 'Retry same request' })).toBeVisible();
 
     await page.getByRole('button', { name: 'Retry same request' }).click();
     await expect(page.getByText(/This agent is archived/)).toBeVisible();
     expect(api.archiveRequests).toHaveLength(2);
-    expect(api.archiveRequests[1]?.key).toBe(api.archiveRequests[0]?.key);
+    expect(api.archiveRequests[1]?.key).toBe(originalKey);
   });
 
   test('a draft agent cannot be archived', async ({ page, api }) => {
