@@ -5,6 +5,7 @@ import {
   SyntheticFakeProviderSubmissionResponseSchema,
 } from '@omnis/contracts/broker-ipc';
 import type { ConnectorDecisionEnvelope } from '@omnis/contracts/connector-broker';
+import { readBoundedResponse } from './bounded-http-response.ts';
 
 const origin = 'http://omnis-synthetic-provider:8787';
 
@@ -102,27 +103,19 @@ export class FakeProviderClient {
             reject(new Error('Fake provider redirects are prohibited.'));
             return;
           }
-          const chunks: Buffer[] = [];
-          let size = 0;
-          response.on('data', (chunk: Buffer) => {
-            size += chunk.length;
-            if (size > 64 * 1024) {
-              response.destroy(new Error('Fake provider response exceeds its limit.'));
-              return;
-            }
-            chunks.push(chunk);
-          });
-          response.on('end', () => {
-            if (response.statusCode !== 200 && response.statusCode !== 202) {
-              reject(new FakeProviderResponseError(response.statusCode ?? 0));
-              return;
-            }
-            try {
-              resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown);
-            } catch {
-              reject(new Error('Fake provider response was invalid.'));
-            }
-          });
+          void readBoundedResponse(response, 64 * 1024, 'Fake provider response exceeds its limit.')
+            .then((body) => {
+              if (response.statusCode !== 200 && response.statusCode !== 202) {
+                reject(new FakeProviderResponseError(response.statusCode ?? 0));
+                return;
+              }
+              try {
+                resolve(JSON.parse(body.toString('utf8')) as unknown);
+              } catch {
+                reject(new Error('Fake provider response was invalid.'));
+              }
+            })
+            .catch(reject);
         },
       );
       request.on('timeout', () => request.destroy(new Error('Fake provider request timed out.')));

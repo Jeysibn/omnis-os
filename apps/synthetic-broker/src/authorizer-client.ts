@@ -9,6 +9,7 @@ import type {
   ConnectorDecisionEnvelope,
   SyntheticProviderEvent,
 } from '@omnis/contracts/connector-broker';
+import { readBoundedResponse } from './bounded-http-response.ts';
 
 const version = 'omnis.broker-authorizer-ipc.v1' as const;
 
@@ -79,30 +80,28 @@ export class AuthorizerClient {
           timeout: 2_000,
         },
         (response) => {
-          const chunks: Buffer[] = [];
-          let size = 0;
-          response.on('data', (chunk: Buffer) => {
-            size += chunk.length;
-            if (size > 64 * 1024) {
-              response.destroy(new Error('Authorizer IPC response exceeds its limit.'));
-              return;
-            }
-            chunks.push(chunk);
-          });
-          response.on('end', () => {
-            const text = Buffer.concat(chunks).toString('utf8');
-            if (response.statusCode !== 200) {
-              reject(
-                new Error(`Authorizer operation failed closed with status ${response.statusCode}.`),
-              );
-              return;
-            }
-            try {
-              resolve(JSON.parse(text) as unknown);
-            } catch {
-              reject(new Error('Authorizer IPC response was invalid.'));
-            }
-          });
+          void readBoundedResponse(
+            response,
+            64 * 1024,
+            'Authorizer IPC response exceeds its limit.',
+          )
+            .then((body) => {
+              const text = body.toString('utf8');
+              if (response.statusCode !== 200) {
+                reject(
+                  new Error(
+                    `Authorizer operation failed closed with status ${response.statusCode}.`,
+                  ),
+                );
+                return;
+              }
+              try {
+                resolve(JSON.parse(text) as unknown);
+              } catch {
+                reject(new Error('Authorizer IPC response was invalid.'));
+              }
+            })
+            .catch(reject);
         },
       );
       request.on('timeout', () => request.destroy(new Error('Authorizer IPC timed out.')));
