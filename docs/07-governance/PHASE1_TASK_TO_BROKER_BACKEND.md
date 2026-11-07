@@ -1,116 +1,105 @@
-# Phase 1 task-to-synthetic-broker backend contract
+# Phase 1 task-to-synthetic-broker backend integration
 
-Status: disabled-by-default backend integration for synthetic tests only. This contract does
-not authorize provider credentials, real inference, deployment, or production runtime selection.
+Status: backend integration is implemented in the Draft PR #55 → #56 → #57 stack. It is
+synthetic-only and disabled outside explicit test mode. It does not authorize credentials,
+provider authentication, real inference, deployment, or production runtime selection.
 
-## Verified integration surface
+## Live repository state
 
-- Current main at implementation start: `a89982c9af5c1107d5156b2ad53fd4d603de929b`.
-- PR #49 merged during this work as `b2490501395a3e53fb0f97fc6ab3914a3300fa56`; the backend
-  branch incorporates it with a normal merge commit. Its Docker boundary harness does not add a
-  broker endpoint or change the backend authorization contract.
-- PR #49 is Draft (`test/disposable-docker-boundary`, head
-  `d350a2450549c715ab562354f21b129f306ae1f9`) and currently changes only the disposable Docker
-  boundary CI harness, its evidence, and the CI/package command. It does not provide a broker
-  process, caller socket, task/run dispatcher, or cancellation API.
-- PR #46 remains a separate Draft platform branch and is treated as historical context. This
-  backend defines the fixed broker request below without editing or depending on that branch.
-- PR #43/#45/#47 remain the only grant, attempt, submission, audit, and authorizer IPC sources
-  of truth. No new authorization or attempt table is introduced.
+- Current main: `ac24bc3af8504c06465aeca2924011f4771252b3`.
+- PR #49 is merged as `b2490501395a3e53fb0f97fc6ab3914a3300fa56`. It supplies disposable Docker
+  boundary tests; those tests are not the broker application boundary.
+- PR #52 is merged at `ac24bc3af8504c06465aeca2924011f4771252b3`. It supplies the original
+  synchronous, test-only owner API → worker → broker path.
+- PR #55 (`feat/phase1-canonical-synthetic-prompt`, head
+  `428003209480e543263995c9ba18de6afd43a435`) binds owner consent and worker dispatch to the
+  persisted task and immutable profile version.
+- PR #56 (`feat/phase1-canonical-synthetic-runs`, head
+  `bb945fcbad582e6a72a25f45b537ce7934ac28dc`) adds PostgreSQL Run projection, transactional
+  pg-boss admission, worker orchestration, durable events, Run history, and the existing SSE
+  replay surface.
+- PR #57 (`feat/phase1-run-stop-revocation`, head
+  `c4b2bea364e33ad08c3ef460561945c57c53365c`) routes standard Run cancellation through the
+  persisted grant binding and authorizer revocation.
+- PRs #55–#57 are open Drafts and are not integrated into main. Their merge order is #55, #56,
+  then #57. PR #41 remains deferred; if migration 0021 lands first, migration 0024 and its role
+  contract require adaptation and renewed review.
+- PR #46 (`codex/phase1-isolated-synthetic-broker`, head
+  `16e5f2c1d8aa82324468a6ca8327059b497399d4`) remains Draft and security-blocked. It is not
+  modified by this backend work.
 
-## Owner API and worker contract
+PRs #43, #45, and #47 remain the only durable connector grant, attempt, submission, audit, and
+broker-authorizer IPC authority. This stack creates no second grant store or attempt ledger.
 
-Test-only owner API, registered only when `NODE_ENV=test` and
-`OMNIS_SYNTHETIC_BROKER_TEST_MODE=1`:
+## Backend task and Run flow
 
-```text
-POST /api/v1/tasks/{taskId}/synthetic-runs
-Idempotency-Key: <UUID>
-{
-  "authorizationId": "<owner-approved connector grant UUID>",
-  "request": { ... ConnectorAuthorizationRequest v1 ... },
-  "renderedRequest": "<ephemeral exact rendered request>"
-}
-```
+1. Owner consent uses PR #43's connector-specific authorization, not `mock.execute`. The API
+   checks the owner session and CSRF protection and binds consent to the persisted task, project
+   revision, immutable profile version, canonical rendered-request digest, connector/provider/
+   model/operation, empty tool scope, limits, request identity, and authorizer correlation ID.
+2. At test-only admission, API and worker reload persisted task/profile state and independently
+   reproduce the canonical prompt. The worker rejects changed identity or digest before
+   admission.
+3. PostgreSQL creates the canonical Run projection, initial `run.queued` event, idempotency
+   record, synthetic authorization reference, and pg-boss queue entry atomically. The queue
+   carries only `runId`; it does not contain rendered prompt text.
+4. The worker claims a bounded Run lease, reconstructs the same prompt from task/profile state,
+   verifies the digest again, then calls the fixed Unix-socket broker client once. The broker
+   reuses PR #47 IPC and PR #45 durable authorizer attempts; PostgreSQL remains authoritative for
+   provider events and usage.
+5. The worker maps confirmed broker outcomes to durable Run events and result projection. A lost
+   or malformed broker response, a mismatched identity, or lease expiry remains `unknown`; the
+   queue does not retry. Run history and SSE use the existing `runs`, `run_events`, and API
+   replay path. The current Command Center labels these events as mock-source synthetic activity.
+6. Owner cancellation resolves the persisted Run-to-grant binding rather than accepting a grant
+   ID from the caller, revokes through the authorizer first, then requests a durable Run stop.
+   Provider termination remains unconfirmed until a correlated `interrupted` event is persisted.
 
-The API requires owner session and CSRF validation, validates the exact request digest, reads
-the grant from the independent authorizer, checks task/project/profile/provider/model/operation/
-limits against the persisted approved grant, and forwards the stable UUID as both request ID and
-idempotency key. It never forwards an owner identity or approval flag. The worker revalidates
-the task path, request schema, and idempotency identity and sends the ephemeral request over a
-fixed Unix socket path to:
+## Broker response identity contract
 
-```text
-POST /internal/broker/v1/submit
-Authorization: Bearer <disposable synthetic broker caller token>
-```
+The broker request uses `omnis.synthetic-broker.v1`, a fixed local Unix socket, stable request
+ID, persisted authorization ID, immutable binding, and exact rendered request. Its request and
+response limits are 64 KiB. The worker does not accept caller-selected URLs and never retries a
+request that may have crossed the provider boundary.
 
-The broker request protocol is `omnis.synthetic-broker.v1`; its body contains only the grant ID,
-stable request ID, immutable connector binding, and exact rendered request. The socket path is
-absolute configuration, never caller input. The body and response are limited to 64 KiB; the
-worker performs one request and never retries a possibly submitted request. Broker responses
-must include an attempt UUID, the exact persisted grant correlation UUID, lifecycle state,
-submission evidence, and a completed response only when the state is `completed`. Provider usage not present in the broker response is
-reported as `unknown/not_reported`, never zero.
+Every broker response, including HTTP 202 `unknown`, must include the attempt UUID and exact
+persisted authorization `correlationId`. The worker validates task, authorization, request, and
+correlation identity before accepting status or response text. A missing or mismatched
+correlation is rejected; the Run remains unknown and the response cannot attach an attempt or
+result to it. A completed response requires nonempty result text. Unreported usage remains
+`unknown/not_reported`, not zero.
 
-The broker calls the four existing authorizer IPC operations from
-`PHASE1_PR_C_BACKEND_CONTRACT.md`. Its `attemptId` is the durable connector run identity; the
-grant already binds project/task/profile and exact request digest. The authorizer attempt and
-audit records remain authoritative. A caller can read status through the owner API path
-`GET /api/v1/tasks/{taskId}/synthetic-runs/{authorizationId}`, which checks the grant/task
-association and reads the persisted authorizer attempt and usage provenance. No request text,
-token, or private signing key is returned. After a broker response, the API reads the durable
-attempt again and checks task, grant, request, attempt, status, submission evidence, and response
-text before returning it; it derives the submission evidence from the persisted lifecycle and
-provider submission ID, since `submissionStartedAt` marks the pre-send boundary and does not by
-itself prove provider receipt. Usage is taken from the durable record. If worker or authorizer
-state cannot be confirmed, the API returns an uncertain result and does not resubmit.
+The current PR #46 branch omits `correlationId` in its uncertain HTTP 202 response at
+`apps/synthetic-broker/src/server.ts`. The backend now rejects that response and preserves the Run
+as unknown. Codex #3 must return the verified envelope's correlation ID for every outcome before
+the cross-process flow can pass acceptance. PR #46 must remain separate from backend changes.
 
-Cancellation uses the existing owner-protected grant revocation operation. Both the task-specific
-cancellation route and the standard Run stop route resolve the persisted Run-to-grant binding;
-the standard route does not accept an authorization ID from the caller. The API revokes the
-matching grant first, then asks the worker to persist `stopping`. The authorizer atomically blocks
-future consumption and records the in-flight attempt's durable `cancelRequestedAt`; this remains
-possible after grant expiry only when an active attempt exists. An expired unused grant cannot be
-revoked, and cannot be consumed. The owner receives a requested, unconfirmed state; worker
-unavailability after revocation does not erase that authorizer record, and a retry is idempotent.
-The broker recovery loop may request provider cancellation, but only a correlated `interrupted`
-event confirms termination. If the broker cannot establish the outcome, status and billing
-exposure remain unknown. No cancellation result is inferred from a lost response.
+## Validation evidence and remaining gaps
 
-## Security and production behavior
+- PR #55 exact-head CI: run `42295292543` passed; its independent reviewer approved the exact
+  base/head after fixing persisted task identity validation.
+- PR #56 exact-head CI: run `42309142334` passed; its independent reviewer approved the exact
+  base/head. Its database projection and queue integration are covered by PostgreSQL CI, and its
+  UI consumes the standard Run list/detail/SSE APIs.
+- PR #57's previous exact-head CI run `42314003278` passed on
+  `c4b2bea364e33ad08c3ef460561945c57c53365c`; the previous independent review returned
+  implementation **APPROVE**, synthetic-only **ELIGIBLE**, and real-runtime **BLOCK**.
+- A subsequent backend contract hardening makes broker correlation mandatory for every outcome.
+  It changes the reviewed head; that new candidate requires fresh exact-head CI and independent
+  re-review before its verdict can be used.
+- These PRs remain Draft and stacked; passing CI and review do not mean the changes are on main.
+- No local disposable PostgreSQL environment was available during PR #57 validation; the exact
+  head's PostgreSQL, full-stack, browser, backup/restore, container, and aggregate CI jobs passed.
+- The PR #46 independent review blocks milestone 1: the actual broker → authorizer → PostgreSQL
+  → network fake-provider lifecycle has not passed in distinct running processes; systemd
+  `IPAddressDeny` egress enforcement has not been demonstrated at the broker boundary; its
+  cross-surface canary coverage is incomplete; and its current-main CI integration is dirty.
+- PR #49's Compose/Docker boundary harness does not prove PR #46's broker process, actual
+  end-to-end provider event persistence, systemd egress enforcement, or real credential custody.
+- The rootful Docker launcher remains host-root-equivalent. Real provider credentials must not
+  be stored on that host. G4-3 remains Partially Fixed, R1-G5 remains Partially Complete,
+  AO-107/AO-113 remain BLOCKED, and production remains hard-wired to
+  `SandboxedMockRuntimeAdapter`.
 
-- The API and worker test-only routes are absent unless `NODE_ENV=test` and the explicit test
-  switch is set; setting the switch outside test mode aborts startup.
-- The standard worker runtime remains hard-wired to `SandboxedMockRuntimeAdapter`.
-- The test broker client uses only a fixed local Unix socket, a distinct synthetic caller token,
-  and the fixed synthetic-only broker contract. It does not accept provider URLs, credentials,
-  OAuth data, runtime selection, or tool capabilities.
-- The worker performs no direct authorization-table writes and cannot sign decisions. The broker
-  holds no PostgreSQL credentials; the authorizer validates and consumes grants transactionally.
-- Owner cancellation is a request, not proof of provider termination. Provider and run status
-  are read from the durable attempt record after restart.
-- This interface is application-level authentication only. It does not prove host peer UID/GID,
-  socket ownership, process isolation, or network egress controls.
-
-## Remaining integration gates
-
-PR #49 does not implement the socket target above or the broker's execution contract, so the
-owner-to-broker end-to-end path remains unavailable until Codex #3 aligns its active platform
-work to this versioned interface and supplies executable peer-identity/egress evidence.
-PR #46 remains Draft historical context and is not modified here. Its current unknown-submission
-response omits `correlationId`, which this backend contract requires to bind the outcome to the
-approved grant. It must be aligned before end-to-end integration; this PR does not claim it is
-compatible as-is.
-The current application `runs` table and pg-boss queue remain mock-specific; this integration
-uses the existing connector attempt as its durable run identity and does not enqueue connector
-prompts in PostgreSQL. This avoids persisting the exact rendered request, but it is a synchronous
-worker dispatch rather than a pg-boss scheduled connector run. A future asynchronous scheduler
-must decide how to retain or retrieve rendered input without storing it in plaintext, and must
-link any run projection to the existing attempt rather than creating a second state machine.
-
-The standard Run SSE stream remains mock-only. Connector status is available as a durable
-attempt snapshot; a separate event-history/UI projection is not part of this backend slice.
-Rootful Docker remains host-root-equivalent, so no real credential custody is permitted on that
-host. G4-3 remains Partially Fixed, R1-G5 Partially Complete, AO-107/AO-113 remain BLOCKED, and
-real-runtime activation remains BLOCK.
+The queued Run/SSE backend stack is ready for owner merge sequencing, but it does not complete
+synthetic end-to-end acceptance or authorize real runtime activation.

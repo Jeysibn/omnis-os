@@ -133,7 +133,7 @@ export class SyntheticBrokerRunCoordinator {
         response.taskId !== link.run.taskId ||
         response.authorizationId !== link.authorizationId ||
         response.requestId !== link.requestId ||
-        (response.correlationId !== undefined && response.correlationId !== link.correlationId)
+        response.correlationId !== link.correlationId
       ) {
         await this.finish(link.run.id, begun.generation, { status: 'unknown' });
         return;
