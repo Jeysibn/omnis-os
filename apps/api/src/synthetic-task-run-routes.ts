@@ -8,10 +8,12 @@ import {
   SyntheticTaskRunCancellationResponseSchema,
   SyntheticTaskRunDetailSchema,
   SyntheticTaskRunAdmissionResponseSchema,
-  SyntheticTaskRunEventsQuerySchema,
-  SyntheticTaskRunEventsResponseSchema,
   SyntheticTaskRunRequestSchema,
 } from '@omnis/contracts/synthetic-task-run';
+import {
+  SyntheticTaskRunEventsQuerySchema,
+  SyntheticTaskRunEventsResponseSchema,
+} from '@omnis/contracts/synthetic-audit-history';
 
 type Forwarder = <TResult>(
   path: string,

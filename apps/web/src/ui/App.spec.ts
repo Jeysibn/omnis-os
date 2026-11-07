@@ -34,10 +34,12 @@ const makeRun = (
   taskId: string,
   taskTitle: string,
   status: Run['status'] = 'completed',
+  linkedAuthorizationId?: string,
 ): Run => ({
   id,
   taskId,
   taskTitle,
+  ...(linkedAuthorizationId ? { authorizationId: linkedAuthorizationId } : {}),
   status,
   runtimeKind: 'mock',
   synthetic: true,
@@ -337,6 +339,26 @@ function createMockApi(page: Page) {
         return fulfillError(route, 503, 'runs_unavailable', 'Runs are temporarily unavailable.');
       }
       return route.fulfill({ json: currentRuns.map((run) => RunSchema.parse(run)) });
+    }
+    const auditMatch = path.match(/^\/api\/v1\/tasks\/([^/]+)\/synthetic-runs\/([^/]+)\/events$/);
+    if (auditMatch && method === 'GET') {
+      const auditEvent = {
+        attemptId: 'b70ef09b-b357-4da9-89c9-981eb90a0b05',
+        sequence: 1,
+        eventType: 'connector.authorization_consumed',
+        outcome: 'recorded',
+        revocationGeneration: 0,
+        occurredAt: now,
+      };
+      return route.fulfill({
+        json: {
+          version: 'omnis.synthetic-task-run-events.v1',
+          authorizationId: auditMatch[2],
+          taskId: auditMatch[1],
+          events: [auditEvent],
+          page: { nextAfter: null },
+        },
+      });
     }
     if (path === '/api/v1/authorizations' && method === 'POST') {
       const key = headers['idempotency-key'] ?? '';
@@ -805,6 +827,28 @@ test('loads tasks and runs independently and retries without false empty states'
   await expect(page.getByRole('heading', { name: 'Review launch checklist' })).toBeVisible();
   await page.getByRole('button', { name: 'Retry tasks' }).first().click();
   await expect(page.getByRole('heading', { name: 'Review launch checklist' })).toBeVisible();
+});
+
+test('shows persisted authorization audit history for a linked synthetic run', async ({
+  page,
+  api,
+}) => {
+  api.configure({
+    runs: [
+      makeRun('run-audit', 'task-open', 'Review launch checklist', 'completed', authorizationId),
+    ],
+  });
+  await openWorkspace(page, '#runs/run-audit');
+  await expect(page.getByRole('heading', { name: 'Authorization audit' })).toBeVisible();
+  await expect(page.getByText('authorization consumed')).toBeVisible();
+  await expect(page.getByText('recorded; revocation generation 0')).toBeVisible();
+  expect(api.requests).toContainEqual({
+    method: 'GET',
+    path: `/api/v1/tasks/task-open/synthetic-runs/${authorizationId}/events`,
+    headers: expect.any(Object),
+    body: null,
+  });
+  await assertNoSeriousAxeViolations(page);
 });
 
 test('shows a real loading state until the delayed task request resolves', async ({

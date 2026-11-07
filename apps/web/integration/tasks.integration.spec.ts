@@ -285,6 +285,7 @@ test('owner sees an authorized synthetic broker Run, ordered events, result and 
     .toEqual({ runStatus: 'completed', attemptStatus: 'completed' });
   expect(persistedRun.runtimeKind).toBe('mock');
   expect(persistedRun.synthetic).toBe(true);
+  expect(persistedRun.authorizationId).toBe(authorization.id);
 
   const detail = await ownerRequest(
     page,

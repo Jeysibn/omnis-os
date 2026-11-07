@@ -8,6 +8,7 @@
     "./connector-broker": "./src/connector-broker.ts",
     "./broker-ipc": "./src/broker-ipc.ts",
     "./synthetic-task-run": "./src/synthetic-task-run.ts",
+    "./synthetic-audit-history": "./src/synthetic-audit-history.ts",
     "./synthetic-connector-prompt": "./src/synthetic-connector-prompt.ts"
   },
   "scripts": {

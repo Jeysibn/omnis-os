@@ -39,6 +39,7 @@ import { ApiRequestError, request } from './api.js';
 import { AgentsWorkspace } from './agents/AgentsWorkspace.js';
 import { DepartmentsWorkspace } from './departments/DepartmentsWorkspace.js';
 import { AppHeader } from './shell/AppHeader.js';
+import { SyntheticAuditHistory } from './SyntheticAuditHistory.js';
 
 type Owner = { id: string; displayName: string };
 type Page = 'command-center' | 'tasks' | 'runs' | 'agents' | 'departments';
@@ -1668,6 +1669,9 @@ function RunInspector({
                     ? 'Event stream closed. Refresh the page to reconnect.'
                     : 'Waiting for run events…'}
             </div>
+          )}
+          {run.authorizationId && (
+            <SyntheticAuditHistory taskId={run.taskId} authorizationId={run.authorizationId} />
           )}
           {run.status === 'completed' && (
             <div className="unverified-note">
