@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   SyntheticTaskRunEventsResponseSchema,
   type SyntheticTaskRunEvent,
@@ -19,11 +19,14 @@ export function SyntheticAuditHistory({
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState('');
   const [retry, setRetry] = useState(0);
+  const requestGeneration = useRef(0);
 
   useEffect(() => {
+    const generation = ++requestGeneration.current;
     let current = true;
     setHistory({ events: [], nextAfter: null });
     setLoading(true);
+    setLoadingMore(false);
     setError('');
     const query = new URLSearchParams({ after: '0', limit: '50' });
     void request(
@@ -48,11 +51,13 @@ export function SyntheticAuditHistory({
       });
     return () => {
       current = false;
+      if (requestGeneration.current === generation) requestGeneration.current += 1;
     };
   }, [taskId, authorizationId, retry]);
 
-  async function loadOlder() {
+  async function loadMore() {
     if (history.nextAfter === null || loadingMore) return;
+    const generation = requestGeneration.current;
     setLoadingMore(true);
     setError('');
     const query = new URLSearchParams({ after: String(history.nextAfter), limit: '50' });
@@ -62,6 +67,7 @@ export function SyntheticAuditHistory({
         {},
         (value) => SyntheticTaskRunEventsResponseSchema.parse(value),
       );
+      if (requestGeneration.current !== generation) return;
       if (page.taskId !== taskId || page.authorizationId !== authorizationId)
         throw new Error('Authorization audit history did not match this Run.');
       setHistory((current) => ({
@@ -69,11 +75,12 @@ export function SyntheticAuditHistory({
         nextAfter: page.page.nextAfter,
       }));
     } catch (cause) {
+      if (requestGeneration.current !== generation) return;
       setError(
-        cause instanceof Error ? cause.message : 'Older authorization events are unavailable.',
+        cause instanceof Error ? cause.message : 'More authorization events are unavailable.',
       );
     } finally {
-      setLoadingMore(false);
+      if (requestGeneration.current === generation) setLoadingMore(false);
     }
   }
 
@@ -102,7 +109,9 @@ export function SyntheticAuditHistory({
           {history.events.map((event) => (
             <li key={`${event.attemptId}-${event.sequence}`}>
               <span>{event.eventType.replace('connector.', '').replaceAll('_', ' ')}</span>
-              <time dateTime={event.occurredAt}>{new Date(event.occurredAt).toLocaleString()}</time>
+              <time dateTime={event.occurredAt}>
+                {new Date(event.occurredAt).toLocaleString('en-US', { timeZone: 'Asia/Manila' })}
+              </time>
               <small>
                 {event.outcome}; revocation generation {event.revocationGeneration}
               </small>
@@ -120,8 +129,8 @@ export function SyntheticAuditHistory({
         </p>
       )}
       {history.nextAfter !== null && !loading && (
-        <button className="text-button" onClick={() => void loadOlder()} disabled={loadingMore}>
-          {loadingMore ? 'Loading older events…' : 'Load older authorization events'}
+        <button className="text-button" onClick={() => void loadMore()} disabled={loadingMore}>
+          {loadingMore ? 'Loading more events…' : 'Load more authorization events'}
         </button>
       )}
     </section>
