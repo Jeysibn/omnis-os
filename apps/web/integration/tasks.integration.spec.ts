@@ -267,16 +267,22 @@ test('owner sees an authorized synthetic broker Run, ordered events, result and 
   expect(syntheticRun.status).toBe(202);
   const runId = syntheticRun.body.id;
   let persistedRun;
+  let persistedAttemptStatus;
   await expect
     .poll(
       async () => {
         const state = await ownerRequest(page, `/api/v1/runs/${runId}`);
         persistedRun = state.body;
-        return state.body.status;
+        const detail = await ownerRequest(
+          page,
+          `/api/v1/tasks/${assigned.body.id}/synthetic-runs/${authorization.id}`,
+        );
+        persistedAttemptStatus = detail.body?.attempt?.status;
+        return { runStatus: state.body.status, attemptStatus: persistedAttemptStatus };
       },
       { timeout: 15_000 },
     )
-    .toBe('completed');
+    .toEqual({ runStatus: 'completed', attemptStatus: 'completed' });
   expect(persistedRun.runtimeKind).toBe('mock');
   expect(persistedRun.synthetic).toBe(true);
 

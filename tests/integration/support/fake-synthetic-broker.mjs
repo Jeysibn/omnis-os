@@ -18,6 +18,7 @@ if (Object.keys(process.env).some((name) => !allowedEnvironment.has(name))) {
   throw new Error('The synthetic broker fixture received an unexpected environment variable.');
 }
 const server = createServer((request, response) => {
+  let stage = 'validate_request';
   void (async () => {
     if (request.method === 'GET' && request.url === '/health') {
       return sendJson(response, 200, { status: 'ok' });
@@ -45,6 +46,7 @@ const server = createServer((request, response) => {
       return sendJson(response, 400, { error: { code: 'invalid_input' } });
     }
 
+    stage = 'admission';
     const admission = await authorizerRequest('admissions', {
       version: 'omnis.broker-authorizer-ipc.v1',
       authorizationId: input.authorizationId,
@@ -56,6 +58,7 @@ const server = createServer((request, response) => {
     if (typeof attemptId !== 'string' || !envelope?.claims) {
       throw new Error('Synthetic authorizer admission response was invalid.');
     }
+    stage = 'begin_submission';
     await authorizerRequest('submissions/begin', {
       version: 'omnis.broker-authorizer-ipc.v1',
       attemptId,
@@ -76,6 +79,7 @@ const server = createServer((request, response) => {
       },
       responseText: 'Synthetic provider fixture result.',
     };
+    stage = 'record_provider_event';
     await authorizerRequest('provider-events', {
       version: 'omnis.broker-authorizer-ipc.v1',
       attemptId,
@@ -89,6 +93,7 @@ const server = createServer((request, response) => {
       responseText: event.responseText,
     });
   })().catch(() => {
+    process.stderr.write(`synthetic_broker_fixture_failure:${stage}\n`);
     if (!response.headersSent) sendJson(response, 503, { error: { code: 'fixture_unavailable' } });
     else response.destroy();
   });
