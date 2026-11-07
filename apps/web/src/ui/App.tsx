@@ -70,17 +70,29 @@ const pendingTaskCreateStorageKey = 'omnis.pending-task-create.v1';
 const idempotencyKeyPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-function readPendingTaskCreate(): TaskCreateOperation | null {
+type StoredTaskCreate = { ownerId: string; operation: TaskCreateOperation };
+
+function readPendingTaskCreate(): StoredTaskCreate | null {
   try {
     const stored = sessionStorage.getItem(pendingTaskCreateStorageKey);
     if (!stored) return null;
     const value: unknown = JSON.parse(stored);
-    if (typeof value !== 'object' || value === null || !('idempotencyKey' in value)) {
+    if (
+      typeof value !== 'object' ||
+      value === null ||
+      !('ownerId' in value) ||
+      typeof value.ownerId !== 'string' ||
+      !value.ownerId ||
+      !('operation' in value) ||
+      typeof value.operation !== 'object' ||
+      value.operation === null ||
+      !('idempotencyKey' in value.operation)
+    ) {
       sessionStorage.removeItem(pendingTaskCreateStorageKey);
       return null;
     }
-    const operation = CreateTaskSchema.safeParse(value);
-    const idempotencyKey = value.idempotencyKey;
+    const operation = CreateTaskSchema.safeParse(value.operation);
+    const idempotencyKey = value.operation.idempotencyKey;
     if (
       !operation.success ||
       operation.data.projectId == null ||
@@ -91,18 +103,26 @@ function readPendingTaskCreate(): TaskCreateOperation | null {
       return null;
     }
     return {
-      ...operation.data,
-      projectId: operation.data.projectId,
-      idempotencyKey,
+      ownerId: value.ownerId,
+      operation: {
+        ...operation.data,
+        projectId: operation.data.projectId,
+        idempotencyKey,
+      },
     };
   } catch {
     return null;
   }
 }
 
-function storePendingTaskCreate(operation: TaskCreateOperation | null): boolean {
+function storePendingTaskCreate(
+  ownerId: string | null,
+  operation: TaskCreateOperation | null,
+): boolean {
   try {
-    if (operation) sessionStorage.setItem(pendingTaskCreateStorageKey, JSON.stringify(operation));
+    if (operation && ownerId)
+      sessionStorage.setItem(pendingTaskCreateStorageKey, JSON.stringify({ ownerId, operation }));
+    else if (operation) return false;
     else sessionStorage.removeItem(pendingTaskCreateStorageKey);
     return true;
   } catch {
@@ -230,12 +250,18 @@ function App() {
   const [events, setEvents] = useState<RunEvent[]>([]);
   const [streamState, setStreamState] = useState<StreamState>('connecting');
   const [page, setPage] = useState<Page>(() => readRoute().page);
-  const [title, setTitle] = useState('');
-  const [detail, setDetail] = useState('');
-  const [taskProjectId, setTaskProjectId] = useState('');
+  const [restoredTaskCreate] = useState(readPendingTaskCreate);
+  const [title, setTitle] = useState(() => restoredTaskCreate?.operation.title ?? '');
+  const [detail, setDetail] = useState(() => restoredTaskCreate?.operation.detail ?? '');
+  const [taskProjectId, setTaskProjectId] = useState(
+    () => restoredTaskCreate?.operation.projectId ?? '',
+  );
   const [invalidTaskProjectSelection, setInvalidTaskProjectSelection] = useState(false);
   const [pendingTaskCreate, setPendingTaskCreate] = useState<TaskCreateOperation | null>(
-    readPendingTaskCreate,
+    () => restoredTaskCreate?.operation ?? null,
+  );
+  const [pendingTaskCreateOwnerId, setPendingTaskCreateOwnerId] = useState<string | null>(
+    () => restoredTaskCreate?.ownerId ?? null,
   );
   const [password, setPassword] = useState('');
   const [approvalTask, setApprovalTask] = useState<Task | null>(null);
@@ -309,7 +335,8 @@ function App() {
       setApprovalTask(null);
       setApprovalOperation(null);
       setPendingTaskCreate(null);
-      storePendingTaskCreate(null);
+      setPendingTaskCreateOwnerId(null);
+      storePendingTaskCreate(null, null);
       setApprovalExpiry('');
       setPassword('');
       setError('Your owner session expired. Sign in again to continue.');
@@ -360,6 +387,27 @@ function App() {
       setProjectsLoading(false);
     }
   }, [expireSessionIfNeeded]);
+
+  useEffect(() => {
+    if (
+      !owner ||
+      !pendingTaskCreate ||
+      !pendingTaskCreateOwnerId ||
+      projectsLoaded ||
+      projectsLoading ||
+      projectsError
+    )
+      return;
+    void loadProjects();
+  }, [
+    loadProjects,
+    owner,
+    pendingTaskCreate,
+    pendingTaskCreateOwnerId,
+    projectsError,
+    projectsLoaded,
+    projectsLoading,
+  ]);
 
   const loadRuns = useCallback(async () => {
     setRunsLoading(true);
@@ -427,6 +475,14 @@ function App() {
       try {
         await refreshCsrf();
         const currentOwner = await request('/api/v1/me', {}, parseOwner);
+        if (restoredTaskCreate && restoredTaskCreate.ownerId !== currentOwner.id) {
+          setPendingTaskCreate(null);
+          setPendingTaskCreateOwnerId(null);
+          setTitle('');
+          setDetail('');
+          setTaskProjectId('');
+          storePendingTaskCreate(null, null);
+        }
         setOwner(currentOwner);
         setChecking(false);
         void loadWorkspace();
@@ -438,7 +494,7 @@ function App() {
         setChecking(false);
       }
     })();
-  }, [loadWorkspace, refreshCsrf]);
+  }, [loadWorkspace, refreshCsrf, restoredTaskCreate]);
 
   useEffect(() => {
     if (!owner || page !== 'runs' || !selectedRunId || !selectedRunExists) {
@@ -550,6 +606,14 @@ function App() {
       setPassword('');
       const token = await refreshCsrf();
       const currentOwner = await request('/api/v1/me', {}, parseOwner);
+      if (restoredTaskCreate && restoredTaskCreate.ownerId !== currentOwner.id) {
+        setPendingTaskCreate(null);
+        setPendingTaskCreateOwnerId(null);
+        setTitle('');
+        setDetail('');
+        setTaskProjectId('');
+        storePendingTaskCreate(null, null);
+      }
       setOwner(currentOwner);
       setCsrfToken(token);
       await loadWorkspace();
@@ -598,23 +662,31 @@ function App() {
       setDetail('');
       setTaskProjectId('');
       setPendingTaskCreate(null);
-      storePendingTaskCreate(null);
+      setPendingTaskCreateOwnerId(null);
+      storePendingTaskCreate(null, null);
     } catch (cause) {
       if (expireSessionIfNeeded(cause)) {
         setPendingTaskCreate(null);
-        storePendingTaskCreate(null);
+        setPendingTaskCreateOwnerId(null);
+        storePendingTaskCreate(null, null);
       } else if (
         operation.projectId &&
         !(cause instanceof ApiRequestError && cause.outcome === 'rejected')
       ) {
         setPendingTaskCreate(operation);
-        const saved = storePendingTaskCreate(operation);
+        setPendingTaskCreateOwnerId(owner?.id ?? null);
+        const saved = storePendingTaskCreate(owner?.id ?? null, operation);
         setError(
           saved
             ? 'The project task request may have been accepted, but its result was not confirmed. The form is locked; retry the exact request with the same idempotency key.'
             : 'The project task request may have been accepted, but its result was not confirmed. The form is locked; retry the exact request with the same idempotency key. Recovery could not be saved for a page refresh.',
         );
       } else {
+        if (pendingTaskCreate) {
+          setPendingTaskCreate(null);
+          setPendingTaskCreateOwnerId(null);
+          storePendingTaskCreate(null, null);
+        }
         setError(
           cause instanceof ApiRequestError && cause.outcome !== 'rejected'
             ? 'Task creation could not be confirmed. Reload Tasks and check for the task before trying again.'
@@ -905,7 +977,8 @@ function App() {
       setTasks([]);
       setRuns([]);
       setPendingTaskCreate(null);
-      storePendingTaskCreate(null);
+      setPendingTaskCreateOwnerId(null);
+      storePendingTaskCreate(null, null);
       setSelectedRunId(null);
       setSelectedTaskId(null);
       setEvents([]);

@@ -90,6 +90,7 @@ type FixtureOptions = {
   taskDelayMs?: number;
   taskMutationStatus?: number;
   taskMutationFailures?: number;
+  taskMutationRetryStatus?: number;
   authorizationDisconnects?: number;
   decisionDisconnects?: number;
   runDisconnects?: number;
@@ -356,18 +357,19 @@ function createMockApi(page: Page) {
         options.taskMutationStatus &&
         (taskMutationFailures > 0 || options.taskMutationFailures === undefined)
       ) {
+        const status =
+          options.taskMutationFailures !== undefined &&
+          taskMutationFailures === 0 &&
+          options.taskMutationRetryStatus
+            ? options.taskMutationRetryStatus
+            : options.taskMutationStatus;
         if (taskMutationFailures > 0) taskMutationFailures -= 1;
-        if (options.taskMutationStatus === 401) {
+        if (status === 401) {
           authenticated = false;
           currentCsrfToken = 'csrf-recovered-fixture-token';
           csrfBootstrapFailures = options.csrfBootstrapFailures ?? 0;
         }
-        return fulfillError(
-          route,
-          options.taskMutationStatus,
-          'task_write_failed',
-          'Task could not be created.',
-        );
+        return fulfillError(route, status, 'task_write_failed', 'Task could not be created.');
       }
       const parsed = CreateTaskSchema.safeParse(body);
       if (!parsed.success)
@@ -1147,6 +1149,12 @@ test('an uncertain project task create retries the identical request with the sa
   await page.reload();
   await expect(page.getByRole('button', { name: 'Retry same request' })).toBeVisible();
   await expect(page.getByLabel('Task title')).toHaveAttribute('readonly', '');
+  await expect(page.getByLabel('Task title')).toHaveValue('Review the deployment plan');
+  await expect(page.getByLabel('Task detail')).toHaveValue(
+    'Read the deployment plan and report its next action.',
+  );
+  await expect(page.getByLabel('Project')).toHaveValue(`prj_${'a'.repeat(32)}`);
+  await expect(page.getByRole('status')).toContainText('unknown outcome');
   await page.getByRole('button', { name: 'Retry same request' }).click();
   await expect(page.getByRole('heading', { name: 'Review the deployment plan' })).toBeVisible();
 
@@ -1157,6 +1165,62 @@ test('an uncertain project task create retries the identical request with the sa
   expect(creates[1]?.body).toEqual(creates[0]?.body);
   expect(creates[1]?.headers['idempotency-key']).toBe(creates[0]?.headers['idempotency-key']);
   expect(api.tasks.filter((task) => task.title === 'Review the deployment plan')).toHaveLength(1);
+});
+
+test('a definitive rejection of a recovered request unlocks the form for correction', async ({
+  page,
+  api,
+}) => {
+  api.configure({
+    taskMutationStatus: 503,
+    taskMutationFailures: 1,
+    taskMutationRetryStatus: 409,
+  });
+  await openWorkspace(page, '#tasks');
+  await page.getByRole('button', { name: 'Load available projects' }).click();
+  await expect(page.getByRole('option', { name: 'Operations (OPS)' })).toBeAttached();
+  await page.getByLabel('Project').selectOption(`prj_${'a'.repeat(32)}`);
+  await page.getByLabel('Task title').fill('Review the deployment plan');
+  await page.getByLabel('Task detail').fill('Read the deployment plan and report its next action.');
+  await page.getByRole('button', { name: 'Create task' }).click();
+  await expect(page.getByRole('button', { name: 'Retry same request' })).toBeVisible();
+  await page.getByRole('button', { name: 'Retry same request' }).click();
+  await expect(page.getByRole('button', { name: 'Create task' })).toBeVisible();
+  await expect(page.getByLabel('Task title')).not.toHaveAttribute('readonly', '');
+  await expect(page.getByLabel('Task detail')).not.toHaveAttribute('readonly', '');
+  await expect(page.getByText('The project task request may have been accepted')).toHaveCount(0);
+  await expect(page.getByRole('alert')).toContainText('Task could not be created.');
+  expect(
+    await page.evaluate(() => sessionStorage.getItem('omnis.pending-task-create.v1')),
+  ).toBeNull();
+});
+
+test('does not restore a pending task request for a different owner session', async ({
+  page,
+  api,
+}) => {
+  api.configure();
+  await page.addInitScript(() => {
+    sessionStorage.setItem(
+      'omnis.pending-task-create.v1',
+      JSON.stringify({
+        ownerId: 'another-owner',
+        operation: {
+          title: 'Private task from another owner',
+          detail: 'This task belongs to a different owner session.',
+          projectId: `prj_${'a'.repeat(32)}`,
+          idempotencyKey: 'b7cece2c-2e6f-4b3b-92da-f0352c24debb',
+        },
+      }),
+    );
+  });
+  await openWorkspace(page, '#tasks');
+  await expect(page.getByLabel('Task title')).toHaveValue('');
+  await expect(page.getByLabel('Task title')).not.toHaveAttribute('readonly', '');
+  await expect(page.getByText('Private task from another owner')).toHaveCount(0);
+  expect(
+    await page.evaluate(() => sessionStorage.getItem('omnis.pending-task-create.v1')),
+  ).toBeNull();
 });
 
 test('rejects an invalid project selection before posting a task', async ({ page, api }) => {
