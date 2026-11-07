@@ -848,6 +848,7 @@ const postgresSuite = describe(
       assert.equal(admitted.created, true);
       assert.equal(replay.created, false);
       assert.equal(admitted.run.id, runId);
+      assert.equal(admitted.run.authorizationId, grant.id);
       assert.equal(admitted.run.status, 'queued');
       assert.equal(queued, 1);
       const linked = await store.getSyntheticBrokerRun(runId);

@@ -1597,6 +1597,7 @@ function mapRun(row: RunRow): Run {
     id: row.id,
     taskId: row.task_id,
     taskTitle: row.task_title,
+    authorizationId: row.connector_authorization_id ?? null,
     status: row.status,
     runtimeKind: row.runtime_kind,
     synthetic: row.synthetic,

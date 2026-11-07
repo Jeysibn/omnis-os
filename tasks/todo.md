@@ -5,6 +5,7 @@
 - [x] Review #55→#58 diff and findings; record the remaining late-outcome and process-boundary gaps.
 - [x] Review #54 audit overlap and #41 migration/ACL implications; selectively implement only the additive audit read path.
 - [x] Implement a local owner-scoped, paginated synthetic execution audit API without adding a second ledger.
+- [x] Render that audit history from a persisted Run authorization identity and add browser/database coverage.
 - [ ] Complete minimum owner frontend journey and browser E2E.
 - [x] Set Docker Compose/private Linux as the documented deployment target and remove active Kubernetes/k3s roadmap direction.
 - [x] Document real-runtime blockers and disabled-by-default design; no provider calls.
@@ -17,4 +18,4 @@
 - [x] Unit/contracts, disposable PostgreSQL backup/restore, ACL fixtures, and rejection-path tests pass.
 - [ ] Browser owner journey, cancellation, refresh, and persisted recovery pass.
 - [ ] Docker process-boundary and restart evidence is current; boundary script is restricted to disposable root Linux CI.
-- [x] Exact-head GitHub CI passed for Draft PR #59 at `583224a` (run `42350161214`, all eight jobs).
+- [x] Exact-head GitHub CI passed for Draft PR #60 at `ca36a90` (run `42351895709`, all eight jobs).

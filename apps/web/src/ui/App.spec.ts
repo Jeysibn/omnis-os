@@ -34,10 +34,12 @@ const makeRun = (
   taskId: string,
   taskTitle: string,
   status: Run['status'] = 'completed',
+  linkedAuthorizationId?: string,
 ): Run => ({
   id,
   taskId,
   taskTitle,
+  ...(linkedAuthorizationId ? { authorizationId: linkedAuthorizationId } : {}),
   status,
   runtimeKind: 'mock',
   synthetic: true,
@@ -337,6 +339,26 @@ function createMockApi(page: Page) {
         return fulfillError(route, 503, 'runs_unavailable', 'Runs are temporarily unavailable.');
       }
       return route.fulfill({ json: currentRuns.map((run) => RunSchema.parse(run)) });
+    }
+    const auditMatch = path.match(/^\/api\/v1\/tasks\/([^/]+)\/synthetic-runs\/([^/]+)\/events$/);
+    if (auditMatch && method === 'GET') {
+      const auditEvent = {
+        attemptId: 'b70ef09b-b357-4da9-89c9-981eb90a0b05',
+        sequence: 1,
+        eventType: 'connector.authorization_consumed',
+        outcome: 'recorded',
+        revocationGeneration: 0,
+        occurredAt: now,
+      };
+      return route.fulfill({
+        json: {
+          version: 'omnis.synthetic-task-run-events.v1',
+          authorizationId: auditMatch[2],
+          taskId: auditMatch[1],
+          events: [auditEvent],
+          page: { nextAfter: null },
+        },
+      });
     }
     if (path === '/api/v1/authorizations' && method === 'POST') {
       const key = headers['idempotency-key'] ?? '';
@@ -805,6 +827,168 @@ test('loads tasks and runs independently and retries without false empty states'
   await expect(page.getByRole('heading', { name: 'Review launch checklist' })).toBeVisible();
   await page.getByRole('button', { name: 'Retry tasks' }).first().click();
   await expect(page.getByRole('heading', { name: 'Review launch checklist' })).toBeVisible();
+});
+
+test.describe('persisted authorization audit history', () => {
+  test.use({ timezoneId: 'UTC' });
+
+  test('shows history in Asia/Manila time for a linked synthetic run', async ({ page, api }) => {
+    api.configure({
+      runs: [
+        makeRun('run-audit', 'task-open', 'Review launch checklist', 'completed', authorizationId),
+      ],
+    });
+    await openWorkspace(page, '#runs/run-audit');
+    await expect(page.getByRole('heading', { name: 'Authorization audit' })).toBeVisible();
+    await expect(page.getByText('authorization consumed')).toBeVisible();
+    await expect(page.getByText('recorded; revocation generation 0')).toBeVisible();
+    await expect(page.locator('.audit-list time')).toHaveText(/11\/3\/2026, 6:00:00 PM/);
+    expect(api.requests).toContainEqual({
+      method: 'GET',
+      path: `/api/v1/tasks/task-open/synthetic-runs/${authorizationId}/events`,
+      headers: expect.any(Object),
+      body: null,
+    });
+    await assertNoSeriousAxeViolations(page);
+  });
+
+  test('ignores an authorization audit page that resolves after switching Runs', async ({
+    page,
+    api,
+  }) => {
+    const otherAuthorizationId = 'cc62d253-2473-4fbc-bfdc-3f2a050ec778';
+    api.configure({
+      runs: [
+        makeRun(
+          'run-audit-a',
+          'task-open',
+          'Review launch checklist',
+          'completed',
+          authorizationId,
+        ),
+        makeRun(
+          'run-audit-b',
+          'task-open',
+          'Review launch checklist',
+          'completed',
+          otherAuthorizationId,
+        ),
+      ],
+    });
+    let releasePending!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      releasePending = resolve;
+    });
+    let signalPageRequest!: () => void;
+    const pageRequested = new Promise<void>((resolve) => {
+      signalPageRequest = resolve;
+    });
+    await page.route(`**/synthetic-runs/${authorizationId}/events**`, async (route) => {
+      const after = new URL(route.request().url()).searchParams.get('after');
+      if (after !== '1') {
+        return route.fulfill({
+          json: {
+            version: 'omnis.synthetic-task-run-events.v1',
+            authorizationId,
+            taskId: 'task-open',
+            events: [
+              {
+                attemptId: 'b70ef09b-b357-4da9-89c9-981eb90a0b05',
+                sequence: 1,
+                eventType: 'connector.authorization_consumed',
+                outcome: 'recorded',
+                revocationGeneration: 0,
+                occurredAt: now,
+              },
+            ],
+            page: { nextAfter: 1 },
+          },
+        });
+      }
+      signalPageRequest();
+      await pending;
+      await route.fulfill({
+        json: {
+          version: 'omnis.synthetic-task-run-events.v1',
+          authorizationId,
+          taskId: 'task-open',
+          events: [
+            {
+              attemptId: 'b70ef09b-b357-4da9-89c9-981eb90a0b05',
+              sequence: 2,
+              eventType: 'connector.execution_completed',
+              outcome: 'recorded',
+              revocationGeneration: 0,
+              occurredAt: now,
+            },
+          ],
+          page: { nextAfter: null },
+        },
+      });
+    });
+    await openWorkspace(page, '#runs/run-audit-a');
+    await expect(page.getByRole('heading', { name: 'Authorization audit' })).toBeVisible();
+    await page.getByRole('button', { name: 'Load more authorization events' }).click();
+    await pageRequested;
+    await page.evaluate(() => {
+      window.location.hash = '#runs/run-audit-b';
+    });
+    await expect(page.getByText('authorization consumed')).toBeVisible();
+    releasePending();
+    await expect(page.getByText('execution completed')).toHaveCount(0);
+    await expect(page.getByText('authorization consumed')).toBeVisible();
+  });
+
+  test('loads later authorization events in ascending order with an accurate action label', async ({
+    page,
+    api,
+  }) => {
+    api.configure({
+      runs: [
+        makeRun(
+          'run-audit-pages',
+          'task-open',
+          'Review launch checklist',
+          'completed',
+          authorizationId,
+        ),
+      ],
+    });
+    await page.route(`**/synthetic-runs/${authorizationId}/events**`, async (route) => {
+      const after = new URL(route.request().url()).searchParams.get('after');
+      const sequence = after === '1' ? 2 : 1;
+      await route.fulfill({
+        json: {
+          version: 'omnis.synthetic-task-run-events.v1',
+          authorizationId,
+          taskId: 'task-open',
+          events: [
+            {
+              attemptId: 'b70ef09b-b357-4da9-89c9-981eb90a0b05',
+              sequence,
+              eventType:
+                sequence === 1
+                  ? 'connector.authorization_consumed'
+                  : 'connector.submission_started',
+              outcome: 'recorded',
+              revocationGeneration: 0,
+              occurredAt: now,
+            },
+          ],
+          page: { nextAfter: sequence === 1 ? 1 : null },
+        },
+      });
+    });
+    await openWorkspace(page, '#runs/run-audit-pages');
+    await expect(page.getByText('authorization consumed')).toBeVisible();
+    const loadMore = page.getByRole('button', { name: 'Load more authorization events' });
+    await expect(loadMore).toBeVisible();
+    await loadMore.click();
+    await expect(page.getByText('submission started')).toBeVisible();
+    await expect(page.locator('.audit-list li')).toHaveCount(2);
+    await expect(page.locator('.audit-list li').nth(0)).toContainText('authorization consumed');
+    await expect(page.locator('.audit-list li').nth(1)).toContainText('submission started');
+  });
 });
 
 test('shows a real loading state until the delayed task request resolves', async ({

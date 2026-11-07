@@ -4,11 +4,11 @@ import {
   ConnectorAuthorizationRequestSchema,
   ConnectorAuthorizationSchema,
 } from '@omnis/contracts/connector-authorization';
+import { SyntheticTaskRunDetailSchema } from '@omnis/contracts/synthetic-task-run';
 import {
-  SyntheticTaskRunDetailSchema,
   SyntheticTaskRunEventsQuerySchema,
   SyntheticTaskRunEventsResponseSchema,
-} from '@omnis/contracts/synthetic-task-run';
+} from '@omnis/contracts/synthetic-audit-history';
 import {
   ConnectorAuthorizationStoreError,
   type PostgresConnectorAuthorizationStore,

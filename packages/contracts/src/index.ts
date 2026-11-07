@@ -442,6 +442,7 @@ export const RunSchema = z.object({
   id: z.string().min(1),
   taskId: z.string().min(1),
   taskTitle: z.string().min(1),
+  authorizationId: z.string().uuid().nullable().optional(),
   status: RunStatusSchema,
   runtimeKind: z.literal('mock'),
   synthetic: z.literal(true),

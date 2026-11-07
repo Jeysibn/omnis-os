@@ -323,6 +323,27 @@ describe('run contracts', () => {
     );
   });
 
+  it('carries a nullable authorization identity for linked Run audit history', () => {
+    const run = {
+      id: 'run-0001',
+      taskId: 'task-0001',
+      taskTitle: 'Read the file list',
+      status: 'queued',
+      runtimeKind: 'mock',
+      synthetic: true,
+      usage: { quality: 'unknown', inputTokens: null, outputTokens: null, cost: null },
+      createdAt: '2026-11-02T00:00:00.000Z',
+      updatedAt: '2026-11-02T00:00:00.000Z',
+    };
+    assert.equal(
+      RunSchema.parse({ ...run, authorizationId: 'b7cece2c-2e6f-4b3b-92da-f0352c24debb' })
+        .authorizationId,
+      'b7cece2c-2e6f-4b3b-92da-f0352c24debb',
+    );
+    assert.equal(RunSchema.parse({ ...run, authorizationId: null }).authorizationId, null);
+    assert.equal(RunSchema.safeParse({ ...run, authorizationId: 'invalid' }).success, false);
+  });
+
   it('represents interrupted execution explicitly and as synthetic mock evidence', () => {
     const event = RunEventSchema.parse({
       id: 'evt-run-0001-0004',

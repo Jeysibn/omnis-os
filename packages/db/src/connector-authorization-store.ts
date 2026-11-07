@@ -13,7 +13,7 @@ import {
 import {
   SyntheticTaskRunEventSchema,
   type SyntheticTaskRunEvent,
-} from '@omnis/contracts/synthetic-task-run';
+} from '@omnis/contracts/synthetic-audit-history';
 import {
   ConnectorDecisionEnvelopeSchema,
   canonicalizeConnectorDecisionClaims,

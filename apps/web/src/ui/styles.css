@@ -1051,6 +1051,61 @@ button:disabled {
   padding: 0;
   list-style: none;
 }
+.audit-history {
+  margin-top: 20px;
+  padding-top: 15px;
+  border-top: 1px solid #e5e9ef;
+}
+.audit-description,
+.audit-empty {
+  margin: 0 1px 8px;
+  color: #647287;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.audit-list {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.audit-list li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 12px;
+  padding: 10px 1px;
+  border-bottom: 1px solid #edf0f4;
+}
+.audit-list li > span {
+  color: #35445a;
+  font-size: 12px;
+  font-weight: 620;
+  text-transform: capitalize;
+  overflow-wrap: anywhere;
+}
+.audit-list time,
+.audit-list small {
+  color: #647287;
+  font-size: 10px;
+}
+.audit-list small {
+  grid-column: 1 / -1;
+}
+.audit-history > .text-button {
+  min-height: 36px;
+  margin-top: 8px;
+  padding: 0 2px;
+  color: #435d88;
+  font-size: 11px;
+  text-align: left;
+}
+.audit-error {
+  margin: 0 1px 8px;
+  color: #a03343;
+  font-size: 11px;
+  line-height: 1.5;
+}
 .event-row {
   position: relative;
   display: grid;
