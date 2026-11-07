@@ -79,7 +79,7 @@ Tasks are ordered and suitable for individual GitHub issues. Every issue must in
 |---|---|---|---|---|
 | AO-601 | P0 | Security audit incl. tools, MCP, memory and OAuth | AO-303,AO-501 | Critical findings remediated/reviewed |
 | AO-602 | P0 | DB/vault/artifact backup + restore drill | AO-304,AO-404 | Verified isolated restore and audit |
-| AO-603 | P0 | Private homelab k3s/TLS/secret deployment | AO-601,AO-602 | No public ports, rollback verified |
+| AO-603 | P0 | Private Linux Docker Compose/TLS/secret deployment | AO-601,AO-602 | No public ports, rollback verified |
 | AO-604 | P1 | Observability, perf/load/3D resource tests | AO-503,AO-603 | Benchmarked on target hardware |
 
 ## Issue format

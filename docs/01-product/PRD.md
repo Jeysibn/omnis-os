@@ -27,7 +27,7 @@ G6. Private chats that cannot affect operational agents without an explicit auth
 G7. Scheduled and event-triggered execution that respects limits, approvals and reliability policies.
 G8. Token usage, reference value and actual costs reported distinctly.
 G9. An expressive 3D company view reflecting real task events, with accessible 2D fallback.
-G10. Private, testable, backup-able deployment on Linux/WSL and ultimately k3s.
+G10. Private, testable, backup-able deployment using Docker Compose on a self-hosted Linux machine.
 
 ## Non-goals (initial releases)
 

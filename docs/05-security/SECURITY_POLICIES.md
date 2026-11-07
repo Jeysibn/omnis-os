@@ -34,7 +34,7 @@ Grants have subject (director, agent, team, run or chat), resource (project ID, 
 ## Network and secrets
 
 - API and runtime listener bind to loopback/private network. End-user access through HTTPS and private DNS.
-- For self-hosted k3s, use private trust CA on devices if no domain/public certificate; test client certificate trust.
+- For private Docker Compose deployment on Linux, use a private trust CA on client devices when no domain/public certificate is available; test client certificate trust.
 - Credential storage: native runtime secure store/keyring or protected host secret store; not database user fields. Root-level encrypted secret files with SOPS+age considered for deployment only.
 - Do not mount all host `$HOME`, `.ssh`, cloud CLI credentials or native auth stores into unrestricted sandboxes.
 - External MCP auth distinct from AI model auth.

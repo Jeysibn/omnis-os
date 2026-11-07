@@ -18,7 +18,7 @@ Run `scripts/host-security/verify-worker-boundary.sh` only in the reviewed Linux
 
 1. **Development:** WSL2 Ubuntu/Linux with Node, pnpm, Docker Compose. PostgreSQL in Compose; native AI runtimes on trusted host or isolated dedicated execution user per capability/secret-store requirements.
 2. **CI:** ephemeral PostgreSQL + pinned mock sandbox image, no OAuth credentials, no paid inference, migrations, sandbox negative tests and Playwright smoke tests.
-3. **Production (after gated testing):** private k3s homelab with protected database PVC, SOPS+age for deployment secrets if selected, private DNS and device-trusted TLS/CA, no publicly exposed runtime or database endpoints.
+3. **Private deployment (after gated testing):** Docker Compose on a self-hosted Linux machine with protected persistent database storage, private DNS and device-trusted TLS/CA, and no publicly exposed runtime or database endpoints. Kubernetes and k3s are outside the deployment target.
 
 No permanent staging required initially. Isolated local/CI test data must never point at production runtime homes or production database.
 
@@ -90,7 +90,7 @@ The scripts do not encrypt or cryptographically authenticate artifacts. Do not u
 
 - Bind dashboard, API, worker and database to localhost/private interfaces during development.
 - Browser -> HTTPS reverse proxy -> authenticated API; no direct browser-to-runtime privileged bearer access.
-- Restrict k3s ingress to private network/Tailscale where appropriate; use Pi-hole/other private DNS and a trusted private CA if no public domain.
+- Restrict published Compose ports to loopback or the approved private interface; use private DNS and a trusted private CA if no public domain.
 - Database accessible only to app/worker identities. External MCP traffic is explicitly allowlisted.
 
 ## Secrets
