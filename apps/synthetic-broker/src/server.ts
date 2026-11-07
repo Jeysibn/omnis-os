@@ -6,13 +6,14 @@ import { z } from 'zod';
 import { AuthorizerClient } from './authorizer-client.ts';
 import { FakeProviderClient } from './fake-provider-client.ts';
 import { createSyntheticBrokerApp } from './broker-app.ts';
+import { reconcileDurableAttempts } from './recovery.ts';
 import type { VerificationKey } from '@omnis/contracts/connector-broker';
 
 const config = readConfig();
 const verificationKeys = parseTrustAnchors(config.trustAnchors);
 const authorizer = new AuthorizerClient(config.authorizerSocketPath, config.authorizerToken);
 const provider = new FakeProviderClient(config.providerToken);
-await reconcileDurableAttempts();
+await reconcileDurableAttempts(authorizer, provider);
 const app = createSyntheticBrokerApp({
   callerToken: config.callerToken,
   verificationKeys,
@@ -32,7 +33,7 @@ if (existing) {
 await app.listen({ path: config.socketPath });
 await chmod(config.socketPath, 0o660);
 const recoveryTimer = setInterval(() => {
-  void reconcileDurableAttempts().catch(() => undefined);
+  void reconcileDurableAttempts(authorizer, provider).catch(() => undefined);
 }, 2_000);
 recoveryTimer.unref();
 
@@ -45,38 +46,6 @@ const shutdown = () => {
 };
 process.once('SIGTERM', shutdown);
 process.once('SIGINT', shutdown);
-
-async function reconcileDurableAttempts(): Promise<void> {
-  for (let cursor: string | null = null; ;) {
-    const page = await authorizer.recovery(100, cursor);
-    for (const attempt of page) {
-      if (attempt.status === 'submitting') {
-        await authorizer.record(attempt.id, {
-          eventId: `restart-unknown:${attempt.id}`,
-          status: 'unknown',
-          usage: { kind: 'unknown', reason: 'submission_uncertain', billingExposure: 'unknown' },
-        });
-        continue;
-      }
-      if (
-        attempt.cancelRequestedAt &&
-        attempt.providerSubmissionId &&
-        ['accepted', 'running', 'unknown'].includes(attempt.status)
-      ) {
-        try {
-          const cancellation = await provider.cancel(attempt.id, attempt.providerSubmissionId);
-          if (cancellation.cancellation === 'confirmed' && cancellation.event) {
-            await authorizer.record(attempt.id, cancellation.event);
-          }
-        } catch {
-          // Without a correlated interrupted event the durable cancellation remains pending.
-        }
-      }
-    }
-    if (page.length < 100) break;
-    cursor = page.at(-1)!.id;
-  }
-}
 
 function parseTrustAnchors(source: string): VerificationKey[] {
   const entries = z
