@@ -195,6 +195,7 @@ export class PostgresAgentLifecycleStore {
     requestId: string,
   ): Promise<AgentIdentityUpdateReceipt> {
     const input = safeParse(UpdateAgentIdentityInputSchema, inputValue);
+    mapWriteValidation(() => assertNoCredentialMaterial(input));
     const fingerprint = this.fingerprint('agent.identity_updated', agentId, input);
     try {
       const result = await this.pool.query<JsonRow>(
