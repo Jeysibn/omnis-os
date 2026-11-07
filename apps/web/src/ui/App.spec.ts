@@ -1090,16 +1090,31 @@ test('creates a task in the selected active project with an idempotency key', as
   page,
   api,
 }) => {
-  api.configure();
+  api.configure({
+    projects: [
+      makeProject(`prj_${'a'.repeat(32)}`, 'OPS', 'Operations'),
+      makeProject(`prj_${'b'.repeat(32)}`, 'PROP', 'Proposed project', 'proposed'),
+      makeProject(`prj_${'c'.repeat(32)}`, 'PAUSE', 'Paused project', 'paused'),
+      makeProject(`prj_${'d'.repeat(32)}`, 'DONE', 'Completed project', 'completed'),
+      makeProject(`prj_${'e'.repeat(32)}`, 'ARCHIVED', 'Archived project', 'archived'),
+    ],
+  });
   await openWorkspace(page, '#tasks');
   await page.getByRole('button', { name: 'Load available projects' }).click();
   await expect(page.getByRole('option', { name: 'Operations (OPS)' })).toBeAttached();
-  await expect(page.getByRole('option', { name: /Archived project/ })).toHaveCount(0);
+  for (const unavailable of [
+    'Proposed project',
+    'Paused project',
+    'Completed project',
+    'Archived project',
+  ])
+    await expect(page.getByRole('option', { name: new RegExp(unavailable) })).toHaveCount(0);
   await page.getByLabel('Project').selectOption(`prj_${'a'.repeat(32)}`);
   await page.getByLabel('Task title').fill('Review the deployment plan');
   await page.getByLabel('Task detail').fill('Read the deployment plan and report its next action.');
   await page.getByRole('button', { name: 'Create task' }).click();
   await expect(page.getByRole('heading', { name: 'Review the deployment plan' })).toBeVisible();
+  await expect(page.locator('.task-detail-panel .metadata-list')).toContainText('Operations (OPS)');
 
   const create = api.requests.find(
     (entry) => entry.path === '/api/v1/tasks' && entry.method === 'POST',
@@ -1129,6 +1144,9 @@ test('an uncertain project task create retries the identical request with the sa
   await expect(page.getByRole('button', { name: 'Retry same request' })).toBeVisible();
   await expect(page.getByLabel('Task title')).toHaveAttribute('readonly', '');
   await expect(page.getByLabel('Project')).toBeDisabled();
+  await page.reload();
+  await expect(page.getByRole('button', { name: 'Retry same request' })).toBeVisible();
+  await expect(page.getByLabel('Task title')).toHaveAttribute('readonly', '');
   await page.getByRole('button', { name: 'Retry same request' }).click();
   await expect(page.getByRole('heading', { name: 'Review the deployment plan' })).toBeVisible();
 
@@ -1139,6 +1157,28 @@ test('an uncertain project task create retries the identical request with the sa
   expect(creates[1]?.body).toEqual(creates[0]?.body);
   expect(creates[1]?.headers['idempotency-key']).toBe(creates[0]?.headers['idempotency-key']);
   expect(api.tasks.filter((task) => task.title === 'Review the deployment plan')).toHaveLength(1);
+});
+
+test('rejects an invalid project selection before posting a task', async ({ page, api }) => {
+  api.configure();
+  await openWorkspace(page, '#tasks');
+  await page.getByRole('button', { name: 'Load available projects' }).click();
+  await expect(page.getByRole('option', { name: 'Operations (OPS)' })).toBeAttached();
+  await page.locator('#task-project').evaluate((select) => {
+    const invalid = document.createElement('option');
+    invalid.value = 'prj_invalid';
+    invalid.textContent = 'Invalid project';
+    select.append(invalid);
+    (select as HTMLSelectElement).value = invalid.value;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await page.getByLabel('Task title').fill('Review the deployment plan');
+  await page.getByLabel('Task detail').fill('Read the deployment plan and report its next action.');
+  await page.getByRole('button', { name: 'Create task' }).click();
+  await expect(page.getByRole('alert')).toContainText('valid active project');
+  expect(
+    api.requests.filter((entry) => entry.path === '/api/v1/tasks' && entry.method === 'POST'),
+  ).toHaveLength(0);
 });
 
 test('a project-list failure is explicit and unassigned task creation remains available', async ({
