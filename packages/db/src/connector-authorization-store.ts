@@ -578,7 +578,7 @@ export class PostgresConnectorAuthorizationStore {
       const existing = await client.query<AttemptRow>(
         `SELECT id, authorization_id, request_id, status, synthetic, created_at, updated_at,
                 submission_started_at, provider_submission_id, cancel_requested_at,
-                decision_envelope, decision_nonce, usage_provenance
+                decision_envelope, decision_nonce, usage_provenance, response_text
            FROM omnis.connector_execution_attempts WHERE request_id = $1`,
         [requestId],
       );

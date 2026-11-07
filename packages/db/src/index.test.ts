@@ -259,6 +259,13 @@ const postgresSuite = describe(
         },
       });
       assert.equal(completed.status, 'completed');
+      const completedReplay = await brokerStore.consumeForBroker(
+        pending.id,
+        fixture.request,
+        attemptRequestId,
+      );
+      assert.equal(completedReplay.attempt.status, 'completed');
+      assert.equal(completedReplay.attempt.responseText, 'Synthetic response fixture.');
       const durableExecution = await brokerStore.getExecutionForAuthorization(pending.id);
       assert.equal(durableExecution?.attempt.id, completed.id);
       assert.equal(durableExecution?.attempt.responseText, 'Synthetic response fixture.');
