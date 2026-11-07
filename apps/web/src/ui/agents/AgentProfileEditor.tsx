@@ -6,6 +6,7 @@ import {
 } from '@omnis/contracts';
 import { ApiRequestError } from '../api.js';
 import { classifyError, fetchDraft, publishDraft, saveDraft } from './data.js';
+import { AgentProfileFields } from './AgentProfileFields.js';
 
 type PendingOperation =
   | {
@@ -44,26 +45,17 @@ function fromVersion(profile: AgentProfileResponse['currentVersion']): AgentProf
   };
 }
 
-function lines(value: string) {
-  return value
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-}
-
-function displayLines(value: readonly string[]) {
-  return value.join('\n');
-}
-
 export function AgentProfileEditor({
   profile,
   csrfToken,
   onUnauthorized,
+  onConflict,
   onPublished,
 }: {
   profile: AgentProfileResponse;
   csrfToken: string;
   onUnauthorized: (cause: unknown) => void;
+  onConflict: () => void;
   onPublished: () => void;
 }) {
   const { agent, currentVersion } = profile;
@@ -147,7 +139,7 @@ export function AgentProfileEditor({
         setMessage(error?.message ?? 'The profile change was not confirmed.');
         if (cause instanceof ApiRequestError && cause.status === 409) {
           setGeneration((value) => value + 1);
-          onPublished();
+          onConflict();
         }
       }
     } finally {
@@ -199,20 +191,6 @@ export function AgentProfileEditor({
     });
   }
 
-  const updateList = (path: 'specialties' | 'traits' | 'principles', value: string) => {
-    if (path === 'specialties') setForm((current) => ({ ...current, specialties: lines(value) }));
-    else if (path === 'traits')
-      setForm((current) => ({
-        ...current,
-        personality: { ...current.personality, traits: lines(value) },
-      }));
-    else
-      setForm((current) => ({
-        ...current,
-        personality: { ...current.personality, principles: lines(value) },
-      }));
-  };
-
   if (agent.lifecycle === 'archived') return null;
   if (draftError)
     return (
@@ -258,111 +236,7 @@ export function AgentProfileEditor({
       )}
       {editing && (
         <div className="agents-profile-editor-fields" aria-disabled={locked}>
-          <label>
-            Profession
-            <input
-              maxLength={160}
-              value={form.profession}
-              disabled={locked}
-              onChange={(event) =>
-                setForm((current) => ({ ...current, profession: event.target.value }))
-              }
-            />
-          </label>
-          <label>
-            Seniority
-            <input
-              maxLength={80}
-              value={form.seniority ?? ''}
-              disabled={locked}
-              onChange={(event) =>
-                setForm((current) => ({ ...current, seniority: event.target.value || null }))
-              }
-            />
-          </label>
-          <label>
-            Specialties (one per line)
-            <textarea
-              rows={3}
-              value={displayLines(form.specialties)}
-              disabled={locked}
-              onChange={(event) => updateList('specialties', event.target.value)}
-            />
-          </label>
-          <label>
-            Personality traits (one per line)
-            <textarea
-              rows={3}
-              value={displayLines(form.personality.traits)}
-              disabled={locked}
-              onChange={(event) => updateList('traits', event.target.value)}
-            />
-          </label>
-          <label>
-            Tone
-            <input
-              maxLength={120}
-              value={form.personality.tone ?? ''}
-              disabled={locked}
-              onChange={(event) =>
-                setForm((current) => ({
-                  ...current,
-                  personality: { ...current.personality, tone: event.target.value || null },
-                }))
-              }
-            />
-          </label>
-          <label>
-            Principles (one per line)
-            <textarea
-              rows={3}
-              value={displayLines(form.personality.principles)}
-              disabled={locked}
-              onChange={(event) => updateList('principles', event.target.value)}
-            />
-          </label>
-          <label>
-            Autonomy
-            <textarea
-              rows={3}
-              maxLength={500}
-              value={form.behavior.autonomy ?? ''}
-              disabled={locked}
-              onChange={(event) =>
-                setForm((current) => ({
-                  ...current,
-                  behavior: { ...current.behavior, autonomy: event.target.value || null },
-                }))
-              }
-            />
-          </label>
-          <label>
-            Escalation
-            <textarea
-              rows={3}
-              maxLength={1000}
-              value={form.behavior.escalation ?? ''}
-              disabled={locked}
-              onChange={(event) =>
-                setForm((current) => ({
-                  ...current,
-                  behavior: { ...current.behavior, escalation: event.target.value || null },
-                }))
-              }
-            />
-          </label>
-          <label className="agents-profile-instructions">
-            Instructions
-            <textarea
-              rows={8}
-              maxLength={16_384}
-              value={form.instructions}
-              disabled={locked}
-              onChange={(event) =>
-                setForm((current) => ({ ...current, instructions: event.target.value }))
-              }
-            />
-          </label>
+          <AgentProfileFields value={form} disabled={locked} onChange={setForm} />
           <div className="agents-profile-editor-actions">
             <button
               type="button"

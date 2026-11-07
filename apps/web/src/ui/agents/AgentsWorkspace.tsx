@@ -198,6 +198,9 @@ function ProfileScreen({
           csrfToken={csrfToken}
           onUnauthorized={onUnauthorized}
           onReload={retry}
+          onConflict={() =>
+            setNotice('The profile changed on the server. The latest profile was reloaded.')
+          }
           onPublished={() => setNotice('A new immutable profile version was published.')}
         />
       )}

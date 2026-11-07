@@ -126,7 +126,9 @@ type Options = {
   profileBody?: (agentId: string) => unknown;
   signedOut?: boolean;
   createResponseLosses?: number;
+  createReceiptMismatches?: number;
   mutationResponseLosses?: number;
+  profileConflict?: boolean;
 };
 
 function createApi(page: Page) {
@@ -134,6 +136,7 @@ function createApi(page: Page) {
   let fixtures = defaultFixtures;
   let historyFailures = 0;
   let createResponseLosses = 0;
+  let createReceiptMismatches = 0;
   let mutationResponseLosses = 0;
   const drafts = new Map<
     string,
@@ -141,6 +144,7 @@ function createApi(page: Page) {
   >();
   const requests: Array<{ method: string; path: string; search: string }> = [];
   const createRequests: Array<{ body: unknown; key: string | undefined }> = [];
+  const createReceipts = new Map<string, Record<string, unknown>>();
   const mutationRequests: Array<{
     method: string;
     path: string;
@@ -165,6 +169,8 @@ function createApi(page: Page) {
       createRequests.push({ body, key });
       if (request.headers()['x-omnis-csrf'] !== 'csrf-fixture' || !key)
         return error(route, 403, 'invalid_csrf', 'Mutation protection failed.');
+      const priorReceipt = createReceipts.get(key);
+      if (priorReceipt) return route.fulfill({ status: 201, json: priorReceipt });
       if (createResponseLosses > 0) {
         createResponseLosses -= 1;
         return route.abort();
@@ -176,18 +182,27 @@ function createApi(page: Page) {
       created.summary.slug = body.slug ?? 'new-agent';
       fixtures = [...fixtures, created];
       drafts.set(created.summary.id, { revision: 0, baseVersionNo: null, profile: null });
+      const receipt = {
+        requestId: key,
+        operation: 'agent.created',
+        agentId: created.summary.id,
+        lifecycle: 'draft',
+        versionId: null,
+        versionNo: null,
+        draftRevision: 0,
+        occurredAt: later,
+      };
+      createReceipts.set(key, receipt);
+      if (createReceiptMismatches > 0) {
+        createReceiptMismatches -= 1;
+        return route.fulfill({
+          status: 201,
+          json: { ...receipt, requestId: '123e4567-e89b-42d3-a456-426614174000' },
+        });
+      }
       return route.fulfill({
         status: 201,
-        json: {
-          requestId: key,
-          operation: 'agent.created',
-          agentId: created.summary.id,
-          lifecycle: 'draft',
-          versionId: null,
-          versionNo: null,
-          draftRevision: 0,
-          occurredAt: later,
-        },
+        json: receipt,
       });
     }
 
@@ -200,6 +215,8 @@ function createApi(page: Page) {
       mutationRequests.push({ method, path, body, key });
       if (request.headers()['x-omnis-csrf'] !== 'csrf-fixture' || !key)
         return error(route, 403, 'invalid_csrf', 'Mutation protection failed.');
+      if (method === 'PUT' && options.profileConflict)
+        return error(route, 409, 'profile_conflict', 'The profile changed. Reload before saving.');
       if (mutationResponseLosses > 0) {
         mutationResponseLosses -= 1;
         return route.abort();
@@ -378,9 +395,11 @@ function createApi(page: Page) {
       fixtures = (next.agents ?? defaultFixtures).map(cloneFixture);
       historyFailures = next.historyFailures ?? 0;
       createResponseLosses = next.createResponseLosses ?? 0;
+      createReceiptMismatches = next.createReceiptMismatches ?? 0;
       mutationResponseLosses = next.mutationResponseLosses ?? 0;
       requests.length = 0;
       createRequests.length = 0;
+      createReceipts.clear();
       mutationRequests.length = 0;
       drafts.clear();
     },
@@ -479,6 +498,26 @@ test.describe('Agent Directory', () => {
     await expect(page.getByRole('heading', { name: 'Orion' })).toBeVisible();
     expect(api.createRequests).toHaveLength(2);
     expect(api.createRequests[1]).toEqual(api.createRequests[0]);
+  });
+
+  test('a receipt mismatch is treated as unknown and retries the original idempotent create', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ agents: [], createReceiptMismatches: 1 });
+    await openAgents(page);
+    await page.getByRole('button', { name: 'Create agent' }).click();
+    await page.getByLabel('Name', { exact: true }).fill('Orion');
+    await page.getByLabel('Slug', { exact: true }).fill('orion-ops');
+    await page.getByRole('button', { name: 'Create draft agent' }).click();
+    await expect(page.getByText(/create result is unknown/i)).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Cancel' })).toBeDisabled();
+    await page.getByRole('button', { name: 'Retry same request' }).click();
+    await expect(page.getByRole('heading', { name: 'Orion' })).toBeVisible();
+    expect(api.createRequests).toHaveLength(2);
+    expect(api.createRequests[1]).toEqual(api.createRequests[0]);
+    await page.goto('/#agents');
+    await expect(page.getByRole('heading', { level: 3, name: 'Orion' })).toHaveCount(1);
   });
 
   test('lists real API agents with identity, profile status and no runtime claims', async ({
@@ -774,6 +813,27 @@ test.describe('Agent Profile', () => {
     ).toBeVisible();
     expect(api.mutationRequests).toHaveLength(2);
     expect(api.mutationRequests[1]).toEqual(api.mutationRequests[0]);
+  });
+
+  test('a stale draft conflict reloads without claiming a profile was published', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ profileConflict: true });
+    await openAgents(page, '#agents/agent-atlas');
+    await page.getByRole('button', { name: 'Create next draft' }).click();
+    await page
+      .locator('.agents-profile-editor')
+      .getByLabel('Profession', { exact: true })
+      .fill('Platform Reliability Lead');
+    await page.getByRole('button', { name: 'Save draft' }).click();
+    await expect(
+      page.getByText('The profile changed on the server. The latest profile was reloaded.', {
+        exact: true,
+      }),
+    ).toBeVisible();
+    await expect(page.getByText('A new immutable profile version was published.')).toHaveCount(0);
+    expect(api.mutationRequests).toHaveLength(1);
   });
 
   test('renders identity, snapshot sections, safe text and the permissions note', async ({

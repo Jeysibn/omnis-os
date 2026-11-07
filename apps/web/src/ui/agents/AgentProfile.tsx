@@ -29,12 +29,14 @@ export function AgentProfile({
   csrfToken,
   onUnauthorized,
   onReload,
+  onConflict,
   onPublished,
 }: {
   profile: AgentProfileResponse;
   csrfToken: string;
   onUnauthorized: (cause: unknown) => void;
   onReload: () => void;
+  onConflict: () => void;
   onPublished: () => void;
 }) {
   const { agent, currentVersion } = profile;
@@ -72,6 +74,11 @@ export function AgentProfile({
             profile={profile}
             csrfToken={csrfToken}
             onUnauthorized={onUnauthorized}
+            onConflict={() => {
+              onConflict();
+              onReload();
+              history.reload();
+            }}
             onPublished={() => {
               onPublished();
               onReload();

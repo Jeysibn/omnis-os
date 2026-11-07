@@ -52,14 +52,17 @@ export function AgentCreateForm({
           },
           body: JSON.stringify(current.input),
         },
-        (value) => AgentMutationReceiptSchema.parse(value),
+        (value) => {
+          const result = AgentMutationReceiptSchema.parse(value);
+          if (
+            result.requestId !== current.key ||
+            result.operation !== 'agent.created' ||
+            result.lifecycle !== 'draft'
+          )
+            throw new Error('Create receipt does not match the submitted request.');
+          return result;
+        },
       );
-      if (
-        receipt.requestId !== current.key ||
-        receipt.operation !== 'agent.created' ||
-        receipt.lifecycle !== 'draft'
-      )
-        throw new Error('The create response did not confirm a draft agent.');
       window.location.hash = profileHash(receipt.agentId);
     } catch (cause) {
       if (cause instanceof ApiRequestError && cause.status === 401) {
@@ -123,7 +126,12 @@ export function AgentCreateForm({
         </p>
       )}
       <div className="agents-create-actions">
-        <button type="button" className="secondary-button" disabled={busy} onClick={onCancel}>
+        <button
+          type="button"
+          className="secondary-button"
+          disabled={busy || unknown}
+          onClick={onCancel}
+        >
           Cancel
         </button>
         <button type="submit" className="primary-button" disabled={busy || !csrfToken}>
