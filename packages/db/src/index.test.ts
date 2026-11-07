@@ -885,6 +885,13 @@ const postgresSuite = describe(
       const lease = started.started
         ? { workerId: 'synthetic-worker', generation: started.generation }
         : { workerId: 'duplicate-worker', generation: duplicateStart.generation };
+      const submission = await store.recordSyntheticBrokerSubmissionRequested(
+        runId,
+        lease.workerId,
+        lease.generation,
+      );
+      assert.equal(submission.events[0]?.event.type, 'run.provider_submission_requested');
+      assert.match(submission.events[0]?.event.message ?? '', /acceptance is not yet confirmed/);
       await fixture.authorizations.revoke(grant.id, 'owner');
       await store.requestSyntheticBrokerStop(runId, grant.id);
       const unknown = await store.finishSyntheticBrokerRun(
@@ -898,12 +905,18 @@ const postgresSuite = describe(
       assert.equal((await store.getSyntheticBrokerRun(runId))?.attemptId !== null, true);
       assert.deepEqual(
         (await store.getEvents(runId)).map((event) => event.type),
-        ['run.queued', 'run.started', 'run.stop_requested', 'run.interrupted'],
+        [
+          'run.queued',
+          'run.started',
+          'run.provider_submission_requested',
+          'run.stop_requested',
+          'run.outcome_unknown',
+        ],
       );
       assert.match((await store.getEvents(runId)).at(-1)!.message, /Do not resubmit/);
     });
 
-    it('reconciles an expired synthetic worker lease as unknown without replay', async () => {
+    it('reconciles an expired synthetic worker lease after submission as unknown without replay', async () => {
       const fixture = await connectorFixture();
       const grant = await fixture.authorizations.request(fixture.request, randomUUID());
       await fixture.authorizations.decide(grant.id, 'owner', {
@@ -923,6 +936,8 @@ const postgresSuite = describe(
         async () => 'synthetic-job',
       );
       const claim = await store.beginSyntheticBrokerRun(admitted.run.id, 'old-worker', 1);
+      await store.recordSyntheticBrokerSubmissionRequested(runId, 'old-worker', claim.generation);
+      await store.requestSyntheticBrokerStop(runId, grant.id);
       await pool!.query(
         "UPDATE omnis.runs SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
         [runId],
@@ -940,8 +955,59 @@ const postgresSuite = describe(
       const events = await store.reconcileExpiredRuns();
       assert.equal((await store.getRun(runId))?.status, 'unknown');
       assert.equal((await store.getTask(fixture.task.id))?.status, 'in_progress');
-      assert.equal(events[0]?.event.type, 'run.interrupted');
+      assert.equal(events[0]?.event.type, 'run.outcome_unknown');
+      assert.deepEqual(
+        (await store.getEvents(runId)).map((event) => event.type),
+        [
+          'run.queued',
+          'run.started',
+          'run.provider_submission_requested',
+          'run.stop_requested',
+          'run.outcome_unknown',
+        ],
+      );
       assert.equal((await store.listActiveRunIds([runId])).includes(runId), false);
+    });
+
+    it('confirms stop for an expired synthetic lease before broker submission', async () => {
+      const fixture = await connectorFixture();
+      const grant = await fixture.authorizations.request(fixture.request, randomUUID());
+      await fixture.authorizations.decide(grant.id, 'owner', {
+        decision: 'approve',
+        promptDigestConfirmation: fixture.request.promptDigest,
+      });
+      const runId = randomUUID();
+      const admitted = await store.admitSyntheticBrokerRun(
+        {
+          runId,
+          taskId: fixture.task.id,
+          authorizationId: grant.id,
+          requestId: randomUUID(),
+          correlationId: runId,
+          binding: fixture.request,
+        },
+        async () => 'synthetic-job',
+      );
+      await store.beginSyntheticBrokerRun(admitted.run.id, 'old-worker', 1);
+      await store.requestSyntheticBrokerStop(runId, grant.id);
+      await pool!.query(
+        "UPDATE omnis.runs SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
+        [runId],
+      );
+
+      const events = await store.reconcileExpiredRuns();
+
+      assert.equal((await store.getRun(runId))?.status, 'cancelled');
+      assert.equal((await store.getTask(fixture.task.id))?.status, 'open');
+      assert.deepEqual(
+        events.map(({ event }) => event.type),
+        ['run.cancelled'],
+      );
+      assert.deepEqual(
+        (await store.getEvents(runId)).map((event) => event.type),
+        ['run.queued', 'run.started', 'run.stop_requested', 'run.cancelled'],
+      );
+      assert.match(events[0]?.event.message ?? '', /before broker submission began/);
     });
 
     it('confirms cancellation before the queued synthetic Run can begin', async () => {
@@ -5765,7 +5831,7 @@ const postgresSuite = describe(
       assert.equal(recovered?.events[0]?.event.type, 'run.cancelled');
     });
 
-    it('recovers an expired execution lease without replay and allows a fresh run', async () => {
+    it('keeps an expired legacy mock stop interrupted until cancellation is confirmed', async () => {
       const task = await store.createTask({
         title: 'Inspect files',
         detail: 'List files read-only.',
@@ -5775,6 +5841,7 @@ const postgresSuite = describe(
         return `job-${runId}`;
       });
       await store.beginExecution(admitted.run.id, 'worker-old', 1);
+      await store.requestStop(admitted.run.id);
       assert.ok((await store.listActiveRunIds()).includes(admitted.run.id));
       await pool!.query(
         "UPDATE omnis.runs SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
@@ -5784,6 +5851,8 @@ const postgresSuite = describe(
       const recovered = await store.reconcileExpiredRuns();
       assert.equal((await store.getRun(admitted.run.id))?.status, 'interrupted');
       assert.equal(recovered[0]?.event.type, 'run.interrupted');
+      assert.match(recovered[0]?.event.message ?? '', /execution lease expired/i);
+      assert.doesNotMatch(recovered[0]?.event.message ?? '', /broker submission/i);
       assert.equal((await store.getTask(task.id))?.status, 'open');
       assert.equal((await store.listActiveRunIds()).includes(admitted.run.id), false);
 

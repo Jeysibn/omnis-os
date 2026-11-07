@@ -8,7 +8,9 @@ import {
   assertNoExecutableWork,
   buildBrowserEnvironment,
   startManagedProcess,
+  startSyntheticBrokerFixture,
   startServicesWithCleanup,
+  socketRequest,
   stopProcess,
   validateTestDatabaseConfiguration,
 } from './mock-services.mjs';
@@ -232,4 +234,29 @@ test('a required service spawn error cleans up already-started services and temp
   assert.ok(firstProcess);
   assert.ok(firstProcess.exitCode !== null || firstProcess.signalCode !== null);
   await assert.rejects(readFile(envFile));
+});
+
+test('runs the synthetic broker fixture in a separate process with authenticated bounded socket access', async () => {
+  const tempDirectory = await mkdtemp(join(tmpdir(), 'omnis-broker-fixture-test-'));
+  const socketPath = join(tempDirectory, 'broker.sock');
+  const fixture = await startSyntheticBrokerFixture({
+    socketPath,
+    testToken: 'a'.repeat(64),
+    authorizerSocket: join(tempDirectory, 'authorizer.sock'),
+    authorizerToken: 'b'.repeat(64),
+  });
+  try {
+    assert.equal(fixture.process.spawned, true);
+    assert.notEqual(fixture.process.pid, process.pid);
+    assert.equal((await socketRequest(socketPath, '/health')).status, 200);
+    const denied = await socketRequest(socketPath, '/internal/broker/v1/submit', {
+      method: 'POST',
+      headers: { authorization: 'Bearer wrong-token', 'content-type': 'application/json' },
+      body: '{}',
+    });
+    assert.equal(denied.status, 401);
+  } finally {
+    await fixture.close();
+    await rm(tempDirectory, { recursive: true, force: true });
+  }
 });

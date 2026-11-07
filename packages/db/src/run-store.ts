@@ -830,7 +830,9 @@ export class PostgresRunStore {
             ? 'run.failed'
             : nextStatus === 'cancelled'
               ? 'run.cancelled'
-              : 'run.interrupted';
+              : nextStatus === 'unknown'
+                ? 'run.outcome_unknown'
+                : 'run.interrupted';
       const message =
         nextStatus === 'completed'
           ? (result.responseText ?? 'Synthetic broker run completed.')
@@ -842,6 +844,41 @@ export class PostgresRunStore {
                 ? 'Synthetic broker execution stopped before a terminal result was confirmed.'
                 : 'The broker outcome is unknown. Do not resubmit this request.';
       const event = await appendEvent(client, runId, eventType, message);
+      return { run: mapRun(updated.rows[0]), events: [{ runId, event }] };
+    });
+  }
+
+  async recordSyntheticBrokerSubmissionRequested(
+    runId: string,
+    workerId: string,
+    generation: number,
+  ): Promise<{ run: Run; events: DurableEvent[] }> {
+    return inTransaction(this.pool, async (client) => {
+      const current = await lockRun(client, runId);
+      if (
+        !current.connector_authorization_id ||
+        current.status !== 'running' ||
+        current.lease_owner !== workerId ||
+        current.execution_generation !== generation ||
+        !current.lease_expires_at
+      ) {
+        throw new StoreError('conflict', 'The worker no longer owns this synthetic Run.', 409);
+      }
+      const lease = await client.query<{ valid: boolean }>(
+        'SELECT $1::timestamptz > now() AS valid',
+        [current.lease_expires_at],
+      );
+      if (!lease.rows[0]?.valid) {
+        throw new StoreError('conflict', 'The worker no longer owns this synthetic Run.', 409);
+      }
+      const event = await appendEvent(
+        client,
+        runId,
+        'run.provider_submission_requested',
+        'The broker submission was requested. Provider acceptance is not yet confirmed.',
+      );
+      const updated = await client.query<RunRow>(`${runSelect} WHERE r.id=$1`, [runId]);
+      if (!updated.rows[0]) throw new StoreError('not_found', 'Run was not found.', 404);
       return { run: mapRun(updated.rows[0]), events: [{ runId, event }] };
     });
   }
@@ -1292,7 +1329,21 @@ export class PostgresRunStore {
       );
       const events: DurableEvent[] = [];
       for (const row of expired.rows) {
-        const nextStatus = row.connector_authorization_id ? 'unknown' : 'interrupted';
+        const submission = row.connector_authorization_id
+          ? await client.query<{ requested: boolean }>(
+              `SELECT EXISTS (
+                 SELECT 1 FROM omnis.run_events
+                 WHERE run_id = $1 AND event_type = 'run.provider_submission_requested'
+               ) AS requested`,
+              [row.id],
+            )
+          : undefined;
+        const submissionRequested = submission?.rows[0]?.requested ?? false;
+        const nextStatus = submissionRequested
+          ? 'unknown'
+          : row.connector_authorization_id && row.status === 'stopping'
+            ? 'cancelled'
+            : 'interrupted';
         await client.query(
           `
             UPDATE omnis.runs SET status = $2, lease_owner = NULL,
@@ -1307,10 +1358,18 @@ export class PostgresRunStore {
         const event = await appendEvent(
           client,
           row.id,
-          'run.interrupted',
-          row.connector_authorization_id
+          nextStatus === 'unknown'
+            ? 'run.outcome_unknown'
+            : nextStatus === 'cancelled'
+              ? 'run.cancelled'
+              : 'run.interrupted',
+          nextStatus === 'unknown'
             ? 'The worker lease expired before the broker result was confirmed. The attempt was not retried; reconcile its authorizer record.'
-            : 'The execution lease expired. It was not retried automatically.',
+            : nextStatus === 'cancelled'
+              ? 'Cancellation was confirmed before broker submission began.'
+              : row.connector_authorization_id
+                ? 'The worker lease expired before broker submission began. The execution was not retried automatically.'
+                : 'The execution lease expired. The run was not replayed automatically.',
         );
         events.push({ runId: row.id, event });
       }

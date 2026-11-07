@@ -91,6 +91,8 @@ const terminalStatus = (type: RunEvent['type']): Run['status'] | null => {
       return 'failed';
     case 'run.interrupted':
       return 'interrupted';
+    case 'run.outcome_unknown':
+      return 'unknown';
     default:
       return null;
   }
@@ -368,12 +370,14 @@ function App() {
     const eventNames = [
       'run.queued',
       'run.started',
+      'run.provider_submission_requested',
       'run.output',
       'run.stop_requested',
       'run.completed',
       'run.cancelled',
       'run.failed',
       'run.interrupted',
+      'run.outcome_unknown',
     ];
     source.onopen = () => setStreamState('connected');
     const handlers = eventNames.map((name) => {
@@ -411,6 +415,7 @@ function App() {
               'run.cancelled',
               'run.failed',
               'run.interrupted',
+              'run.outcome_unknown',
             ].includes(parsed.type)
           ) {
             setAnnouncement(

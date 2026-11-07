@@ -18,8 +18,8 @@ provider authentication, real inference, deployment, or production runtime selec
   `bb945fcbad582e6a72a25f45b537ce7934ac28dc`) adds PostgreSQL Run projection, transactional
   pg-boss admission, worker orchestration, durable events, Run history, and the existing SSE
   replay surface.
-- PR #57 (`feat/phase1-run-stop-revocation`, head
-  `c4b2bea364e33ad08c3ef460561945c57c53365c`) routes standard Run cancellation through the
+- PR #57 (`feat/phase1-run-stop-revocation`, current head
+  `71fdc437db0ef572b10a69588ec67ab4b4ecad62`) routes standard Run cancellation through the
   persisted grant binding and authorizer revocation.
 - PRs #55–#57 are open Drafts and are not integrated into main. Their merge order is #55, #56,
   then #57. PR #41 remains deferred; if migration 0021 lands first, migration 0024 and its role
@@ -74,6 +74,31 @@ The current PR #46 branch omits `correlationId` in its uncertain HTTP 202 respon
 as unknown. Codex #3 must return the verified envelope's correlation ID for every outcome before
 the cross-process flow can pass acceptance. PR #46 must remain separate from backend changes.
 
+## Run event truthfulness and browser integration
+
+The follow-on backend candidate based on PR #57 adds two explicit persisted Run events:
+
+- `run.provider_submission_requested` is committed under the current worker lease before the
+  broker client is called. Its message says provider acceptance is not yet confirmed.
+- `run.outcome_unknown` is terminal and represents a potentially submitted request whose result
+  cannot be confirmed. It is used for uncertain broker responses and expired connector Run leases;
+  legacy mock lease expiry continues to use `run.interrupted`.
+
+Migration `0025_synthetic_run_event_semantics.sql` updates only the Run event-type check to admit
+those event names. It does not change grants, role ACLs, authorization records or submission
+attempt tables. It follows PR #56's migration 0024. The normal migration-order coordination rule
+for deferred PR #41 still applies.
+
+The full-stack browser smoke now has an opt-in disposable owner-authorized synthetic Run path. It
+starts a separate fake broker child process with an allowlisted environment, a fixed synthetic
+completion, and only the worker test token plus broker-authorizer IPC credentials. The authorizer
+alone receives the disposable Ed25519 private key. The Playwright scenario creates and approves
+the exact task/profile prompt, then checks the persisted Run event order, result and measured
+synthetic usage through the existing UI/API. The fixture uses Unix sockets and does not prove OS
+peer UID/GID enforcement, a container boundary, network egress denial, or the executable PR #49
+platform path. The PostgreSQL/browser scenario requires the repository's disposable PostgreSQL
+integration environment; it has not been run locally in this worktree.
+
 ## Validation evidence and remaining gaps
 
 - PR #55 exact-head CI: run `42295292543` passed; its independent reviewer approved the exact
@@ -81,12 +106,11 @@ the cross-process flow can pass acceptance. PR #46 must remain separate from bac
 - PR #56 exact-head CI: run `42309142334` passed; its independent reviewer approved the exact
   base/head. Its database projection and queue integration are covered by PostgreSQL CI, and its
   UI consumes the standard Run list/detail/SSE APIs.
-- PR #57's previous exact-head CI run `42314003278` passed on
-  `c4b2bea364e33ad08c3ef460561945c57c53365c`; the previous independent review returned
-  implementation **APPROVE**, synthetic-only **ELIGIBLE**, and real-runtime **BLOCK**.
-- A subsequent backend contract hardening makes broker correlation mandatory for every outcome.
-  It changes the reviewed head; that new candidate requires fresh exact-head CI and independent
-  re-review before its verdict can be used.
+- PR #57's exact-head CI run `42316272333` passed on
+  `71fdc437db0ef572b10a69588ec67ab4b4ecad62`; the independent review returned implementation
+  **APPROVE**, synthetic-only **ELIGIBLE**, and real-runtime **BLOCK**.
+- The run-event and browser integration changes are a separate, uncommitted candidate based on
+  PR #57. It has not yet received exact-head CI or independent review.
 - These PRs remain Draft and stacked; passing CI and review do not mean the changes are on main.
 - No local disposable PostgreSQL environment was available during PR #57 validation; the exact
   head's PostgreSQL, full-stack, browser, backup/restore, container, and aggregate CI jobs passed.
