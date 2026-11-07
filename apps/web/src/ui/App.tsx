@@ -31,6 +31,7 @@ import {
   RunEventSchema,
   RunSchema,
   TaskSchema,
+  type ProjectSummary,
   type Authorization,
   type Run,
   type RunEvent,
@@ -40,6 +41,7 @@ import { ApiRequestError, request } from './api.js';
 import { AgentsWorkspace } from './agents/AgentsWorkspace.js';
 import { DepartmentsWorkspace } from './departments/DepartmentsWorkspace.js';
 import { ProjectsWorkspace } from './projects/ProjectsWorkspace.js';
+import { parseProjectList } from './projects/data.js';
 import { AppHeader } from './shell/AppHeader.js';
 import { SyntheticAuditHistory } from './SyntheticAuditHistory.js';
 
@@ -55,6 +57,12 @@ type ApprovalOperation = {
   authorizationUncertain: boolean;
   decisionUncertain: boolean;
   runUncertain: boolean;
+};
+type TaskCreateOperation = {
+  title: string;
+  detail: string;
+  projectId: string | null;
+  idempotencyKey: string | null;
 };
 
 const parseOwner = (value: unknown): Owner => {
@@ -164,6 +172,10 @@ function App() {
   const [csrfBootstrapError, setCsrfBootstrapError] = useState('');
   const [tasks, setTasks] = useState<Task[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [projectsLoading, setProjectsLoading] = useState(false);
+  const [projectsLoaded, setProjectsLoaded] = useState(false);
+  const [projectsError, setProjectsError] = useState('');
   const [tasksLoading, setTasksLoading] = useState(true);
   const [runsLoading, setRunsLoading] = useState(true);
   const [tasksError, setTasksError] = useState('');
@@ -175,6 +187,8 @@ function App() {
   const [page, setPage] = useState<Page>(() => readRoute().page);
   const [title, setTitle] = useState('');
   const [detail, setDetail] = useState('');
+  const [taskProjectId, setTaskProjectId] = useState('');
+  const [pendingTaskCreate, setPendingTaskCreate] = useState<TaskCreateOperation | null>(null);
   const [password, setPassword] = useState('');
   const [approvalTask, setApprovalTask] = useState<Task | null>(null);
   const [approvalOperation, setApprovalOperation] = useState<ApprovalOperation | null>(null);
@@ -190,6 +204,7 @@ function App() {
   // False until the first in-app hash navigation, so a direct load of a screen never steals focus.
   const navigatedInApp = useRef(false);
   const stopInFlight = useRef(new Set<string>());
+  const taskCreateInFlight = useRef(false);
   const seenSequences = useRef(new Map<string, Set<number>>());
 
   const selectedRun = useMemo(
@@ -237,11 +252,15 @@ function App() {
       setCsrfToken('');
       setTasks([]);
       setRuns([]);
+      setProjects([]);
+      setProjectsLoaded(false);
+      setProjectsError('');
       setSelectedRunId(null);
       setSelectedTaskId(null);
       setEvents([]);
       setApprovalTask(null);
       setApprovalOperation(null);
+      setPendingTaskCreate(null);
       setApprovalExpiry('');
       setPassword('');
       setError('Your owner session expired. Sign in again to continue.');
@@ -275,6 +294,21 @@ function App() {
         setTasksError(failureMessage(cause, 'Tasks could not be loaded.'));
     } finally {
       setTasksLoading(false);
+    }
+  }, [expireSessionIfNeeded]);
+
+  const loadProjects = useCallback(async () => {
+    setProjectsLoading(true);
+    setProjectsError('');
+    try {
+      const result = await request('/api/v1/projects', {}, parseProjectList);
+      setProjects(result.projects.filter((project) => project.status !== 'archived'));
+      setProjectsLoaded(true);
+    } catch (cause) {
+      if (!expireSessionIfNeeded(cause))
+        setProjectsError(failureMessage(cause, 'Projects could not be loaded.'));
+    } finally {
+      setProjectsLoading(false);
     }
   }, [expireSessionIfNeeded]);
 
@@ -477,8 +511,9 @@ function App() {
     }
   }
 
-  async function createTask(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function submitTaskCreate(operation: TaskCreateOperation) {
+    if (taskCreateInFlight.current) return;
+    taskCreateInFlight.current = true;
     setBusy(true);
     setError('');
     try {
@@ -486,17 +521,46 @@ function App() {
         '/api/v1/tasks',
         {
           method: 'POST',
-          headers: { 'x-omnis-csrf': csrfToken },
-          body: JSON.stringify({ title, detail }),
+          headers: {
+            'x-omnis-csrf': csrfToken,
+            ...(operation.idempotencyKey ? { 'idempotency-key': operation.idempotencyKey } : {}),
+          },
+          body: JSON.stringify({
+            title: operation.title,
+            detail: operation.detail,
+            ...(operation.projectId ? { projectId: operation.projectId } : {}),
+          }),
         },
-        (value) => TaskSchema.parse(value),
+        (value) => {
+          const created = TaskSchema.parse(value);
+          if (
+            created.title !== operation.title.trim() ||
+            created.detail !== operation.detail.trim() ||
+            (created.projectId ?? null) !== operation.projectId
+          ) {
+            throw new Error('Created task does not match the request.');
+          }
+          return created;
+        },
       );
       setTasks((current) => [task, ...current]);
       setSelectedTaskId(task.id);
       setTitle('');
       setDetail('');
+      setTaskProjectId('');
+      setPendingTaskCreate(null);
     } catch (cause) {
-      if (!expireSessionIfNeeded(cause)) {
+      if (expireSessionIfNeeded(cause)) {
+        setPendingTaskCreate(null);
+      } else if (
+        operation.projectId &&
+        !(cause instanceof ApiRequestError && cause.outcome === 'rejected')
+      ) {
+        setPendingTaskCreate(operation);
+        setError(
+          'The project task request may have been accepted, but its result was not confirmed. The form is locked; retry the exact request with the same idempotency key.',
+        );
+      } else {
         setError(
           cause instanceof ApiRequestError && cause.outcome !== 'rejected'
             ? 'Task creation could not be confirmed. Reload Tasks and check for the task before trying again.'
@@ -504,8 +568,24 @@ function App() {
         );
       }
     } finally {
+      taskCreateInFlight.current = false;
       setBusy(false);
     }
+  }
+
+  async function createTask(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const operation: TaskCreateOperation = pendingTaskCreate ?? {
+      title,
+      detail,
+      projectId: taskProjectId || null,
+      idempotencyKey: taskProjectId ? crypto.randomUUID() : null,
+    };
+    await submitTaskCreate(operation);
+  }
+
+  async function retryTaskCreate() {
+    if (pendingTaskCreate) await submitTaskCreate(pendingTaskCreate);
   }
 
   function openApproval(task: Task, trigger: HTMLButtonElement) {
@@ -871,6 +951,11 @@ function App() {
           <TasksWorkspace
             tasks={tasks}
             runs={runs}
+            projects={projects}
+            projectsLoading={projectsLoading}
+            projectsLoaded={projectsLoaded}
+            projectsError={projectsError}
+            onRetryProjects={() => void loadProjects()}
             loading={tasksLoading}
             error={tasksError}
             runsAvailable={!runsLoading && !runsError}
@@ -878,10 +963,14 @@ function App() {
             busy={busy}
             title={title}
             detail={detail}
+            projectId={taskProjectId}
+            pendingTaskCreate={pendingTaskCreate}
             selectedTask={selectedTask}
             onTitle={setTitle}
             onDetail={setDetail}
+            onProjectId={setTaskProjectId}
             onCreate={createTask}
+            onRetryCreate={retryTaskCreate}
             onSelectTask={(task) => setSelectedTaskId(task.id)}
             onStart={(task, trigger) => openApproval(task, trigger)}
           />
@@ -1249,6 +1338,11 @@ function CommandCenter({
 function TasksWorkspace({
   tasks,
   runs,
+  projects,
+  projectsLoading,
+  projectsLoaded,
+  projectsError,
+  onRetryProjects,
   loading,
   error,
   runsAvailable,
@@ -1256,15 +1350,24 @@ function TasksWorkspace({
   busy,
   title,
   detail,
+  projectId,
+  pendingTaskCreate,
   selectedTask,
   onTitle,
   onDetail,
+  onProjectId,
   onCreate,
+  onRetryCreate,
   onSelectTask,
   onStart,
 }: {
   tasks: Task[];
   runs: Run[];
+  projects: ProjectSummary[];
+  projectsLoading: boolean;
+  projectsLoaded: boolean;
+  projectsError: string;
+  onRetryProjects: () => void;
   loading: boolean;
   error: string;
   runsAvailable: boolean;
@@ -1272,10 +1375,14 @@ function TasksWorkspace({
   busy: boolean;
   title: string;
   detail: string;
+  projectId: string;
+  pendingTaskCreate: TaskCreateOperation | null;
   selectedTask: Task | null;
   onTitle: (value: string) => void;
   onDetail: (value: string) => void;
+  onProjectId: (value: string) => void;
   onCreate: (event: FormEvent<HTMLFormElement>) => void;
+  onRetryCreate: () => void;
   onSelectTask: (task: Task) => void;
   onStart: (task: Task, trigger: HTMLButtonElement) => void;
 }) {
@@ -1301,6 +1408,7 @@ function TasksWorkspace({
               placeholder="Give this task a clear outcome"
               value={title}
               onChange={(event) => onTitle(event.target.value)}
+              readOnly={pendingTaskCreate !== null}
               required
             />
             <label htmlFor="task-detail">Task detail</label>
@@ -1311,13 +1419,50 @@ function TasksWorkspace({
               placeholder="Describe the read-only work you want to inspect…"
               value={detail}
               onChange={(event) => onDetail(event.target.value)}
+              readOnly={pendingTaskCreate !== null}
               required
               rows={3}
             />
+            <label htmlFor="task-project">Project</label>
+            <select
+              id="task-project"
+              value={projectId}
+              onChange={(event) => onProjectId(event.target.value)}
+              disabled={pendingTaskCreate !== null || !projectsLoaded || projectsLoading}
+            >
+              <option value="">No project</option>
+              {projects.map((project) => (
+                <option key={project.id} value={project.id}>
+                  {project.name} ({project.key})
+                </option>
+              ))}
+            </select>
+            {projectsLoading && <small role="status">Loading projects…</small>}
+            {!projectsLoading && !projectsLoaded && !projectsError && (
+              <button type="button" onClick={onRetryProjects}>
+                Load available projects
+              </button>
+            )}
+            {projectsLoaded && projects.length === 0 && (
+              <small>No active projects are available.</small>
+            )}
+            {projectsError && (
+              <div className="task-project-error" role="status">
+                <span>{projectsError} Tasks can still be created without a project.</span>
+                <button type="button" onClick={onRetryProjects}>
+                  Retry projects
+                </button>
+              </div>
+            )}
             <div className="composer-footer">
-              <span>Mock runs are synthetic.</span>
-              <button className="primary-button" type="submit" disabled={busy}>
-                <Plus size={16} /> Create task
+              <span>Mock runs are synthetic. Project tasks are idempotent.</span>
+              <button
+                className="primary-button"
+                type={pendingTaskCreate ? 'button' : 'submit'}
+                disabled={busy}
+                onClick={pendingTaskCreate ? onRetryCreate : undefined}
+              >
+                <Plus size={16} /> {pendingTaskCreate ? 'Retry same request' : 'Create task'}
               </button>
             </div>
           </form>
