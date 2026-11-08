@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { z } from 'zod';
 import {
   AgentProfileVersionResponseSchema,
   RunSchema,
@@ -14,6 +13,13 @@ import {
   CreateConnectorAuthorizationSchema,
 } from '@omnis/contracts/connector-authorization-schema';
 import type { ConnectorAuthorization } from '@omnis/contracts/connector-authorization-schema';
+import {
+  clearPendingOperation,
+  readPendingOperation,
+  storePendingOperation,
+  type PendingOperation,
+} from './syntheticConnectorOperationStorage.js';
+import { SyntheticOperationDialog } from './SyntheticOperationDialog.js';
 import { renderSyntheticConnectorRequest } from '@omnis/contracts/synthetic-connector-prompt';
 import { RuntimeCapabilitiesSchema } from '@omnis/contracts/runtime-capabilities';
 import { ApiRequestError, request } from './api.js';
@@ -25,17 +31,6 @@ const limits = {
   maxConcurrentRuns: 1 as const,
   maxUsageUnits: 100,
   maxCostMicrousd: 100,
-};
-const storageVersion = 1 as const;
-const pendingOperationStorageKey = 'omnis.synthetic-connector-operation.v1';
-type PendingOperation = {
-  ownerId: string;
-  taskId: string;
-  projectId: string;
-  profileVersion: number;
-  assignmentRevision: number;
-  idempotencyKey: string;
-  authorizationId: string | null;
 };
 type CapabilityState = 'loading' | 'enabled' | 'disabled' | 'failed';
 
@@ -158,7 +153,7 @@ export function SyntheticConnectorRunAction({
         throw new Error('The persisted authorization did not match the exact synthetic operation.');
       }
       const nextOperation = { ...operation, authorizationId: grant.id };
-      storeOperation(nextOperation, ownerId, task.id);
+      storePendingOperation(nextOperation, ownerId, task.id);
       setPendingOperation(nextOperation);
       setRenderedRequest(rendered);
       setAuthorization(grant);
@@ -201,7 +196,7 @@ export function SyntheticConnectorRunAction({
 
   useEffect(() => {
     if (availability !== 'enabled' || !canRun || pendingOperation) return;
-    const stored = readOperation(ownerId, task.id);
+    const stored = readPendingOperation(ownerId, task.id);
     if (
       stored &&
       stored.ownerId === ownerId &&
@@ -241,7 +236,7 @@ export function SyntheticConnectorRunAction({
       idempotencyKey: crypto.randomUUID(),
       authorizationId: null,
     };
-    storeOperation(operation, ownerId, task.id);
+    storePendingOperation(operation, ownerId, task.id);
     setPendingOperation(operation);
     try {
       await createOrReadAuthorization(operation);
@@ -327,7 +322,7 @@ export function SyntheticConnectorRunAction({
       if (run.id !== authorization.correlationId || run.taskId !== task.id) {
         throw new Error('The admitted Run did not match its approved task and correlation.');
       }
-      clearOperation(ownerId, task.id);
+      clearPendingOperation(ownerId, task.id);
       onRunAdmitted(run);
     } catch (cause) {
       handleError(cause, 'The authorized synthetic Run could not be started.');
@@ -380,7 +375,7 @@ export function SyntheticConnectorRunAction({
       )}
       {dialogOpen && authorization && (
         <SyntheticOperationDialog
-          ref={dialogRef}
+          dialogRef={dialogRef}
           authorization={authorization}
           renderedRequest={renderedRequest}
           busy={busy}
@@ -403,171 +398,5 @@ async function createAuthorization(operation: PendingOperation, input: unknown, 
       body: JSON.stringify(input),
     },
     (value) => ConnectorAuthorizationSchema.parse(value),
-  );
-}
-
-function storageKey(ownerId: string, taskId: string) {
-  return `${pendingOperationStorageKey}:${encodeURIComponent(ownerId)}:${encodeURIComponent(taskId)}`;
-}
-
-function storeOperation(operation: PendingOperation, ownerId: string, taskId: string) {
-  sessionStorage.setItem(
-    storageKey(ownerId, taskId),
-    JSON.stringify({ version: storageVersion, ...operation }),
-  );
-}
-
-function clearOperation(ownerId: string, taskId: string) {
-  sessionStorage.removeItem(storageKey(ownerId, taskId));
-}
-
-function readOperation(ownerId: string, taskId: string): PendingOperation | null {
-  try {
-    const value: unknown = JSON.parse(
-      sessionStorage.getItem(storageKey(ownerId, taskId)) ?? 'null',
-    );
-    if (typeof value !== 'object' || value === null) return null;
-    const parsed = pendingOperationSchema.safeParse(value);
-    if (!parsed.success) {
-      clearOperation(ownerId, taskId);
-      return null;
-    }
-    if (parsed.data.ownerId !== ownerId || parsed.data.taskId !== taskId) {
-      clearOperation(ownerId, taskId);
-      return null;
-    }
-    return parsed.data;
-  } catch {
-    clearOperation(ownerId, taskId);
-    return null;
-  }
-}
-
-const pendingOperationSchema = z
-  .object({
-    version: z.literal(storageVersion),
-    ownerId: z.string().min(1).max(128),
-    taskId: z.string().min(1).max(128),
-    projectId: z.string().min(1).max(128),
-    profileVersion: z.number().int().positive(),
-    assignmentRevision: z.number().int().positive(),
-    idempotencyKey: z.string().uuid(),
-    authorizationId: z.string().uuid().nullable(),
-  })
-  .strict();
-
-function SyntheticOperationDialog({
-  ref,
-  authorization,
-  renderedRequest,
-  busy,
-  error,
-  onApprove,
-  onStart,
-  onClose,
-}: {
-  ref: React.RefObject<HTMLDialogElement | null>;
-  authorization: ConnectorAuthorization;
-  renderedRequest: string;
-  busy: boolean;
-  error: string;
-  onApprove: () => void;
-  onStart: () => void;
-  onClose: () => void;
-}) {
-  return (
-    <dialog
-      ref={ref}
-      className="nx-dialog synthetic-operation-dialog"
-      aria-labelledby="synthetic-operation-title"
-      onCancel={(event) => {
-        event.preventDefault();
-        onClose();
-      }}
-    >
-      <div className="nx-dialog__body">
-        <h2 id="synthetic-operation-title">Review synthetic operation</h2>
-        <p>This is a local deterministic fixture. It cannot contact a real provider.</p>
-        <dl className="metadata-list">
-          <div>
-            <dt>Execution type</dt>
-            <dd>Synthetic test fixture</dd>
-          </div>
-          <div>
-            <dt>Runtime</dt>
-            <dd>mock</dd>
-          </div>
-          <div>
-            <dt>Provider / model</dt>
-            <dd>
-              {authorization.providerId} / {authorization.modelId}
-            </dd>
-          </div>
-          <div>
-            <dt>Operation</dt>
-            <dd>{authorization.operation}</dd>
-          </div>
-          <div>
-            <dt>Capabilities</dt>
-            <dd>
-              {authorization.capabilities.length
-                ? authorization.capabilities.join(', ')
-                : 'None (text only)'}
-            </dd>
-          </div>
-          <div>
-            <dt>Limits</dt>
-            <dd>
-              {authorization.limits.maxInputTokens} input tokens;{' '}
-              {authorization.limits.maxOutputTokens} output tokens;{' '}
-              {authorization.limits.maxDurationSeconds}s; {authorization.limits.maxCostMicrousd}{' '}
-              micro-USD ceiling
-            </dd>
-          </div>
-          <div>
-            <dt>Request digest</dt>
-            <dd>
-              <code>{authorization.promptDigest}</code>
-            </dd>
-          </div>
-          <div>
-            <dt>Approval expires</dt>
-            <dd>{new Date(authorization.expiresAt).toLocaleString()}</dd>
-          </div>
-        </dl>
-        <label htmlFor="synthetic-rendered-request">Exact rendered request</label>
-        <pre id="synthetic-rendered-request" className="synthetic-request-preview">
-          {renderedRequest}
-        </pre>
-        {error && (
-          <p role="alert" className="error-note">
-            {error}
-          </p>
-        )}
-        <div className="nx-dialog__actions">
-          <button type="button" className="secondary-button" disabled={busy} onClick={onClose}>
-            Close
-          </button>
-          {authorization.status === 'pending' && (
-            <button type="button" disabled={busy} onClick={onApprove}>
-              Approve exact operation
-            </button>
-          )}
-          {authorization.status === 'authorized' && authorization.consumedAt === null && (
-            <button type="button" disabled={busy} onClick={onStart}>
-              Start authorized synthetic Run
-            </button>
-          )}
-          {authorization.consumedAt !== null && (
-            <p role="status">This authorization was already consumed. Inspect its Run history.</p>
-          )}
-          {authorization.status !== 'pending' && authorization.status !== 'authorized' && (
-            <p role="status">
-              This authorization is {authorization.status}; create a new operation to continue.
-            </p>
-          )}
-        </div>
-      </div>
-    </dialog>
   );
 }
