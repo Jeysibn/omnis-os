@@ -11,7 +11,22 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 PROXY = ROOT / 'scripts/platform/broker-peer-proxy.py'
+AUTHORIZE_GATEWAY = ROOT / 'infra/systemd/omnis-broker-peer-gateway.service'
 uid, gid = os.getuid(), os.getgid()
+
+gateway_config = AUTHORIZE_GATEWAY.read_text(encoding='utf-8')
+configured_routes = next(
+    line.split('=', 2)[2].split(',')
+    for line in gateway_config.splitlines()
+    if line.startswith('Environment=OMNIS_PEER_ALLOWED_PATHS=')
+)
+assert set(configured_routes) == {
+    '/internal/broker/v1/admissions',
+    '/internal/broker/v1/submissions/begin',
+    '/internal/broker/v1/provider-events',
+    '/internal/broker/v1/recovery/list',
+    '/internal/broker/v1/recovery/claim',
+}
 
 
 def backend_server(path, seen):
