@@ -235,7 +235,11 @@ try {
     `could not inspect disposable PostgreSQL port binding: ${redact(postgresPortInspection.stderr || 'unknown Docker error')}`,
   );
   const postgresPorts = JSON.parse(postgresPortInspection.stdout);
-  assert.deepEqual(postgresPorts['5432/tcp'], [{ HostIp: '127.0.0.1', HostPort: String(dbPort) }]);
+  assert.deepEqual(
+    postgresPorts['5432/tcp'],
+    [{ HostIp: '127.0.0.1', HostPort: String(dbPort) }],
+    `PostgreSQL runtime binding differs from the loopback-only Compose configuration: ${JSON.stringify(postgresPorts)}`,
+  );
   const provision = spawnSync(
     process.execPath,
     ['--experimental-strip-types', 'packages/db/src/provision.ts'],
