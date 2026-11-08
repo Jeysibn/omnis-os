@@ -1,12 +1,12 @@
 # Phase 1 task-to-synthetic-broker backend integration
 
-Status: backend integration is implemented in the Draft PR #55 → #56 → #57 stack. It is
-synthetic-only and disabled outside explicit test mode. It does not authorize credentials,
-provider authentication, real inference, deployment, or production runtime selection.
+Status as of 2026-11-09: PRs #55–#57 and PR #46 are merged. PR #46 merged as `d3adf7e9f5aaf2d95901eff76717a3e7eaca669e`; its broker remains limited to explicit synthetic test flows. The owner-facing production execution path remains mock-only. Real-provider execution remains blocked.
 
-## Live repository state
+The remaining material below records an earlier candidate integration review and is retained for its design history. Its branch states, candidate findings, and pending-review language are superseded by the merged source and [current PR #46 platform status](PHASE1_PR_C_PLATFORM_STATUS.md).
 
-- Current main: `ac24bc3af8504c06465aeca2924011f4771252b3`.
+## Earlier candidate repository state (historical snapshot)
+
+- Snapshot main at the time: `ac24bc3af8504c06465aeca2924011f4771252b3`.
 - PR #49 is merged as `b2490501395a3e53fb0f97fc6ab3914a3300fa56`. It supplies disposable Docker
   boundary tests; those tests are not the broker application boundary.
 - PR #52 is merged at `ac24bc3af8504c06465aeca2924011f4771252b3`. It supplies the original
@@ -69,10 +69,7 @@ correlation is rejected; the Run remains unknown and the response cannot attach 
 result to it. A completed response requires nonempty result text. Unreported usage remains
 `unknown/not_reported`, not zero.
 
-The current PR #46 branch omits `correlationId` in its uncertain HTTP 202 response at
-`apps/synthetic-broker/src/server.ts`. The backend now rejects that response and preserves the Run
-as unknown. Codex #3 must return the verified envelope's correlation ID for every outcome before
-the cross-process flow can pass acceptance. PR #46 must remain separate from backend changes.
+A previous PR #46 candidate omitted `correlationId` in its uncertain HTTP 202 response. The merged `apps/synthetic-broker/src/broker-app.ts` returns the verified envelope correlation ID for unknown outcomes; `apps/worker/src/synthetic-broker-run-coordinator.ts` validates response identity and preserves uncertain Runs as unknown. This resolves that candidate finding for the synthetic test flow, without enabling production broker execution.
 
 ## Run event truthfulness and browser integration
 
