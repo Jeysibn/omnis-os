@@ -1,0 +1,23 @@
+services:
+  api:
+    image: omnis-api:ci
+    volumes:
+      - type: bind
+        source: ${OMNIS_CI_AUTHORIZER_SOCKET_DIRECTORY:?CI authorizer fixture directory is required}
+        target: /run/omnis-authorizer
+        read_only: true
+        bind:
+          create_host_path: false
+
+  worker:
+    image: omnis-worker:ci
+    volumes:
+      - type: bind
+        source: ${OMNIS_CI_LAUNCHER_SOCKET_DIRECTORY:?CI launcher fixture directory is required}
+        target: /run/omnis-sandbox
+        read_only: true
+        bind:
+          create_host_path: false
+
+  web:
+    image: omnis-web:ci

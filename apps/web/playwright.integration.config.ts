@@ -26,12 +26,16 @@ export default defineConfig({
     actionTimeout: 10_000,
     navigationTimeout: 10_000,
   },
-  webServer: {
-    command: `node node_modules/vite/bin/vite.js --config vite.integration.config.ts --host 127.0.0.1 --port ${frontendPort} --strictPort`,
-    url: frontendOrigin,
-    reuseExistingServer: false,
-    timeout: 30_000,
-  },
+  ...(process.env.OMNIS_TEST_EXTERNAL_WEB === '1'
+    ? {}
+    : {
+        webServer: {
+          command: `node node_modules/vite/bin/vite.js --config vite.integration.config.ts --host 127.0.0.1 --port ${frontendPort} --strictPort`,
+          url: frontendOrigin,
+          reuseExistingServer: false,
+          timeout: 30_000,
+        },
+      }),
 });
 
 function requiredLoopbackOrigin(name: string): string {
