@@ -1,4 +1,8 @@
 services:
+  postgres:
+    ports:
+      - '127.0.0.1:${OMNIS_DB_PORT:?CI database port is required}:5432'
+
   api:
     image: omnis-api:ci
     volumes:
