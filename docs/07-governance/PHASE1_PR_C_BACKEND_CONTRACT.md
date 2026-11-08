@@ -121,6 +121,33 @@ or fake endpoint is unavailable. Socket peer UID/GID, file modes, broker DB/secr
 synthetic canary non-leakage across process/container boundaries also require disposable
 platform tests from Codex #3.
 
+## Current deployment and Run SSE constraints (2026-11-09)
+
+Main is `076b0c2668c76b5e21f31621c0e3c1eaf0fbe824`; its CI run
+[42524011075](https://github.com/Jeysibn/omnis-os/actions/runs/42524011075) passed all eight
+jobs. This is repository/CI evidence, not evidence that the Compose application or systemd
+services are installed on the owner's host. The owner's 2026-11-09 platform handoff reports
+WSL2 Ubuntu 26.04.1 with systemd running, but no Omnis systemd units, service accounts,
+`/etc/omnis` configuration, runtime sockets, or listeners on ports 5432 and 8080. Therefore
+target-host service identity, socket peer credentials, restart behavior, and host egress
+enforcement remain unverified. The handoff also reports that the current user's Docker-group
+membership grants root-equivalent Docker authority; no real credentials may be placed on this
+host under the current boundary.
+
+PR #87 closes an active Run SSE connection when its owning in-process session is logged out,
+rotated, expired, or invalidated. The session store and stream registry are process-local
+(`apps/api/src/session-store.ts` and `apps/api/src/run-event-stream-registry.ts`). The supported
+API deployment is therefore one replica. Do not scale the API horizontally until session
+validation and invalidation are shared across replicas, and integration tests prove that
+revocation closes an already-open stream on every replica. CI does not launch the full
+`docker-compose.app.yml` topology as a deployed application and cannot establish this host
+behavior.
+
+PR #86 adds bounded, read-only reconciliation of a late authoritative broker attempt into an
+unknown Run projection; PR #87 adds the session-bound SSE closure described above. Neither
+changes the production runtime selection: the owner-facing worker remains mock-only, while the
+broker exercise remains synthetic and test-only.
+
 ## Scope and residual blockers
 
 - No migration or database role change is required. Existing authorizer credentials are used
