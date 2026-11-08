@@ -29,6 +29,7 @@ import { registerTaskEpicRoutes } from './task-epic-routes.ts';
 import { registerTaskRoutes } from './task-routes.ts';
 import { registerConnectorAuthorizationRoutes } from './connector-authorization-routes.ts';
 import { registerSyntheticTaskRunRoutes } from './synthetic-task-run-routes.ts';
+import { registerRuntimeCapabilityRoutes } from './runtime-capability-routes.ts';
 import { registerRunStopRoute } from './run-stop-route.ts';
 import {
   parseRun,
@@ -215,6 +216,10 @@ registerProjectWorkspaceRoutes(app);
 registerTaskEpicRoutes(app);
 registerTaskRoutes(app);
 registerConnectorAuthorizationRoutes(app, { requireOwner, requireMutationProtection });
+registerRuntimeCapabilityRoutes(app, {
+  requireOwner,
+  syntheticConnectorEnabled: syntheticBrokerTestMode,
+});
 registerSyntheticTaskRunRoutes(app, {
   requireOwner,
   requireMutationProtection,

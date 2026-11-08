@@ -47,6 +47,7 @@ import { parseProjectList } from './projects/data.js';
 import { AppHeader } from './shell/AppHeader.js';
 import { SyntheticAuditHistory } from './SyntheticAuditHistory.js';
 import { TaskExecutionAssignmentEditor } from './TaskExecutionAssignmentEditor.js';
+import { SyntheticConnectorRunAction } from './SyntheticConnectorRunAction.js';
 
 type Owner = { id: string; displayName: string };
 type Page = 'command-center' | 'tasks' | 'runs' | 'agents' | 'departments' | 'projects';
@@ -1132,12 +1133,18 @@ function App() {
             projectId={taskProjectId}
             pendingTaskCreate={pendingTaskCreate}
             selectedTask={selectedTask}
+            ownerId={owner?.id ?? ''}
             csrfToken={csrfToken}
             onSessionExpired={expireSessionIfNeeded}
             onTaskUpdated={(updated) => {
               setTasks((current) =>
                 current.map((task) => (task.id === updated.id ? updated : task)),
               );
+            }}
+            onRunAdmitted={(run) => {
+              setRuns((current) => [run, ...current.filter((item) => item.id !== run.id)]);
+              setSelectedRunId(run.id);
+              navigate('runs', setPage, run.id);
             }}
             onTitle={setTitle}
             onDetail={setDetail}
@@ -1539,9 +1546,11 @@ function TasksWorkspace({
   projectId,
   pendingTaskCreate,
   selectedTask,
+  ownerId,
   csrfToken,
   onSessionExpired,
   onTaskUpdated,
+  onRunAdmitted,
   onTitle,
   onDetail,
   onProjectId,
@@ -1568,9 +1577,11 @@ function TasksWorkspace({
   projectId: string;
   pendingTaskCreate: TaskCreateOperation | null;
   selectedTask: Task | null;
+  ownerId: string;
   csrfToken: string;
   onSessionExpired: (cause: unknown) => boolean;
   onTaskUpdated: (task: Task) => void;
+  onRunAdmitted: (run: Run) => void;
   onTitle: (value: string) => void;
   onDetail: (value: string) => void;
   onProjectId: (value: string) => void;
@@ -1792,6 +1803,14 @@ function TasksWorkspace({
               csrfToken={csrfToken}
               onSessionExpired={onSessionExpired}
               onTaskUpdated={onTaskUpdated}
+            />
+            <SyntheticConnectorRunAction
+              ownerId={ownerId}
+              task={selectedTask}
+              project={selectedTaskProject}
+              csrfToken={csrfToken}
+              onSessionExpired={onSessionExpired}
+              onRunAdmitted={onRunAdmitted}
             />
           </>
         ) : (
