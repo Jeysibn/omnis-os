@@ -202,6 +202,16 @@ describe('synthetic broker task run coordinator', () => {
         return evidence;
       },
     });
+    const discover = fixture.store.listUnknownSyntheticRuns;
+    fixture.store.listUnknownSyntheticRuns = async () => {
+      throw new Error('Disposable PostgreSQL temporarily unavailable');
+    };
+    await assert.rejects(
+      fixture.instance.reconcileUnknownRuns(),
+      /PostgreSQL temporarily unavailable/,
+    );
+    assert.equal(fixture.resultCalls.length, 0);
+    fixture.store.listUnknownSyntheticRuns = discover;
     await fixture.instance.reconcileUnknownRuns();
     assert.equal(fixture.resultCalls.length, 0);
     unavailable = false;

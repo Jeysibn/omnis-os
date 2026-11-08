@@ -1199,7 +1199,8 @@ const postgresSuite = describe(
         };
         assert.equal((await store.reconcileSyntheticBrokerRun(link, evidence)).length, 1);
         assert.deepEqual(await store.reconcileSyntheticBrokerRun(link, evidence), []);
-        const repaired = (await store.getSyntheticBrokerRun(runId))!.run;
+        const restartedStore = new PostgresRunStore(pool!);
+        const repaired = (await restartedStore.getSyntheticBrokerRun(runId))!.run;
         assert.equal(repaired.status, status);
         assert.deepEqual(repaired.usage, link.run.usage);
         assert.equal(
