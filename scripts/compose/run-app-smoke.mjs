@@ -226,7 +226,12 @@ try {
   assert.ok(postgresId, 'running disposable PostgreSQL container has an ID');
   const postgresPortInspection = runDocker(
     'docker',
-    ['inspect', postgresId, '--format', '{{json .NetworkSettings.Ports}}'],
+    [
+      'inspect',
+      postgresId,
+      '--format',
+      '{{json .Config.ExposedPorts}}|{{json .HostConfig.PortBindings}}|{{json .NetworkSettings.Ports}}',
+    ],
     { encoding: 'utf8' },
   );
   assert.equal(
@@ -234,11 +239,13 @@ try {
     0,
     `could not inspect disposable PostgreSQL port binding: ${redact(postgresPortInspection.stderr || 'unknown Docker error')}`,
   );
-  const postgresRuntime = JSON.parse(postgresPortInspection.stdout)[0];
-  const postgresPorts = postgresRuntime.NetworkSettings.Ports;
+  const [imageExposedPorts, hostPortBindings, postgresPorts] = postgresPortInspection.stdout
+    .trim()
+    .split('|')
+    .map((value) => JSON.parse(value));
   const postgresBindingEvidence = {
-    imageExposedPorts: postgresRuntime.Config.ExposedPorts,
-    hostPortBindings: postgresRuntime.HostConfig.PortBindings,
+    imageExposedPorts,
+    hostPortBindings,
     runtimeNetworkPorts: postgresPorts,
   };
   assert.deepEqual(
