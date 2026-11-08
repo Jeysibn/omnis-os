@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash, randomBytes, randomUUID, scrypt as scryptCallback } from 'node:crypto';
-import { createServer, isIPv4 } from 'node:net';
+import { createConnection, createServer, isIPv4 } from 'node:net';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -41,11 +41,12 @@ const runtimePassword = randomBytes(32).toString('hex');
 const authorizerPassword = randomBytes(32).toString('hex');
 const launcherPassword = randomBytes(32).toString('hex');
 const occupiedPorts = new Set();
-const dbPort = 5432;
+const dbPort = await freePort(occupiedPorts);
+occupiedPorts.add(dbPort);
 const webPort = await freePort(occupiedPorts);
 const origin = `http://127.0.0.1:${webPort}`;
-let databaseHost = '127.0.0.1';
-let dbAdminUrl = dbUrl('omnis', dbPassword);
+const databaseHost = '127.0.0.1';
+let dbAdminUrl;
 const redactions = [
   dbPassword,
   migrationPassword,
@@ -58,13 +59,13 @@ let fixtures;
 let stackStarted = false;
 let failed = false;
 const auxiliaryProjects = new Set();
+let databaseProxyServer;
 
 function dbUrl(user, password) {
   return `postgresql://${user}:${encodeURIComponent(password)}@${databaseHost}:${dbPort}/${dbName}`;
 }
 
-function configureDatabaseHost(host) {
-  databaseHost = host;
+function configureDatabaseUrls() {
   dbAdminUrl = dbUrl('omnis', dbPassword);
   Object.assign(process.env, {
     OMNIS_TEST_ADMIN_DATABASE_URL: dbAdminUrl,
@@ -79,6 +80,24 @@ function configureDatabaseHost(host) {
     OMNIS_RUNTIME_DB_PASSWORD: runtimePassword,
     OMNIS_AUTHORIZER_DB_PASSWORD: authorizerPassword,
     OMNIS_LAUNCHER_DB_PASSWORD: launcherPassword,
+  });
+}
+
+function startDatabaseProxy(targetHost) {
+  const server = createServer((client) => {
+    const upstream = createConnection({ host: targetHost, port: 5432 });
+    client.on('error', () => upstream.destroy());
+    upstream.on('error', () => client.destroy());
+    client.pipe(upstream);
+    upstream.pipe(client);
+  });
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(dbPort, '127.0.0.1', () => {
+      server.removeListener('error', reject);
+      databaseProxyServer = server;
+      resolve();
+    });
   });
 }
 
@@ -233,7 +252,8 @@ try {
   assert.equal(postgresNetworks.length, 1, 'PostgreSQL joins only the internal data network');
   const postgresAddress = postgresNetworks[0]?.IPAddress;
   assert.ok(isIPv4(postgresAddress), 'PostgreSQL has a data-network IPv4 address');
-  configureDatabaseHost(postgresAddress);
+  await startDatabaseProxy(postgresAddress);
+  configureDatabaseUrls();
   const postgresPortInspection = runDocker(
     'docker',
     [
@@ -301,7 +321,7 @@ try {
     requireAuditPool: true,
     composeManagedApplication: true,
   });
-  // Host-side fixtures keep their restricted roles on the loopback-published PostgreSQL endpoint.
+  // Host-side fixtures keep their restricted roles on the loopback-only database proxy.
   await writeEnv(composeEnvPath, [
     ['OMNIS_DB_NAME', dbName],
     ['OMNIS_DB_PASSWORD', dbPassword],
@@ -479,6 +499,11 @@ try {
         failed = true;
         process.stderr.write(`Host fixture cleanup failed: ${redact(error)}\n`);
       }
+    }
+    if (databaseProxyServer) {
+      const proxyCloseTimeout = setTimeout(() => databaseProxyServer.closeAllConnections(), 5_000);
+      await new Promise((resolve) => databaseProxyServer.close(resolve));
+      clearTimeout(proxyCloseTimeout);
     }
     await rm(directory, { recursive: true, force: true });
   }
