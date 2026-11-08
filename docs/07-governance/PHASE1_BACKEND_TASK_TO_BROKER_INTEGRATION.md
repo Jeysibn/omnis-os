@@ -35,9 +35,10 @@ type, outcome, revocation generation, and timestamp. It excludes prompt text, pr
 response text, usage, and credentials.
 
 This audit stream complements the canonical Run event/SSE history and has its own per-grant
-cursor. It does not reconcile an `unknown` Run projection from later attempt state. The
-authorizer attempt remains authoritative; a future reconciliation change needs an explicit
-worker/API contract and must not resubmit the request.
+cursor. The stream itself does not reconcile Runs. PR #46 adds a test-mode worker projection loop
+that reads persisted unknown Runs, requests read-only broker evidence, and applies a bounded
+projection repair without resubmitting. The authorizer attempt remains authoritative; see
+[the reconciliation contract](PHASE1_PR46_LATE_RECONCILIATION.md).
 
 The implementation adds no grant store, attempt ledger, or provider state machine. Migration
 `0024_synthetic_task_run_projection.sql` adds a nullable projection to `omnis.runs`. It follows
@@ -50,15 +51,15 @@ merged migration 0023 and does not edit deferred PR #41's 0021 or merged 0022/00
   `unknown`; it never requeues a request that may have reached the provider. The authorizer
   attempt remains the source for `accepted`, `running`, final status, cancellation acknowledgement,
   and usage provenance.
-- Every broker response, including an uncertain HTTP 202, must carry the exact persisted grant
+- Every broker response, including an uncertain response, must carry the exact persisted grant
   `correlationId`. The worker rejects missing or mismatched correlation instead of attaching an
-  attempt or result to the Run, and records the Run as `unknown`. PR #46's current platform branch
-  omits this field in its uncertain response; Codex #3 must return the correlation UUID from the
-  verified decision envelope before process-level E2E acceptance.
+  attempt or result to the Run, and records the Run as `unknown`. PR #46 returns and validates this
+  identity in the merged synthetic path; regression coverage includes missing and mismatched
+  correlation (`apps/worker/src/synthetic-broker-run-coordinator.test.ts`).
 - A worker restart does not submit again. An expired broker Run lease becomes unknown and is
-  excluded from normal mock-run recovery. The API status route still reports the authorizer
-  attempt. The platform broker currently owns its own attempt recovery; this backend does not
-  invent a parallel reconciliation ledger.
+  excluded from normal mock-run recovery. The API status route reports the authorizer attempt and
+  matching Run projection when available. The test-mode worker performs bounded reconciliation
+  from authoritative attempt evidence; it does not create a parallel attempt ledger.
 - Owner cancellation revokes the grant first, then records a durable Run stop request. If the
   queued job has not started, the worker confirms cancellation before broker submission. During
   or after submission, the API reports `confirmed: false`; only the authorizer's correlated
@@ -84,9 +85,9 @@ credential custody.
 
 ## Known integration dependencies
 
-- This branch depends on the canonical task/profile renderer currently supplied by Draft PR #55.
-  It is based on that branch and must be integrated with its reviewed head, or revalidated if the
-  PR #55 base/head changes.
+- The canonical task/profile renderer landed in PR #55 (merge commit
+  `1b64a089d51f05797024c67b219dde9d2086fd24`). Revalidate renderer bindings if later code changes
+  alter the task/profile contract.
 - Deferred PR #41's migration 0021 is numbered before 0024 and its migration runner applies
   unapplied files in lexical order. Its current Draft also revokes direct runtime writes to
   `omnis.runs`, `omnis.tasks`, and `omnis.run_events`, replacing them with database transition
@@ -95,14 +96,13 @@ credential custody.
   integrated, this branch must be adapted to the exact 0021 transition-function contract and
   re-reviewed before merge. The new column-level grants in 0024 do not restore any table write
   privileges revoked by 0021.
-- PR #46 does not expose a backend worker status/reconciliation route for a late attempt update.
-  The owner status API reads the authorizer attempt directly, while the Run projection remains
-  `unknown` after an uncertain worker result. The Run projection must not be treated as a
-  reconciliation authority.
-- PR #54's audit-history read is additive to the Run SSE projection. It is based on the same
-  append-only authorizer audit stream and adds no migration. Its older correlation-relaxation
-  behavior is not part of this queue-backed candidate: all broker responses still require the
-  persisted correlation ID.
+- PR #46 includes a test-mode worker-side `reconcileUnknownRuns` loop for late authoritative
+  attempt outcomes; it is not a separate owner status route. The owner status API reads the
+  authorizer attempt and the matching Run projection when available. The Run projection remains a
+  bounded view and must not be treated as authorization or attempt authority.
+- The audit-history read is additive to the Run SSE projection. It uses the append-only
+  authorizer audit stream and adds no attempt ledger. Regardless of audit-history route version,
+  broker responses must carry the persisted correlation ID.
 - PR #41 remains deferred and nonmergeable. Its migration 0021 changes task/run event writes and
   runtime table privileges; this candidate must be adapted to those transition functions and
   re-reviewed before that migration can be integrated.

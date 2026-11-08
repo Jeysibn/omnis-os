@@ -14,14 +14,14 @@ A runtime transaction locks the Run and validates its unknown status, captured e
 
 ## Allowed transitions
 
-| Existing Run | Authoritative attempt | Result |
-| --- | --- | --- |
-| unknown | completed with validated output | completed, one run.completed event |
-| unknown | failed | failed, one run.failed event |
-| unknown | interrupted with durable owner stop event and authoritative cancellation strictly preceding outcome | cancelled, one run.cancelled event |
-| unknown | interrupted with insufficient cancellation proof, including equal timestamps | interrupted, one run.interrupted event |
-| unknown | admitted/submitting/accepted/running/unknown or unavailable/conflicting evidence | unchanged and eligible for another pass |
-| any other status, stale Run generation, or active lease | any | no repair |
+| Existing Run                                            | Authoritative attempt                                                                               | Result                                  |
+| ------------------------------------------------------- | --------------------------------------------------------------------------------------------------- | --------------------------------------- |
+| unknown                                                 | completed with validated output                                                                     | completed, one run.completed event      |
+| unknown                                                 | failed                                                                                              | failed, one run.failed event            |
+| unknown                                                 | interrupted with durable owner stop event and authoritative cancellation strictly preceding outcome | cancelled, one run.cancelled event      |
+| unknown                                                 | interrupted with insufficient cancellation proof, including equal timestamps                        | interrupted, one run.interrupted event  |
+| unknown                                                 | admitted/submitting/accepted/running/unknown or unavailable/conflicting evidence                    | unchanged and eligible for another pass |
+| any other status, stale Run generation, or active lease | any                                                                                                 | no repair                               |
 
 An owner stop request alone never proves provider termination. Only the authoritative interrupted attempt permits cancelled projection, together with its persisted cancellation request timestamp strictly before the outcome timestamp and a durable Run stop event. Equal millisecond timestamps cannot establish causal ordering and conservatively project interrupted. Contradictory interruption timestamps preserve unknown. Completed/failed outcomes remain authoritative regardless of cancellation timestamps; cancellation ordering is relevant only to classifying interruption. A later owner stop request cannot relabel an independently interrupted attempt. Completion and cancellation races retain the authoritative attempt's terminal outcome. Unknown continues to block admission until a definitive projection is validated. Ordinary execution terminal protections remain intact. Earlier unknown events remain in history; SSE keeps streaming through uncertainty and replays the later definitive event after browser refresh. An owner tab may keep its event connection open while the outcome is unknown, just as for other ongoing Runs; normal disconnect/navigation cleanup closes it. This does not keep an execution job alive or cause provider I/O. Projection requests have an absolute 10-second deadline, each pass examines at most 20 rows, and overlapping passes are suppressed.
 
@@ -35,4 +35,4 @@ Local database/browser verification requires explicitly configured disposable Po
 
 ## Remaining gates
 
-This is a synthetic-only projection repair. Real-provider activation remains blocked by provider policy, credential custody, entitlement, consent and independent activation review. Target-host egress, socket identity/permissions, rootful Docker trust and host recovery validation remain BLOCKED — HOST VALIDATION REQUIRED. Synthetic CI does not establish production readiness. PR #46 remains Draft and unmerged.
+This is a synthetic-only projection repair. PR #46 merged at `d3adf7e9f5aaf2d95901eff76717a3e7eaca669e` on November 8, 2026; all eight merged-head CI checks passed, including full-stack browser integration and both PostgreSQL jobs ([run 42482891023](https://github.com/Jeysibn/omnis-os/actions/runs/42482891023)). This verifies the listed synthetic tests only. Real-provider activation remains blocked by provider policy, credential custody, entitlement, consent, owner approval, and independent security review. Target-host egress, socket identity/permissions, rootful Docker trust, and host recovery validation remain BLOCKED — HOST VALIDATION REQUIRED. Synthetic CI does not establish production readiness.
