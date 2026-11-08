@@ -70,8 +70,10 @@ export function createSyntheticFakeProviderServer(input: {
       if (!parsed.success) return send(response, 400, { error: 'invalid_input' });
       if (trustAnchors.length === 0)
         return send(response, 503, { error: 'synthetic_trust_anchor_missing' });
+      let requestId: string;
       try {
         const verified = verifyConnectorDecisionEnvelope(parsed.data.envelope, trustAnchors);
+        requestId = verified.claims.requestId;
         if (
           verified.claims.attemptId !== parsed.data.attemptId ||
           verified.claims.promptDigest !==
@@ -91,7 +93,8 @@ export function createSyntheticFakeProviderServer(input: {
         return previous.digest === digest
           ? send(response, 200, previous.response)
           : send(response, 409, { error: 'idempotency_conflict' });
-      const fixture = fixtures[attemptId] ?? fixtures.default ?? 'completed';
+      const fixture = fixtures[attemptId] ?? fixtures[requestId] ?? fixtures.default ?? 'completed';
+      console.info(`synthetic_fake_provider_fixture_selected:${fixture}`);
       if (fixture === 'fail-before-acceptance')
         return send(response, 422, { error: 'not_accepted' });
       if (fixture === 'rejected') return send(response, 422, { error: 'fixture_rejected' });
@@ -151,6 +154,8 @@ export function createSyntheticFakeProviderServer(input: {
         eventReads: 0,
       });
       if (fixture === 'lost-ack') {
+        console.info('synthetic_fake_provider_lost_ack_acceptance_recorded');
+        await new Promise((resolve) => setTimeout(resolve, 30_000));
         response.destroy();
         return;
       }
@@ -167,6 +172,7 @@ export function createSyntheticFakeProviderServer(input: {
         ['delayed-events', 'delayed-cancel-confirmed-events'].includes(found.fixture) &&
         found.eventReads === 0
       ) {
+        console.info('synthetic_fake_provider_delayed_event_lookup');
         found.eventReads += 1;
         await new Promise((resolve) => setTimeout(resolve, 8_000));
       } else {

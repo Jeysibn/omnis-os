@@ -26,6 +26,7 @@ export async function startMockServices({
   reservedPorts = [],
   enableSyntheticBrokerTestMode = false,
   enableSyntheticBrokerProcessTestMode = false,
+  syntheticLostAckRequestId,
 }) {
   if (enableSyntheticBrokerProcessTestMode && !enableSyntheticBrokerTestMode) {
     throw new Error('The synthetic broker process test requires the owner-authorized test mode.');
@@ -364,6 +365,7 @@ export async function startMockServices({
         trustAnchors,
         providerTokenPath: join(brokerSecretDirectory, 'provider.token'),
         sensitiveValues: sensitiveLogCanaries,
+        lostAckRequestId: syntheticLostAckRequestId,
       });
     }
     return {
@@ -536,7 +538,7 @@ function parseTestDatabaseUrl(name, value, expectedUsername) {
 
 export function buildBrowserEnvironment(
   source,
-  { apiTarget, frontendOrigin, frontendPort, ownerPassword, syntheticProjectId },
+  { apiTarget, frontendOrigin, frontendPort, ownerPassword, syntheticProjectId, lostAckRequestId },
 ) {
   const allowed = [
     'PATH',
@@ -569,6 +571,7 @@ export function buildBrowserEnvironment(
     OMNIS_TEST_FRONTEND_PORT: String(frontendPort),
     OMNIS_TEST_OWNER_PASSWORD: ownerPassword,
     ...(syntheticProjectId ? { OMNIS_TEST_SYNTHETIC_PROJECT_ID: syntheticProjectId } : {}),
+    ...(lostAckRequestId ? { OMNIS_TEST_SYNTHETIC_LOST_ACK_REQUEST_ID: lostAckRequestId } : {}),
   });
   return environment;
 }
@@ -713,6 +716,7 @@ async function startSyntheticBrokerCompose({
   trustAnchors,
   providerTokenPath,
   sensitiveValues,
+  lostAckRequestId,
 }) {
   const projectName = `omnis-broker-e2e-${process.pid}-${randomUUID().replaceAll('-', '').slice(0, 10)}`;
   const compose = [
@@ -733,6 +737,7 @@ async function startSyntheticBrokerCompose({
     OMNIS_FAKE_PROVIDER_TOKEN_FILE: providerTokenPath,
     OMNIS_BROKER_TEST_PROVIDER_FIXTURES: JSON.stringify({
       default: 'delayed-cancel-confirmed-events',
+      ...(lostAckRequestId ? { [lostAckRequestId]: 'lost-ack' } : {}),
     }),
     OMNIS_BROKER_TEST_TRUST_ANCHORS: trustAnchors,
     OMNIS_BROKER_TEST_SOCKET_DIRECTORY: brokerSocketDirectory,
@@ -766,23 +771,31 @@ async function startSyntheticBrokerCompose({
               let attemptId;
               while (Date.now() < acceptedDeadline) {
                 const accepted = await auditPool.query(
-                  `SELECT id
-                     FROM omnis.connector_execution_attempts
-                    WHERE status = 'accepted'
-                      AND provider_submission_id IS NOT NULL
-                      AND created_at >= $1
-                    ORDER BY created_at DESC
+                  `SELECT attempt.id
+                     FROM omnis.connector_execution_attempts AS attempt
+                     JOIN omnis.connector_authorization_audit AS audit
+                       ON audit.attempt_id = attempt.id
+                      AND audit.event_type = 'connector.submission_accepted'
+                    WHERE attempt.status = 'accepted'
+                      AND attempt.provider_submission_id IS NOT NULL
+                      AND audit.occurred_at >= $1
+                    ORDER BY audit.occurred_at DESC
                     LIMIT 1`,
                   [createdAfter],
                 );
                 attemptId = accepted.rows[0]?.id;
                 if (attemptId) break;
-                await delay(100);
+                await delay(20);
               }
-              if (!attemptId)
+              if (!attemptId) {
+                const logs = runCompose(['logs', 'fake-provider']);
+                const fixtures = logs.stdout
+                  ?.match(/synthetic_fake_provider_fixture_selected:[a-z-]+/g)
+                  ?.join(',');
                 throw new Error(
-                  'No accepted synthetic attempt appeared before the broker restart deadline.',
+                  `No accepted synthetic attempt appeared before the broker restart deadline${fixtures ? `; ${fixtures}` : ''}.`,
                 );
+              }
 
               const killed = runCompose(['kill', '--signal', 'SIGKILL', 'broker-process']);
               if (killed.error || killed.status !== 0)
@@ -809,6 +822,87 @@ async function startSyntheticBrokerCompose({
                 await delay(100);
               }
               throw new Error('Broker restart did not reconcile the accepted synthetic attempt.');
+            },
+            async restartAfterLostAcknowledgement(auditPool, requestId) {
+              const attemptDeadline = Date.now() + 60_000;
+              let attemptId;
+              while (Date.now() < attemptDeadline) {
+                const result = await auditPool.query(
+                  `SELECT id FROM omnis.connector_execution_attempts
+                    WHERE request_id = $1 AND status = 'submitting'
+                    ORDER BY created_at DESC LIMIT 1`,
+                  [requestId],
+                );
+                attemptId = result.rows[0]?.id;
+                if (attemptId) break;
+                await delay(100);
+              }
+              if (!attemptId)
+                throw new Error('Lost-ack synthetic attempt did not enter durable submission.');
+
+              const acceptanceDeadline = Date.now() + 10_000;
+              let acceptanceRecorded = false;
+              while (Date.now() < acceptanceDeadline) {
+                const logs = runCompose(['logs', 'fake-provider']);
+                if (logs.error || logs.status !== 0)
+                  throw new Error('Fake-provider acceptance evidence could not be read.');
+                if (logs.stdout.includes('synthetic_fake_provider_lost_ack_acceptance_recorded')) {
+                  acceptanceRecorded = true;
+                  break;
+                }
+                await delay(100);
+              }
+              if (!acceptanceRecorded)
+                throw new Error(
+                  'Fake provider did not record acceptance before the lost-ack restart.',
+                );
+
+              const current = await auditPool.query(
+                `SELECT status, provider_submission_id
+                   FROM omnis.connector_execution_attempts WHERE id = $1`,
+                [attemptId],
+              );
+              if (
+                current.rows[0]?.status !== 'submitting' ||
+                current.rows[0]?.provider_submission_id !== null
+              )
+                throw new Error('Lost-ack precondition changed before broker interruption.');
+
+              const killed = runCompose(['kill', '--signal', 'SIGKILL', 'broker-process']);
+              if (killed.error || killed.status !== 0)
+                throw new Error('Broker could not be interrupted after fake-provider acceptance.');
+              const restarted = runCompose(['up', '--detach', '--no-deps', 'broker-process']);
+              if (restarted.error || restarted.status !== 0)
+                throw new Error('Broker did not restart after lost acknowledgement.');
+
+              const terminalDeadline = Date.now() + 60_000;
+              while (Date.now() < terminalDeadline) {
+                const state = await auditPool.query(
+                  `SELECT attempt.status AS attempt_status,
+                          attempt.provider_submission_id,
+                          attempt.usage_provenance,
+                          run.status AS run_status,
+                          (SELECT count(*) FROM omnis.connector_execution_attempts AS same_auth
+                            WHERE same_auth.authorization_id = attempt.authorization_id) AS attempt_count
+                     FROM omnis.connector_execution_attempts AS attempt
+                     JOIN omnis.runs AS run
+                       ON run.connector_authorization_id = attempt.authorization_id
+                    WHERE attempt.id = $1`,
+                  [attemptId],
+                );
+                const row = state.rows[0];
+                if (row?.attempt_status === 'unknown' && row.run_status === 'unknown') {
+                  if (
+                    row.provider_submission_id !== null ||
+                    row.attempt_count !== '1' ||
+                    row.usage_provenance?.kind !== 'unknown'
+                  )
+                    throw new Error('Lost-ack recovery violated unknown-outcome invariants.');
+                  return;
+                }
+                await delay(150);
+              }
+              throw new Error('Broker restart did not persist the lost-ack outcome as unknown.');
             },
             async restartAfterAcceptedCancellation(auditPool, createdAfter) {
               const cancellationDeadline = Date.now() + 60_000;
@@ -878,6 +972,22 @@ async function startSyntheticBrokerCompose({
               if (stopped.error || stopped.status !== 0) {
                 throw new Error('Disposable synthetic broker Compose cleanup failed.');
               }
+            },
+            safeFailureDiagnostics() {
+              assertComposeLogsContainNoSensitiveValues(runCompose, sensitiveValues);
+              const logs = runCompose(['logs', 'broker-process', 'fake-provider']);
+              if (logs.error || logs.status !== 0)
+                return 'broker logs unavailable after integration failure';
+              const markers = logs.stdout
+                .split('\n')
+                .filter((line) =>
+                  /synthetic_fake_provider_(?:fixture_selected:[a-z-]+|lost_ack_acceptance_recorded|delayed_event_lookup)/.test(
+                    line,
+                  ),
+                );
+              return markers.length
+                ? markers.slice(-8).join(',')
+                : 'no fake-provider marker observed';
             },
             assertSensitiveValuesAbsentFromLogs() {
               assertComposeLogsContainNoSensitiveValues(runCompose, sensitiveValues);

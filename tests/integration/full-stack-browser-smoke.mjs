@@ -15,6 +15,7 @@ const stages = [];
 let services;
 let browserRunner;
 let brokerRecovery;
+let brokerLostAckRecovery;
 let brokerCancellationRecovery;
 let timedOut = false;
 let interrupted = false;
@@ -29,12 +30,14 @@ try {
   stages.push('postgres-migration');
   const frontendPort = await freePort();
   const frontendOrigin = `http://127.0.0.1:${frontendPort}`;
+  const lostAckRequestId = randomUUID();
   services = await startMockServices({
     origin: frontendOrigin,
     reservedPorts: [frontendPort],
     requireAuditPool: true,
     enableSyntheticBrokerTestMode: true,
     enableSyntheticBrokerProcessTestMode: true,
+    syntheticLostAckRequestId: lostAckRequestId,
   });
   if (interrupted) throw new Error('The full-stack smoke was interrupted during service startup.');
   stages.push('api-worker-authorizer-launcher-broker-and-fake-provider-ready');
@@ -46,6 +49,7 @@ try {
     frontendPort,
     ownerPassword: services.password,
     syntheticProjectId,
+    lostAckRequestId,
   });
 
   browserRunner = spawn('pnpm', ['--filter', '@omnis/web', 'test:e2e:integration'], {
@@ -59,14 +63,25 @@ try {
     services.auditPool,
     new Date(),
   );
-  brokerCancellationRecovery = services.syntheticBrokerCompose.restartAfterAcceptedCancellation(
-    services.auditPool,
-    new Date(),
+  brokerLostAckRecovery = brokerRecovery.then(() =>
+    services.syntheticBrokerCompose.restartAfterLostAcknowledgement(
+      services.auditPool,
+      lostAckRequestId,
+    ),
   );
-  const exit = await waitForBrowserRunner(browserRunner, 180_000);
+  brokerCancellationRecovery = brokerLostAckRecovery.then(() =>
+    services.syntheticBrokerCompose.restartAfterAcceptedCancellation(
+      services.auditPool,
+      new Date(),
+    ),
+  );
+  void brokerRecovery.catch(() => undefined);
+  void brokerLostAckRecovery.catch(() => undefined);
+  void brokerCancellationRecovery.catch(() => undefined);
+  const exit = await waitForBrowserRunner(browserRunner, 240_000);
   if (exit.timedOut) {
     timedOut = true;
-    throw new Error('The full-stack browser test exceeded its 180-second limit.');
+    throw new Error('The full-stack browser test exceeded its 240-second limit.');
   }
   if (exit.signal) throw new Error(`The full-stack browser runner exited from ${exit.signal}.`);
   if (exit.code !== 0)
@@ -74,6 +89,8 @@ try {
 
   await brokerRecovery;
   stages.push('broker-restart-reconciled-accepted-attempt');
+  await brokerLostAckRecovery;
+  stages.push('broker-restart-reconciled-lost-acknowledgement');
   await brokerCancellationRecovery;
   stages.push('broker-restart-reconciled-owner-cancellation');
 
@@ -86,13 +103,20 @@ try {
   const fixtureStage = services?.syntheticBrokerFixture?.process?.capturedLogs
     ?.match(/synthetic_broker_fixture_failure:[a-z_]+/g)
     ?.at(-1);
+  let brokerDiagnostics;
+  try {
+    brokerDiagnostics = services?.syntheticBrokerCompose?.safeFailureDiagnostics();
+  } catch {
+    brokerDiagnostics = 'broker diagnostic collection failed safely';
+  }
   process.stderr.write(
-    `Full-stack smoke failed during ${stages.at(-1) ?? 'startup'}: ${message}${fixtureStage ? `; ${fixtureStage}` : ''}\n`,
+    `Full-stack smoke failed during ${stages.at(-1) ?? 'startup'}: ${message}${fixtureStage ? `; ${fixtureStage}` : ''}${brokerDiagnostics ? `; ${brokerDiagnostics}` : ''}\n`,
   );
   process.exitCode = 1;
 } finally {
   await stopBrowserRunner(browserRunner);
   await brokerRecovery?.catch(() => undefined);
+  await brokerLostAckRecovery?.catch(() => undefined);
   await brokerCancellationRecovery?.catch(() => undefined);
   await services?.cleanup();
   process.off('SIGINT', handleParentSignal);
