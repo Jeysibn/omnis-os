@@ -1,12 +1,6 @@
 import { RunEventSchema, type RunEvent } from '@omnis/contracts';
 
-const terminalTypes = new Set([
-  'run.completed',
-  'run.cancelled',
-  'run.failed',
-  'run.interrupted',
-  'run.outcome_unknown',
-]);
+const terminalTypes = new Set(['run.completed', 'run.cancelled', 'run.failed', 'run.interrupted']);
 
 export interface RunEventSource {
   subscribe(runId: string, listener: () => void): () => void;

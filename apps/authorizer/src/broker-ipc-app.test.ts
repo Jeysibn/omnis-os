@@ -83,6 +83,10 @@ const attempt = {
 function harness() {
   const calls: string[] = [];
   const store: BrokerIpcStore = {
+    async lookupBrokerAttempt(id) {
+      calls.push(`lookup:${id}`);
+      return { attempt, envelope };
+    },
     async consumeForBroker(id) {
       calls.push(`consume:${id}`);
       return { attempt, envelope };
@@ -123,6 +127,52 @@ const brokerHeaders = {
 };
 
 describe('broker-only authorizer IPC', () => {
+  it('authenticates read-only projection lookups without admitting or mutating attempts', async () => {
+    const { app, calls } = harness();
+    const keys = [
+      'projectId',
+      'projectRevision',
+      'taskId',
+      'taskRevision',
+      'agentId',
+      'profileVersion',
+      'promptDigest',
+      'connectorId',
+      'connectorVersion',
+      'providerId',
+      'modelId',
+      'operation',
+      'capabilities',
+      'limits',
+    ] as const;
+    const payload = {
+      version: 'omnis.broker-authorizer-ipc.v1',
+      authorizationId,
+      requestId,
+      request: Object.fromEntries(keys.map((key) => [key, envelope.claims[key]])),
+    };
+    try {
+      const denied = await app.inject({
+        method: 'POST',
+        url: '/internal/broker/v1/projection',
+        payload,
+      });
+      assert.equal(denied.statusCode, 401);
+      assert.deepEqual(calls, []);
+      const result = await app.inject({
+        method: 'POST',
+        url: '/internal/broker/v1/projection',
+        headers: brokerHeaders,
+        payload,
+      });
+      assert.equal(result.statusCode, 200);
+      assert.deepEqual(calls, [`lookup:${authorizationId}`]);
+      assert.equal(result.json().attempt.id, attemptId);
+    } finally {
+      await app.close();
+    }
+  });
+
   it('refuses to reuse the API service credential as broker authority', () => {
     assert.throws(
       () =>

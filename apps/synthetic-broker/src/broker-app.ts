@@ -1,4 +1,4 @@
-import Fastify from 'fastify';
+import Fastify, { type FastifyRequest, type FastifyReply } from 'fastify';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import {
@@ -33,7 +33,8 @@ export function createSyntheticBrokerApp(input: {
   callerToken: string;
   brokerInstanceId?: string;
   verificationKeys: VerificationKey[];
-  authorizer: Pick<AuthorizerClient, 'admit' | 'begin' | 'record' | 'claim'>;
+  authorizer: Pick<AuthorizerClient, 'admit' | 'begin' | 'record' | 'claim'> &
+    Partial<Pick<AuthorizerClient, 'lookup'>>;
   provider: Pick<FakeProviderClient, 'submit' | 'events'> & {
     cancel?: FakeProviderClient['cancel'];
   };
@@ -59,11 +60,26 @@ export function createSyntheticBrokerApp(input: {
     }
   });
 
-  app.post('/internal/broker/v1/submit', async (request, reply) => {
-    const parsed = RequestSchema.safeParse(request.body);
+  async function handleSubmission(
+    request: FastifyRequest,
+    reply: FastifyReply,
+    projectionOnly: boolean,
+  ) {
+    const parsed = (
+      projectionOnly ? RequestSchema.omit({ renderedRequest: true }) : RequestSchema
+    ).safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: { code: 'invalid_input' } });
-    const input = parsed.data;
-    if (createRenderedRequestDigest(input.renderedRequest) !== input.request.promptDigest) {
+    const input = {
+      ...parsed.data,
+      renderedRequest:
+        'renderedRequest' in parsed.data && typeof parsed.data.renderedRequest === 'string'
+          ? parsed.data.renderedRequest
+          : '',
+    };
+    if (
+      !projectionOnly &&
+      createRenderedRequestDigest(input.renderedRequest) !== input.request.promptDigest
+    ) {
       return reply.code(403).send({ error: { code: 'request_binding_failed' } });
     }
     if (busyAttempts.has(input.requestId))
@@ -73,11 +89,14 @@ export function createSyntheticBrokerApp(input: {
     activeSubmissions += 1;
     busyAttempts.add(input.requestId);
     try {
-      const admission = await authorizer.admit(
-        input.authorizationId,
-        input.requestId,
-        input.request,
-      );
+      const admission = await (
+        projectionOnly
+          ? (authorizer.lookup?.bind(authorizer) ??
+              (() => {
+                throw new Error('Lookup unavailable.');
+              }))
+          : authorizer.admit.bind(authorizer)
+      )(input.authorizationId, input.requestId, input.request);
       const retryingExistingAttempt = admission.attempt.status !== 'admitted';
       const envelope = retryingExistingAttempt
         ? verifyPersistedDecisionEnvelope(admission.envelope, verificationKeys)
@@ -106,6 +125,17 @@ export function createSyntheticBrokerApp(input: {
       )
         throw new Error('Authorizer envelope binding did not match the broker request.');
 
+      if (projectionOnly) {
+        return reply.send({
+          attemptId: admission.attempt.id,
+          correlationId: envelope.claims.correlationId,
+          status: admission.attempt.status,
+          submitted: Boolean(admission.attempt.submissionStartedAt),
+          ...(admission.attempt.responseText
+            ? { responseText: admission.attempt.responseText }
+            : {}),
+        });
+      }
       if (retryingExistingAttempt) {
         const claim = await authorizer.claim(admission.attempt.id, brokerInstanceId);
         if (!claim.owned)
@@ -169,7 +199,11 @@ export function createSyntheticBrokerApp(input: {
         await authorizer.record(admission.attempt.id, brokerInstanceId, started.brokerGeneration, {
           eventId: `unknown:${admission.attempt.id}`,
           status: 'unknown',
-          usage: { kind: 'unknown', reason: 'submission_uncertain', billingExposure: 'unknown' },
+          usage: {
+            kind: 'unknown',
+            reason: 'submission_uncertain',
+            billingExposure: 'unknown',
+          },
         });
         return reply.code(202).send({
           attemptId: admission.attempt.id,
@@ -222,7 +256,13 @@ export function createSyntheticBrokerApp(input: {
       busyAttempts.delete(input.requestId);
       activeSubmissions -= 1;
     }
-  });
+  }
+  app.post('/internal/broker/v1/submit', (request, reply) =>
+    handleSubmission(request, reply, false),
+  );
+  app.post('/internal/broker/v1/projection', (request, reply) =>
+    handleSubmission(request, reply, true),
+  );
 
   app.setNotFoundHandler((_request, reply) =>
     reply.code(404).send({ error: { code: 'not_found' } }),

@@ -292,7 +292,7 @@ test('owner sees an authorized synthetic broker Run, ordered events, result and 
         persistedAttemptStatus = detail.body?.attempt?.status;
         return { runStatus: state.body.status, attemptStatus: persistedAttemptStatus };
       },
-      { timeout: 50_000 },
+      { timeout: 100_000 },
     )
     .toEqual({ runStatus: 'completed', attemptStatus: 'completed' });
   expect(persistedRun.runtimeKind).toBe('mock');
@@ -322,6 +322,7 @@ test('owner sees an authorized synthetic broker Run, ordered events, result and 
   await expect(inspector).toContainText('queued');
   await expect(inspector).toContainText('started');
   await expect(inspector).toContainText('provider submission requested');
+  await expect(inspector).toContainText('outcome unknown');
   await expect(inspector).toContainText('completed');
   await expect(inspector).toContainText('Synthetic provider response.');
   await expect(page.getByText('completed', { exact: true })).toBeVisible();

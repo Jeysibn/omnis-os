@@ -240,6 +240,35 @@ export class PostgresConnectorAuthorizationStore {
     return result.rows[0] ? mapAuthorization(result.rows[0]) : undefined;
   }
 
+  /** Read-only lookup: never admits an attempt or refreshes its authority. */
+  async lookupBrokerAttempt(
+    authorizationId: string,
+    input: ConnectorAuthorizationRequest,
+    requestId: string,
+  ): Promise<BrokerAdmission> {
+    const request = ConnectorAuthorizationRequestSchema.parse(input);
+    if (!isUuid(authorizationId) || !isUuid(requestId)) throw notFound();
+    const grant = await this.authorizer.query<AuthorizationRow>(
+      `${selectAuthorization} WHERE id=$1`,
+      [authorizationId],
+    );
+    if (
+      !grant.rows[0] ||
+      !sameFingerprint(grant.rows[0].request_fingerprint, fingerprintRequest(request))
+    )
+      throw notFound();
+    const result = await this.authorizer.query<AttemptRow>(
+      'SELECT * FROM omnis.connector_execution_attempts WHERE authorization_id=$1 AND request_id=$2',
+      [authorizationId, requestId],
+    );
+    const row = result.rows[0];
+    if (!row?.decision_envelope) throw notFound();
+    return {
+      attempt: mapAttempt(row),
+      envelope: ConnectorDecisionEnvelopeSchema.parse(row.decision_envelope),
+    };
+  }
+
   async getExecutionForAuthorization(
     authorizationId: string,
   ): Promise<{ attempt: ConnectorExecutionAttempt; usage: UsageProvenance } | undefined> {

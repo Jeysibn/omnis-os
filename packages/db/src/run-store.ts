@@ -16,6 +16,10 @@ import {
   type Task,
   type ProjectWorkspaceTaskPage,
 } from '@omnis/contracts';
+import {
+  SyntheticTaskRunResponseSchema,
+  type SyntheticTaskRunResponse,
+} from '@omnis/contracts/synthetic-task-run';
 import type { Pool, PoolClient, QueryResultRow } from 'pg';
 import { asPgBossTransaction, inTransaction, type PgBossTransaction } from './database.ts';
 import { createHmac, createHash, hkdfSync, randomUUID, timingSafeEqual } from 'node:crypto';
@@ -127,6 +131,7 @@ export type SyntheticBrokerRun = {
   correlationId: string;
   binding: ConnectorAuthorizationRequest;
   attemptId: string | null;
+  generation: number;
 };
 
 export type SyntheticBrokerRunResult = {
@@ -668,6 +673,78 @@ export class PostgresRunStore {
     });
   }
 
+  async listUnknownSyntheticRuns(afterId: string | null): Promise<SyntheticBrokerRun[]> {
+    const rows = await this.pool.query<{ id: string }>(
+      `SELECT id FROM omnis.runs WHERE status='unknown' AND connector_authorization_id IS NOT NULL
+       AND ($1::text IS NULL OR id > $1) ORDER BY id LIMIT 20`,
+      [afterId],
+    );
+    const links = await Promise.all(rows.rows.map((row) => this.getSyntheticBrokerRun(row.id)));
+    return links.filter((link): link is SyntheticBrokerRun => Boolean(link));
+  }
+
+  /** Exceptional read-projection repair, never an execution admission or attempt mutation. */
+  async reconcileSyntheticBrokerRun(
+    link: SyntheticBrokerRun,
+    evidenceInput: SyntheticTaskRunResponse,
+  ): Promise<DurableEvent[]> {
+    const evidence = SyntheticTaskRunResponseSchema.parse(evidenceInput);
+    if (!['completed', 'failed', 'interrupted'].includes(evidence.status)) return [];
+    return inTransaction(this.pool, async (client) => {
+      const current = await lockRun(client, link.run.id);
+      if (current.status !== 'unknown' || current.execution_generation !== link.generation)
+        return [];
+      if (
+        current.lease_owner ||
+        current.connector_authorization_id !== evidence.authorizationId ||
+        current.connector_request_id !== evidence.requestId ||
+        current.task_id !== evidence.taskId ||
+        current.id !== evidence.correlationId ||
+        current.connector_correlation_id !== evidence.correlationId ||
+        (current.connector_attempt_id && current.connector_attempt_id !== evidence.attemptId)
+      )
+        throw new StoreError(
+          'conflict',
+          'Authoritative projection identity conflicts with Run.',
+          409,
+        );
+      const stopped = await client.query<{ requested: boolean }>(
+        "SELECT EXISTS(SELECT 1 FROM omnis.run_events WHERE run_id=$1 AND event_type='run.stop_requested') AS requested",
+        [current.id],
+      );
+      const terminalStatus = evidence.status as 'completed' | 'failed' | 'interrupted';
+      const status =
+        terminalStatus === 'interrupted'
+          ? stopped.rows[0]?.requested
+            ? 'cancelled'
+            : 'interrupted'
+          : terminalStatus;
+      await client.query(
+        `UPDATE omnis.runs SET status=$2, result_output=$3, connector_attempt_id=$4,
+        execution_generation=execution_generation+1, updated_at=now() WHERE id=$1`,
+        [
+          current.id,
+          status,
+          status === 'completed' ? evidence.responseText : null,
+          evidence.attemptId,
+        ],
+      );
+      await client.query('UPDATE omnis.tasks SET status=$2 WHERE id=$1', [
+        current.task_id,
+        status === 'completed' ? 'completed' : 'open',
+      ]);
+      const event = await appendEvent(
+        client,
+        current.id,
+        `run.${status}`,
+        status === 'completed'
+          ? evidence.responseText!
+          : 'Authoritative synthetic attempt outcome reconciled.',
+      );
+      return [{ runId: current.id, event }];
+    });
+  }
+
   async getSyntheticBrokerRun(runId: string): Promise<SyntheticBrokerRun | undefined> {
     const result = await this.pool.query<RunRow>(`${runSelect} WHERE r.id = $1`, [runId]);
     const row = result.rows[0];
@@ -688,6 +765,7 @@ export class PostgresRunStore {
       correlationId: row.connector_correlation_id,
       binding,
       attemptId: row.connector_attempt_id ?? null,
+      generation: row.execution_generation,
     };
   }
 

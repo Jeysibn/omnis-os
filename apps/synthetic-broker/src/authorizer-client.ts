@@ -23,6 +23,17 @@ export class AuthorizerClient {
     this.token = token;
   }
 
+  async lookup(authorizationId: string, requestId: string, request: ConnectorAuthorizationRequest) {
+    return BrokerConsumeResponseSchema.parse(
+      await this.post('/internal/broker/v1/projection', {
+        version,
+        authorizationId,
+        requestId,
+        request,
+      }),
+    );
+  }
+
   async admit(authorizationId: string, requestId: string, request: ConnectorAuthorizationRequest) {
     const body = await this.post('/internal/broker/v1/admissions', {
       version,

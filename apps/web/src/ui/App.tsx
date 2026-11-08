@@ -578,7 +578,13 @@ function App() {
               `${parsed.type.replace('run.', '').replaceAll('_', ' ')}: ${parsed.message}`,
             );
           }
-          if (parsed.sequence > newestSequence && terminalStatus(parsed.type) && !terminalHandled) {
+          if (parsed.type === 'run.outcome_unknown') void reconcileRun(selectedRunId);
+          if (
+            parsed.sequence > newestSequence &&
+            parsed.type !== 'run.outcome_unknown' &&
+            terminalStatus(parsed.type) &&
+            !terminalHandled
+          ) {
             terminalHandled = true;
             setStreamState('ended');
             source.close();

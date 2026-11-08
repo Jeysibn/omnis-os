@@ -26,6 +26,11 @@ import {
 } from '@omnis/db';
 
 export type BrokerIpcStore = {
+  lookupBrokerAttempt?: (
+    authorizationId: string,
+    request: ConnectorAuthorizationRequest,
+    requestId: string,
+  ) => Promise<BrokerAdmission>;
   consumeForBroker(
     authorizationId: string,
     request: ConnectorAuthorizationRequest,
@@ -87,6 +92,22 @@ export function createBrokerAuthorizerIpcApp(input: {
       return reply.code(401).send({
         error: { code: 'unauthorized_broker', message: 'Broker IPC authentication failed.' },
       });
+    }
+  });
+
+  app.post('/internal/broker/v1/projection', async (request, reply) => {
+    const parsed = BrokerConsumeRequestSchema.safeParse(request.body);
+    if (!parsed.success) return invalidInput(reply);
+    try {
+      if (!input.store.lookupBrokerAttempt) throw new Error('Lookup unavailable.');
+      const admission = await input.store.lookupBrokerAttempt(
+        parsed.data.authorizationId,
+        parsed.data.request,
+        parsed.data.requestId,
+      );
+      return BrokerConsumeResponseSchema.parse({ version: parsed.data.version, ...admission });
+    } catch (error) {
+      return sendBrokerStoreError(error, reply);
     }
   });
 

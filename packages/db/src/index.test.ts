@@ -1074,6 +1074,53 @@ const postgresSuite = describe(
       assert.equal(unknown.run.status, 'unknown');
       assert.equal((await store.getTask(fixture.task.id))?.status, 'in_progress');
       assert.equal((await store.getSyntheticBrokerRun(runId))?.attemptId !== null, true);
+      const pending = (await store.getSyntheticBrokerRun(runId))!;
+      const authoritative = {
+        version: 'omnis.synthetic-task-run.v1' as const,
+        taskId: fixture.task.id,
+        authorizationId: grant.id,
+        requestId,
+        correlationId: runId,
+        attemptId: pending.attemptId!,
+        status: 'interrupted' as const,
+        submitted: true,
+        usage: {
+          kind: 'unknown' as const,
+          reason: 'not_reported' as const,
+          billingExposure: 'unknown' as const,
+        },
+      };
+      assert.deepEqual(
+        await store.reconcileSyntheticBrokerRun(pending, { ...authoritative, status: 'unknown' }),
+        [],
+      );
+      assert.equal((await store.getSyntheticBrokerRun(runId))?.run.status, 'unknown');
+      await assert.rejects(
+        store.reconcileSyntheticBrokerRun(pending, { ...authoritative, attemptId: randomUUID() }),
+        /identity conflicts/,
+      );
+      assert.deepEqual(
+        await store.reconcileSyntheticBrokerRun(
+          { ...pending, generation: pending.generation! - 1 },
+          authoritative,
+        ),
+        [],
+      );
+      const repaired = await Promise.all([
+        store.reconcileSyntheticBrokerRun(pending, authoritative),
+        store.reconcileSyntheticBrokerRun(pending, authoritative),
+      ]);
+      assert.equal(repaired.flat().length, 1);
+      assert.equal((await store.getSyntheticBrokerRun(runId))?.run.status, 'cancelled');
+      assert.deepEqual(await store.reconcileSyntheticBrokerRun(pending, authoritative), []);
+      await assert.rejects(
+        store.finishSyntheticBrokerRun(runId, lease.workerId, lease.generation, {
+          status: 'completed',
+          responseText: 'stale result',
+        }),
+        /no longer owns/,
+      );
+
       assert.deepEqual(
         (await store.getEvents(runId)).map((event) => event.type),
         [
@@ -1082,9 +1129,70 @@ const postgresSuite = describe(
           'run.provider_submission_requested',
           'run.stop_requested',
           'run.outcome_unknown',
+          'run.cancelled',
         ],
       );
-      assert.match((await store.getEvents(runId)).at(-1)!.message, /Do not resubmit/);
+      assert.match(
+        (await store.getEvents(runId)).find((event) => event.type === 'run.outcome_unknown')!
+          .message,
+        /Do not resubmit/,
+      );
+    });
+
+    it('repairs late completed and failed projections without duplicate events or usage', async () => {
+      for (const status of ['completed', 'failed'] as const) {
+        const fixture = await connectorFixture();
+        const grant = await fixture.authorizations.request(fixture.request, randomUUID());
+        await fixture.authorizations.decide(grant.id, 'owner', {
+          decision: 'approve',
+          promptDigestConfirmation: fixture.request.promptDigest,
+        });
+        const runId = randomUUID(),
+          requestId = randomUUID();
+        await store.admitSyntheticBrokerRun(
+          {
+            runId,
+            taskId: fixture.task.id,
+            authorizationId: grant.id,
+            requestId,
+            correlationId: runId,
+            binding: fixture.request,
+          },
+          async () => 'projection-job',
+        );
+        const lease = await store.beginSyntheticBrokerRun(runId, 'projection-worker', 30);
+        await store.finishSyntheticBrokerRun(runId, 'projection-worker', lease.generation, {
+          status: 'unknown',
+        });
+        const link = (await store.getSyntheticBrokerRun(runId))!;
+        const evidence = {
+          version: 'omnis.synthetic-task-run.v1' as const,
+          taskId: fixture.task.id,
+          authorizationId: grant.id,
+          requestId,
+          correlationId: runId,
+          attemptId: randomUUID(),
+          status,
+          submitted: true,
+          usage: {
+            kind: 'unknown' as const,
+            reason: 'not_reported' as const,
+            billingExposure: 'unknown' as const,
+          },
+          ...(status === 'completed'
+            ? { responseText: 'Authoritative late synthetic output' }
+            : {}),
+        };
+        assert.equal((await store.reconcileSyntheticBrokerRun(link, evidence)).length, 1);
+        assert.deepEqual(await store.reconcileSyntheticBrokerRun(link, evidence), []);
+        const repaired = (await store.getSyntheticBrokerRun(runId))!.run;
+        assert.equal(repaired.status, status);
+        assert.deepEqual(repaired.usage, link.run.usage);
+        assert.equal(
+          (await store.getEvents(runId)).filter((event) => event.type === `run.${status}`).length,
+          1,
+        );
+      }
     });
 
     it('reconciles an expired synthetic worker lease after submission as unknown without replay', async () => {

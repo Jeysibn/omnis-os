@@ -817,6 +817,26 @@ async function startSyntheticBrokerCompose({
               const killed = runCompose(['kill', '--signal', 'SIGKILL', 'broker-process']);
               if (killed.error || killed.status !== 0)
                 throw new Error('Disposable synthetic broker process could not be interrupted.');
+              // Keep the broker unavailable beyond the real worker recovery deadline.
+              const unknownDeadline = Date.now() + 65_000;
+              let sawUnknown = false;
+              while (Date.now() < unknownDeadline) {
+                const projection = await auditPool.query(
+                  `SELECT run.status, attempt.status AS attempt_status FROM omnis.runs AS run JOIN omnis.connector_execution_attempts AS attempt
+                   ON attempt.authorization_id=run.connector_authorization_id WHERE attempt.id=$1`,
+                  [attemptId],
+                );
+                if (projection.rows[0]?.status === 'unknown') {
+                  if (projection.rows[0].attempt_status !== 'accepted')
+                    throw new Error('Attempt changed before late broker recovery.');
+                  sawUnknown = true;
+                  break;
+                }
+                await delay(100);
+              }
+              if (!sawUnknown)
+                throw new Error('Worker did not persist unknown before late broker recovery.');
+
               const restarted = runCompose(['up', '--detach', '--no-deps', 'broker-process']);
               if (restarted.error || restarted.status !== 0)
                 throw new Error('Disposable synthetic broker process did not restart.');
@@ -832,10 +852,20 @@ async function startSyntheticBrokerCompose({
               const attemptDeadline = Date.now() + 50_000;
               while (Date.now() < attemptDeadline) {
                 const recovered = await auditPool.query(
-                  'SELECT status FROM omnis.connector_execution_attempts WHERE id = $1',
+                  `SELECT attempt.status, run.status AS run_status,
+                    (SELECT count(*)::int FROM omnis.connector_authorization_audit WHERE attempt_id=attempt.id AND event_type='connector.submission_started') AS submissions,
+                    (SELECT count(*)::int FROM omnis.run_events WHERE run_id=run.id AND event_type='run.completed') AS completions
+                   FROM omnis.connector_execution_attempts AS attempt JOIN omnis.runs AS run ON run.connector_authorization_id=attempt.authorization_id WHERE attempt.id=$1`,
                   [attemptId],
                 );
-                if (recovered.rows[0]?.status === 'completed') return;
+                if (
+                  recovered.rows[0]?.status === 'completed' &&
+                  recovered.rows[0]?.run_status === 'completed'
+                ) {
+                  if (recovered.rows[0].submissions !== 1 || recovered.rows[0].completions !== 1)
+                    throw new Error('Late recovery duplicated submission or completion.');
+                  return;
+                }
                 await delay(100);
               }
               throw new Error('Broker restart did not reconcile the accepted synthetic attempt.');

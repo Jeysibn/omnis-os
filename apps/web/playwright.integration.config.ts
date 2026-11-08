@@ -14,7 +14,7 @@ export default defineConfig({
   retries: 0,
   workers: 1,
   timeout: 30_000,
-  globalTimeout: 150_000,
+  globalTimeout: 210_000,
   reporter: 'list',
   outputDir: './test-results/full-stack-smoke',
   use: {

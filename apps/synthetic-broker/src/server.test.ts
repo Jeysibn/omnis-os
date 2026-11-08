@@ -92,6 +92,78 @@ const request = {
 };
 
 describe('synthetic broker submission boundary', () => {
+  it('reads a late terminal attempt without admission, claims, provider access or resubmission', async () => {
+    const forbidden = async () => {
+      throw new Error('Mutation or provider access forbidden');
+    };
+    let reads = 0;
+    const app = createSyntheticBrokerApp({
+      callerToken: 'a'.repeat(96),
+      verificationKeys: [
+        {
+          keyId: 'test-key',
+          publicKey: keyPair.publicKey,
+          notBefore: new Date(now.getTime() - 60_000).toISOString(),
+          notAfter: new Date(now.getTime() + 600_000).toISOString(),
+        },
+      ],
+      authorizer: {
+        admit: forbidden,
+        begin: forbidden,
+        record: forbidden,
+        claim: forbidden,
+        lookup: async () => {
+          reads++;
+          return {
+            version: 'omnis.broker-authorizer-ipc.v1' as const,
+            envelope,
+            attempt: {
+              id: attemptId,
+              authorizationId,
+              requestId,
+              status: 'completed',
+              synthetic: true,
+              createdAt: now.toISOString(),
+              brokerGeneration: 2,
+              brokerLeaseExpiresAt: null,
+              submissionStartedAt: now.toISOString(),
+              responseText: 'Late authoritative synthetic output',
+            },
+          };
+        },
+      },
+      provider: { submit: forbidden, events: forbidden },
+    });
+    const projectionRequest = Object.fromEntries(
+      Object.entries(request).filter(([key]) => key !== 'renderedRequest'),
+    );
+    try {
+      const denied = await app.inject({
+        method: 'POST',
+        url: '/internal/broker/v1/projection',
+        payload: projectionRequest,
+      });
+      assert.equal(denied.statusCode, 401);
+      for (let index = 0; index < 3; index++) {
+        const result = await app.inject({
+          method: 'POST',
+          url:
+            index === 2
+              ? '/internal/broker/v1/projection?variant=1'
+              : '/internal/broker/v1/projection',
+          headers: { authorization: `Bearer ${'a'.repeat(96)}` },
+          payload: projectionRequest,
+        });
+        assert.equal(result.statusCode, 200);
+        assert.equal(result.json().status, 'completed');
+        assert.equal(result.json().attemptId, attemptId);
+      }
+      assert.equal(reads, 3);
+    } finally {
+      await app.close();
+    }
+  });
+
   it('returns authorizer-signed correlation for an uncertain provider submission', async () => {
     const attempt = {
       id: attemptId,

@@ -43,6 +43,7 @@ export class SyntheticBrokerRunCoordinator {
   private readonly enqueue: EnqueueRun;
   private readonly publish: (events: DurableEvent[]) => void;
   private readonly recoveryTimeoutMs: number;
+  private readonly onProjectionError: (error: unknown) => void;
   private readonly workerId = randomUUID();
 
   constructor(input: {
@@ -52,7 +53,9 @@ export class SyntheticBrokerRunCoordinator {
     enqueue: EnqueueRun;
     publish: (events: DurableEvent[]) => void;
     recoveryTimeoutMs?: number;
+    onProjectionError?: (error: unknown) => void;
   }) {
+    this.onProjectionError = input.onProjectionError ?? (() => undefined);
     this.store = input.store;
     this.profiles = input.profiles;
     this.broker = input.broker;
@@ -60,6 +63,37 @@ export class SyntheticBrokerRunCoordinator {
     this.publish = input.publish;
     // Exceeds the broker's 30-second lease plus the fake provider's delayed event fixture.
     this.recoveryTimeoutMs = input.recoveryTimeoutMs ?? 45_000;
+  }
+
+  private projectionBusy = false;
+  private projectionCursor: string | null = null;
+
+  async reconcileUnknownRuns(): Promise<void> {
+    if (this.projectionBusy || !this.broker.reconcile) return;
+    this.projectionBusy = true;
+    try {
+      const links = await this.store.listUnknownSyntheticRuns(this.projectionCursor);
+      this.projectionCursor = links.length === 20 ? links.at(-1)!.run.id : null;
+      for (const link of links) {
+        try {
+          // Projection lookup uses the immutable persisted binding, not mutable task content.
+          const request: SyntheticTaskRunRequest = {
+            version: 'omnis.synthetic-task-run.v1',
+            authorizationId: link.authorizationId,
+            requestId: link.requestId,
+            request: link.binding,
+            renderedRequest: 'Read-only projection lookup; no prompt is sent.',
+          };
+          const evidence = await this.broker.reconcile(link.run.taskId, request);
+          this.publish(await this.store.reconcileSyntheticBrokerRun(link, evidence));
+        } catch (error) {
+          this.onProjectionError(error);
+          /* Missing/unavailable evidence leaves durable unknown state eligible. */
+        }
+      }
+    } finally {
+      this.projectionBusy = false;
+    }
   }
 
   async admit(input: {

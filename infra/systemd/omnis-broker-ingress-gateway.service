@@ -16,7 +16,7 @@ Environment=OMNIS_PEER_BACK_SOCKET=/run/omnis-synthetic-broker/broker.sock
 Environment=OMNIS_PEER_UID=omnis-worker
 Environment=OMNIS_PEER_GID=omnis-worker
 Environment=OMNIS_PEER_SOCKET_GID=omnis-broker-ingress-callers
-Environment=OMNIS_PEER_ALLOWED_PATHS=/internal/broker/v1/submit
+Environment=OMNIS_PEER_ALLOWED_PATHS=/internal/broker/v1/submit,/internal/broker/v1/projection
 ExecStart=/usr/bin/python3 /opt/omnis-os/scripts/platform/broker-peer-proxy.py
 Restart=on-failure
 RestartSec=2
