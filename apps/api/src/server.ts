@@ -4,7 +4,6 @@ import {
   AuthorizationDecisionSchema,
   CreateAuthorizationSchema,
   CreateRunSchema,
-  RunEventSchema,
 } from '@omnis/contracts';
 import { syntheticTaskRunTestMode } from '@omnis/contracts/synthetic-task-run';
 import {
@@ -17,6 +16,8 @@ import {
 import { authorizerRequest, AuthorizerRequestError } from './authorizer-client.ts';
 import { env } from './env.ts';
 import { LocalSessionStore } from './session-store.ts';
+import { RunEventStreamRegistry } from './run-event-stream-registry.ts';
+import { registerRunEventsRoute } from './run-events-route.ts';
 import { AuthThrottle } from './auth-throttle.ts';
 import { registerAgentReadRoutes } from './agent-routes.ts';
 import { registerAgentManagementRoutes } from './agent-management-routes.ts';
@@ -46,6 +47,7 @@ const app = Fastify({
 const syntheticBrokerTestMode = syntheticTaskRunTestMode(process.env);
 // Memory-backed sessions are limited to this single-owner local mock gate. Durable session storage is a later gate.
 const sessions = new LocalSessionStore(env.sessionSecret, env.secureCookies);
+const runEventStreams = new RunEventStreamRegistry({ sessions });
 const authThrottle = new AuthThrottle();
 app.decorateRequest('omnisSession', undefined);
 app.addHook('onRequest', async (request, reply) => {
@@ -270,74 +272,12 @@ registerRunStopRoute(app, {
   requireMutationProtection,
   syntheticBrokerEnabled: syntheticBrokerTestMode,
 });
-app.get<{ Params: { runId: string } }>(
-  '/api/v1/runs/:runId/events',
-  { preHandler: requireOwner },
-  async (request, reply) => {
-    const lastEventId = request.headers['last-event-id'];
-    const after = lastEventId === undefined ? 0 : Number(lastEventId);
-    if (!Number.isSafeInteger(after) || after < 0) {
-      return reply
-        .code(400)
-        .send({ error: { code: 'invalid_cursor', message: 'Event cursor is invalid.' } });
-    }
-    const controller = new AbortController();
-    const abort = () => controller.abort();
-    reply.raw.on('close', abort);
-    try {
-      const stream = await workerEventStream(request.params.runId, after, controller.signal);
-      reply.hijack();
-      reply.raw.writeHead(200, {
-        'content-type': 'text/event-stream; charset=utf-8',
-        'cache-control': 'no-cache, no-transform',
-        connection: 'keep-alive',
-        'x-accel-buffering': 'no',
-      });
-      const reader = stream.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let lastSequence = after;
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done || controller.signal.aborted) break;
-          buffer += decoder.decode(value, { stream: true });
-          while (true) {
-            const boundary = buffer.indexOf('\n\n');
-            if (boundary < 0) break;
-            const block = buffer.slice(0, boundary);
-            buffer = buffer.slice(boundary + 2);
-            if (block.startsWith(':')) {
-              reply.raw.write(': keep-alive\n\n');
-              continue;
-            }
-            const dataLine = block.split('\n').find((line) => line.startsWith('data: '));
-            if (!dataLine) continue;
-            const payload: unknown = JSON.parse(dataLine.slice(6));
-            const event = RunEventSchema.parse(payload);
-            if (event.runId !== request.params.runId || event.sequence <= lastSequence) {
-              throw new Error('Worker event stream violated run identity or sequence ordering.');
-            }
-            lastSequence = event.sequence;
-            reply.raw.write(
-              `id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
-            );
-          }
-        }
-      } finally {
-        reader.releaseLock();
-        reply.raw.end();
-      }
-    } catch (error) {
-      if (error instanceof WorkerRequestError && !reply.sent) {
-        return reply.code(error.statusCode).send(error.body);
-      }
-      if (!controller.signal.aborted) app.log.error(error);
-    } finally {
-      reply.raw.off('close', abort);
-    }
-  },
-);
+registerRunEventsRoute(app, {
+  sessions,
+  streams: runEventStreams,
+  requireOwner,
+  workerEventStream,
+});
 
 app.setErrorHandler((error, request, reply) => {
   if (error instanceof AuthorizerRequestError) return reply.code(error.statusCode).send(error.body);

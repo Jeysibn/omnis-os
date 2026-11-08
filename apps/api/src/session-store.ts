@@ -14,6 +14,7 @@ export class LocalSessionStore {
   private readonly maxSessions: number;
   private readonly now: () => number;
   private readonly sessions = new Map<string, LocalSession>();
+  private readonly invalidationListeners = new Map<string, Set<() => void>>();
   private readonly secret: string;
   private readonly secureCookies: boolean;
 
@@ -54,9 +55,9 @@ export class LocalSessionStore {
         timingSafeEqual(suppliedBuffer, expectedBuffer)
       ) {
         const existing = this.sessions.get(id);
-        if (existing && existing.expiresAt > Date.now())
+        if (existing && existing.expiresAt > this.now())
           return { session: existing, setCookie: false };
-        if (existing) this.sessions.delete(id);
+        if (existing) this.invalidate(id);
       }
     }
     if (!createAnonymous) return { setCookie: false };
@@ -65,12 +66,39 @@ export class LocalSessionStore {
   }
 
   rotate(previousId: string): LocalSession | undefined {
-    this.sessions.delete(previousId);
+    this.invalidate(previousId);
     return this.create(true);
   }
 
   destroy(id: string): void {
-    this.sessions.delete(id);
+    this.invalidate(id);
+  }
+
+  isOwnerActive(id: string): boolean {
+    const session = this.sessions.get(id);
+    if (!session) return false;
+    if (session.expiresAt <= this.now()) {
+      this.invalidate(id);
+      return false;
+    }
+    return session.owner;
+  }
+
+  onInvalidated(id: string, listener: () => void): () => void {
+    if (!this.isOwnerActive(id)) {
+      listener();
+      return () => {};
+    }
+    let listeners = this.invalidationListeners.get(id);
+    if (!listeners) {
+      listeners = new Set();
+      this.invalidationListeners.set(id, listeners);
+    }
+    listeners.add(listener);
+    return () => {
+      listeners?.delete(listener);
+      if (listeners?.size === 0) this.invalidationListeners.delete(id);
+    };
   }
 
   cookie(session: LocalSession): string {
@@ -86,7 +114,7 @@ export class LocalSessionStore {
     this.removeExpired(this.now());
     if (this.sessions.size >= this.maxSessions) {
       const oldestAnonymous = [...this.sessions].find(([, session]) => !session.owner)?.[0];
-      if (oldestAnonymous) this.sessions.delete(oldestAnonymous);
+      if (oldestAnonymous) this.invalidate(oldestAnonymous);
       else return undefined;
     }
     const id = randomBytes(32).toString('base64url');
@@ -100,9 +128,23 @@ export class LocalSessionStore {
     return session;
   }
 
-  private removeExpired(now = Date.now()): void {
+  private removeExpired(now = this.now()): void {
     for (const [id, session] of this.sessions) {
-      if (session.expiresAt <= now) this.sessions.delete(id);
+      if (session.expiresAt <= now) this.invalidate(id);
+    }
+  }
+
+  private invalidate(id: string): void {
+    this.sessions.delete(id);
+    const listeners = this.invalidationListeners.get(id);
+    if (!listeners) return;
+    this.invalidationListeners.delete(id);
+    for (const listener of listeners) {
+      try {
+        listener();
+      } catch {
+        // One failed stream cleanup must not prevent other streams from closing.
+      }
     }
   }
 

@@ -26,6 +26,52 @@ describe('local owner sessions', () => {
     assert.notEqual(ownerSession.id, first.id);
     assert.equal(store.resolve(cookie).session!.owner, false);
   });
+
+  it('notifies active stream listeners when a session is destroyed or rotated', () => {
+    const store = new LocalSessionStore('e'.repeat(64), false);
+    const anonymous = store.resolve(undefined).session!;
+    const owner = store.rotate(anonymous.id)!;
+    const oldSessionInvalidations: string[] = [];
+    const newSessionInvalidations: string[] = [];
+    store.onInvalidated(anonymous.id, () => oldSessionInvalidations.push('anonymous'));
+    store.onInvalidated(owner.id, () => oldSessionInvalidations.push('owner'));
+
+    const replacement = store.rotate(owner.id)!;
+    store.onInvalidated(replacement.id, () => newSessionInvalidations.push('replacement'));
+    store.destroy(replacement.id);
+
+    assert.deepEqual(oldSessionInvalidations, ['anonymous', 'owner']);
+    assert.deepEqual(newSessionInvalidations, ['replacement']);
+    assert.equal(store.isOwnerActive(owner.id), false);
+    assert.equal(store.isOwnerActive(replacement.id), false);
+  });
+
+  it('invalidates and notifies expired sessions using the injected clock', () => {
+    let now = 10_000;
+    const store = new LocalSessionStore('f'.repeat(64), false, 4, () => now);
+    const anonymous = store.resolve(undefined).session!;
+    const owner = store.rotate(anonymous.id)!;
+    const invalidated: string[] = [];
+    store.onInvalidated(owner.id, () => invalidated.push(owner.id));
+
+    now = owner.expiresAt;
+    assert.equal(store.isOwnerActive(owner.id), false);
+    assert.deepEqual(invalidated, [owner.id]);
+    assert.equal(store.resolve(store.cookie(owner), false).session, undefined);
+  });
+
+  it('releases invalidation listeners when their subscriber disconnects', () => {
+    const store = new LocalSessionStore('g'.repeat(64), false);
+    const anonymous = store.resolve(undefined).session!;
+    const session = store.rotate(anonymous.id)!;
+    let invalidations = 0;
+    const unsubscribe = store.onInvalidated(session.id, () => invalidations++);
+
+    unsubscribe();
+    store.destroy(session.id);
+
+    assert.equal(invalidations, 0);
+  });
 });
 
 describe('bounded anonymous session storage', () => {
