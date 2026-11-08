@@ -63,16 +63,16 @@ try {
     services.auditPool,
     new Date(),
   );
-  brokerLostAckRecovery = brokerRecovery.then(() =>
-    services.syntheticBrokerCompose.restartAfterLostAcknowledgement(
-      services.auditPool,
-      lostAckRequestId,
-    ),
-  );
-  brokerCancellationRecovery = brokerLostAckRecovery.then(() =>
+  brokerCancellationRecovery = brokerRecovery.then(() =>
     services.syntheticBrokerCompose.restartAfterAcceptedCancellation(
       services.auditPool,
       new Date(),
+    ),
+  );
+  brokerLostAckRecovery = brokerCancellationRecovery.then(() =>
+    services.syntheticBrokerCompose.restartAfterLostAcknowledgement(
+      services.auditPool,
+      lostAckRequestId,
     ),
   );
   void brokerRecovery.catch(() => undefined);
@@ -89,10 +89,10 @@ try {
 
   await brokerRecovery;
   stages.push('broker-restart-reconciled-accepted-attempt');
-  await brokerLostAckRecovery;
-  stages.push('broker-restart-reconciled-lost-acknowledgement');
   await brokerCancellationRecovery;
   stages.push('broker-restart-reconciled-owner-cancellation');
+  await brokerLostAckRecovery;
+  stages.push('broker-restart-reconciled-lost-acknowledgement');
 
   services.assertSensitiveValuesAbsentFromLogs();
   stages.push('synthetic-broker-credential-log-canaries-absent');
