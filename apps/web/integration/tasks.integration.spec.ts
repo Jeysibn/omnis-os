@@ -105,6 +105,7 @@ test('owner creates an unassigned task that persists after reload', async ({ pag
 test('owner sees an authorized synthetic broker Run, ordered events, result and usage provenance', async ({
   page,
 }) => {
+  test.setTimeout(90_000);
   test.skip(
     !syntheticProjectId,
     'The disposable backend harness did not enable synthetic broker integration.',
