@@ -6941,6 +6941,9 @@ const postgresSuite = describe(
           omnis.runtime_authorizations, omnis.run_idempotency,
           omnis.mission_lane_events, omnis.run_events, omnis.runs, omnis.tasks
       `);
+        await adminPool!.query(
+          'UPDATE omnis.mission_lane_clock SET feed_epoch = gen_random_uuid(), last_global_sequence = 0, history_started_at = clock_timestamp(), history_start_sequence = 1 WHERE singleton',
+        );
         await adminPool!.query('ALTER SEQUENCE omnis.task_id_seq RESTART WITH 1');
         await adminPool!.query('ALTER SEQUENCE omnis.run_id_seq RESTART WITH 1');
         await adminPool!.query('DROP TABLE IF EXISTS omnis.test_queue_outbox');

@@ -27,6 +27,52 @@ GRANT UPDATE (
 ) ON omnis.runs TO omnis_runtime;
 GRANT INSERT (id, run_id, sequence, event_type, at, message)
   ON omnis.run_events TO omnis_runtime;
+-- Mission Lane upgrades make run_events writes available only through the
+-- constrained runtime append function. ACL-free restores need the same rule.
+DO $mission_lane_run_event_acl$
+BEGIN
+  IF pg_catalog.to_regclass('omnis.mission_lane_clock') IS NOT NULL
+     AND pg_catalog.to_regclass('omnis.mission_lane_events') IS NOT NULL THEN
+    EXECUTE 'GRANT SELECT ON omnis.mission_lane_clock, omnis.mission_lane_events TO omnis_runtime';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.append_runtime_run_event(text,text,text)') IS NOT NULL THEN
+    EXECUTE 'REVOKE INSERT ON omnis.run_events FROM omnis_runtime';
+    EXECUTE 'REVOKE INSERT (id, run_id, sequence, event_type, at, message) ON omnis.run_events FROM omnis_runtime';
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.append_runtime_run_event(text, text, text) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.append_runtime_run_event(text, text, text) TO omnis_runtime';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.append_mission_lane_event(text,text,text,text,text,text,boolean,text,text,text,text,timestamptz,jsonb)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.append_mission_lane_event(text, text, text, text, text, text, boolean, text, text, text, text, timestamptz, jsonb) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.require_mission_lane_writer_lock()') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.require_mission_lane_writer_lock() FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.project_run_event_to_mission_lane()') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.project_run_event_to_mission_lane() FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.project_task_event_to_mission_lane()') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.project_task_event_to_mission_lane() FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.project_task_epic_event_to_mission_lane()') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.project_task_epic_event_to_mission_lane() FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.advance_mission_task_status_revision()') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.advance_mission_task_status_revision() FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.reject_mission_lane_mutation()') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.reject_mission_lane_mutation() FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.create_task_mission_lane_impl(text,text,text,uuid,bytea)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.create_task_mission_lane_impl(text, text, text, uuid, bytea) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.set_task_project_mission_lane_impl(text,integer,text,uuid,bytea)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.set_task_project_mission_lane_impl(text, integer, text, uuid, bytea) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.set_task_epic_mission_lane_impl(text,integer,text,uuid,bytea)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.set_task_epic_mission_lane_impl(text, integer, text, uuid, bytea) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+END
+$mission_lane_run_event_acl$;
 GRANT INSERT (idempotency_key, request_fingerprint, run_id)
   ON omnis.run_idempotency TO omnis_runtime;
 GRANT SELECT ON omnis.runtime_authorizations TO omnis_runtime;

@@ -659,14 +659,35 @@ async function verifyLegacyRuntimeAclParity(sourceUrl, restoredUrl) {
                  'omnis.create_task(text,text,text,uuid,bytea)', 'EXECUTE') AS create_task,
                has_function_privilege('omnis_runtime',
                  'omnis.set_task_project(text,integer,text,uuid,bytea)', 'EXECUTE') AS set_project,
+               has_function_privilege('omnis_runtime',
+                 'omnis.append_runtime_run_event(text,text,text)', 'EXECUTE') AS append_run_event,
+               EXISTS (
+                 SELECT 1
+                   FROM pg_proc p
+                   CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) acl
+                  WHERE p.oid = 'omnis.append_runtime_run_event(text,text,text)'::regprocedure
+                    AND acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
+               ) AS public_append_run_event,
+               has_function_privilege('omnis_authorizer',
+                 'omnis.append_runtime_run_event(text,text,text)', 'EXECUTE') AS authorizer_append_run_event,
+               has_function_privilege('omnis_launcher',
+                 'omnis.append_runtime_run_event(text,text,text)', 'EXECUTE') AS launcher_append_run_event,
                has_table_privilege('omnis_runtime', 'omnis.tasks', 'INSERT') AS direct_insert,
+               has_table_privilege('omnis_runtime', 'omnis.run_events', 'INSERT') AS direct_run_event_insert,
+               has_column_privilege('omnis_runtime', 'omnis.run_events', 'event_type', 'INSERT') AS direct_run_event_column_insert,
                has_column_privilege('omnis_runtime', 'omnis.tasks', 'project_id', 'UPDATE') AS direct_project_update,
                has_sequence_privilege('omnis_runtime', 'omnis.task_id_seq', 'USAGE') AS task_sequence_usage
       `);
       assert.deepEqual(taskBoundary.rows[0], {
         create_task: true,
         set_project: true,
+        append_run_event: true,
+        public_append_run_event: false,
+        authorizer_append_run_event: false,
+        launcher_append_run_event: false,
         direct_insert: false,
+        direct_run_event_insert: false,
+        direct_run_event_column_insert: false,
         direct_project_update: false,
         task_sequence_usage: false,
       });
