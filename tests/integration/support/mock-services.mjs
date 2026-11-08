@@ -368,6 +368,28 @@ export async function startMockServices({
         sensitiveValues: sensitiveLogCanaries,
         lostAckRequestId: syntheticLostAckRequestId,
         cancellationRequestId: syntheticCancellationRequestId,
+        restartProjectionServices: async () => {
+          // These are disposable test children; preserve canary evidence before replacement.
+          await stopProcess(worker);
+          await stopProcess(authorizer);
+          assertSensitiveValuesAbsentFromLogs(sensitiveLogCanaries, [
+            { name: 'worker before restart', process: worker },
+            { name: 'authorizer before restart', process: authorizer },
+          ]);
+          worker = await startWorker();
+          authorizer = await startAuthorizer();
+          await waitForHealth({
+            apiUrl,
+            workerUrl,
+            internalToken,
+            workerProcess: worker,
+            apiProcess: api,
+            authorizerSocket,
+            authorizerProcess: authorizer,
+            launcherSocket,
+            launcherProcess: launcher,
+          });
+        },
       });
     }
     return {
@@ -731,6 +753,7 @@ async function startSyntheticBrokerCompose({
   sensitiveValues,
   lostAckRequestId,
   cancellationRequestId,
+  restartProjectionServices,
 }) {
   const projectName = `omnis-broker-e2e-${process.pid}-${randomUUID().replaceAll('-', '').slice(0, 10)}`;
   const compose = [
@@ -836,6 +859,8 @@ async function startSyntheticBrokerCompose({
               }
               if (!sawUnknown)
                 throw new Error('Worker did not persist unknown before late broker recovery.');
+
+              await restartProjectionServices?.();
 
               const restarted = runCompose(['up', '--detach', '--no-deps', 'broker-process']);
               if (restarted.error || restarted.status !== 0)
