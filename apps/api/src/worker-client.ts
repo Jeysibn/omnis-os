@@ -7,20 +7,10 @@ import {
   AgentProfileVersionsResponseSchema,
   RunSchema,
   TaskSchema,
-  type ApiError,
 } from '@omnis/contracts';
 import { env } from './env.ts';
-
-export class WorkerRequestError extends Error {
-  readonly statusCode: number;
-  readonly body: ApiError;
-
-  constructor(statusCode: number, body: ApiError) {
-    super(body.error.message);
-    this.statusCode = statusCode;
-    this.body = body;
-  }
-}
+import { WorkerRequestError } from './worker-request-error.ts';
+export { WorkerRequestError } from './worker-request-error.ts';
 
 export async function workerRequest<T>(
   path: string,
