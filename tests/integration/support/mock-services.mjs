@@ -750,7 +750,7 @@ async function startSyntheticBrokerCompose({
     ...(process.env.DOCKER_CONFIG ? { DOCKER_CONFIG: process.env.DOCKER_CONFIG } : {}),
     OMNIS_FAKE_PROVIDER_TOKEN_FILE: providerTokenPath,
     OMNIS_BROKER_TEST_PROVIDER_FIXTURES: JSON.stringify({
-      default: 'completed',
+      default: 'delayed-events',
       ...(cancellationRequestId
         ? { [cancellationRequestId]: 'delayed-cancel-confirmed-events' }
         : {}),
