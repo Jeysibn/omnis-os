@@ -144,13 +144,13 @@ export function assertValidMetrics(report) {
     !validProjectManagementCounts(report.projectManagementCounts) ||
     !validTaskProjectManagementCounts(report.taskProjectManagementCounts) ||
     !validTaskExecutionAssignmentCounts(report.taskExecutionAssignmentCounts) ||
-    !validMissionLaneMetrics(report.missionLane) ||
     !validManagementFingerprints(report.recordFingerprints) ||
     report.syntheticOnly !== true ||
     report.sequenceInvariants !== true ||
     report.applicationQueryWorks !== true ||
     !validIdSequence(report.idSequences?.tasks, 'task') ||
-    !validIdSequence(report.idSequences?.runs, 'run')
+    !validIdSequence(report.idSequences?.runs, 'run') ||
+    !validMissionLaneMetrics(report.missionLane)
   ) {
     throw new Error('Database did not satisfy Omnis backup invariants.');
   }
