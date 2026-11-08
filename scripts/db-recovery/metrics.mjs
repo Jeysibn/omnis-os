@@ -130,6 +130,11 @@ export function parseMetrics(output) {
 }
 
 export function assertValidMetrics(report) {
+  if (!validMissionLaneMetrics(report?.missionLane)) {
+    throw new Error(
+      `Database Mission Lane ledger metrics are invalid: ${JSON.stringify(report?.missionLane)}.`,
+    );
+  }
   if (
     !Array.isArray(report.migrations) ||
     !report.migrations.includes('0001_initial') ||
@@ -149,8 +154,7 @@ export function assertValidMetrics(report) {
     report.sequenceInvariants !== true ||
     report.applicationQueryWorks !== true ||
     !validIdSequence(report.idSequences?.tasks, 'task') ||
-    !validIdSequence(report.idSequences?.runs, 'run') ||
-    !validMissionLaneMetrics(report.missionLane)
+    !validIdSequence(report.idSequences?.runs, 'run')
   ) {
     throw new Error('Database did not satisfy Omnis backup invariants.');
   }

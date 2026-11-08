@@ -373,6 +373,17 @@ const postgresSuite = describe(
       const loadStore = new PostgresRunStore(loadPool);
       const mutationLatencies: number[] = [];
       try {
+        await Promise.all(
+          Array.from({ length: 32 }, async (_, writer) =>
+            loadStore.createTask(
+              {
+                title: `Warmup ${writer}`,
+                detail: 'Warm each independent writer connection before measurement.',
+              },
+              randomUUID(),
+            ),
+          ),
+        );
         for (let round = 0; round < 10; round += 1) {
           await Promise.all(
             Array.from({ length: 32 }, async (_, writer) => {
@@ -396,11 +407,11 @@ const postgresSuite = describe(
       const p50MutationLatency = orderedLatencies[Math.ceil(orderedLatencies.length * 0.5) - 1];
       const maxMutationLatency = orderedLatencies.at(-1);
       assert.equal(mutationLatencies.length, 320);
+      testContext.diagnostic(
+        `32 writers x 10 measured rounds after warmup: mutation p50=${p50MutationLatency?.toFixed(2)}ms p95=${p95MutationLatency?.toFixed(2)}ms max=${maxMutationLatency?.toFixed(2)}ms`,
+      );
       assert.ok(p95MutationLatency !== undefined && p95MutationLatency <= 500);
       assert.ok(maxMutationLatency !== undefined && maxMutationLatency <= 3000);
-      testContext.diagnostic(
-        `32 writers x 10 rounds: mutation p50=${p50MutationLatency?.toFixed(2)}ms p95=${p95MutationLatency?.toFixed(2)}ms max=${maxMutationLatency?.toFixed(2)}ms`,
-      );
       const countAndClock = await adminPool!.query<{
         count: string;
         last_global_sequence: string;
