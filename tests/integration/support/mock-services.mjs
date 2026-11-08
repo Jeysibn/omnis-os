@@ -86,6 +86,8 @@ export async function startMockServices({
   const authorizerToken = randomBytes(48).toString('hex');
   const brokerAuthorizerToken = randomBytes(48).toString('hex');
   const syntheticBrokerTestToken = randomBytes(48).toString('hex');
+  const sessionSecret = randomBytes(48).toString('hex');
+  const agentIdempotencyKey = randomBytes(32).toString('hex');
   const decisionKeyFile = join(tempDirectory, 'authorizer-ed25519.pem');
   const decisionKeyNotBefore = new Date(Date.now() - 5_000).toISOString();
   const decisionKeyNotAfter = new Date(Date.now() + 60 * 60_000).toISOString();
@@ -95,7 +97,7 @@ export async function startMockServices({
   const passwordHash = (await scrypt(testOwnerPassword, salt, 64)).toString('hex');
   const sharedEnvLines = [
     `OMNIS_OWNER_PASSWORD_HASH=${salt.toString('hex')}:${passwordHash}`,
-    `OMNIS_SESSION_SECRET=${randomBytes(48).toString('hex')}`,
+    `OMNIS_SESSION_SECRET=${sessionSecret}`,
     `OMNIS_INTERNAL_TOKEN=${internalToken}`,
     `OMNIS_API_AUTHORIZER_TOKEN=${authorizerToken}`,
     'OMNIS_API_HOST=127.0.0.1',
@@ -141,7 +143,7 @@ export async function startMockServices({
       authorizerEnvPath,
       [
         `OMNIS_API_AUTHORIZER_TOKEN=${authorizerToken}`,
-        `OMNIS_AGENT_IDEMPOTENCY_KEY=${randomBytes(32).toString('hex')}`,
+        `OMNIS_AGENT_IDEMPOTENCY_KEY=${agentIdempotencyKey}`,
         'OMNIS_AGENT_IDEMPOTENCY_KEY_VERSION=1',
         `OMNIS_AUTHORIZER_DATABASE_URL=${authorizerUrl}`,
         `OMNIS_AUTHORIZER_SOCKET=${authorizerSocket}`,
@@ -303,6 +305,31 @@ export async function startMockServices({
       canary,
       syntheticBrokerFixture,
       syntheticBrokerProcess,
+      assertSensitiveValuesAbsentFromLogs: () =>
+        assertSensitiveValuesAbsentFromLogs(
+          [
+            canary,
+            testOwnerPassword,
+            databaseUrl,
+            migrationUrl,
+            authorizerUrl,
+            launcherUrl,
+            adminAuditUrl,
+            internalToken,
+            authorizerToken,
+            brokerAuthorizerToken,
+            syntheticBrokerTestToken,
+            sessionSecret,
+            agentIdempotencyKey,
+            passwordHash,
+          ],
+          [
+            { name: 'API', process: api },
+            { name: 'worker', process: worker },
+            { name: 'authorizer', process: authorizer },
+            { name: 'synthetic broker', process: syntheticBrokerProcess },
+          ],
+        ),
       auditPool,
       api,
       worker,
@@ -604,6 +631,17 @@ export function socketRequest(socketPath, requestPath, init = {}) {
     req.setTimeout(3_000, () => req.destroy(new Error('unix_socket_request_timeout')));
     req.end(init.body);
   });
+}
+
+export function assertSensitiveValuesAbsentFromLogs(values, processes) {
+  for (const { name, process: child } of processes) {
+    const logs = child?.capturedLogs ?? '';
+    if (
+      values.some((value) => typeof value === 'string' && value.length > 0 && logs.includes(value))
+    ) {
+      throw new Error(`A sensitive test value was written to ${name} logs.`);
+    }
+  }
 }
 
 export async function startSyntheticBrokerFixture({

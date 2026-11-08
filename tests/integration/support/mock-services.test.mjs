@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import {
+  assertSensitiveValuesAbsentFromLogs,
   assertNoExecutableWork,
   buildBrowserEnvironment,
   startManagedProcess,
@@ -14,6 +15,32 @@ import {
   stopProcess,
   validateTestDatabaseConfiguration,
 } from './mock-services.mjs';
+
+test('checks test credential canaries across isolated service logs without echoing values', () => {
+  const canary = 'synthetic-canary-value-for-test-only';
+  assert.doesNotThrow(() =>
+    assertSensitiveValuesAbsentFromLogs(
+      [canary],
+      [
+        { name: 'API', process: { capturedLogs: 'request rejected' } },
+        { name: 'worker', process: { capturedLogs: 'run completed' } },
+        { name: 'authorizer', process: { capturedLogs: 'attempt persisted' } },
+        { name: 'synthetic broker', process: { capturedLogs: 'provider outcome recorded' } },
+      ],
+    ),
+  );
+  assert.throws(
+    () =>
+      assertSensitiveValuesAbsentFromLogs(
+        [canary],
+        [{ name: 'synthetic broker', process: { capturedLogs: `request ${canary}` } }],
+      ),
+    (error) =>
+      error instanceof Error &&
+      error.message === 'A sensitive test value was written to synthetic broker logs.' &&
+      !error.message.includes(canary),
+  );
+});
 
 const goodUrls = {
   OMNIS_TEST_DATABASE_URL: 'postgresql://omnis_runtime:runtime-synthetic@127.0.0.1:5432/omnis_test',
