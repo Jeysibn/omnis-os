@@ -20,6 +20,7 @@ import {
   type PendingOperation,
 } from './syntheticConnectorOperationStorage.js';
 import { SyntheticOperationDialog } from './SyntheticOperationDialog.js';
+import { useConnectorAuthorizationRevoke } from './useConnectorAuthorizationRevoke.js';
 import { renderSyntheticConnectorRequest } from '@omnis/contracts/synthetic-connector-prompt';
 import { RuntimeCapabilitiesSchema } from '@omnis/contracts/runtime-capabilities';
 import { ApiRequestError, request } from './api.js';
@@ -58,6 +59,26 @@ export function SyntheticConnectorRunAction({
   const [error, setError] = useState('');
   const [announcement, setAnnouncement] = useState('');
   const dialogRef = useRef<HTMLDialogElement>(null);
+
+  const applyAuthorization = useCallback(
+    (current: ConnectorAuthorization) => {
+      setAuthorization(current);
+      if (current.status === 'revoked' && current.consumedAt === null) {
+        // A revoked approval can never be resumed; the next review starts a new operation.
+        clearPendingOperation(ownerId, task.id);
+        setPendingOperation(null);
+      }
+    },
+    [ownerId, task.id],
+  );
+  const revocation = useConnectorAuthorizationRevoke({
+    authorization,
+    csrfToken,
+    blocked: busy,
+    onSessionExpired,
+    onAuthorization: applyAuthorization,
+  });
+  const { clearMessages: clearRevocationMessages } = revocation;
 
   const canRun = Boolean(
     task.projectId &&
@@ -251,6 +272,7 @@ export function SyntheticConnectorRunAction({
     if (!authorization || authorization.status !== 'pending') return;
     setBusy(true);
     setError('');
+    clearRevocationMessages();
     try {
       const decision = ConnectorAuthorizationDecisionSchema.parse({
         decision: 'approve',
@@ -283,9 +305,17 @@ export function SyntheticConnectorRunAction({
   }
 
   async function startRun() {
-    if (!authorization || authorization.status !== 'authorized' || !renderedRequest) return;
+    if (
+      !authorization ||
+      authorization.status !== 'authorized' ||
+      !renderedRequest ||
+      revocation.pending ||
+      revocation.unresolved
+    )
+      return;
     setBusy(true);
     setError('');
+    clearRevocationMessages();
     try {
       const requestBinding = ConnectorAuthorizationRequestSchema.parse({
         projectId: authorization.projectId,
@@ -332,7 +362,8 @@ export function SyntheticConnectorRunAction({
   }
 
   function closeDialog() {
-    if (busy) return;
+    if (busy || revocation.pending) return;
+    clearRevocationMessages();
     setDialogOpen(false);
   }
 
@@ -378,10 +409,14 @@ export function SyntheticConnectorRunAction({
           dialogRef={dialogRef}
           authorization={authorization}
           renderedRequest={renderedRequest}
-          busy={busy}
-          error={error}
+          busy={busy || revocation.pending}
+          error={error || revocation.error}
+          notice={revocation.notice}
+          revokeUnresolved={revocation.unresolved}
           onApprove={() => void approve()}
           onStart={() => void startRun()}
+          onRevoke={revocation.revoke}
+          onRefreshStatus={() => void revocation.refreshStatus()}
           onClose={closeDialog}
         />
       )}

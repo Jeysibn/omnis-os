@@ -40,6 +40,14 @@ import {
   type Task,
 } from '@omnis/contracts';
 import { ApiRequestError, request } from './api.js';
+import { formatDate } from './manilaTime.js';
+import {
+  createRunStreamBudget,
+  createRunStreamRecovery,
+  resetRunStreamBudget,
+  type RunStreamBudget,
+  type SessionProbeResult,
+} from './runStreamRecovery.js';
 import { AgentsWorkspace } from './agents/AgentsWorkspace.js';
 import { DepartmentsWorkspace } from './departments/DepartmentsWorkspace.js';
 import { ProjectsWorkspace } from './projects/ProjectsWorkspace.js';
@@ -51,7 +59,7 @@ import { SyntheticConnectorRunAction } from './SyntheticConnectorRunAction.js';
 
 type Owner = { id: string; displayName: string };
 type Page = 'command-center' | 'tasks' | 'runs' | 'agents' | 'departments' | 'projects';
-type StreamState = 'connecting' | 'connected' | 'reconnecting' | 'closed' | 'ended';
+type StreamState = 'connecting' | 'connected' | 'reconnecting' | 'closed' | 'ended' | 'paused';
 type ApprovalOperation = {
   taskId: string;
   authorizationKey: string;
@@ -222,15 +230,6 @@ function statusLabel(status: Run['status'] | Task['status']): string {
   return status.replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
-function formatDate(value: string, options: Intl.DateTimeFormatOptions = {}) {
-  return new Intl.DateTimeFormat('en-PH', {
-    timeZone: 'Asia/Manila',
-    dateStyle: 'medium',
-    timeStyle: 'short',
-    ...options,
-  }).format(new Date(value));
-}
-
 function App() {
   const [owner, setOwner] = useState<Owner | null>(null);
   const [checking, setChecking] = useState(true);
@@ -251,6 +250,16 @@ function App() {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [events, setEvents] = useState<RunEvent[]>([]);
   const [streamState, setStreamState] = useState<StreamState>('connecting');
+  const [streamEpoch, setStreamEpoch] = useState(0);
+  const recreatingStream = useRef(false);
+  // Identifies the current owner session. Anything started under an older value (a delayed
+  // session probe, a retry budget) must not affect the session that replaced it.
+  const sessionGeneration = useRef(0);
+  const streamBudgets = useRef(new Map<string, RunStreamBudget>());
+  const rotateSession = useCallback(() => {
+    sessionGeneration.current += 1;
+    streamBudgets.current.clear();
+  }, []);
   const [page, setPage] = useState<Page>(() => readRoute().page);
   const [restoredTaskCreate] = useState(readPendingTaskCreate);
   const [title, setTitle] = useState(() => restoredTaskCreate?.operation.title ?? '');
@@ -330,6 +339,7 @@ function App() {
   const expireSessionIfNeeded = useCallback(
     (cause: unknown) => {
       if (!(cause instanceof ApiRequestError) || cause.status !== 401) return false;
+      rotateSession();
       setOwner(null);
       setCsrfToken('');
       setTasks([]);
@@ -365,7 +375,7 @@ function App() {
       }
       return true;
     },
-    [refreshCsrf],
+    [refreshCsrf, rotateSession],
   );
 
   const loadTasks = useCallback(async () => {
@@ -465,6 +475,36 @@ function App() {
     [expireSessionIfNeeded],
   );
 
+  // Authenticated Run read used to tell a dropped network from an ended owner session after a
+  // stream error. 401 goes through the existing sign-out flow; 403 and other refusals are shown
+  // without signing out; network and server trouble never sign the owner out.
+  const probeRunSession = useCallback(
+    async (runId: string, signal: AbortSignal): Promise<SessionProbeResult> => {
+      // The session this probe was made for. Every outcome below is checked against it BEFORE any
+      // side effect, so a late answer for an old session (for example a 401 for a cookie that was
+      // replaced by a new sign-in) can never sign out or alter the session that replaced it.
+      const generation = sessionGeneration.current;
+      const stale = () => signal.aborted || generation !== sessionGeneration.current;
+      try {
+        const run = await request(
+          `/api/v1/runs/${encodeURIComponent(runId)}`,
+          { signal },
+          (value) => RunSchema.parse(value),
+        );
+        if (stale()) return 'stale';
+        setRuns((current) => current.map((entry) => (entry.id === run.id ? run : entry)));
+        return 'valid';
+      } catch (cause) {
+        if (stale()) return 'stale';
+        if (expireSessionIfNeeded(cause)) return 'unauthorized';
+        if (cause instanceof ApiRequestError && cause.outcome === 'uncertain') return 'unreachable';
+        setReconcileError(failureMessage(cause, 'Access to this run could not be confirmed.'));
+        return 'rejected';
+      }
+    },
+    [expireSessionIfNeeded],
+  );
+
   useEffect(() => {
     const onHashChange = () => {
       navigatedInApp.current = true;
@@ -497,6 +537,7 @@ function App() {
           setTaskProjectId('');
           storePendingTaskCreate(null, null);
         }
+        rotateSession();
         setOwner(currentOwner);
         setChecking(false);
         void loadWorkspace();
@@ -508,7 +549,7 @@ function App() {
         setChecking(false);
       }
     })();
-  }, [loadWorkspace, refreshCsrf, restoredTaskCreate]);
+  }, [loadWorkspace, refreshCsrf, restoredTaskCreate, rotateSession]);
 
   useEffect(() => {
     if (!owner || page !== 'runs' || !selectedRunId || !selectedRunExists) {
@@ -516,12 +557,47 @@ function App() {
       setStreamState('closed');
       return;
     }
-    setEvents([]);
-    setReconcileError('');
-    setAnnouncement('');
-    seenSequences.current.set(selectedRunId, new Set());
+    // The retry budget belongs to the session and Run, not to this effect instance, so a stream
+    // recreated here (or an unrelated effect re-run) cannot obtain a fresh allowance.
+    let budget = streamBudgets.current.get(selectedRunId);
+    if (!budget) {
+      budget = createRunStreamBudget();
+      streamBudgets.current.set(selectedRunId, budget);
+    }
+    if (budget.exhausted) {
+      // Stay stopped until the owner explicitly retries; keep whatever history is on screen.
+      recreatingStream.current = false;
+      setStreamState('paused');
+      return;
+    }
+    // A recreated stream (after a confirmed-valid session) keeps what is on screen: the new
+    // connection replays from the start and the sequence set below drops the duplicates.
+    const recreated = recreatingStream.current;
+    recreatingStream.current = false;
+    if (!recreated) {
+      setEvents([]);
+      setReconcileError('');
+      setAnnouncement('');
+      seenSequences.current.set(selectedRunId, new Set());
+    }
     setStreamState('connecting');
     let terminalHandled = false;
+    const recovery = createRunStreamRecovery({
+      budget,
+      probe: (signal) => probeRunSession(selectedRunId, signal),
+      recreate: () => {
+        recreatingStream.current = true;
+        setStreamEpoch((epoch) => epoch + 1);
+      },
+      onExhausted: () => {
+        // Closing is what stops the browser's own reconnect loop; stopping our probes would not.
+        source.close();
+        setStreamState('paused');
+        setAnnouncement(
+          'Live updates paused after repeated connection problems. Use Retry live updates to try again.',
+        );
+      },
+    });
     const source = new EventSource(`/api/v1/runs/${encodeURIComponent(selectedRunId)}/events`);
     const eventNames = [
       'run.queued',
@@ -535,7 +611,10 @@ function App() {
       'run.interrupted',
       'run.outcome_unknown',
     ];
-    source.onopen = () => setStreamState('connected');
+    source.onopen = () => {
+      recovery.opened();
+      setStreamState('connected');
+    };
     const handlers = eventNames.map((name) => {
       const handler = (message: Event) => {
         try {
@@ -552,6 +631,7 @@ function App() {
           if (received.has(parsed.sequence)) return;
           const newestSequence = Math.max(0, ...received);
           received.add(parsed.sequence);
+          recovery.progress(); // an event not seen before is the only per-event progress
           seenSequences.current.set(selectedRunId, received);
           setEvents((current) => [...current, parsed].sort((a, b) => a.sequence - b.sequence));
           if (parsed.sequence > newestSequence) {
@@ -600,14 +680,28 @@ function App() {
       return [name, handler] as const;
     });
     source.onerror = () => {
-      if (!terminalHandled)
-        setStreamState(source.readyState === EventSource.CLOSED ? 'closed' : 'reconnecting');
+      if (terminalHandled) return;
+      const closed = source.readyState === EventSource.CLOSED;
+      setStreamState(closed ? 'closed' : 'reconnecting');
+      // EventSource hides the HTTP status; ask the authenticated API whether the session is valid.
+      recovery.streamError(closed);
     };
     return () => {
+      recovery.dispose();
       handlers.forEach(([name, handler]) => source.removeEventListener(name, handler));
       source.close();
     };
-  }, [owner, page, reconcileRun, selectedRunExists, selectedRunId]);
+  }, [owner, page, probeRunSession, reconcileRun, selectedRunExists, selectedRunId, streamEpoch]);
+
+  function retryStream() {
+    if (!selectedRunId) return;
+    const budget = streamBudgets.current.get(selectedRunId);
+    if (budget) resetRunStreamBudget(budget);
+    recreatingStream.current = true; // keep the history on screen; replays are de-duplicated
+    setStreamEpoch((epoch) => epoch + 1);
+    // The Retry button is replaced as soon as the stream reconnects; keep keyboard focus nearby.
+    document.getElementById('run-inspector-heading')?.focus();
+  }
 
   async function signIn(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -623,6 +717,7 @@ function App() {
         },
         (value) => value,
       );
+      rotateSession(); // the session cookie just changed: older in-flight work is now stale
       setPassword('');
       const token = await refreshCsrf();
       const currentOwner = await request('/api/v1/me', {}, parseOwner);
@@ -995,6 +1090,7 @@ function App() {
         { method: 'POST', headers: { 'x-omnis-csrf': csrfToken } },
         (value) => value,
       );
+      rotateSession();
       setOwner(null);
       setTasks([]);
       setRuns([]);
@@ -1185,6 +1281,7 @@ function App() {
             busy={busy}
             reconcileError={reconcileError}
             onReconcile={() => selectedRunId && void reconcileRun(selectedRunId)}
+            onRetryStream={retryStream}
             announcement={announcement}
             onSelectRun={(run) => {
               setSelectedRunId(run.id);
@@ -1843,6 +1940,7 @@ function RunsWorkspace({
   busy,
   reconcileError,
   onReconcile,
+  onRetryStream,
   announcement,
   onSelectRun,
   onStop,
@@ -1859,6 +1957,7 @@ function RunsWorkspace({
   busy: boolean;
   reconcileError: string;
   onReconcile: () => void;
+  onRetryStream: () => void;
   announcement: string;
   onSelectRun: (run: Run) => void;
   onStop: (run: Run) => void;
@@ -1924,6 +2023,7 @@ function RunsWorkspace({
         onStop={onStop}
         reconcileError={reconcileError}
         onReconcile={onReconcile}
+        onRetryStream={onRetryStream}
         announcement={announcement}
       />
     </div>
@@ -1944,6 +2044,7 @@ function RunInspector({
   onStop,
   reconcileError,
   onReconcile,
+  onRetryStream,
   announcement,
 }: {
   run: Run | null;
@@ -1959,6 +2060,7 @@ function RunInspector({
   onStop: (run: Run) => void;
   reconcileError: string;
   onReconcile: () => void;
+  onRetryStream: () => void;
   announcement: string;
 }) {
   const task = run ? tasks.find((item) => item.id === run.taskId) : null;
@@ -2052,6 +2154,17 @@ function RunInspector({
           <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
             {announcement}
           </span>
+          {streamState === 'paused' && (
+            <div className="run-notice stream-paused-note">
+              <p>
+                Live updates are paused after repeated connection problems. The events shown are not
+                updating.
+              </p>
+              <button type="button" className="secondary-button" onClick={onRetryStream}>
+                Retry live updates
+              </button>
+            </div>
+          )}
           {events.length ? (
             <div
               className="event-scroll"
@@ -2074,7 +2187,9 @@ function RunInspector({
                   ? 'Event stream disconnected. Reconnecting…'
                   : streamState === 'closed'
                     ? 'Event stream closed. Refresh the page to reconnect.'
-                    : 'Waiting for run events…'}
+                    : streamState === 'paused'
+                      ? 'Live updates are paused. Use Retry live updates to reconnect.'
+                      : 'Waiting for run events…'}
             </div>
           )}
           {run.authorizationId && (
@@ -2133,6 +2248,7 @@ function streamLabel(state: StreamState) {
     reconnecting: 'Reconnecting',
     closed: 'Disconnected',
     ended: 'Stream ended',
+    paused: 'Updates paused',
   }[state];
 }
 
