@@ -1762,6 +1762,7 @@ button:disabled {
   gap: 10px;
 }
 .agents-profile-editor-head h3,
+.agents-profile-editor-head h4,
 .agents-profile-editor-head p {
   margin: 0;
 }
@@ -1775,6 +1776,11 @@ button:disabled {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
 }
+.agents-identity-editor-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
 .agents-profile-editor-fields label {
   display: grid;
   align-content: start;
@@ -1783,7 +1789,16 @@ button:disabled {
   font-size: 13px;
   font-weight: 600;
 }
+.agents-identity-editor-fields label {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+}
 .agents-profile-editor-fields input,
+.agents-identity-editor-fields input,
 .agents-profile-editor-fields textarea {
   width: 100%;
   min-width: 0;
@@ -1800,6 +1815,7 @@ button:disabled {
   min-height: 40px;
 }
 .agents-profile-editor-fields input:focus,
+.agents-identity-editor-fields input:focus,
 .agents-profile-editor-fields textarea:focus {
   outline: 3px solid var(--blue);
   outline-offset: 2px;
@@ -2152,6 +2168,9 @@ button:disabled {
     grid-template-columns: minmax(0, 1fr);
   }
   .agents-profile-editor-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .agents-identity-editor-fields {
     grid-template-columns: minmax(0, 1fr);
   }
   .agents-grid,

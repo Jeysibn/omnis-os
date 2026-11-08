@@ -652,6 +652,17 @@ describe('independent authorizer service boundary', () => {
       async archive() {
         throw new Error('not used');
       },
+      async updateIdentity(agentId, input, requestId) {
+        return {
+          requestId,
+          operation: 'agent.identity_updated',
+          agentId,
+          name: (input as { name: string }).name,
+          slug: (input as { slug: string }).slug,
+          identityRevision: 2,
+          updatedAt: '2026-11-04T00:00:00.000Z',
+        };
+      },
     };
     const app = createAuthorizerApp({ store, serviceToken, checkDatabase: async () => undefined });
     const headers = {
@@ -686,6 +697,26 @@ describe('independent authorizer service boundary', () => {
         calls.filter((call) => call.method === 'createAgent'),
         [{ method: 'createAgent', requestId: headers['idempotency-key'] }],
       );
+      const identity = await app.inject({
+        method: 'PUT',
+        url: '/internal/v1/agents/agt_created/identity',
+        headers,
+        payload: {
+          expectedIdentityRevision: 1,
+          name: 'Atlas North',
+          slug: 'atlas-north',
+        },
+      });
+      assert.equal(identity.statusCode, 200);
+      assert.deepEqual(identity.json(), {
+        requestId: headers['idempotency-key'],
+        operation: 'agent.identity_updated',
+        agentId: 'agt_created',
+        name: 'Atlas North',
+        slug: 'atlas-north',
+        identityRevision: 2,
+        updatedAt: '2026-11-04T00:00:00.000Z',
+      });
       const rejectedText = 'password: "synthetic-secret-value-123"';
       const rejected = await app.inject({
         method: 'PUT',

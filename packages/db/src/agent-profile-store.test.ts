@@ -13,6 +13,7 @@ const createdAt = new Date('2026-11-04T00:00:00.000Z');
 function agentRow(currentVersionNo = 1) {
   return {
     id: 'agt_atlas',
+    identity_revision: 1,
     name: 'Atlas',
     slug: 'atlas',
     department_id: null,

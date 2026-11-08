@@ -71,10 +71,15 @@ try {
   if (exit.signal) throw new Error(`The full-stack browser runner exited from ${exit.signal}.`);
   if (exit.code !== 0)
     throw new Error(`The full-stack browser runner exited with code ${exit.code}.`);
+
   await brokerRecovery;
   stages.push('broker-restart-reconciled-accepted-attempt');
   await brokerCancellationRecovery;
   stages.push('broker-restart-reconciled-owner-cancellation');
+
+  services.assertSensitiveValuesAbsentFromLogs();
+  stages.push('synthetic-broker-credential-log-canaries-absent');
+
   stages.push('real-browser-standard-and-synthetic-run-smoke-passed');
 } catch (error) {
   const message = error instanceof Error ? error.message : 'Unknown integration smoke failure.';

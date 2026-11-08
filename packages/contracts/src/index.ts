@@ -595,6 +595,7 @@ export type AgentCurrentVersionSummary = z.infer<typeof AgentCurrentVersionSumma
 export const AgentSummarySchema = z
   .object({
     id: OpaqueIdSchema,
+    identityRevision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
     name: z.string().min(1).max(120),
     slug: z.string().min(1).max(80),
     department: AgentDepartmentSummarySchema.nullable(),
@@ -612,6 +613,18 @@ export const AgentSummarySchema = z
     'Agent lifecycle, archive timestamp, and current version are inconsistent.',
   );
 export type AgentSummary = z.infer<typeof AgentSummarySchema>;
+
+export const UpdateAgentIdentityInputSchema = z
+  .object({
+    expectedIdentityRevision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    name: z.string().trim().min(1).max(120),
+    slug: z
+      .string()
+      .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/)
+      .max(80),
+  })
+  .strict();
+export type UpdateAgentIdentityInput = z.infer<typeof UpdateAgentIdentityInputSchema>;
 
 export const AgentPageSchema = z
   .object({
@@ -679,6 +692,22 @@ export const AgentProfileWriteInputSchema = z
 export type AgentProfileWriteInput = z.infer<typeof AgentProfileWriteInputSchema>;
 
 export const AgentIdempotencyKeySchema = z.string().uuid();
+
+export const AgentIdentityUpdateReceiptSchema = z
+  .object({
+    requestId: AgentIdempotencyKeySchema,
+    operation: z.literal('agent.identity_updated'),
+    agentId: OpaqueIdSchema,
+    name: z.string().min(1).max(120),
+    slug: z
+      .string()
+      .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/)
+      .max(80),
+    identityRevision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    updatedAt: AgentTimestampSchema,
+  })
+  .strict();
+export type AgentIdentityUpdateReceipt = z.infer<typeof AgentIdentityUpdateReceiptSchema>;
 export const CreateAgentInputSchema = z
   .object({
     name: z.string().trim().min(1).max(120),
