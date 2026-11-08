@@ -12,6 +12,7 @@ import {
 import { SyntheticFakeProviderSubmissionResponseSchema } from '@omnis/contracts/broker-ipc';
 import type { AuthorizerClient } from './authorizer-client.ts';
 import { FakeProviderResponseError, type FakeProviderClient } from './fake-provider-client.ts';
+import { reconcileAttempt } from './reconcile-attempt.ts';
 
 const RequestSchema = z
   .object({
@@ -103,37 +104,7 @@ export function createSyntheticBrokerApp(input: {
         throw new Error('Authorizer envelope binding did not match the broker request.');
 
       if (retryingExistingAttempt) {
-        let attempt = admission.attempt;
-        if (attempt.status === 'submitting') {
-          attempt = await authorizer.record(attempt.id, {
-            eventId: `restart-unknown:${attempt.id}`,
-            status: 'unknown',
-            usage: {
-              kind: 'unknown',
-              reason: 'submission_uncertain',
-              billingExposure: 'unknown',
-            },
-          });
-        } else if (attempt.cancelRequestedAt && attempt.providerSubmissionId && provider.cancel) {
-          try {
-            const cancellation = await provider.cancel(attempt.id, attempt.providerSubmissionId);
-            if (cancellation.cancellation === 'confirmed' && cancellation.event) {
-              attempt = await authorizer.record(attempt.id, cancellation.event);
-            }
-          } catch {
-            // A failed cancellation observation does not prove that work stopped.
-          }
-        } else if (
-          attempt.providerSubmissionId &&
-          ['accepted', 'running', 'unknown'].includes(attempt.status)
-        ) {
-          try {
-            const completion = await provider.events(attempt.id, attempt.providerSubmissionId);
-            attempt = await authorizer.record(attempt.id, completion.event);
-          } catch {
-            // A read-only status failure is retried with the same authorization and request IDs.
-          }
-        }
+        const attempt = await reconcileAttempt(authorizer, provider, admission.attempt);
 
         const result = {
           attemptId: attempt.id,
