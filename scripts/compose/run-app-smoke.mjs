@@ -801,7 +801,7 @@ async function assertRuntimeRestrictions() {
   }
   for (const [service, hiddenService] of [
     ['web', 'worker'],
-    ['worker', 'api'],
+    ['worker', 'web'],
   ]) {
     const id = compose(['ps', '-q', service]).stdout.trim();
     const probe = runDocker(
