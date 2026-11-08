@@ -1083,8 +1083,8 @@ const postgresSuite = describe(
         correlationId: runId,
         attemptId: pending.attemptId!,
         status: 'interrupted' as const,
-        cancellationRequestedAt: new Date().toISOString(),
-        outcomeRecordedAt: new Date().toISOString(),
+        cancellationRequestedAt: '2026-11-08T00:00:00.000Z',
+        outcomeRecordedAt: '2026-11-08T00:00:01.000Z',
         submitted: true,
         usage: {
           kind: 'unknown' as const,
@@ -1185,6 +1185,9 @@ const postgresSuite = describe(
           attemptId: randomUUID(),
           status,
           submitted: true,
+          cancellationRequestedAt: '2026-11-08T00:00:01.000Z',
+          outcomeRecordedAt:
+            status === 'interrupted' ? '2026-11-08T00:00:01.000Z' : '2026-11-08T00:00:00.000Z',
           usage: {
             kind: 'unknown' as const,
             reason: 'not_reported' as const,

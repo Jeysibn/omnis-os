@@ -691,9 +691,10 @@ export class PostgresRunStore {
     const evidence = SyntheticTaskRunResponseSchema.parse(evidenceInput);
     if (!['completed', 'failed', 'interrupted'].includes(evidence.status)) return [];
     if (
+      evidence.status === 'interrupted' &&
       evidence.cancellationRequestedAt &&
-      (!evidence.outcomeRecordedAt ||
-        Date.parse(evidence.cancellationRequestedAt) > Date.parse(evidence.outcomeRecordedAt))
+      evidence.outcomeRecordedAt &&
+      Date.parse(evidence.cancellationRequestedAt) > Date.parse(evidence.outcomeRecordedAt)
     )
       return [];
     return inTransaction(this.pool, async (client) => {
@@ -724,7 +725,7 @@ export class PostgresRunStore {
           ? stopped.rows[0]?.requested &&
             evidence.cancellationRequestedAt &&
             evidence.outcomeRecordedAt &&
-            Date.parse(evidence.cancellationRequestedAt) <= Date.parse(evidence.outcomeRecordedAt)
+            Date.parse(evidence.cancellationRequestedAt) < Date.parse(evidence.outcomeRecordedAt)
             ? 'cancelled'
             : 'interrupted'
           : terminalStatus;
