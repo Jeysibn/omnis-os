@@ -5,9 +5,11 @@
   "exports": {
     ".": "./src/index.ts",
     "./connector-authorization": "./src/connector-authorization.ts",
+    "./connector-authorization-schema": "./src/connector-authorization-schema.ts",
     "./connector-broker": "./src/connector-broker.ts",
     "./broker-ipc": "./src/broker-ipc.ts",
     "./synthetic-task-run": "./src/synthetic-task-run.ts",
+    "./runtime-capabilities": "./src/runtime-capabilities.ts",
     "./synthetic-audit-history": "./src/synthetic-audit-history.ts",
     "./synthetic-connector-prompt": "./src/synthetic-connector-prompt.ts"
   },

@@ -1,6 +1,6 @@
 import { createHash, sign, verify, type KeyObject } from 'node:crypto';
 import { z } from 'zod';
-import { ConnectorLimitsSchema } from './connector-authorization.ts';
+import { ConnectorLimitsSchema } from './connector-authorization-schema.ts';
 
 const Uuid = z.string().uuid();
 const Digest = z.string().regex(/^sha256:[0-9a-f]{64}$/);
