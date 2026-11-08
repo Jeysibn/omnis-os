@@ -56,7 +56,7 @@ def launch(front, back, peer_uid, peer_gid, inject_token=None):
         'OMNIS_PEER_UID': str(peer_uid),
         'OMNIS_PEER_GID': str(peer_gid),
         'OMNIS_PEER_SOCKET_GID': str(gid),
-        'OMNIS_PEER_ALLOWED_PATHS': '/internal/broker/v1/admissions',
+        'OMNIS_PEER_ALLOWED_PATHS': '/internal/broker/v1/admissions,/internal/broker/v1/recovery/claim',
     }
     if inject_token:
         token_file = Path(front).parent / 'gateway.token'
@@ -103,6 +103,7 @@ with tempfile.TemporaryDirectory(prefix='omnis-peer-proxy-') as directory:
         for index, (expected_uid, expected_gid, allowed, should_forward) in enumerate([
             (uid, gid, '/internal/broker/v1/admissions', True),
             (uid, gid, '/internal/broker/v1/admissions', True),
+            (uid, gid, '/internal/broker/v1/recovery/claim', True),
             (uid + 1, gid, '/internal/broker/v1/admissions', False),
             (uid, gid + 1, '/internal/broker/v1/admissions', False),
             (uid, gid, '/internal/owner/v1/decisions', False),
@@ -119,7 +120,7 @@ with tempfile.TemporaryDirectory(prefix='omnis-peer-proxy-') as directory:
                 assert b'200 OK' in result and b'{"ok":true}' in result
             else:
                 assert not (b'200 OK' in result), 'unexpected peer or route must not reach backend'
-        assert len(state['requests']) == 2, 'only an allowed peer and route reaches backend'
+        assert len(state['requests']) == 3, 'only an allowed peer and route reaches backend'
         assert b'Bearer synthetic-injected-token-not-for-callers' in state['requests'][1]
         assert b'Bearer forged-caller-token' not in state['requests'][1]
     finally:
