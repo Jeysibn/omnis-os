@@ -84,7 +84,7 @@ const postgresSuite = describe(
     }
 
     beforeEach(async () => {
-      assertTestDatabase(databaseUrl!);
+      assertTestDatabase(databaseUrl!, migrationUrl!, adminUrl!, authorizerUrl!, launcherUrl!);
       authorizationByIdempotency.clear();
       await migrate(migrationPool!);
       await adminPool!.query(`
@@ -123,6 +123,91 @@ const postgresSuite = describe(
       assert.equal(insertedTaskEvent.rowCount, 1);
       assert.equal(insertedTaskEvent.rows[0]?.event_type, 'task.created');
       assert.deepEqual(insertedTaskEvent.rows[0]?.payload, {});
+      const createdIdentity = await adminPool!.query<{
+        source_key: string;
+        source_kind: string;
+        source_record_id: string;
+        event_type: string;
+        actor: string;
+        origin: string;
+        synthetic: boolean;
+        task_id: string;
+        run_id: string | null;
+        project_id: string | null;
+        previous_project_id: string | null;
+        occurred_at: string;
+        payload: unknown;
+      }>(
+        `SELECT source_key, source_kind, source_record_id, event_type, actor, origin,
+                synthetic, task_id, run_id, project_id, previous_project_id, occurred_at::text, payload
+           FROM omnis.mission_lane_events WHERE source_key=$1`,
+        [`task:${task.id}:created`],
+      );
+      const createdSource = createdIdentity.rows[0]!;
+      const beforeDuplicate = await adminPool!.query<{
+        last_global_sequence: string;
+      }>('SELECT last_global_sequence::text FROM omnis.mission_lane_clock WHERE singleton');
+      const sourceValues = [
+        createdSource.source_key,
+        createdSource.source_kind,
+        createdSource.source_record_id,
+        createdSource.event_type,
+        createdSource.actor,
+        createdSource.origin,
+        createdSource.synthetic,
+        createdSource.task_id,
+        createdSource.run_id,
+        createdSource.project_id,
+        createdSource.previous_project_id,
+        createdSource.occurred_at,
+        createdSource.payload,
+      ];
+      const duplicateClient = await adminPool!.connect();
+      try {
+        await duplicateClient.query('BEGIN');
+        await duplicateClient.query('SELECT pg_advisory_xact_lock(70463909136525)');
+        await duplicateClient.query(
+          'SELECT omnis.append_mission_lane_event($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)',
+          sourceValues,
+        );
+        await duplicateClient.query('COMMIT');
+        assert.equal(
+          (
+            await adminPool!.query<{ last_global_sequence: string }>(
+              'SELECT last_global_sequence::text FROM omnis.mission_lane_clock WHERE singleton',
+            )
+          ).rows[0]?.last_global_sequence,
+          beforeDuplicate.rows[0]?.last_global_sequence,
+        );
+        await duplicateClient.query('BEGIN');
+        await duplicateClient.query('SELECT pg_advisory_xact_lock(70463909136525)');
+        await assert.rejects(
+          duplicateClient.query(
+            'SELECT omnis.append_mission_lane_event($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)',
+            [
+              ...sourceValues.slice(0, 11),
+              new Date(Date.parse(createdSource.occurred_at) + 1000).toISOString(),
+              ...sourceValues.slice(12),
+            ],
+          ),
+          (error: unknown) =>
+            typeof error === 'object' &&
+            error !== null &&
+            'code' in error &&
+            error.code === '23505',
+        );
+        await duplicateClient.query('ROLLBACK');
+      } finally {
+        duplicateClient.release();
+      }
+      assert.equal(
+        (
+          await adminPool!.query<{ last_global_sequence: string }>(
+            'SELECT last_global_sequence::text FROM omnis.mission_lane_clock WHERE singleton',
+          )
+        ).rows[0]?.last_global_sequence,
+        beforeDuplicate.rows[0]?.last_global_sequence,
+      );
 
       const projectStore = new PostgresProjectManagementStore(
         authorizerPool!,
@@ -174,6 +259,39 @@ const postgresSuite = describe(
         previousEpicId: null,
         epicId: epic.id,
       });
+      const beforeNoOp = await adminPool!.query<{
+        event_count: string;
+        last_global_sequence: string;
+      }>(`SELECT (SELECT count(*)::text FROM omnis.mission_lane_events) AS event_count,
+                 (SELECT last_global_sequence::text FROM omnis.mission_lane_clock WHERE singleton) AS last_global_sequence`);
+      const associationState = await store.getTask(associationTask.id);
+      assert.ok(associationState);
+      await store.setTaskProject(
+        associationTask.id,
+        {
+          expectedAssociationRevision: associationState.associationRevision,
+          projectId: project.id,
+        },
+        randomUUID(),
+      );
+      const noOpStatusClient = await adminPool!.connect();
+      try {
+        await noOpStatusClient.query('BEGIN');
+        await noOpStatusClient.query('SELECT pg_advisory_xact_lock(70463909136525)');
+        await noOpStatusClient.query('UPDATE omnis.tasks SET status=status WHERE id=$1', [task.id]);
+        await noOpStatusClient.query('COMMIT');
+      } catch (error) {
+        await noOpStatusClient.query('ROLLBACK').catch(() => undefined);
+        throw error;
+      } finally {
+        noOpStatusClient.release();
+      }
+      const afterNoOp = await adminPool!.query<{
+        event_count: string;
+        last_global_sequence: string;
+      }>(`SELECT (SELECT count(*)::text FROM omnis.mission_lane_events) AS event_count,
+                 (SELECT last_global_sequence::text FROM omnis.mission_lane_clock WHERE singleton) AS last_global_sequence`);
+      assert.deepEqual(afterNoOp.rows[0], beforeNoOp.rows[0]);
 
       const beforeRollback = await adminPool!.query(
         'SELECT last_global_sequence FROM omnis.mission_lane_clock WHERE singleton',
@@ -367,6 +485,19 @@ const postgresSuite = describe(
         JSON.stringify(ledger.rows).includes('PRIVATE_RAW_OUTPUT_MUST_NOT_ENTER_MISSION_LANE'),
         false,
       );
+      const runProvenance = await adminPool!.query<{
+        event_type: string;
+        actor: string;
+        origin: string;
+      }>(
+        'SELECT event_type, actor, origin FROM omnis.mission_lane_events WHERE run_id=$1 ORDER BY global_sequence',
+        [admission.run.id],
+      );
+      assert.deepEqual(runProvenance.rows, [
+        { event_type: 'run.queued', actor: 'service:omnis-worker', origin: 'mock-worker' },
+        { event_type: 'run.started', actor: 'service:omnis-worker', origin: 'mock-worker' },
+        { event_type: 'run.completed', actor: 'service:omnis-worker', origin: 'mock-worker' },
+      ]);
       assert.equal(new Set(ledger.rows.map((row) => row.global_sequence)).size, ledger.rows.length);
 
       const loadPool = createPool({ connectionString: databaseUrl!, max: 32 });
@@ -6638,6 +6769,17 @@ const postgresSuite = describe(
         events.map((event) => event.type),
         ['run.queued', 'run.started', 'run.stop_requested', 'run.cancelled'],
       );
+      const stopProvenance = await adminPool!.query<{
+        event_type: string;
+        actor: string;
+        origin: string;
+      }>(
+        "SELECT event_type, actor, origin FROM omnis.mission_lane_events WHERE run_id=$1 AND event_type='run.stop_requested'",
+        [admitted.run.id],
+      );
+      assert.deepEqual(stopProvenance.rows, [
+        { event_type: 'run.stop_requested', actor: 'service:omnis-worker', origin: 'mock-worker' },
+      ]);
       assert.equal((await store.getEvents(admitted.run.id, 2)).length, 2);
     });
 
@@ -6923,7 +7065,7 @@ const postgresSuite = describe(
 
     after(async () => {
       if (pool && databaseUrl) {
-        assertTestDatabase(databaseUrl);
+        assertTestDatabase(databaseUrl, migrationUrl!, adminUrl!, authorizerUrl!, launcherUrl!);
         await adminPool!.query(`
         TRUNCATE omnis.test_queue_outbox, omnis.connector_authorization_audit,
           omnis.connector_execution_attempts, omnis.connector_authorizations,
@@ -7052,9 +7194,45 @@ async function waitForLockWaitOrCompletion(
   return isSettled() ? 'completed' : 'timeout';
 }
 
-function assertTestDatabase(connectionString: string): void {
-  const databaseName = new URL(connectionString).pathname.slice(1);
-  if (!/(?:^|[_-])test(?:s)?$/i.test(databaseName)) {
-    throw new Error('OMNIS_TEST_DATABASE_URL must point to a database ending in test or tests.');
+describe('PostgreSQL test database URL guard', () => {
+  it('requires every configured role URL to target the same test database', () => {
+    assert.doesNotThrow(() =>
+      assertTestDatabase(
+        'postgres://runtime:pass@localhost/omnis_test',
+        'postgres://admin:pass@localhost/omnis_test',
+        'postgres://migrator:pass@localhost/omnis_test',
+      ),
+    );
+    assert.throws(
+      () =>
+        assertTestDatabase(
+          'postgres://runtime:pass@localhost/omnis_test',
+          'postgres://admin:pass@localhost/omnis',
+        ),
+      /same database ending in test or tests/i,
+    );
+    assert.throws(
+      () =>
+        assertTestDatabase(
+          'postgres://runtime:pass@localhost/omnis_test',
+          'postgres://admin:pass@localhost/omnis_other_test',
+        ),
+      /same database ending in test or tests/i,
+    );
+  });
+});
+
+function assertTestDatabase(...connectionStrings: string[]): void {
+  const databaseNames = connectionStrings.map((connectionString) =>
+    new URL(connectionString).pathname.slice(1),
+  );
+  if (
+    databaseNames.length === 0 ||
+    databaseNames.some((databaseName) => !/(?:^|[_-])test(?:s)?$/i.test(databaseName)) ||
+    new Set(databaseNames).size !== 1
+  ) {
+    throw new Error(
+      'All OMNIS_TEST_* database URLs must target the same database ending in test or tests.',
+    );
   }
 }

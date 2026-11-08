@@ -125,6 +125,24 @@ describe('Mission Lane event contract', () => {
 
   it('accepts strict synthetic Run events and rejects unsafe or inconsistent payloads', () => {
     assert.equal(MissionEventSchema.parse(base).globalSequence, '1');
+    assert.equal(
+      MissionEventSchema.safeParse({
+        ...base,
+        type: 'run.queued',
+        actor: 'service:omnis-runtime',
+        origin: 'api',
+      }).success,
+      false,
+    );
+    assert.equal(
+      MissionEventSchema.safeParse({
+        ...base,
+        type: 'run.started',
+        actor: 'service:omnis-runtime',
+        origin: 'api',
+      }).success,
+      false,
+    );
     assert.equal(MissionEventSchema.safeParse({ ...base, message: 'raw output' }).success, false);
     assert.equal(MissionEventSchema.safeParse({ ...base, synthetic: false }).success, false);
     assert.equal(
