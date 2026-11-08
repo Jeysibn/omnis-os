@@ -332,6 +332,7 @@ export async function startMockServices({
           { name: 'API', process: api },
           { name: 'worker', process: worker },
           { name: 'authorizer', process: authorizer },
+          { name: 'sandbox launcher', process: launcher },
           { name: 'synthetic broker', process: syntheticBrokerProcess },
         ]),
       auditPool,
@@ -645,6 +646,9 @@ export function appendCapturedLogChunk(child, chunk, values, maxBytes = 262_144)
     (length, value) => (typeof value === 'string' ? Math.max(length, value.length) : length),
     0,
   );
+  if (maxCanaryLength > 4_096) {
+    throw new Error('A test log canary exceeds the bounded scan limit.');
+  }
   child.sensitiveCanaryDetected ||= values.some(
     (value) => typeof value === 'string' && value.length > 0 && searchable.includes(value),
   );

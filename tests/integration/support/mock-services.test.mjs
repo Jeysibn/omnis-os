@@ -26,6 +26,7 @@ test('checks test credential canaries across isolated service logs without echoi
         { name: 'API', process: { capturedLogs: 'request rejected' } },
         { name: 'worker', process: { capturedLogs: 'run completed' } },
         { name: 'authorizer', process: { capturedLogs: 'attempt persisted' } },
+        { name: 'sandbox launcher', process: { capturedLogs: 'mock task completed' } },
         { name: 'synthetic broker', process: { capturedLogs: 'provider outcome recorded' } },
       ],
     ),
@@ -53,6 +54,13 @@ test('detects a split canary even after its log text falls outside the bounded c
   assert.throws(
     () => assertSensitiveValuesAbsentFromLogs([canary], [{ name: 'worker', process: child }]),
     (error) => error instanceof Error && !error.message.includes(canary),
+  );
+});
+
+test('rejects log canaries above the bounded cross-chunk scan size', () => {
+  assert.throws(
+    () => appendCapturedLogChunk({ capturedLogs: '' }, 'irrelevant output', ['x'.repeat(4_097)]),
+    /bounded scan limit/,
   );
 });
 
