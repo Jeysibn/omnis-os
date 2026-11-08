@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import {
+  appendCapturedLogChunk,
+  assertSensitiveValuesAbsentFromLogs,
   assertNoExecutableWork,
   buildBrowserEnvironment,
   startManagedProcess,
@@ -14,6 +16,53 @@ import {
   stopProcess,
   validateTestDatabaseConfiguration,
 } from './mock-services.mjs';
+
+test('checks test credential canaries across isolated service logs without echoing values', () => {
+  const canary = 'synthetic-canary-value-for-test-only';
+  assert.doesNotThrow(() =>
+    assertSensitiveValuesAbsentFromLogs(
+      [canary],
+      [
+        { name: 'API', process: { capturedLogs: 'request rejected' } },
+        { name: 'worker', process: { capturedLogs: 'run completed' } },
+        { name: 'authorizer', process: { capturedLogs: 'attempt persisted' } },
+        { name: 'sandbox launcher', process: { capturedLogs: 'mock task completed' } },
+        { name: 'synthetic broker', process: { capturedLogs: 'provider outcome recorded' } },
+      ],
+    ),
+  );
+  assert.throws(
+    () =>
+      assertSensitiveValuesAbsentFromLogs(
+        [canary],
+        [{ name: 'synthetic broker', process: { capturedLogs: `request ${canary}` } }],
+      ),
+    (error) =>
+      error instanceof Error &&
+      error.message === 'A sensitive test value was written to synthetic broker logs.' &&
+      !error.message.includes(canary),
+  );
+});
+
+test('detects a split canary even after its log text falls outside the bounded capture', () => {
+  const canary = 'synthetic-canary-value-for-test-only';
+  const child = { capturedLogs: '', sensitiveCanaryDetected: false, sensitiveLogOverlap: '' };
+  const splitAt = 19;
+  appendCapturedLogChunk(child, `prefix ${canary.slice(0, splitAt)}`, [canary], 16);
+  appendCapturedLogChunk(child, `${canary.slice(splitAt)} suffix`, [canary], 16);
+  assert.equal(child.capturedLogs.includes(canary), false);
+  assert.throws(
+    () => assertSensitiveValuesAbsentFromLogs([canary], [{ name: 'worker', process: child }]),
+    (error) => error instanceof Error && !error.message.includes(canary),
+  );
+});
+
+test('rejects log canaries above the bounded cross-chunk scan size', () => {
+  assert.throws(
+    () => appendCapturedLogChunk({ capturedLogs: '' }, 'irrelevant output', ['x'.repeat(4_097)]),
+    /bounded scan limit/,
+  );
+});
 
 const goodUrls = {
   OMNIS_TEST_DATABASE_URL: 'postgresql://omnis_runtime:runtime-synthetic@127.0.0.1:5432/omnis_test',
