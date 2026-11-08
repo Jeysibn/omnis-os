@@ -25,13 +25,13 @@ for variable in OMNIS_TEST_MIGRATION_DATABASE_URL OMNIS_TEST_DATABASE_URL OMNIS_
     exit 1
   fi
 done
-for user in omnis-api omnis-authorizer omnis-worker omnis-launcher; do
+for user in omnis-api omnis-authorizer omnis-worker omnis-launcher omnis-broker-gateway omnis-broker-ingress-gateway omnis-synthetic-broker; do
   if id "$user" >/dev/null 2>&1; then echo "Refusing to replace existing identity $user." >&2; exit 1; fi
 done
-for group in omnis-api omnis-authorizer omnis-worker omnis-launcher omnis-authorizer-socket omnis-launcher-socket; do
+for group in omnis-api omnis-authorizer omnis-worker omnis-launcher omnis-authorizer-socket omnis-launcher-socket omnis-broker-gateway omnis-broker-ingress-gateway omnis-broker-gateway-socket omnis-broker-ingress-socket omnis-broker-ingress-callers omnis-broker-gateway-token omnis-synthetic-broker; do
   if getent group "$group" >/dev/null; then echo "Refusing to reuse existing group $group." >&2; exit 1; fi
 done
-for path in /opt/omnis-os /etc/omnis /var/lib/omnis-sandbox /run/omnis-authorizer /run/omnis-sandbox; do
+for path in /opt/omnis-os /etc/omnis /var/lib/omnis-sandbox /run/omnis-authorizer /run/omnis-broker-authorizer /run/omnis-sandbox; do
   if [[ -e "$path" || -L "$path" ]]; then echo "Refusing to replace existing host path $path." >&2; exit 1; fi
 done
 for unit in omnis-api.service omnis-authorizer.service omnis-worker.service omnis-sandbox-launcher.service; do
@@ -66,7 +66,7 @@ for port in 4100 4101; do
     exit 1
   fi
 done
-for env_file in .env .env.worker .env.authorizer .env.sandbox-launcher; do
+for env_file in .env .env.worker .env.authorizer .env.sandbox-launcher .env.synthetic-broker; do
   if [[ -e "$repo_root/$env_file" || -L "$repo_root/$env_file" ]]; then
     echo "Refusing to overwrite pre-existing local secret file $env_file." >&2
     exit 1
@@ -127,6 +127,10 @@ cleanup() {
           /etc/omnis) remove_created_directory "$value" ;;
           /run/omnis-authorizer)
             rm -f -- "$value/authorizer.sock"
+            remove_created_directory "$value"
+            ;;
+          /run/omnis-broker-authorizer)
+            rm -f -- "$value/broker.sock"
             remove_created_directory "$value"
             ;;
           /run/omnis-sandbox)

@@ -111,6 +111,11 @@ if (syntheticBrokerTestMode) {
         db,
       }),
     publish: (events) => coordinator.publishExternalEvents(events),
+    onProjectionError: (error) =>
+      app.log.warn(
+        { errorType: error instanceof Error ? error.name : 'unknown' },
+        'Synthetic Run projection remains unresolved.',
+      ),
   });
 }
 await coordinator.reconcileExpiredRuns();
@@ -124,6 +129,12 @@ await boss.work(queueName, { batchSize: 1, localConcurrency: 1 }, async ([job]) 
 });
 
 const recoveryTimer = setInterval(() => {
+  void syntheticBrokerCoordinator?.reconcileUnknownRuns().catch((error: unknown) => {
+    app.log.warn(
+      { errorType: error instanceof Error ? error.name : 'unknown' },
+      'Synthetic Run projection discovery failed.',
+    );
+  });
   void coordinator.reconcileExpiredRuns().catch((error: unknown) => {
     app.log.error(
       { errorType: error instanceof Error ? error.name : 'unknown' },

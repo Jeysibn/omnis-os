@@ -15,6 +15,21 @@ const images = [
     command: ['node', '--experimental-strip-types', 'src/server.ts'],
   },
   {
+    name: 'omnis-synthetic-broker:ci',
+    user: '10001:10001',
+    command: [
+      'node',
+      '--permission',
+      '--allow-fs-read=/app',
+      '--allow-fs-read=/run/omnis-synthetic-broker',
+      '--allow-fs-read=/run/omnis-broker-authorizer',
+      '--allow-fs-read=/run/omnis-broker-secrets',
+      '--allow-fs-write=/run/omnis-synthetic-broker',
+      '--experimental-strip-types',
+      'src/server.ts',
+    ],
+  },
+  {
     name: 'omnis-web:ci',
     user: '10001:10001',
     command: ['node', 'server.js'],
@@ -25,6 +40,7 @@ const images = [
 for (const dockerfile of [
   'infra/docker/api.Dockerfile',
   'infra/docker/worker.Dockerfile',
+  'infra/docker/synthetic-broker.Dockerfile',
   'infra/docker/web.Dockerfile',
   'infra/docker/web-assets.Dockerfile',
 ]) {
@@ -64,6 +80,21 @@ for (const expected of images) {
   }
 }
 
+execFileSync('docker', [
+  'run',
+  '--rm',
+  '--network=none',
+  '--read-only',
+  '--cap-drop=ALL',
+  '--security-opt=no-new-privileges:true',
+  '--user=10001:10001',
+  '--entrypoint=node',
+  'omnis-synthetic-broker:ci',
+  '--permission',
+  '--allow-fs-read=/app',
+  '-e',
+  "const cp=require('node:child_process');const fs=require('node:fs');let child=false,read=false;try{cp.spawnSync('/bin/sh',['-c','true'])}catch(e){child=e.code==='ERR_ACCESS_DENIED'}try{fs.readFileSync('/etc/passwd')}catch(e){read=e.code==='ERR_ACCESS_DENIED'}if(!child||!read)process.exit(1);console.log('PASS Node permission model denies child process and out-of-scope file reads')",
+]);
 // Start the final images: a module-loader crash is never a configuration pass.
 for (const [image, reason] of [
   ['omnis-api:ci', 'OMNIS_SESSION_SECRET must be generated'],

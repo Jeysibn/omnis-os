@@ -109,7 +109,7 @@ describe('persisted SSE replay and live delivery', () => {
     assert.deepEqual(delivered, [1, 2, 3]);
   });
 
-  it('ends replay on an unknown outcome without relabeling it as interruption', async () => {
+  it('keeps unknown observable until authoritative reconciliation arrives', async () => {
     const source = new MemoryEventSource();
     const unknown = event(1, 'run.outcome_unknown');
     source.events.push(unknown);
@@ -127,6 +127,13 @@ describe('persisted SSE replay and live delivery', () => {
     assert.deepEqual(
       delivered.map((item) => item.type),
       ['run.outcome_unknown'],
+    );
+    assert.equal(ended, 0);
+    source.publish(event(2, 'run.completed'));
+    await settle();
+    assert.deepEqual(
+      delivered.map((item) => item.type),
+      ['run.outcome_unknown', 'run.completed'],
     );
     assert.equal(ended, 1);
   });

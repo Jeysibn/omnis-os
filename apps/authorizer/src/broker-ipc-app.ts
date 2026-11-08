@@ -3,6 +3,8 @@ import Fastify, { type FastifyInstance, type FastifyReply } from 'fastify';
 import {
   BrokerAttemptResponseSchema,
   BrokerBeginSubmissionRequestSchema,
+  BrokerClaimRecoveryRequestSchema,
+  BrokerClaimRecoveryResponseSchema,
   BrokerConsumeRequestSchema,
   BrokerConsumeResponseSchema,
   BrokerRecoveryRequestSchema,
@@ -17,9 +19,18 @@ import type {
   ConnectorDecisionEnvelope,
   SyntheticProviderEvent,
 } from '@omnis/contracts/connector-broker';
-import { ConnectorAuthorizationStoreError, type BrokerAdmission } from '@omnis/db';
+import {
+  ConnectorAuthorizationStoreError,
+  type BrokerAdmission,
+  type BrokerRecoveryClaim,
+} from '@omnis/db';
 
 export type BrokerIpcStore = {
+  lookupBrokerAttempt?: (
+    authorizationId: string,
+    request: ConnectorAuthorizationRequest,
+    requestId: string,
+  ) => Promise<BrokerAdmission>;
   consumeForBroker(
     authorizationId: string,
     request: ConnectorAuthorizationRequest,
@@ -27,13 +38,20 @@ export type BrokerIpcStore = {
   ): Promise<BrokerAdmission>;
   beginSyntheticSubmission(
     attemptId: string,
+    brokerInstanceId: string,
     envelope: ConnectorDecisionEnvelope,
     renderedRequest: string,
   ): Promise<ConnectorExecutionAttempt>;
   recordSyntheticProviderEvent(
     attemptId: string,
+    brokerInstanceId: string,
+    brokerGeneration: number,
     event: SyntheticProviderEvent,
   ): Promise<ConnectorExecutionAttempt>;
+  claimBrokerRecoveryAttempt(
+    attemptId: string,
+    brokerInstanceId: string,
+  ): Promise<BrokerRecoveryClaim>;
   listBrokerRecoveryCandidates(
     limit: number,
     afterAttemptId: string | null,
@@ -77,6 +95,22 @@ export function createBrokerAuthorizerIpcApp(input: {
     }
   });
 
+  app.post('/internal/broker/v1/projection', async (request, reply) => {
+    const parsed = BrokerConsumeRequestSchema.safeParse(request.body);
+    if (!parsed.success) return invalidInput(reply);
+    try {
+      if (!input.store.lookupBrokerAttempt) throw new Error('Lookup unavailable.');
+      const admission = await input.store.lookupBrokerAttempt(
+        parsed.data.authorizationId,
+        parsed.data.request,
+        parsed.data.requestId,
+      );
+      return BrokerConsumeResponseSchema.parse({ version: parsed.data.version, ...admission });
+    } catch (error) {
+      return sendBrokerStoreError(error, reply);
+    }
+  });
+
   app.post('/internal/broker/v1/admissions', async (request, reply) => {
     const parsed = BrokerConsumeRequestSchema.safeParse(request.body);
     if (!parsed.success) return invalidInput(reply);
@@ -98,6 +132,7 @@ export function createBrokerAuthorizerIpcApp(input: {
     try {
       const attempt = await input.store.beginSyntheticSubmission(
         parsed.data.attemptId,
+        parsed.data.brokerInstanceId,
         parsed.data.envelope,
         parsed.data.renderedRequest,
       );
@@ -113,9 +148,25 @@ export function createBrokerAuthorizerIpcApp(input: {
     try {
       const attempt = await input.store.recordSyntheticProviderEvent(
         parsed.data.attemptId,
+        parsed.data.brokerInstanceId,
+        parsed.data.brokerGeneration,
         parsed.data.event,
       );
       return BrokerAttemptResponseSchema.parse({ version: parsed.data.version, attempt });
+    } catch (error) {
+      return sendBrokerStoreError(error, reply);
+    }
+  });
+
+  app.post('/internal/broker/v1/recovery/claim', async (request, reply) => {
+    const parsed = BrokerClaimRecoveryRequestSchema.safeParse(request.body);
+    if (!parsed.success) return invalidInput(reply);
+    try {
+      const claim = await input.store.claimBrokerRecoveryAttempt(
+        parsed.data.attemptId,
+        parsed.data.brokerInstanceId,
+      );
+      return BrokerClaimRecoveryResponseSchema.parse({ version: parsed.data.version, ...claim });
     } catch (error) {
       return sendBrokerStoreError(error, reply);
     }

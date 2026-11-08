@@ -97,6 +97,9 @@ type AttemptRow = QueryResultRow & {
   created_at: Date | string;
   updated_at?: Date | string;
   submission_started_at?: Date | string | null;
+  broker_generation?: number;
+  broker_lease_owner_id?: string | null;
+  broker_lease_expires_at?: Date | string | null;
   provider_submission_id?: string | null;
   cancel_requested_at?: Date | string | null;
   decision_envelope?: ConnectorDecisionEnvelope | null;
@@ -108,6 +111,10 @@ type AttemptRow = QueryResultRow & {
 export type BrokerAdmission = {
   attempt: ConnectorExecutionAttempt;
   envelope: ConnectorDecisionEnvelope;
+};
+export type BrokerRecoveryClaim = {
+  attempt: ConnectorExecutionAttempt;
+  owned: boolean;
 };
 export type SyntheticTaskRunEventPage = {
   events: SyntheticTaskRunEvent[];
@@ -233,6 +240,35 @@ export class PostgresConnectorAuthorizationStore {
     return result.rows[0] ? mapAuthorization(result.rows[0]) : undefined;
   }
 
+  /** Read-only lookup: never admits an attempt or refreshes its authority. */
+  async lookupBrokerAttempt(
+    authorizationId: string,
+    input: ConnectorAuthorizationRequest,
+    requestId: string,
+  ): Promise<BrokerAdmission> {
+    const request = ConnectorAuthorizationRequestSchema.parse(input);
+    if (!isUuid(authorizationId) || !isUuid(requestId)) throw notFound();
+    const grant = await this.authorizer.query<AuthorizationRow>(
+      `${selectAuthorization} WHERE id=$1`,
+      [authorizationId],
+    );
+    if (
+      !grant.rows[0] ||
+      !sameFingerprint(grant.rows[0].request_fingerprint, fingerprintRequest(request))
+    )
+      throw notFound();
+    const result = await this.authorizer.query<AttemptRow>(
+      'SELECT * FROM omnis.connector_execution_attempts WHERE authorization_id=$1 AND request_id=$2',
+      [authorizationId, requestId],
+    );
+    const row = result.rows[0];
+    if (!row?.decision_envelope) throw notFound();
+    return {
+      attempt: mapAttempt(row),
+      envelope: ConnectorDecisionEnvelopeSchema.parse(row.decision_envelope),
+    };
+  }
+
   async getExecutionForAuthorization(
     authorizationId: string,
   ): Promise<{ attempt: ConnectorExecutionAttempt; usage: UsageProvenance } | undefined> {
@@ -245,8 +281,8 @@ export class PostgresConnectorAuthorizationStore {
     }
     const result = await this.authorizer.query<AttemptRow>(
       `SELECT id, authorization_id, request_id, status, synthetic, created_at, updated_at,
-              submission_started_at, provider_submission_id, cancel_requested_at,
-              usage_provenance, response_text
+              submission_started_at, broker_generation, broker_lease_expires_at,
+              provider_submission_id, cancel_requested_at, usage_provenance, response_text
          FROM omnis.connector_execution_attempts
         WHERE authorization_id = $1`,
       [authorizationId],
@@ -577,8 +613,9 @@ export class PostgresConnectorAuthorizationStore {
       await lockIdempotencyKey(client, 'attempt', requestId);
       const existing = await client.query<AttemptRow>(
         `SELECT id, authorization_id, request_id, status, synthetic, created_at, updated_at,
-                submission_started_at, provider_submission_id, cancel_requested_at,
-                decision_envelope, decision_nonce, usage_provenance
+                submission_started_at, broker_generation, broker_lease_owner_id,
+                broker_lease_expires_at, provider_submission_id, cancel_requested_at,
+                decision_envelope, decision_nonce, usage_provenance, response_text
            FROM omnis.connector_execution_attempts WHERE request_id = $1`,
         [requestId],
       );
@@ -670,8 +707,8 @@ export class PostgresConnectorAuthorizationStore {
            (id, authorization_id, request_id, status, synthetic, decision_envelope, decision_nonce)
          VALUES ($1, $2, $3, 'admitted', TRUE, $4::jsonb, $5)
          RETURNING id, authorization_id, request_id, status, synthetic, created_at, updated_at,
-                   submission_started_at, provider_submission_id, cancel_requested_at,
-                   decision_envelope, decision_nonce, usage_provenance`,
+                   submission_started_at, broker_generation, broker_lease_expires_at,
+                   provider_submission_id, cancel_requested_at, decision_envelope, decision_nonce, usage_provenance`,
         [attemptId, authorizationId, requestId, JSON.stringify(envelope), nonce],
       );
       const consumed = await client.query<AuthorizationRow>(
@@ -696,10 +733,11 @@ export class PostgresConnectorAuthorizationStore {
   /** Marks the provider boundary crossed before submission; this cannot be reversed or retried. */
   async beginSyntheticSubmission(
     attemptId: string,
+    brokerInstanceId: string,
     envelopeInput: unknown,
     renderedRequest: string,
   ): Promise<ConnectorExecutionAttempt> {
-    if (!isUuid(attemptId))
+    if (!isUuid(attemptId) || !isUuid(brokerInstanceId))
       throw new ConnectorAuthorizationStoreError('invalid_input', 'Attempt ID is invalid.', 400);
     const envelope = ConnectorDecisionEnvelopeSchema.safeParse(envelopeInput);
     if (!envelope.success || envelope.data.claims.attemptId !== attemptId) {
@@ -741,11 +779,15 @@ export class PostgresConnectorAuthorizationStore {
         throw invalidTransition('Attempt is not eligible for provider submission.');
       }
       const updated = await client.query<AttemptRow>(
-        `UPDATE omnis.connector_execution_attempts SET status = 'submitting', submission_started_at = now(), updated_at = now()
+        `UPDATE omnis.connector_execution_attempts SET status = 'submitting',
+            submission_started_at = now(), broker_generation = broker_generation + 1,
+            broker_lease_owner_id = $2, broker_lease_expires_at = now() + interval '30 seconds',
+            updated_at = now()
           WHERE id = $1 AND status = 'admitted'
           RETURNING id, authorization_id, request_id, status, synthetic, created_at, updated_at,
-                    submission_started_at, provider_submission_id, cancel_requested_at`,
-        [attemptId],
+                    submission_started_at, broker_generation, broker_lease_expires_at,
+                    provider_submission_id, cancel_requested_at`,
+        [attemptId, brokerInstanceId],
       );
       const row = requiredRow(updated.rows[0]);
       await appendAudit(client, authorization, {
@@ -763,10 +805,18 @@ export class PostgresConnectorAuthorizationStore {
   /** Applies a synthetic provider callback once, under the grant lock; duplicate event IDs are no-ops. */
   async recordSyntheticProviderEvent(
     attemptId: string,
+    brokerInstanceId: string,
+    brokerGeneration: number,
     input: unknown,
   ): Promise<ConnectorExecutionAttempt> {
     const parsed = SyntheticProviderEventSchema.safeParse(input);
-    if (!isUuid(attemptId) || !parsed.success)
+    if (
+      !isUuid(attemptId) ||
+      !isUuid(brokerInstanceId) ||
+      !Number.isSafeInteger(brokerGeneration) ||
+      brokerGeneration < 1 ||
+      !parsed.success
+    )
       throw new ConnectorAuthorizationStoreError(
         'invalid_input',
         'Synthetic provider event is invalid.',
@@ -783,13 +833,14 @@ export class PostgresConnectorAuthorizationStore {
       if (!pair) throw notFound();
       const { authorization, execution } = pair;
       const duplicate = await client.query(
-        `SELECT source_event_fingerprint FROM omnis.connector_authorization_audit
+        `SELECT attempt_id, source_event_fingerprint FROM omnis.connector_authorization_audit
           WHERE authorization_id = $1 AND source_event_id = $2`,
         [authorization.id, parsed.data.eventId],
       );
       if (duplicate.rows[0]) {
         const previous = duplicate.rows[0].source_event_fingerprint as Buffer | null;
         if (
+          duplicate.rows[0].attempt_id !== execution.id ||
           !previous ||
           !sameFingerprint(previous, fingerprintSyntheticProviderEvent(parsed.data))
         ) {
@@ -797,15 +848,40 @@ export class PostgresConnectorAuthorizationStore {
         }
         return mapAttempt(execution);
       }
+      if (
+        execution.broker_generation !== brokerGeneration ||
+        execution.broker_lease_owner_id !== brokerInstanceId ||
+        !execution.broker_lease_expires_at ||
+        toEpoch(execution.broker_lease_expires_at) <= Date.now()
+      ) {
+        throw conflict('Broker generation or lease is stale.');
+      }
+      if (
+        execution.provider_submission_id !== null &&
+        parsed.data.providerSubmissionId !== undefined &&
+        execution.provider_submission_id !== parsed.data.providerSubmissionId
+      ) {
+        throw conflict('Provider event submission identity does not match its attempt.');
+      }
       if (!allowedSyntheticEventTransition(execution.status, parsed.data.status))
         throw invalidTransition('Provider event is duplicate, stale, or out of order.');
       const updated = await client.query<AttemptRow>(
         `UPDATE omnis.connector_execution_attempts SET status = $2,
             provider_submission_id = COALESCE(provider_submission_id, $3),
             usage_provenance = COALESCE($4::jsonb, usage_provenance),
-            response_text = COALESCE($5, response_text), updated_at = now()
+            response_text = COALESCE($5, response_text),
+            broker_lease_owner_id = CASE
+              WHEN $2 IN ('completed','failed','interrupted')
+                OR ($2 = 'unknown' AND COALESCE(provider_submission_id, $3) IS NULL)
+              THEN NULL ELSE broker_lease_owner_id END,
+            broker_lease_expires_at = CASE
+              WHEN $2 IN ('completed','failed','interrupted')
+                OR ($2 = 'unknown' AND COALESCE(provider_submission_id, $3) IS NULL)
+              THEN NULL ELSE now() + interval '30 seconds' END,
+            updated_at = now()
           WHERE id = $1 RETURNING id, authorization_id, request_id, status, synthetic, created_at,
-            updated_at, submission_started_at, provider_submission_id, cancel_requested_at, response_text`,
+            updated_at, submission_started_at, broker_generation, broker_lease_expires_at,
+            provider_submission_id, cancel_requested_at, response_text`,
         [
           attemptId,
           parsed.data.status,
@@ -854,7 +930,8 @@ export class PostgresConnectorAuthorizationStore {
     }
     const result = await this.authorizer.query<AttemptRow>(
       `SELECT id, authorization_id, request_id, status, synthetic, created_at, updated_at,
-              submission_started_at, provider_submission_id, cancel_requested_at
+              submission_started_at, broker_generation, broker_lease_owner_id,
+              broker_lease_expires_at, provider_submission_id, cancel_requested_at
          FROM omnis.connector_execution_attempts
         WHERE synthetic IS TRUE
           AND status IN ('admitted', 'submitting', 'accepted', 'running', 'unknown')
@@ -864,6 +941,84 @@ export class PostgresConnectorAuthorizationStore {
       [limit, afterAttemptId],
     );
     return result.rows.map(mapAttempt);
+  }
+
+  /** Claims or renews the fenced lease for one durable in-flight attempt. */
+  async claimBrokerRecoveryAttempt(
+    attemptId: string,
+    brokerInstanceId: string,
+  ): Promise<BrokerRecoveryClaim> {
+    if (!isUuid(attemptId) || !isUuid(brokerInstanceId)) {
+      throw new ConnectorAuthorizationStoreError(
+        'invalid_input',
+        'Broker recovery identity is invalid.',
+        400,
+      );
+    }
+    return inTransaction(this.authorizer, async (client) => {
+      const pair = await lockAttemptAndGrant(client, attemptId);
+      if (!pair) throw notFound();
+      const { authorization, execution } = pair;
+      if (!['submitting', 'accepted', 'running', 'unknown'].includes(execution.status)) {
+        return { attempt: mapAttempt(execution), owned: false };
+      }
+      if (execution.status === 'unknown' && !execution.provider_submission_id) {
+        return { attempt: mapAttempt(execution), owned: false };
+      }
+      const leaseIsActive = Boolean(
+        execution.broker_lease_owner_id &&
+        execution.broker_lease_expires_at &&
+        toEpoch(execution.broker_lease_expires_at) > Date.now(),
+      );
+      if (leaseIsActive) {
+        return {
+          attempt: mapAttempt(execution),
+          owned: execution.broker_lease_owner_id === brokerInstanceId,
+        };
+      }
+
+      const nextGeneration = execution.broker_generation! + 1;
+      const becomesUnknown = execution.status === 'submitting';
+      const noProviderIdentity = !execution.provider_submission_id;
+      const terminalUnknown = becomesUnknown && noProviderIdentity;
+      const updated = await client.query<AttemptRow>(
+        `UPDATE omnis.connector_execution_attempts
+            SET status = CASE WHEN $3::boolean THEN 'unknown' ELSE status END,
+                usage_provenance = CASE WHEN $3::boolean
+                  THEN '{"kind":"unknown","reason":"submission_uncertain","billingExposure":"unknown"}'::jsonb
+                  ELSE usage_provenance END,
+                broker_generation = $2,
+                broker_lease_owner_id = CASE WHEN $4::boolean THEN NULL ELSE $5::uuid END,
+                broker_lease_expires_at = CASE WHEN $4::boolean THEN NULL ELSE now() + interval '30 seconds' END,
+                updated_at = now()
+          WHERE id = $1
+          RETURNING id, authorization_id, request_id, status, synthetic, created_at, updated_at,
+                    submission_started_at, broker_generation, broker_lease_owner_id,
+                    broker_lease_expires_at, provider_submission_id, cancel_requested_at,
+                    usage_provenance, response_text`,
+        [attemptId, nextGeneration, becomesUnknown, terminalUnknown, brokerInstanceId],
+      );
+      const claimed = requiredRow(updated.rows[0]);
+      if (becomesUnknown) {
+        await appendAudit(client, authorization, {
+          requestId: execution.request_id,
+          attemptId,
+          eventType: 'connector.execution_unknown',
+          actorId: 'service:omnis-authorizer',
+          effectiveIdentity: 'service:omnis-authorizer',
+          outcome: 'recorded',
+        });
+      }
+      await appendAudit(client, authorization, {
+        requestId: execution.request_id,
+        attemptId,
+        eventType: 'connector.recovery_claimed',
+        actorId: 'service:omnis-authorizer',
+        effectiveIdentity: 'service:omnis-authorizer',
+        outcome: 'recorded',
+      });
+      return { attempt: mapAttempt(claimed), owned: true };
+    });
   }
 }
 
@@ -1004,6 +1159,9 @@ function mapAttempt(row: AttemptRow): ConnectorExecutionAttempt {
     status: row.status,
     synthetic: row.synthetic,
     createdAt: toIso(row.created_at),
+    brokerGeneration: row.broker_generation ?? 0,
+    brokerLeaseExpiresAt:
+      row.broker_lease_expires_at == null ? null : toIso(row.broker_lease_expires_at),
     ...(row.updated_at ? { updatedAt: toIso(row.updated_at) } : {}),
     ...(row.submission_started_at !== undefined
       ? {
@@ -1041,7 +1199,8 @@ async function lockAttemptAndGrant(
   if (!authorization) return undefined;
   const attemptResult = await client.query<AttemptRow>(
     `SELECT id, authorization_id, request_id, status, synthetic, created_at, updated_at,
-            submission_started_at, provider_submission_id, cancel_requested_at,
+            submission_started_at, broker_generation, broker_lease_owner_id,
+            broker_lease_expires_at, provider_submission_id, cancel_requested_at,
             decision_envelope, decision_nonce, usage_provenance, response_text
        FROM omnis.connector_execution_attempts WHERE id = $1 FOR UPDATE`,
     [attemptId],

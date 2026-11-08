@@ -5,6 +5,8 @@ const ownerPassword = process.env.OMNIS_TEST_OWNER_PASSWORD;
 const frontendOrigin = process.env.OMNIS_TEST_FRONTEND_ORIGIN;
 const taskDetail = 'Verify that a synthetic task persists through the owner Tasks page and reload.';
 const syntheticProjectId = process.env.OMNIS_TEST_SYNTHETIC_PROJECT_ID;
+const lostAckRequestId = process.env.OMNIS_TEST_SYNTHETIC_LOST_ACK_REQUEST_ID;
+const cancellationRequestId = process.env.OMNIS_TEST_SYNTHETIC_CANCELLATION_REQUEST_ID;
 
 if (!frontendOrigin) throw new Error('The integration frontend Origin is not configured.');
 if (!ownerPassword) throw new Error('The disposable owner password is not configured.');
@@ -105,6 +107,7 @@ test('owner creates an unassigned task that persists after reload', async ({ pag
 test('owner sees an authorized synthetic broker Run, ordered events, result and usage provenance', async ({
   page,
 }) => {
+  test.setTimeout(180_000);
   test.skip(
     !syntheticProjectId,
     'The disposable backend harness did not enable synthetic broker integration.',
@@ -289,7 +292,7 @@ test('owner sees an authorized synthetic broker Run, ordered events, result and 
         persistedAttemptStatus = detail.body?.attempt?.status;
         return { runStatus: state.body.status, attemptStatus: persistedAttemptStatus };
       },
-      { timeout: 15_000 },
+      { timeout: 100_000 },
     )
     .toEqual({ runStatus: 'completed', attemptStatus: 'completed' });
   expect(persistedRun.runtimeKind).toBe('mock');
@@ -305,8 +308,8 @@ test('owner sees an authorized synthetic broker Run, ordered events, result and 
   expect(detail.body.usage).toEqual({
     kind: 'measured',
     source: 'synthetic-provider',
-    inputUnits: 12,
-    outputUnits: 7,
+    inputUnits: 1,
+    outputUnits: 1,
     billingExposure: 'synthetic-only',
   });
 
@@ -319,9 +322,331 @@ test('owner sees an authorized synthetic broker Run, ordered events, result and 
   await expect(inspector).toContainText('queued');
   await expect(inspector).toContainText('started');
   await expect(inspector).toContainText('provider submission requested');
+  await expect(inspector).toContainText('outcome unknown');
   await expect(inspector).toContainText('completed');
-  await expect(inspector).toContainText('Synthetic provider fixture result.');
+  await expect(inspector).toContainText('Synthetic provider response.');
   await expect(page.getByText('completed', { exact: true })).toBeVisible();
+
+  const cancellationTask = await ownerRequest(page, '/api/v1/tasks', {
+    method: 'POST',
+    idempotencyKey: randomUUID(),
+    body: {
+      title: `Synthetic broker cancellation ${randomUUID()}`,
+      detail: 'Confirm owner cancellation after fake-provider acceptance.',
+      projectId: project.id,
+    },
+  });
+  expect(cancellationTask.status).toBe(201);
+  const cancellationAssignment = await ownerRequest(
+    page,
+    `/api/v1/tasks/${cancellationTask.body.id}/execution-assignment`,
+    {
+      method: 'PUT',
+      idempotencyKey: randomUUID(),
+      body: {
+        agentId,
+        profileVersion: profileVersion.versionNo,
+        runtimeId: 'mock',
+        expectedAssignmentRevision: cancellationTask.body.assignmentRevision,
+      },
+    },
+  );
+  expect(cancellationAssignment.status).toBe(200);
+  const cancellationRenderedRequest = JSON.stringify({
+    version: 'omnis.synthetic-connector-request.v1',
+    task: {
+      id: cancellationAssignment.body.id,
+      title: cancellationAssignment.body.title,
+      detail: cancellationAssignment.body.detail,
+    },
+    agentProfile: {
+      agentId: profileVersion.agentId,
+      versionNo: profileVersion.versionNo,
+      profession: profileVersion.profession,
+      seniority: profileVersion.seniority,
+      specialties: profileVersion.specialties,
+      personality: profileVersion.personality,
+      behavior: profileVersion.behavior,
+      instructions: profileVersion.instructions,
+    },
+  });
+  const cancellationAuthorizationInput = {
+    ...authorizationInput,
+    taskId: cancellationAssignment.body.id,
+    taskRevision: cancellationAssignment.body.associationRevision,
+    renderedRequest: cancellationRenderedRequest,
+  };
+  const cancellationAuthorizationResponse = await ownerRequest(
+    page,
+    '/api/v1/connector-authorizations',
+    {
+      method: 'POST',
+      idempotencyKey: randomUUID(),
+      body: cancellationAuthorizationInput,
+    },
+  );
+  expect(cancellationAuthorizationResponse.status).toBe(201);
+  const cancellationAuthorization = cancellationAuthorizationResponse.body;
+  const cancellationApproval = await ownerRequest(
+    page,
+    `/api/v1/connector-authorizations/${cancellationAuthorization.id}/decision`,
+    {
+      method: 'POST',
+      body: {
+        decision: 'approve',
+        promptDigestConfirmation: cancellationAuthorization.promptDigest,
+      },
+    },
+  );
+  expect(cancellationApproval.status).toBe(200);
+  expect(cancellationRequestId).toMatch(/^[0-9a-f-]{36}$/i);
+  const cancellationRun = await ownerRequest(
+    page,
+    `/api/v1/tasks/${cancellationAssignment.body.id}/synthetic-runs`,
+    {
+      method: 'POST',
+      idempotencyKey: cancellationRequestId,
+      body: {
+        authorizationId: cancellationAuthorization.id,
+        request: {
+          projectId: cancellationAuthorizationInput.projectId,
+          projectRevision: cancellationAuthorizationInput.projectRevision,
+          taskId: cancellationAuthorizationInput.taskId,
+          taskRevision: cancellationAuthorizationInput.taskRevision,
+          agentId: cancellationAuthorizationInput.agentId,
+          profileVersion: cancellationAuthorizationInput.profileVersion,
+          connectorId: cancellationAuthorizationInput.connectorId,
+          connectorVersion: cancellationAuthorizationInput.connectorVersion,
+          providerId: cancellationAuthorizationInput.providerId,
+          modelId: cancellationAuthorizationInput.modelId,
+          operation: cancellationAuthorizationInput.operation,
+          capabilities: [],
+          limits,
+          promptDigest: cancellationAuthorization.promptDigest,
+        },
+        renderedRequest: cancellationRenderedRequest,
+      },
+    },
+  );
+  expect(cancellationRun.status).toBe(202);
+  const cancellationRunId = cancellationRun.body.id;
+  await expect
+    .poll(
+      async () => {
+        const detail = await ownerRequest(
+          page,
+          `/api/v1/tasks/${cancellationAssignment.body.id}/synthetic-runs/${cancellationAuthorization.id}`,
+        );
+        return detail.body?.attempt?.status;
+      },
+      { timeout: 15_000 },
+    )
+    .toBe('accepted');
+
+  await page.goto(`/#runs/${cancellationRunId}`);
+  await page.reload();
+  const stopButton = page.getByRole('button', { name: 'Request stop', exact: true });
+  await expect(stopButton).toBeVisible();
+  const stopResponsePromise = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return (
+      url.pathname === `/api/v1/runs/${cancellationRunId}/stop` &&
+      response.request().method() === 'POST'
+    );
+  });
+  await stopButton.click();
+  const stopResponse = await stopResponsePromise;
+  expect(stopResponse.status()).toBe(200);
+  await expect(page.getByRole('button', { name: 'Stop requested', exact: true })).toBeVisible();
+
+  await expect
+    .poll(
+      async () => {
+        const state = await ownerRequest(page, `/api/v1/runs/${cancellationRunId}`);
+        const detail = await ownerRequest(
+          page,
+          `/api/v1/tasks/${cancellationAssignment.body.id}/synthetic-runs/${cancellationAuthorization.id}`,
+        );
+        return { runStatus: state.body.status, attemptStatus: detail.body?.attempt?.status };
+      },
+      { timeout: 50_000 },
+    )
+    .toEqual({ runStatus: 'cancelled', attemptStatus: 'interrupted' });
+
+  await page.reload();
+  const cancelledInspector = page.getByRole('region', {
+    name: `Event history for ${cancellationAssignment.body.title}`,
+  });
+  await expect(cancelledInspector).toContainText('stop requested');
+  await expect(cancelledInspector).toContainText('cancelled');
+
+  expect(lostAckRequestId).toMatch(/^[0-9a-f-]{36}$/i);
+  const lostAckTaskTitle = `Synthetic broker lost acknowledgement ${randomUUID()}`;
+  const lostAckTaskCreated = await ownerRequest(page, '/api/v1/tasks', {
+    method: 'POST',
+    idempotencyKey: randomUUID(),
+    body: {
+      title: lostAckTaskTitle,
+      detail: 'Verify a provider acceptance with a lost broker acknowledgement.',
+      projectId: project.id,
+    },
+  });
+  expect(lostAckTaskCreated.status).toBe(201);
+  const lostAckTaskProject = await ownerRequest(
+    page,
+    `/api/v1/tasks/${lostAckTaskCreated.body.id}/project`,
+    {
+      method: 'PUT',
+      idempotencyKey: randomUUID(),
+      body: {
+        projectId: project.id,
+        expectedAssociationRevision: lostAckTaskCreated.body.associationRevision,
+      },
+    },
+  );
+  expect(lostAckTaskProject.status).toBe(200);
+  const lostAckTaskAssignment = await ownerRequest(
+    page,
+    `/api/v1/tasks/${lostAckTaskCreated.body.id}/execution-assignment`,
+    {
+      method: 'PUT',
+      idempotencyKey: randomUUID(),
+      body: {
+        agentId,
+        profileVersion: profileVersion.versionNo,
+        runtimeId: 'mock',
+        expectedAssignmentRevision: lostAckTaskCreated.body.assignmentRevision,
+      },
+    },
+  );
+  expect(lostAckTaskAssignment.status).toBe(200);
+  const lostAckRenderedRequest = JSON.stringify({
+    version: 'omnis.synthetic-connector-request.v1',
+    task: {
+      id: lostAckTaskAssignment.body.id,
+      title: lostAckTaskAssignment.body.title,
+      detail: lostAckTaskAssignment.body.detail,
+    },
+    agentProfile: {
+      agentId: profileVersion.agentId,
+      versionNo: profileVersion.versionNo,
+      profession: profileVersion.profession,
+      seniority: profileVersion.seniority,
+      specialties: profileVersion.specialties,
+      personality: profileVersion.personality,
+      behavior: profileVersion.behavior,
+      instructions: profileVersion.instructions,
+    },
+  });
+  const lostAckAuthorizationInput = {
+    ...authorizationInput,
+    taskId: lostAckTaskAssignment.body.id,
+    taskRevision: lostAckTaskAssignment.body.associationRevision,
+    renderedRequest: lostAckRenderedRequest,
+  };
+  const lostAckAuthorizationResponse = await ownerRequest(
+    page,
+    '/api/v1/connector-authorizations',
+    {
+      method: 'POST',
+      idempotencyKey: randomUUID(),
+      body: lostAckAuthorizationInput,
+    },
+  );
+  expect(
+    lostAckAuthorizationResponse.status,
+    JSON.stringify(lostAckAuthorizationResponse.body),
+  ).toBe(201);
+  const lostAckAuthorization = lostAckAuthorizationResponse.body;
+  const lostAckApproval = await ownerRequest(
+    page,
+    `/api/v1/connector-authorizations/${lostAckAuthorization.id}/decision`,
+    {
+      method: 'POST',
+      body: {
+        decision: 'approve',
+        promptDigestConfirmation: lostAckAuthorization.promptDigest,
+      },
+    },
+  );
+  expect(lostAckApproval.status).toBe(200);
+  const lostAckRunRequestBody = {
+    authorizationId: lostAckAuthorization.id,
+    request: {
+      projectId: lostAckAuthorizationInput.projectId,
+      projectRevision: lostAckAuthorizationInput.projectRevision,
+      taskId: lostAckAuthorizationInput.taskId,
+      taskRevision: lostAckAuthorizationInput.taskRevision,
+      agentId: lostAckAuthorizationInput.agentId,
+      profileVersion: lostAckAuthorizationInput.profileVersion,
+      connectorId: lostAckAuthorizationInput.connectorId,
+      connectorVersion: lostAckAuthorizationInput.connectorVersion,
+      providerId: lostAckAuthorizationInput.providerId,
+      modelId: lostAckAuthorizationInput.modelId,
+      operation: lostAckAuthorizationInput.operation,
+      capabilities: [],
+      limits,
+      promptDigest: lostAckAuthorization.promptDigest,
+    },
+    renderedRequest: lostAckRenderedRequest,
+  };
+  const lostAckRun = await ownerRequest(
+    page,
+    `/api/v1/tasks/${lostAckTaskAssignment.body.id}/synthetic-runs`,
+    {
+      method: 'POST',
+      idempotencyKey: lostAckRequestId,
+      body: lostAckRunRequestBody,
+    },
+  );
+  expect(lostAckRun.status).toBe(202);
+  const lostAckRunId = lostAckRun.body.id;
+  const lostAckRunReplay = await ownerRequest(
+    page,
+    `/api/v1/tasks/${lostAckTaskAssignment.body.id}/synthetic-runs`,
+    {
+      method: 'POST',
+      idempotencyKey: lostAckRequestId,
+      body: lostAckRunRequestBody,
+    },
+  );
+  expect(lostAckRunReplay.status).toBe(200);
+  expect(lostAckRunReplay.body.id).toBe(lostAckRunId);
+  await expect
+    .poll(
+      async () => {
+        const state = await ownerRequest(page, `/api/v1/runs/${lostAckRunId}`);
+        const detail = await ownerRequest(
+          page,
+          `/api/v1/tasks/${lostAckTaskAssignment.body.id}/synthetic-runs/${lostAckAuthorization.id}`,
+        );
+        return { runStatus: state.body?.status, attemptStatus: detail.body?.attempt?.status };
+      },
+      { timeout: 70_000 },
+    )
+    .toEqual({ runStatus: 'unknown', attemptStatus: 'unknown' });
+  const lostAckRunAfterRecoveryReplay = await ownerRequest(
+    page,
+    `/api/v1/tasks/${lostAckTaskAssignment.body.id}/synthetic-runs`,
+    {
+      method: 'POST',
+      idempotencyKey: lostAckRequestId,
+      body: lostAckRunRequestBody,
+    },
+  );
+  expect(lostAckRunAfterRecoveryReplay.status).toBe(200);
+  expect(lostAckRunAfterRecoveryReplay.body.id).toBe(lostAckRunId);
+  const lostAckDetail = await ownerRequest(
+    page,
+    `/api/v1/tasks/${lostAckTaskAssignment.body.id}/synthetic-runs/${lostAckAuthorization.id}`,
+  );
+  expect(lostAckDetail.body.attempt.providerSubmissionId).toBeNull();
+  expect(lostAckDetail.body.usage.kind).toBe('unknown');
+  await page.goto(`/#runs/${lostAckRunId}`);
+  await page.reload();
+  await expect(
+    page.getByRole('region', { name: `Event history for ${lostAckTaskTitle}` }),
+  ).toContainText('unknown');
 });
 
 async function signIn(page) {

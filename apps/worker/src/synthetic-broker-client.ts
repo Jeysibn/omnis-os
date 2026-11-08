@@ -13,6 +13,8 @@ const BrokerResponseSchema = z
     attemptId: z.string().uuid(),
     status: ConnectorExecutionStatusSchema,
     submitted: z.boolean(),
+    cancellationRequestedAt: z.string().datetime().optional(),
+    outcomeRecordedAt: z.string().datetime().optional(),
     correlationId: z.string().uuid(),
     responseText: z.string().min(1).max(32_000).optional(),
   })
@@ -24,6 +26,7 @@ const BrokerResponseSchema = z
   );
 
 export interface SyntheticBrokerExecutor {
+  reconcile?(taskId: string, request: SyntheticTaskRunRequest): Promise<SyntheticTaskRunResponse>;
   execute(taskId: string, request: SyntheticTaskRunRequest): Promise<SyntheticTaskRunResponse>;
 }
 
@@ -39,20 +42,28 @@ export class SyntheticBrokerClient implements SyntheticBrokerExecutor {
     this.callerToken = callerToken;
   }
 
+  async reconcile(taskId: string, request: SyntheticTaskRunRequest) {
+    return this.execute(taskId, request, true);
+  }
+
   async execute(
     taskId: string,
     requestInput: SyntheticTaskRunRequest,
+    projectionOnly = false,
   ): Promise<SyntheticTaskRunResponse> {
     const request = SyntheticTaskRunRequestSchema.parse(requestInput);
     if (request.request.taskId !== taskId) throw new Error('Synthetic broker task binding failed.');
     const brokerResult = BrokerResponseSchema.parse(
-      await this.post({
-        version: 'omnis.synthetic-broker.v1',
-        authorizationId: request.authorizationId,
-        requestId: request.requestId,
-        request: request.request,
-        renderedRequest: request.renderedRequest,
-      }),
+      await this.post(
+        {
+          version: 'omnis.synthetic-broker.v1',
+          authorizationId: request.authorizationId,
+          requestId: request.requestId,
+          request: request.request,
+          ...(!projectionOnly ? { renderedRequest: request.renderedRequest } : {}),
+        },
+        projectionOnly,
+      ),
     );
     return SyntheticTaskRunResponseSchema.parse({
       version: 'omnis.synthetic-task-run.v1',
@@ -63,6 +74,12 @@ export class SyntheticBrokerClient implements SyntheticBrokerExecutor {
       attemptId: brokerResult.attemptId,
       status: brokerResult.status,
       submitted: brokerResult.submitted,
+      ...(brokerResult.cancellationRequestedAt
+        ? { cancellationRequestedAt: brokerResult.cancellationRequestedAt }
+        : {}),
+      ...(brokerResult.outcomeRecordedAt
+        ? { outcomeRecordedAt: brokerResult.outcomeRecordedAt }
+        : {}),
       usage:
         brokerResult.status === 'unknown'
           ? { kind: 'unknown', reason: 'submission_uncertain', billingExposure: 'unknown' }
@@ -71,14 +88,15 @@ export class SyntheticBrokerClient implements SyntheticBrokerExecutor {
     });
   }
 
-  private post(value: unknown): Promise<unknown> {
+  private post(value: unknown, projectionOnly: boolean): Promise<unknown> {
     const payload = Buffer.from(JSON.stringify(value));
     if (payload.length > 64 * 1024) throw new Error('Synthetic broker request exceeds its limit.');
     return new Promise((resolve, reject) => {
       const request = httpRequest(
         {
           socketPath: this.socketPath,
-          path: '/internal/broker/v1/submit',
+          ...(projectionOnly ? { signal: AbortSignal.timeout(10_000) } : {}),
+          path: projectionOnly ? '/internal/broker/v1/projection' : '/internal/broker/v1/submit',
           method: 'POST',
           headers: {
             host: 'localhost',

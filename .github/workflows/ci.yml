@@ -94,6 +94,8 @@ jobs:
         run: pnpm --filter @omnis/web build
       - name: Verify host cleanup, packaging, and required CI checks
         run: node --test scripts/host-security/*.test.mjs
+      - name: Verify SO_PEERCRED broker IPC gate
+        run: python3 scripts/platform/test-broker-peer-proxy.py
       - name: Verify host isolation in disposable systemd deployment
         env:
           CI: 'true'
@@ -249,10 +251,15 @@ jobs:
           printf '%s' 'omnis-image-canary-9f6d3e2c1a' > .env.container-image-canary
           docker build --file infra/docker/api.Dockerfile --tag omnis-api:ci .
           docker build --file infra/docker/worker.Dockerfile --tag omnis-worker:ci .
+          docker build --file infra/docker/synthetic-broker.Dockerfile --tag omnis-synthetic-broker:ci .
           docker build --file infra/docker/web.Dockerfile --tag omnis-web:ci .
           docker build --file infra/docker/web-assets.Dockerfile --tag omnis-web-assets:ci .
           node scripts/compose/verify-app-config.mjs
           node scripts/container-images/verify-built-images.mjs
+      - name: Verify synthetic broker network boundary with positive and negative controls
+        run: |
+          set -euo pipefail
+          node scripts/platform/run-synthetic-egress.mjs
       - name: Verify disposable Docker privilege, socket, lifecycle, and network boundaries
         env:
           OMNIS_DOCKER_TEST_RUN_ID: omnis-${{ github.run_id }}-${{ github.run_attempt }}
@@ -273,7 +280,7 @@ jobs:
           trap cleanup EXIT
           sudo --preserve-env=PATH env \
             OMNIS_DOCKER_TEST_RUN_ID="$OMNIS_DOCKER_TEST_RUN_ID" \
-            node scripts/container-boundary/verify-disposable-boundary.mjs
+          node scripts/container-boundary/verify-disposable-boundary.mjs
 
   checks:
     if: ${{ always() }}

@@ -28,6 +28,7 @@ export {
 } from './connector-authorization-store.ts';
 export type {
   BrokerAdmission,
+  BrokerRecoveryClaim,
   ConnectorAuthorizationStoreErrorCode,
   SyntheticTaskRunEventPage,
 } from './connector-authorization-store.ts';

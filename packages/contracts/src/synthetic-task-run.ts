@@ -75,6 +75,8 @@ export const SyntheticTaskRunResponseSchema = z
     attemptId: z.string().uuid(),
     status: ConnectorExecutionStatusSchema,
     submitted: z.boolean(),
+    cancellationRequestedAt: z.string().datetime().optional(),
+    outcomeRecordedAt: z.string().datetime().optional(),
     usage: UsageProvenanceSchema,
     responseText: z.string().min(1).max(32_000).optional(),
   })

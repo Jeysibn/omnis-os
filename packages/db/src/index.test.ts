@@ -37,10 +37,13 @@ import {
 } from './index.ts';
 import { provisionDatabaseRoles } from './provision-roles.ts';
 import { assertValidMetrics, metricsQuery } from '../../../scripts/db-recovery/metrics.mjs';
+
 import {
   assertRestoreRoleSecurity,
   restoreRoleSecurityQuery,
 } from '../../../scripts/db-recovery/role-integrity.mjs';
+
+const syntheticBrokerInstanceId = 'c22db4c2-27bc-4b1d-a73e-236199111111';
 
 const databaseUrl = process.env.OMNIS_TEST_DATABASE_URL;
 const pool = databaseUrl ? createPool(databaseUrl) : undefined;
@@ -187,6 +190,7 @@ const postgresSuite = describe(
       await assert.rejects(
         brokerStore.beginSyntheticSubmission(
           admission.attempt.id,
+          syntheticBrokerInstanceId,
           admission.envelope,
           `${fixture.renderedRequest} changed`,
         ),
@@ -195,6 +199,7 @@ const postgresSuite = describe(
 
       const submitting = await brokerStore.beginSyntheticSubmission(
         admission.attempt.id,
+        syntheticBrokerInstanceId,
         admission.envelope,
         fixture.renderedRequest,
       );
@@ -207,11 +212,16 @@ const postgresSuite = describe(
       );
       const credentialCanary = 'SYNTHETIC-CREDENTIAL-CANARY-DO-NOT-LOG';
       await assert.rejects(
-        brokerStore.recordSyntheticProviderEvent(admission.attempt.id, {
-          eventId: 'credential-canary-event',
-          status: 'failed',
-          credentialCanary,
-        }),
+        brokerStore.recordSyntheticProviderEvent(
+          admission.attempt.id,
+          syntheticBrokerInstanceId,
+          1,
+          {
+            eventId: 'credential-canary-event',
+            status: 'failed',
+            credentialCanary,
+          },
+        ),
         (error: unknown) =>
           error instanceof ConnectorAuthorizationStoreError &&
           error.code === 'invalid_input' &&
@@ -226,39 +236,84 @@ const postgresSuite = describe(
         [admission.attempt.id],
       );
       assert.equal(noCanary.rows[0]?.evidence.includes(credentialCanary), false);
-      const accepted = await brokerStore.recordSyntheticProviderEvent(admission.attempt.id, {
-        eventId: 'fake-accepted-1',
-        status: 'accepted',
-        providerSubmissionId: 'fake-provider-submission-1',
-      });
-      assert.equal(accepted.status, 'accepted');
-      const duplicate = await brokerStore.recordSyntheticProviderEvent(admission.attempt.id, {
-        eventId: 'fake-accepted-1',
-        status: 'accepted',
-        providerSubmissionId: 'fake-provider-submission-1',
-      });
-      assert.equal(duplicate.status, 'accepted');
-      await assert.rejects(
-        brokerStore.recordSyntheticProviderEvent(admission.attempt.id, {
+      const accepted = await brokerStore.recordSyntheticProviderEvent(
+        admission.attempt.id,
+        syntheticBrokerInstanceId,
+        1,
+        {
           eventId: 'fake-accepted-1',
           status: 'accepted',
-          providerSubmissionId: 'different-provider-submission',
-        }),
+          providerSubmissionId: 'fake-provider-submission-1',
+        },
+      );
+      assert.equal(accepted.status, 'accepted');
+      const duplicate = await brokerStore.recordSyntheticProviderEvent(
+        admission.attempt.id,
+        syntheticBrokerInstanceId,
+        1,
+        {
+          eventId: 'fake-accepted-1',
+          status: 'accepted',
+          providerSubmissionId: 'fake-provider-submission-1',
+        },
+      );
+      assert.equal(duplicate.status, 'accepted');
+      await assert.rejects(
+        brokerStore.recordSyntheticProviderEvent(
+          admission.attempt.id,
+          syntheticBrokerInstanceId,
+          1,
+          {
+            eventId: 'fake-accepted-1',
+            status: 'accepted',
+            providerSubmissionId: 'different-provider-submission',
+          },
+        ),
         /reused with different contents/,
       );
-      const completed = await brokerStore.recordSyntheticProviderEvent(admission.attempt.id, {
-        eventId: 'fake-completed-1',
-        status: 'completed',
-        responseText: 'Synthetic response fixture.',
-        usage: {
-          kind: 'measured',
-          source: 'synthetic-provider',
-          inputUnits: 5,
-          outputUnits: 8,
-          billingExposure: 'synthetic-only',
+      const completed = await brokerStore.recordSyntheticProviderEvent(
+        admission.attempt.id,
+        syntheticBrokerInstanceId,
+        1,
+        {
+          eventId: 'fake-completed-1',
+          status: 'completed',
+          responseText: 'Synthetic response fixture.',
+          usage: {
+            kind: 'measured',
+            source: 'synthetic-provider',
+            inputUnits: 5,
+            outputUnits: 8,
+            billingExposure: 'synthetic-only',
+          },
         },
-      });
+      );
       assert.equal(completed.status, 'completed');
+      const duplicateCompletion = await brokerStore.recordSyntheticProviderEvent(
+        admission.attempt.id,
+        syntheticBrokerInstanceId,
+        1,
+        {
+          eventId: 'fake-completed-1',
+          status: 'completed',
+          responseText: 'Synthetic response fixture.',
+          usage: {
+            kind: 'measured',
+            source: 'synthetic-provider',
+            inputUnits: 5,
+            outputUnits: 8,
+            billingExposure: 'synthetic-only',
+          },
+        },
+      );
+      assert.equal(duplicateCompletion.status, 'completed');
+      const completedReplay = await brokerStore.consumeForBroker(
+        pending.id,
+        fixture.request,
+        attemptRequestId,
+      );
+      assert.equal(completedReplay.attempt.status, 'completed');
+      assert.equal(completedReplay.attempt.responseText, 'Synthetic response fixture.');
       const durableExecution = await brokerStore.getExecutionForAuthorization(pending.id);
       assert.equal(durableExecution?.attempt.id, completed.id);
       assert.equal(durableExecution?.attempt.responseText, 'Synthetic response fixture.');
@@ -300,17 +355,23 @@ const postgresSuite = describe(
       await assert.rejects(
         brokerStore.beginSyntheticSubmission(
           admission.attempt.id,
+          syntheticBrokerInstanceId,
           admission.envelope,
           fixture.renderedRequest,
         ),
         /not eligible/,
       );
       await assert.rejects(
-        brokerStore.recordSyntheticProviderEvent(admission.attempt.id, {
-          eventId: 'stale-accepted-1',
-          status: 'accepted',
-        }),
-        /out of order/,
+        brokerStore.recordSyntheticProviderEvent(
+          admission.attempt.id,
+          syntheticBrokerInstanceId,
+          1,
+          {
+            eventId: 'stale-accepted-1',
+            status: 'accepted',
+          },
+        ),
+        /stale/,
       );
 
       const persisted = await authorizerPool!.query<{
@@ -343,6 +404,70 @@ const postgresSuite = describe(
       );
     });
 
+    it('fences a restarted broker after lease expiry without resubmitting an uncertain attempt', async () => {
+      const fixture = await connectorFixture();
+      const grant = await fixture.authorizations.request(fixture.request, randomUUID());
+      await fixture.authorizations.decide(grant.id, 'owner', {
+        decision: 'approve',
+        promptDigestConfirmation: fixture.request.promptDigest,
+      });
+      const pair = generateKeyPairSync('ed25519');
+      const signingKey = {
+        keyId: 'test-disposable-fencing',
+        privateKey: pair.privateKey,
+        notBefore: new Date(Date.now() - 60_000).toISOString(),
+        notAfter: new Date(Date.now() + 120_000).toISOString(),
+      };
+      const brokerStore = new PostgresConnectorAuthorizationStore(authorizerPool!, {
+        signDecision: (claims) => signConnectorDecisionEnvelope(claims, signingKey),
+      });
+      const admission = await brokerStore.consumeForBroker(grant.id, fixture.request, randomUUID());
+      const oldBroker = randomUUID();
+      const newBroker = randomUUID();
+      const submitting = await brokerStore.beginSyntheticSubmission(
+        admission.attempt.id,
+        oldBroker,
+        admission.envelope,
+        fixture.renderedRequest,
+      );
+      assert.equal(submitting.brokerGeneration, 1);
+
+      const activeClaim = await brokerStore.claimBrokerRecoveryAttempt(
+        admission.attempt.id,
+        newBroker,
+      );
+      assert.equal(activeClaim.owned, false);
+      await adminPool!.query(
+        `UPDATE omnis.connector_execution_attempts
+            SET broker_lease_expires_at = now() - interval '1 second'
+          WHERE id = $1`,
+        [admission.attempt.id],
+      );
+      const recovered = await brokerStore.claimBrokerRecoveryAttempt(
+        admission.attempt.id,
+        newBroker,
+      );
+      assert.equal(recovered.owned, true);
+      assert.equal(recovered.attempt.status, 'unknown');
+      assert.equal(recovered.attempt.brokerGeneration, 2);
+      assert.equal(recovered.attempt.brokerLeaseExpiresAt, null);
+      await assert.rejects(
+        brokerStore.recordSyntheticProviderEvent(admission.attempt.id, oldBroker, 1, {
+          eventId: 'old-broker-late-acceptance',
+          status: 'accepted',
+          providerSubmissionId: 'fake-accepted-after-restart',
+        }),
+        /stale/,
+      );
+      const stillUnknown = await brokerStore.getExecutionForAuthorization(grant.id);
+      assert.equal(stillUnknown?.attempt.status, 'unknown');
+      assert.equal(stillUnknown?.attempt.providerSubmissionId, null);
+      assert.equal(
+        (await brokerStore.claimBrokerRecoveryAttempt(admission.attempt.id, newBroker)).owned,
+        false,
+      );
+    });
+
     it('turns an uncertain submission into unknown and blocks future admission after revocation', async () => {
       const fixture = await connectorFixture();
       const grant = await fixture.authorizations.request(fixture.request, randomUUID());
@@ -363,20 +488,27 @@ const postgresSuite = describe(
       const admission = await brokerStore.consumeForBroker(grant.id, fixture.request, randomUUID());
       await brokerStore.beginSyntheticSubmission(
         admission.attempt.id,
+        syntheticBrokerInstanceId,
         admission.envelope,
         fixture.renderedRequest,
       );
       const revoked = await fixture.authorizations.revoke(grant.id, 'owner');
       assert.equal(revoked.status, 'revoked');
-      const request = await brokerStore.recordSyntheticProviderEvent(admission.attempt.id, {
-        eventId: 'late-cancel-ack-1',
-        status: 'interrupted',
-        usage: { kind: 'unknown', reason: 'submission_uncertain', billingExposure: 'unknown' },
-      });
+      const request = await brokerStore.recordSyntheticProviderEvent(
+        admission.attempt.id,
+        syntheticBrokerInstanceId,
+        1,
+        {
+          eventId: 'late-cancel-ack-1',
+          status: 'interrupted',
+          usage: { kind: 'unknown', reason: 'submission_uncertain', billingExposure: 'unknown' },
+        },
+      );
       assert.equal(request.status, 'interrupted');
       await assert.rejects(
         brokerStore.beginSyntheticSubmission(
           admission.attempt.id,
+          syntheticBrokerInstanceId,
           admission.envelope,
           fixture.renderedRequest,
         ),
@@ -404,6 +536,7 @@ const postgresSuite = describe(
       const admission = await brokerStore.consumeForBroker(grant.id, fixture.request, randomUUID());
       await brokerStore.beginSyntheticSubmission(
         admission.attempt.id,
+        syntheticBrokerInstanceId,
         admission.envelope,
         fixture.renderedRequest,
       );
@@ -459,6 +592,7 @@ const postgresSuite = describe(
       const admission = await brokerStore.consumeForBroker(grant.id, fixture.request, randomUUID());
       await brokerStore.beginSyntheticSubmission(
         admission.attempt.id,
+        syntheticBrokerInstanceId,
         admission.envelope,
         fixture.renderedRequest,
       );
@@ -477,11 +611,16 @@ const postgresSuite = describe(
       `);
       try {
         await assert.rejects(
-          brokerStore.recordSyntheticProviderEvent(admission.attempt.id, {
-            eventId: 'accepted-with-audit-failure',
-            status: 'accepted',
-            providerSubmissionId: 'fake-submission-rollback',
-          }),
+          brokerStore.recordSyntheticProviderEvent(
+            admission.attempt.id,
+            syntheticBrokerInstanceId,
+            1,
+            {
+              eventId: 'accepted-with-audit-failure',
+              status: 'accepted',
+              providerSubmissionId: 'fake-submission-rollback',
+            },
+          ),
           /test audit failure/,
         );
         const state = await authorizerPool!.query<{
@@ -935,6 +1074,63 @@ const postgresSuite = describe(
       assert.equal(unknown.run.status, 'unknown');
       assert.equal((await store.getTask(fixture.task.id))?.status, 'in_progress');
       assert.equal((await store.getSyntheticBrokerRun(runId))?.attemptId !== null, true);
+      const pending = (await store.getSyntheticBrokerRun(runId))!;
+      const authoritative = {
+        version: 'omnis.synthetic-task-run.v1' as const,
+        taskId: fixture.task.id,
+        authorizationId: grant.id,
+        requestId,
+        correlationId: runId,
+        attemptId: pending.attemptId!,
+        status: 'interrupted' as const,
+        cancellationRequestedAt: '2026-11-08T00:00:00.000Z',
+        outcomeRecordedAt: '2026-11-08T00:00:01.000Z',
+        submitted: true,
+        usage: {
+          kind: 'unknown' as const,
+          reason: 'not_reported' as const,
+          billingExposure: 'unknown' as const,
+        },
+      };
+      assert.deepEqual(
+        await store.reconcileSyntheticBrokerRun(pending, { ...authoritative, status: 'unknown' }),
+        [],
+      );
+      assert.equal((await store.getSyntheticBrokerRun(runId))?.run.status, 'unknown');
+      assert.deepEqual(
+        await store.reconcileSyntheticBrokerRun(pending, {
+          ...authoritative,
+          cancellationRequestedAt: '2099-01-01T00:00:00.000Z',
+          outcomeRecordedAt: '2026-01-01T00:00:00.000Z',
+        }),
+        [],
+      );
+      await assert.rejects(
+        store.reconcileSyntheticBrokerRun(pending, { ...authoritative, attemptId: randomUUID() }),
+        /identity conflicts/,
+      );
+      assert.deepEqual(
+        await store.reconcileSyntheticBrokerRun(
+          { ...pending, generation: pending.generation! - 1 },
+          authoritative,
+        ),
+        [],
+      );
+      const repaired = await Promise.all([
+        store.reconcileSyntheticBrokerRun(pending, authoritative),
+        store.reconcileSyntheticBrokerRun(pending, authoritative),
+      ]);
+      assert.equal(repaired.flat().length, 1);
+      assert.equal((await store.getSyntheticBrokerRun(runId))?.run.status, 'cancelled');
+      assert.deepEqual(await store.reconcileSyntheticBrokerRun(pending, authoritative), []);
+      await assert.rejects(
+        store.finishSyntheticBrokerRun(runId, lease.workerId, lease.generation, {
+          status: 'completed',
+          responseText: 'stale result',
+        }),
+        /no longer owns/,
+      );
+
       assert.deepEqual(
         (await store.getEvents(runId)).map((event) => event.type),
         [
@@ -943,9 +1139,75 @@ const postgresSuite = describe(
           'run.provider_submission_requested',
           'run.stop_requested',
           'run.outcome_unknown',
+          'run.cancelled',
         ],
       );
-      assert.match((await store.getEvents(runId)).at(-1)!.message, /Do not resubmit/);
+      assert.match(
+        (await store.getEvents(runId)).find((event) => event.type === 'run.outcome_unknown')!
+          .message,
+        /Do not resubmit/,
+      );
+    });
+
+    it('repairs late completed and failed projections without duplicate events or usage', async () => {
+      for (const status of ['completed', 'failed', 'interrupted'] as const) {
+        const fixture = await connectorFixture();
+        const grant = await fixture.authorizations.request(fixture.request, randomUUID());
+        await fixture.authorizations.decide(grant.id, 'owner', {
+          decision: 'approve',
+          promptDigestConfirmation: fixture.request.promptDigest,
+        });
+        const runId = randomUUID(),
+          requestId = randomUUID();
+        await store.admitSyntheticBrokerRun(
+          {
+            runId,
+            taskId: fixture.task.id,
+            authorizationId: grant.id,
+            requestId,
+            correlationId: runId,
+            binding: fixture.request,
+          },
+          async () => 'projection-job',
+        );
+        const lease = await store.beginSyntheticBrokerRun(runId, 'projection-worker', 30);
+        if (status === 'interrupted') await store.requestSyntheticBrokerStop(runId, grant.id);
+        await store.finishSyntheticBrokerRun(runId, 'projection-worker', lease.generation, {
+          status: 'unknown',
+        });
+        const link = (await store.getSyntheticBrokerRun(runId))!;
+        const evidence = {
+          version: 'omnis.synthetic-task-run.v1' as const,
+          taskId: fixture.task.id,
+          authorizationId: grant.id,
+          requestId,
+          correlationId: runId,
+          attemptId: randomUUID(),
+          status,
+          submitted: true,
+          cancellationRequestedAt: '2026-11-08T00:00:01.000Z',
+          outcomeRecordedAt:
+            status === 'interrupted' ? '2026-11-08T00:00:01.000Z' : '2026-11-08T00:00:00.000Z',
+          usage: {
+            kind: 'unknown' as const,
+            reason: 'not_reported' as const,
+            billingExposure: 'unknown' as const,
+          },
+          ...(status === 'completed'
+            ? { responseText: 'Authoritative late synthetic output' }
+            : {}),
+        };
+        assert.equal((await store.reconcileSyntheticBrokerRun(link, evidence)).length, 1);
+        assert.deepEqual(await store.reconcileSyntheticBrokerRun(link, evidence), []);
+        const restartedStore = new PostgresRunStore(pool!);
+        const repaired = (await restartedStore.getSyntheticBrokerRun(runId))!.run;
+        assert.equal(repaired.status, status);
+        assert.deepEqual(repaired.usage, link.run.usage);
+        assert.equal(
+          (await store.getEvents(runId)).filter((event) => event.type === `run.${status}`).length,
+          1,
+        );
+      }
     });
 
     it('reconciles an expired synthetic worker lease after submission as unknown without replay', async () => {

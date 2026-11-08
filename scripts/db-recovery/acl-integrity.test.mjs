@@ -365,6 +365,9 @@ describe('post-restore PostgreSQL ACL integrity', () => {
       ...[
         'status',
         'submission_started_at',
+        'broker_generation',
+        'broker_lease_owner_id',
+        'broker_lease_expires_at',
         'provider_submission_id',
         'cancel_requested_at',
         'response_text',

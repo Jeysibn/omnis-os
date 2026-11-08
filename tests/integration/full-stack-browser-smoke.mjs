@@ -14,6 +14,9 @@ const startedAt = Date.now();
 const stages = [];
 let services;
 let browserRunner;
+let brokerRecovery;
+let brokerLostAckRecovery;
+let brokerCancellationRecovery;
 let timedOut = false;
 let interrupted = false;
 const handleParentSignal = () => {
@@ -27,14 +30,19 @@ try {
   stages.push('postgres-migration');
   const frontendPort = await freePort();
   const frontendOrigin = `http://127.0.0.1:${frontendPort}`;
+  const lostAckRequestId = randomUUID();
+  const cancellationRequestId = randomUUID();
   services = await startMockServices({
     origin: frontendOrigin,
     reservedPorts: [frontendPort],
     requireAuditPool: true,
     enableSyntheticBrokerTestMode: true,
+    enableSyntheticBrokerProcessTestMode: true,
+    syntheticLostAckRequestId: lostAckRequestId,
+    syntheticCancellationRequestId: cancellationRequestId,
   });
   if (interrupted) throw new Error('The full-stack smoke was interrupted during service startup.');
-  stages.push('api-worker-authorizer-launcher-ready');
+  stages.push('api-worker-authorizer-launcher-broker-and-fake-provider-ready');
   const syntheticProjectId = await createActiveSyntheticProject(services);
 
   const browserEnvironment = buildBrowserEnvironment(process.env, {
@@ -43,8 +51,11 @@ try {
     frontendPort,
     ownerPassword: services.password,
     syntheticProjectId,
+    lostAckRequestId,
+    cancellationRequestId,
   });
 
+  const recoveryCreatedAfter = new Date();
   browserRunner = spawn('pnpm', ['--filter', '@omnis/web', 'test:e2e:integration'], {
     cwd: new URL('../../', import.meta.url),
     env: browserEnvironment,
@@ -52,28 +63,65 @@ try {
     stdio: 'inherit',
   });
 
-  const exit = await waitForBrowserRunner(browserRunner, 180_000);
+  brokerRecovery = services.syntheticBrokerCompose.interruptAfterAcceptedAttempt(
+    services.auditPool,
+    recoveryCreatedAfter,
+  );
+  brokerCancellationRecovery = brokerRecovery.then(() =>
+    services.syntheticBrokerCompose.restartAfterAcceptedCancellation(
+      services.auditPool,
+      recoveryCreatedAfter,
+    ),
+  );
+  brokerLostAckRecovery = brokerCancellationRecovery.then(() =>
+    services.syntheticBrokerCompose.restartAfterLostAcknowledgement(
+      services.auditPool,
+      lostAckRequestId,
+    ),
+  );
+  void brokerRecovery.catch(() => undefined);
+  void brokerLostAckRecovery.catch(() => undefined);
+  void brokerCancellationRecovery.catch(() => undefined);
+  const exit = await waitForBrowserRunner(browserRunner, 240_000);
   if (exit.timedOut) {
     timedOut = true;
-    throw new Error('The full-stack browser test exceeded its 180-second limit.');
+    throw new Error('The full-stack browser test exceeded its 240-second limit.');
   }
   if (exit.signal) throw new Error(`The full-stack browser runner exited from ${exit.signal}.`);
   if (exit.code !== 0)
     throw new Error(`The full-stack browser runner exited with code ${exit.code}.`);
+
+  await brokerRecovery;
+  stages.push('broker-restart-reconciled-accepted-attempt');
+  await brokerCancellationRecovery;
+  stages.push('broker-restart-reconciled-owner-cancellation');
+  await brokerLostAckRecovery;
+  stages.push('broker-restart-reconciled-lost-acknowledgement');
+
   services.assertSensitiveValuesAbsentFromLogs();
   stages.push('synthetic-broker-credential-log-canaries-absent');
+
   stages.push('real-browser-standard-and-synthetic-run-smoke-passed');
 } catch (error) {
   const message = error instanceof Error ? error.message : 'Unknown integration smoke failure.';
   const fixtureStage = services?.syntheticBrokerFixture?.process?.capturedLogs
     ?.match(/synthetic_broker_fixture_failure:[a-z_]+/g)
     ?.at(-1);
+  let brokerDiagnostics;
+  try {
+    brokerDiagnostics = services?.syntheticBrokerCompose?.safeFailureDiagnostics();
+  } catch {
+    brokerDiagnostics = 'broker diagnostic collection failed safely';
+  }
   process.stderr.write(
-    `Full-stack smoke failed during ${stages.at(-1) ?? 'startup'}: ${message}${fixtureStage ? `; ${fixtureStage}` : ''}\n`,
+    `Full-stack smoke failed during ${stages.at(-1) ?? 'startup'}: ${message}${fixtureStage ? `; ${fixtureStage}` : ''}${brokerDiagnostics ? `; ${brokerDiagnostics}` : ''}\n`,
   );
   process.exitCode = 1;
 } finally {
   await stopBrowserRunner(browserRunner);
+  await brokerRecovery?.catch(() => undefined);
+  await brokerLostAckRecovery?.catch(() => undefined);
+  await brokerCancellationRecovery?.catch(() => undefined);
   await services?.cleanup();
   process.off('SIGINT', handleParentSignal);
   process.off('SIGTERM', handleParentSignal);
@@ -118,8 +166,8 @@ async function createActiveSyntheticProject(services) {
     },
     body: JSON.stringify({
       key: `SYNTH-${randomUUID().replaceAll('-', '').slice(0, 12).toUpperCase()}`,
-      name: 'Synthetic broker integration fixture',
-      objective: 'Exercise the test-only owner-authorized broker path.',
+      name: 'Synthetic broker process integration',
+      objective: 'Exercise the test-only owner-authorized broker and fake-provider processes.',
     }),
   });
   if (!project.ok) throw new Error('Disposable synthetic project creation failed.');

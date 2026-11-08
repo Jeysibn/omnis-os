@@ -334,6 +334,8 @@ describe('independent authorizer service boundary', () => {
             status: 'completed',
             synthetic: true,
             createdAt: '2026-11-07T00:00:00.000Z',
+            brokerGeneration: 0,
+            brokerLeaseExpiresAt: null,
             responseText: 'Synthetic result',
           },
           usage: { kind: 'unknown', reason: 'not_reported', billingExposure: 'unknown' },

@@ -73,6 +73,8 @@ const attempt = {
   synthetic: true as const,
   createdAt: now.toISOString(),
   updatedAt: now.toISOString(),
+  brokerGeneration: 0,
+  brokerLeaseExpiresAt: null,
   submissionStartedAt: null,
   providerSubmissionId: null,
   cancelRequestedAt: null,
@@ -81,17 +83,30 @@ const attempt = {
 function harness() {
   const calls: string[] = [];
   const store: BrokerIpcStore = {
+    async lookupBrokerAttempt(id) {
+      calls.push(`lookup:${id}`);
+      return { attempt, envelope };
+    },
     async consumeForBroker(id) {
       calls.push(`consume:${id}`);
       return { attempt, envelope };
     },
     async beginSyntheticSubmission(id) {
       calls.push(`begin:${id}`);
-      return { ...attempt, status: 'submitting' };
+      return {
+        ...attempt,
+        status: 'submitting',
+        brokerGeneration: 1,
+        brokerLeaseExpiresAt: now.toISOString(),
+      };
     },
-    async recordSyntheticProviderEvent(id, event) {
+    async recordSyntheticProviderEvent(id, _brokerInstanceId, _generation, event) {
       calls.push(`event:${id}:${event.eventId}`);
       return { ...attempt, status: event.status };
+    },
+    async claimBrokerRecoveryAttempt(id) {
+      calls.push(`claim:${id}`);
+      return { attempt, owned: true };
     },
     async listBrokerRecoveryCandidates(limit, afterAttemptId) {
       calls.push(`recover:${limit}:${afterAttemptId ?? 'start'}`);
@@ -112,6 +127,52 @@ const brokerHeaders = {
 };
 
 describe('broker-only authorizer IPC', () => {
+  it('authenticates read-only projection lookups without admitting or mutating attempts', async () => {
+    const { app, calls } = harness();
+    const keys = [
+      'projectId',
+      'projectRevision',
+      'taskId',
+      'taskRevision',
+      'agentId',
+      'profileVersion',
+      'promptDigest',
+      'connectorId',
+      'connectorVersion',
+      'providerId',
+      'modelId',
+      'operation',
+      'capabilities',
+      'limits',
+    ] as const;
+    const payload = {
+      version: 'omnis.broker-authorizer-ipc.v1',
+      authorizationId,
+      requestId,
+      request: Object.fromEntries(keys.map((key) => [key, envelope.claims[key]])),
+    };
+    try {
+      const denied = await app.inject({
+        method: 'POST',
+        url: '/internal/broker/v1/projection',
+        payload,
+      });
+      assert.equal(denied.statusCode, 401);
+      assert.deepEqual(calls, []);
+      const result = await app.inject({
+        method: 'POST',
+        url: '/internal/broker/v1/projection',
+        headers: brokerHeaders,
+        payload,
+      });
+      assert.equal(result.statusCode, 200);
+      assert.deepEqual(calls, [`lookup:${authorizationId}`]);
+      assert.equal(result.json().attempt.id, attemptId);
+    } finally {
+      await app.close();
+    }
+  });
+
   it('refuses to reuse the API service credential as broker authority', () => {
     assert.throws(
       () =>
@@ -194,6 +255,7 @@ describe('broker-only authorizer IPC', () => {
         payload: {
           version: 'omnis.broker-authorizer-ipc.v1',
           attemptId,
+          brokerInstanceId: 'c22db4c2-27bc-4b1d-a73e-236199111111',
           envelope,
           renderedRequest,
         },
@@ -208,6 +270,8 @@ describe('broker-only authorizer IPC', () => {
         payload: {
           version: 'omnis.broker-authorizer-ipc.v1',
           attemptId,
+          brokerInstanceId: 'c22db4c2-27bc-4b1d-a73e-236199111111',
+          brokerGeneration: 1,
           event: {
             eventId: 'lost-response-1',
             status: 'unknown',
@@ -234,11 +298,24 @@ describe('broker-only authorizer IPC', () => {
       });
       assert.equal(recovery.statusCode, 200);
       assert.equal(recovery.json().attempts[0].id, attemptId);
+      const claim = await app.inject({
+        method: 'POST',
+        url: '/internal/broker/v1/recovery/claim',
+        headers: brokerHeaders,
+        payload: {
+          version: 'omnis.broker-authorizer-ipc.v1',
+          attemptId,
+          brokerInstanceId: 'c22db4c2-27bc-4b1d-a73e-236199111111',
+        },
+      });
+      assert.equal(claim.statusCode, 200);
+      assert.equal(claim.json().owned, true);
       assert.deepEqual(calls, [
         `consume:${authorizationId}`,
         `begin:${attemptId}`,
         `event:${attemptId}:lost-response-1`,
         'recover:10:start',
+        `claim:${attemptId}`,
       ]);
 
       const ownerRoute = await app.inject({
@@ -306,6 +383,9 @@ describe('broker-only authorizer IPC', () => {
         async recordSyntheticProviderEvent() {
           throw new Error('synthetic database unavailable');
         },
+        async claimBrokerRecoveryAttempt() {
+          throw new Error('synthetic database unavailable');
+        },
         async listBrokerRecoveryCandidates() {
           throw new Error('synthetic database unavailable');
         },
@@ -321,6 +401,8 @@ describe('broker-only authorizer IPC', () => {
         payload: {
           version: 'omnis.broker-authorizer-ipc.v1',
           attemptId,
+          brokerInstanceId: 'c22db4c2-27bc-4b1d-a73e-236199111111',
+          brokerGeneration: 1,
           event: { eventId: 'event-1', status: 'unknown' },
         },
       });

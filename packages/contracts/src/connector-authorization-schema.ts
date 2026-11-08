@@ -105,6 +105,8 @@ export const ConnectorExecutionAttemptSchema = z
       'interrupted',
       'unknown',
     ]),
+    brokerGeneration: z.number().int().nonnegative().safe(),
+    brokerLeaseExpiresAt: z.string().datetime().nullable(),
     synthetic: z.literal(true),
     createdAt: z.string().datetime(),
     updatedAt: z.string().datetime().optional(),

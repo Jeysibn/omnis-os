@@ -1,0 +1,163 @@
+name: omnis-synthetic-egress
+
+services:
+  fake-provider:
+    build:
+      context: ../..
+      dockerfile: infra/docker/synthetic-broker.Dockerfile
+    command: ['node', '--experimental-strip-types', 'src/fake-provider.ts']
+    user: '10002:10002'
+    environment:
+      OMNIS_FAKE_PROVIDER_TOKEN_FILE: /run/secrets/fake-provider-token
+      OMNIS_FAKE_PROVIDER_FIXTURES: '${OMNIS_BROKER_TEST_PROVIDER_FIXTURES:-{}}'
+      OMNIS_FAKE_PROVIDER_TRUST_ANCHORS: '${OMNIS_BROKER_TEST_TRUST_ANCHORS:-[]}'
+    secrets: [fake-provider-token]
+    read_only: true
+    cap_drop: ['ALL']
+    security_opt: ['no-new-privileges:true']
+    pids_limit: 32
+    mem_limit: 128m
+    cpus: 0.5
+    tmpfs: ['/tmp:size=4m,noexec,nosuid,nodev']
+    networks:
+      broker-egress:
+        ipv4_address: 172.29.87.10
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:8787/healthz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 1s
+      timeout: 1s
+      retries: 15
+
+  broker-process:
+    profiles: ['process-e2e']
+    build:
+      context: ../..
+      dockerfile: infra/docker/synthetic-broker.Dockerfile
+    user: '10001:${OMNIS_BROKER_TEST_GROUP_ID:-1001}'
+    environment:
+      OMNIS_BROKER_SOCKET: /run/omnis-synthetic-broker/broker.sock
+      OMNIS_BROKER_CALLER_TOKEN_FILE: /run/omnis-broker-secrets/caller.token
+      OMNIS_BROKER_AUTHORIZER_SOCKET: /run/omnis-broker-authorizer/broker-authorizer.sock
+      OMNIS_BROKER_AUTHORIZER_TOKEN_FILE: /run/omnis-broker-secrets/authorizer.token
+      OMNIS_BROKER_TRUST_ANCHORS: '${OMNIS_BROKER_TEST_TRUST_ANCHORS:-[]}'
+      OMNIS_FAKE_PROVIDER_TOKEN_FILE: /run/omnis-broker-secrets/provider.token
+    volumes:
+      - type: bind
+        source: ${OMNIS_BROKER_TEST_SOCKET_DIRECTORY:-/tmp/omnis-broker-sockets}
+        target: /run/omnis-synthetic-broker
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${OMNIS_BROKER_TEST_AUTHORIZER_DIRECTORY:-/tmp/omnis-broker-authorizer}
+        target: /run/omnis-broker-authorizer
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${OMNIS_BROKER_TEST_SECRET_DIRECTORY:-/tmp/omnis-broker-secrets}
+        target: /run/omnis-broker-secrets
+        read_only: true
+        bind:
+          create_host_path: false
+    read_only: true
+    cap_drop: ['ALL']
+    security_opt: ['no-new-privileges:true']
+    pids_limit: 32
+    mem_limit: 128m
+    cpus: 0.5
+    tmpfs: ['/tmp:size=4m,noexec,nosuid,nodev']
+    networks: [broker-egress]
+    depends_on:
+      fake-provider:
+        condition: service_healthy
+    stop_grace_period: 10s
+
+  broker-boundary-probe:
+    image: omnis-synthetic-broker:ci
+    command:
+      [
+        'node',
+        '--permission',
+        '--allow-fs-read=/app',
+        '--allow-fs-read=/probe/egress-probe.mjs',
+        '--allow-fs-read=/proc/self/status',
+        '/probe/egress-probe.mjs',
+      ]
+    read_only: true
+    cap_drop: ['ALL']
+    security_opt: ['no-new-privileges:true']
+    pids_limit: 32
+    mem_limit: 128m
+    cpus: 0.5
+    tmpfs: ['/tmp:size=4m,noexec,nosuid,nodev']
+    volumes:
+      - ../../scripts/platform/egress-probe.mjs:/probe/egress-probe.mjs:ro
+    extra_hosts:
+      - 'omnis-synthetic-provider:172.29.87.10'
+    dns: ['127.0.0.1']
+    networks: [broker-egress]
+    depends_on:
+      fake-provider:
+        condition: service_healthy
+      private-service-canary:
+        condition: service_healthy
+
+  private-service-canary:
+    build:
+      context: ../..
+      dockerfile: infra/docker/synthetic-broker.Dockerfile
+    command: ['node', '--experimental-strip-types', 'src/fake-provider.ts']
+    user: '10002:10002'
+    environment:
+      OMNIS_FAKE_PROVIDER_TOKEN_FILE: /run/secrets/fake-provider-token
+      OMNIS_FAKE_PROVIDER_FIXTURES: '{}'
+    secrets: [fake-provider-token]
+    read_only: true
+    cap_drop: ['ALL']
+    security_opt: ['no-new-privileges:true']
+    pids_limit: 32
+    mem_limit: 128m
+    cpus: 0.5
+    tmpfs: ['/tmp:size=4m,noexec,nosuid,nodev']
+    networks:
+      private-target:
+        ipv4_address: 172.29.88.10
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:8787/healthz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 1s
+      timeout: 1s
+      retries: 15
+
+networks:
+  broker-egress:
+    name: omnis-synthetic-broker-egress
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.29.87.0/24
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: 'false'
+  private-target:
+    name: omnis-synthetic-private-target
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.29.88.0/24
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: 'false'
+
+secrets:
+  fake-provider-token:
+    file: '${OMNIS_FAKE_PROVIDER_TOKEN_FILE:?synthetic token file required}'

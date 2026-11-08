@@ -6,9 +6,11 @@ import { join } from 'node:path';
 import test from 'node:test';
 import {
   appendCapturedLogChunk,
+  assertComposeLogsContainNoSensitiveValues,
   assertSensitiveValuesAbsentFromLogs,
   assertNoExecutableWork,
   buildBrowserEnvironment,
+  startMockServices,
   startManagedProcess,
   startSyntheticBrokerFixture,
   startServicesWithCleanup,
@@ -16,6 +18,37 @@ import {
   stopProcess,
   validateTestDatabaseConfiguration,
 } from './mock-services.mjs';
+
+test('checks broker and fake-provider Docker logs without echoing sensitive test values', () => {
+  const canary = 'synthetic-provider-token-canary';
+  let argumentsSeen;
+  assert.doesNotThrow(() =>
+    assertComposeLogsContainNoSensitiveValues(
+      (arguments_) => {
+        argumentsSeen = arguments_;
+        return { status: 0, stdout: 'synthetic broker ready\nfake provider ready\n', stderr: '' };
+      },
+      [canary],
+    ),
+  );
+  assert.deepEqual(argumentsSeen, ['logs', '--no-color']);
+
+  assert.throws(
+    () =>
+      assertComposeLogsContainNoSensitiveValues(
+        () => ({ status: 0, stdout: `provider rejected ${canary}`, stderr: '' }),
+        [canary],
+      ),
+    (error) => {
+      assert.equal(
+        error.message,
+        'A sensitive test value was written to synthetic broker Docker services logs.',
+      );
+      assert.equal(error.message.includes(canary), false);
+      return true;
+    },
+  );
+});
 
 test('checks test credential canaries across isolated service logs without echoing values', () => {
   const canary = 'synthetic-canary-value-for-test-only';
@@ -189,6 +222,8 @@ test('browser environment allowlists only explicit runtime and test values', () 
       frontendOrigin: 'http://127.0.0.1:5174',
       frontendPort: 5174,
       ownerPassword: 'SYNTHETIC_OWNER_PASSWORD',
+      lostAckRequestId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      cancellationRequestId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
     },
   );
   assert.deepEqual(
@@ -200,8 +235,10 @@ test('browser environment allowlists only explicit runtime and test values', () 
       'NPM_CONFIG_GLOBALCONFIG',
       'NPM_CONFIG_USERCONFIG',
       'OMNIS_TEST_API_PROXY_TARGET',
+      'OMNIS_TEST_SYNTHETIC_CANCELLATION_REQUEST_ID',
       'OMNIS_TEST_FRONTEND_ORIGIN',
       'OMNIS_TEST_FRONTEND_PORT',
+      'OMNIS_TEST_SYNTHETIC_LOST_ACK_REQUEST_ID',
       'OMNIS_TEST_OWNER_PASSWORD',
       'PATH',
       'PLAYWRIGHT_BROWSERS_PATH',
@@ -237,6 +274,14 @@ test('browser environment allowlists only explicit runtime and test values', () 
   assert.equal(probe.status, 0);
   assert.equal(probe.stdout, 'true');
   assert.equal(environment.OMNIS_TEST_OWNER_PASSWORD, 'SYNTHETIC_OWNER_PASSWORD');
+  assert.equal(
+    environment.OMNIS_TEST_SYNTHETIC_CANCELLATION_REQUEST_ID,
+    'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+  );
+  assert.equal(
+    environment.OMNIS_TEST_SYNTHETIC_LOST_ACK_REQUEST_ID,
+    'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+  );
   assert.equal(environment.NPM_CONFIG_USERCONFIG, '/dev/null');
   assert.equal(environment.NPM_CONFIG_GLOBALCONFIG, '/dev/null');
 });
@@ -252,6 +297,16 @@ test('fails closed when runs or executable queue jobs already exist', async () =
     const pool = { query: async () => ({ rows: [row] }) };
     await assert.rejects(assertNoExecutableWork(pool), /existing executable work/);
   }
+});
+
+test('requires the owner-authorized test mode before starting the broker process profile', async () => {
+  await assert.rejects(
+    startMockServices({
+      origin: 'http://127.0.0.1:5173',
+      enableSyntheticBrokerProcessTestMode: true,
+    }),
+    /requires the owner-authorized test mode/,
+  );
 });
 
 test('a required service spawn error cleans up already-started services and temp files', async () => {
