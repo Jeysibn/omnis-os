@@ -540,6 +540,7 @@ test('owner sees an authorized synthetic broker Run, ordered events, result and 
     ...authorizationInput,
     taskId: cancellationAssignment.body.id,
     taskRevision: cancellationAssignment.body.associationRevision,
+    limits: { ...limits, maxConcurrentRuns: 2 },
     renderedRequest: cancellationRenderedRequest,
   };
   const cancellationAuthorizationResponse = await ownerRequest(
@@ -586,7 +587,7 @@ test('owner sees an authorized synthetic broker Run, ordered events, result and 
           modelId: cancellationAuthorizationInput.modelId,
           operation: cancellationAuthorizationInput.operation,
           capabilities: [],
-          limits,
+          limits: cancellationAuthorizationInput.limits,
           promptDigest: cancellationAuthorization.promptDigest,
         },
         renderedRequest: cancellationRenderedRequest,
