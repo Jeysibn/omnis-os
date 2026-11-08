@@ -123,6 +123,7 @@ export async function startMockServices({
     sessionSecret,
     agentIdempotencyKey,
     passwordHash,
+    fakeProviderToken,
   ];
   const sharedEnvLines = [
     `OMNIS_OWNER_PASSWORD_HASH=${salt.toString('hex')}:${passwordHash}`,
@@ -362,6 +363,7 @@ export async function startMockServices({
         brokerSecretDirectory,
         trustAnchors,
         providerTokenPath: join(brokerSecretDirectory, 'provider.token'),
+        sensitiveValues: sensitiveLogCanaries,
       });
     }
     return {
@@ -389,14 +391,16 @@ export async function startMockServices({
 
       syntheticBrokerCompose,
 
-      assertSensitiveValuesAbsentFromLogs: () =>
+      assertSensitiveValuesAbsentFromLogs: () => {
         assertSensitiveValuesAbsentFromLogs(sensitiveLogCanaries, [
           { name: 'API', process: api },
           { name: 'worker', process: worker },
           { name: 'authorizer', process: authorizer },
           { name: 'sandbox launcher', process: launcher },
           { name: 'synthetic broker', process: syntheticBrokerProcess },
-        ]),
+        ]);
+        syntheticBrokerCompose?.assertSensitiveValuesAbsentFromLogs();
+      },
 
       auditPool,
       api,
@@ -708,6 +712,7 @@ async function startSyntheticBrokerCompose({
   brokerSecretDirectory,
   trustAnchors,
   providerTokenPath,
+  sensitiveValues,
 }) {
   const projectName = `omnis-broker-e2e-${process.pid}-${randomUUID().replaceAll('-', '').slice(0, 10)}`;
   const compose = [
@@ -874,6 +879,9 @@ async function startSyntheticBrokerCompose({
                 throw new Error('Disposable synthetic broker Compose cleanup failed.');
               }
             },
+            assertSensitiveValuesAbsentFromLogs() {
+              assertComposeLogsContainNoSensitiveValues(runCompose, sensitiveValues);
+            },
           };
         }
       } catch {
@@ -916,6 +924,19 @@ export function assertSensitiveValuesAbsentFromLogs(values, processes) {
       throw new Error(`A sensitive test value was written to ${name} logs.`);
     }
   }
+}
+
+export function assertComposeLogsContainNoSensitiveValues(runCompose, sensitiveValues) {
+  const logs = runCompose(['logs', '--no-color']);
+  if (logs.error || logs.status !== 0) {
+    throw new Error('Disposable synthetic broker logs could not be checked safely.');
+  }
+  assertSensitiveValuesAbsentFromLogs(sensitiveValues, [
+    {
+      name: 'synthetic broker Docker services',
+      process: { capturedLogs: `${logs.stdout ?? ''}${logs.stderr ?? ''}` },
+    },
+  ]);
 }
 
 export async function startSyntheticBrokerFixture({

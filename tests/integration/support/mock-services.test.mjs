@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import {
   appendCapturedLogChunk,
+  assertComposeLogsContainNoSensitiveValues,
   assertSensitiveValuesAbsentFromLogs,
   assertNoExecutableWork,
   buildBrowserEnvironment,
@@ -17,6 +18,37 @@ import {
   stopProcess,
   validateTestDatabaseConfiguration,
 } from './mock-services.mjs';
+
+test('checks broker and fake-provider Docker logs without echoing sensitive test values', () => {
+  const canary = 'synthetic-provider-token-canary';
+  let argumentsSeen;
+  assert.doesNotThrow(() =>
+    assertComposeLogsContainNoSensitiveValues(
+      (arguments_) => {
+        argumentsSeen = arguments_;
+        return { status: 0, stdout: 'synthetic broker ready\nfake provider ready\n', stderr: '' };
+      },
+      [canary],
+    ),
+  );
+  assert.deepEqual(argumentsSeen, ['logs', '--no-color']);
+
+  assert.throws(
+    () =>
+      assertComposeLogsContainNoSensitiveValues(
+        () => ({ status: 0, stdout: `provider rejected ${canary}`, stderr: '' }),
+        [canary],
+      ),
+    (error) => {
+      assert.equal(
+        error.message,
+        'A sensitive test value was written to synthetic broker Docker services logs.',
+      );
+      assert.equal(error.message.includes(canary), false);
+      return true;
+    },
+  );
+});
 
 test('checks test credential canaries across isolated service logs without echoing values', () => {
   const canary = 'synthetic-canary-value-for-test-only';
