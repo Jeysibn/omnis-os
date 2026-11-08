@@ -758,17 +758,20 @@ async function assertRuntimeRestrictions() {
       Object.values(ports).every((bindings) => !bindings?.some((binding) => binding?.HostPort)),
     );
   }
-  for (const service of ['web']) {
-    const id = compose(['ps', '-q', service]).stdout.trim();
-    const ports = JSON.parse(
-      runDocker('docker', ['inspect', id, '--format', '{{json .NetworkSettings.Ports}}'], {
-        encoding: 'utf8',
-      }).stdout,
-    );
-    const bindings = Object.values(ports).flatMap((value) => value ?? []);
-    assert.ok(bindings.length > 0);
-    assert.ok(bindings.every((binding) => binding.HostIp === '127.0.0.1'));
-  }
+  const webId = compose(['ps', '-q', 'web']).stdout.trim();
+  const webInspect = JSON.parse(
+    runDocker('docker', ['inspect', webId], { encoding: 'utf8' }).stdout,
+  )[0];
+  const webBindings = Object.values(webInspect.HostConfig.PortBindings ?? {}).flatMap(
+    (value) => value ?? [],
+  );
+  assert.ok(webBindings.length > 0, 'web has a host port binding');
+  assert.ok(
+    webBindings.every(
+      (binding) => binding.HostIp === '127.0.0.1' && binding.HostPort === String(webPort),
+    ),
+    'web is published only on the selected loopback port',
+  );
   const config = JSON.parse(compose(['config', '--format', 'json']).stdout);
   assert.equal(config.networks.edge.internal, true);
   assert.equal(config.networks.data.internal, true);
