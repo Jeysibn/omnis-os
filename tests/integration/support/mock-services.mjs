@@ -850,8 +850,10 @@ async function startSyntheticBrokerCompose({
                   [attemptId],
                 );
                 if (projection.rows[0]?.status === 'unknown') {
-                  if (projection.rows[0].attempt_status !== 'accepted')
-                    throw new Error('Attempt changed before late broker recovery.');
+                  if (!['accepted', 'completed'].includes(projection.rows[0].attempt_status))
+                    throw new Error(
+                      'Attempt left the recoverable state before late broker recovery.',
+                    );
                   sawUnknown = true;
                   break;
                 }
