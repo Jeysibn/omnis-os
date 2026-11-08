@@ -6,7 +6,7 @@ The remaining material below records an earlier candidate integration review and
 
 ## Earlier candidate repository state (historical snapshot)
 
-- Current main: `ac24bc3af8504c06465aeca2924011f4771252b3`.
+- Snapshot main at the time: `ac24bc3af8504c06465aeca2924011f4771252b3`.
 - PR #49 is merged as `b2490501395a3e53fb0f97fc6ab3914a3300fa56`. It supplies disposable Docker
   boundary tests; those tests are not the broker application boundary.
 - PR #52 is merged at `ac24bc3af8504c06465aeca2924011f4771252b3`. It supplies the original
