@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash, randomBytes, randomUUID, scrypt as scryptCallback } from 'node:crypto';
-import { createServer } from 'node:net';
+import { createServer, isIPv4 } from 'node:net';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -41,27 +41,11 @@ const runtimePassword = randomBytes(32).toString('hex');
 const authorizerPassword = randomBytes(32).toString('hex');
 const launcherPassword = randomBytes(32).toString('hex');
 const occupiedPorts = new Set();
-const dbPort = await freePort(occupiedPorts);
-occupiedPorts.add(dbPort);
+const dbPort = 5432;
 const webPort = await freePort(occupiedPorts);
 const origin = `http://127.0.0.1:${webPort}`;
-const dbAdminUrl = `postgresql://omnis:${encodeURIComponent(dbPassword)}@127.0.0.1:${dbPort}/${dbName}`;
-const dbUrls = {
-  OMNIS_TEST_ADMIN_DATABASE_URL: dbAdminUrl,
-  OMNIS_TEST_MIGRATION_DATABASE_URL: dbUrl('omnis_migrator', migrationPassword),
-  OMNIS_TEST_DATABASE_URL: dbUrl('omnis_runtime', runtimePassword),
-  OMNIS_TEST_AUTHORIZER_DATABASE_URL: dbUrl('omnis_authorizer', authorizerPassword),
-  OMNIS_TEST_LAUNCHER_DATABASE_URL: dbUrl('omnis_launcher', launcherPassword),
-};
-Object.assign(process.env, dbUrls, {
-  OMNIS_DB_PASSWORD: dbPassword,
-  OMNIS_DB_NAME: dbName,
-  OMNIS_DB_PORT: String(dbPort),
-  OMNIS_MIGRATION_DB_PASSWORD: migrationPassword,
-  OMNIS_RUNTIME_DB_PASSWORD: runtimePassword,
-  OMNIS_AUTHORIZER_DB_PASSWORD: authorizerPassword,
-  OMNIS_LAUNCHER_DB_PASSWORD: launcherPassword,
-});
+let databaseHost = '127.0.0.1';
+let dbAdminUrl = dbUrl('omnis', dbPassword);
 const redactions = [
   dbPassword,
   migrationPassword,
@@ -76,7 +60,26 @@ let failed = false;
 const auxiliaryProjects = new Set();
 
 function dbUrl(user, password) {
-  return `postgresql://${user}:${encodeURIComponent(password)}@127.0.0.1:${dbPort}/${dbName}`;
+  return `postgresql://${user}:${encodeURIComponent(password)}@${databaseHost}:${dbPort}/${dbName}`;
+}
+
+function configureDatabaseHost(host) {
+  databaseHost = host;
+  dbAdminUrl = dbUrl('omnis', dbPassword);
+  Object.assign(process.env, {
+    OMNIS_TEST_ADMIN_DATABASE_URL: dbAdminUrl,
+    OMNIS_TEST_MIGRATION_DATABASE_URL: dbUrl('omnis_migrator', migrationPassword),
+    OMNIS_TEST_DATABASE_URL: dbUrl('omnis_runtime', runtimePassword),
+    OMNIS_TEST_AUTHORIZER_DATABASE_URL: dbUrl('omnis_authorizer', authorizerPassword),
+    OMNIS_TEST_LAUNCHER_DATABASE_URL: dbUrl('omnis_launcher', launcherPassword),
+    OMNIS_DB_PASSWORD: dbPassword,
+    OMNIS_DB_NAME: dbName,
+    OMNIS_DB_PORT: String(dbPort),
+    OMNIS_MIGRATION_DB_PASSWORD: migrationPassword,
+    OMNIS_RUNTIME_DB_PASSWORD: runtimePassword,
+    OMNIS_AUTHORIZER_DB_PASSWORD: authorizerPassword,
+    OMNIS_LAUNCHER_DB_PASSWORD: launcherPassword,
+  });
 }
 
 function runDocker(_command, args, options = {}) {
@@ -203,17 +206,9 @@ try {
 
   const renderedConfig = JSON.parse(compose(['config', '--format', 'json']).stdout);
   assert.deepEqual(
-    renderedConfig.services.postgres.ports,
-    [
-      {
-        mode: 'ingress',
-        target: 5432,
-        published: String(dbPort),
-        host_ip: '127.0.0.1',
-        protocol: 'tcp',
-      },
-    ],
-    'disposable PostgreSQL must publish only on the selected loopback port',
+    renderedConfig.services.postgres.ports ?? [],
+    [],
+    'disposable PostgreSQL must remain unpublished outside its internal data network',
   );
 
   stackStarted = true;
@@ -224,6 +219,21 @@ try {
   );
   const postgresId = compose(['ps', '-q', 'postgres']).stdout.trim();
   assert.ok(postgresId, 'running disposable PostgreSQL container has an ID');
+  const postgresNetworkInspection = runDocker(
+    'docker',
+    ['inspect', postgresId, '--format', '{{json .NetworkSettings.Networks}}'],
+    { encoding: 'utf8' },
+  );
+  assert.equal(
+    postgresNetworkInspection.status,
+    0,
+    `could not inspect disposable PostgreSQL networks: ${redact(postgresNetworkInspection.stderr || 'unknown Docker error')}`,
+  );
+  const postgresNetworks = Object.values(JSON.parse(postgresNetworkInspection.stdout));
+  assert.equal(postgresNetworks.length, 1, 'PostgreSQL joins only the internal data network');
+  const postgresAddress = postgresNetworks[0]?.IPAddress;
+  assert.ok(isIPv4(postgresAddress), 'PostgreSQL has a data-network IPv4 address');
+  configureDatabaseHost(postgresAddress);
   const postgresPortInspection = runDocker(
     'docker',
     [
@@ -248,10 +258,16 @@ try {
     hostPortBindings,
     runtimeNetworkPorts: postgresPorts,
   };
-  assert.deepEqual(
-    postgresPorts?.['5432/tcp'],
-    [{ HostIp: '127.0.0.1', HostPort: String(dbPort) }],
-    `PostgreSQL runtime binding differs from the loopback-only Compose configuration: ${JSON.stringify(postgresBindingEvidence)}`,
+  const runtimePortBindings = Object.values(postgresPorts ?? {}).flatMap(
+    (bindings) => bindings ?? [],
+  );
+  const hostPortBindingEntries = Object.values(hostPortBindings ?? {}).flatMap(
+    (bindings) => bindings ?? [],
+  );
+  assert.equal(
+    runtimePortBindings.length + hostPortBindingEntries.length,
+    0,
+    `PostgreSQL must have no host port publication: ${JSON.stringify(postgresBindingEvidence)}`,
   );
   const provision = spawnSync(
     process.execPath,

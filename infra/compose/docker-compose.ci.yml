@@ -1,4 +1,7 @@
 services:
+  postgres:
+    ports: !reset []
+
   api:
     image: omnis-api:ci
     volumes:
