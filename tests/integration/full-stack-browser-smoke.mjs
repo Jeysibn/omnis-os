@@ -52,6 +52,7 @@ try {
     lostAckRequestId,
   });
 
+  const recoveryCreatedAfter = new Date();
   browserRunner = spawn('pnpm', ['--filter', '@omnis/web', 'test:e2e:integration'], {
     cwd: new URL('../../', import.meta.url),
     env: browserEnvironment,
@@ -61,12 +62,12 @@ try {
 
   brokerRecovery = services.syntheticBrokerCompose.interruptAfterAcceptedAttempt(
     services.auditPool,
-    new Date(),
+    recoveryCreatedAfter,
   );
   brokerCancellationRecovery = brokerRecovery.then(() =>
     services.syntheticBrokerCompose.restartAfterAcceptedCancellation(
       services.auditPool,
-      new Date(),
+      recoveryCreatedAfter,
     ),
   );
   brokerLostAckRecovery = brokerCancellationRecovery.then(() =>
