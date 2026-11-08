@@ -2445,3 +2445,17 @@ button:disabled {
 .synthetic-revoke-confirm p {
   margin: 0 0 8px;
 }
+
+.stream-badge.stream-paused > span {
+  background: #a52f40;
+}
+.stream-paused-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.stream-paused-note p {
+  flex: 1 1 240px;
+  margin: 0;
+}

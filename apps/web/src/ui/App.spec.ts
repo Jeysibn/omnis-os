@@ -134,12 +134,14 @@ type FixtureOptions = {
   connectorRevokeDelayMs?: number;
   /** Number of GET /connector-authorizations/:id requests to fail with 503. */
   connectorReadFailures?: number;
+  connectorReadDelayMs?: number;
 };
 
 type ConnectorRevokeBehavior =
   | 'success'
   | 'already-revoked'
   | 'rejected-expired'
+  | 'rejected-still-active'
   | 'lost-response-applied'
   | 'lost-response-not-applied'
   | 'unconfirming-response'
@@ -535,6 +537,8 @@ function createMockApi(page: Page) {
       /^\/api\/v1\/connector-authorizations\/([^/]+)$/,
     );
     if (connectorAuthorizationMatch && method === 'GET') {
+      if (options.connectorReadDelayMs)
+        await new Promise((resolve) => setTimeout(resolve, options.connectorReadDelayMs));
       if (connectorReadFailures > 0) {
         connectorReadFailures -= 1;
         return fulfillError(route, 503, 'unavailable', 'Authorization status is unavailable.');
@@ -570,6 +574,13 @@ function createMockApi(page: Page) {
             ...currentConnectorAuthorization,
             status: 'expired',
           });
+          return fulfillError(
+            route,
+            409,
+            'invalid_transition',
+            'Only an active connector authorization can be revoked.',
+          );
+        case 'rejected-still-active':
           return fulfillError(
             route,
             409,
@@ -2639,5 +2650,103 @@ test.describe('synthetic approval revocation', () => {
     await expect(page.getByRole('heading', { name: 'Runs' })).toBeVisible();
     expect(syntheticRunPosts(api)).toHaveLength(1);
     expect(api.connectorRevokeIds).toEqual([]);
+  });
+});
+
+test.describe('synthetic approval revocation fails closed', () => {
+  const read = (api: MockApi) =>
+    api.requests.filter(
+      (item) =>
+        item.method === 'GET' &&
+        item.path === `/api/v1/connector-authorizations/${connectorAuthorizationId}`,
+    );
+
+  test('a rejected revoke whose status read fails stays closed until the status is confirmed', async ({
+    page,
+    api,
+  }) => {
+    const dialog = await openSyntheticReview(page, api, {
+      connectorRevoke: 'rejected-expired',
+      connectorReadFailures: 1,
+    });
+    await approveExactOperation(dialog);
+    await dialog.getByRole('button', { name: 'Revoke approval' }).click();
+    await dialog.getByRole('button', { name: 'Confirm revoke' }).click();
+
+    // The backend refused, but a refusal does not say what the approval's state is.
+    await expect(dialog.getByRole('alert')).toContainText(
+      /rejected the revoke request, but this approval's current status could not be confirmed/,
+    );
+    await expect(dialog.getByRole('alert')).toContainText('Do not rely on the approval shown');
+    await expect(
+      dialog.getByRole('button', { name: 'Start authorized synthetic Run' }),
+    ).toBeDisabled();
+    await expect(dialog.getByRole('button', { name: 'Revoke approval' })).toHaveCount(0);
+    await expect(dialog.getByText(/approval revoked/i)).toHaveCount(0);
+    expect(syntheticRunPosts(api)).toHaveLength(0);
+
+    // A later successful read is authoritative: the approval turned out to be expired.
+    await dialog.getByRole('button', { name: 'Check approval status' }).click();
+    await expect(dialog.getByRole('alert')).toContainText('Its status is now expired.');
+    await expect(
+      dialog.getByText('This authorization is expired; create a new operation'),
+    ).toBeVisible();
+    await expect(dialog.getByRole('button', { name: 'Check approval status' })).toHaveCount(0);
+    await expect(
+      dialog.getByRole('button', { name: 'Start authorized synthetic Run' }),
+    ).toHaveCount(0);
+    expect(syntheticRunPosts(api)).toHaveLength(0);
+  });
+
+  test('a rejected revoke that reconciles to a still-active approval re-enables the actions', async ({
+    page,
+    api,
+  }) => {
+    const dialog = await openSyntheticReview(page, api, {
+      connectorRevoke: 'rejected-still-active',
+      connectorReadFailures: 1,
+    });
+    await approveExactOperation(dialog);
+    await dialog.getByRole('button', { name: 'Revoke approval' }).click();
+    await dialog.getByRole('button', { name: 'Confirm revoke' }).click();
+    await expect(
+      dialog.getByRole('button', { name: 'Start authorized synthetic Run' }),
+    ).toBeDisabled();
+
+    await dialog.getByRole('button', { name: 'Check approval status' }).click();
+    await expect(dialog.getByRole('alert')).toContainText('The approval was not revoked.');
+    await expect(dialog.getByRole('alert')).toContainText('It is still active.');
+    await expect(
+      dialog.getByRole('button', { name: 'Start authorized synthetic Run' }),
+    ).toBeEnabled();
+    await expect(dialog.getByRole('button', { name: 'Revoke approval' })).toBeVisible();
+    expect(api.connectorRevokeIds).toHaveLength(1);
+  });
+
+  test('duplicate activation cannot send a second status read or revoke while unresolved', async ({
+    page,
+    api,
+  }) => {
+    const dialog = await openSyntheticReview(page, api, {
+      connectorRevoke: 'lost-response-not-applied',
+      connectorReadFailures: 1,
+      connectorReadDelayMs: 500,
+    });
+    await approveExactOperation(dialog);
+    await dialog.getByRole('button', { name: 'Revoke approval' }).click();
+    await dialog.getByRole('button', { name: 'Confirm revoke' }).click();
+    const check = dialog.getByRole('button', { name: 'Check approval status' });
+    await expect(check).toBeEnabled();
+    expect(read(api)).toHaveLength(1); // the failed read made by the revoke itself
+
+    await check.evaluate((element) => {
+      element.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      element.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await expect(dialog.getByRole('button', { name: 'Close' })).toBeDisabled();
+    await expect(dialog.getByRole('alert')).toContainText('This approval is still active.');
+    expect(read(api)).toHaveLength(2); // exactly one more
+    expect(api.connectorRevokeIds).toHaveLength(1); // and no second revoke
+    expect(syntheticRunPosts(api)).toHaveLength(0);
   });
 });

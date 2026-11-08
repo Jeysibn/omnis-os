@@ -10,12 +10,23 @@ const sameOperation = (a: ConnectorAuthorization, b: ConnectorAuthorization) =>
   a.id === b.id && a.requestId === b.requestId && a.promptDigest === b.promptDigest;
 
 /**
+ * Why the approval's real state is not known. Both kinds fail closed: the authorization held by
+ * the UI may be stale, so Start (and a second Revoke) stay unavailable until a status read succeeds.
+ *
+ *  - `unknown-outcome`: the revoke request may or may not have been applied (network loss, 5xx,
+ *    or a body that could not be verified).
+ *  - `rejected-unverified`: the backend definitively refused the request, but a refusal does not
+ *    say what the approval's state is (it may have expired or been consumed meanwhile).
+ */
+export type RevokeUnresolved = 'none' | 'unknown-outcome' | 'rejected-unverified';
+
+/**
  * Owner revocation of an UNUSED synthetic approval via POST /api/v1/connector-authorizations/:id/revoke.
  *
  * Success is claimed only when the response is a schema-valid, same-operation authorization whose
- * status is `revoked`. Anything else (network loss, 5xx, an unverifiable body) is reported as an
- * unresolved outcome and blocks further actions until the authorization has been re-read.
- * Revoking an approval is not a Run stop or cancellation and never claims to be.
+ * status is `revoked`. The state is `none` only after an authoritative response (the revoke itself
+ * or a later status read). Revoking an approval is not a Run stop or cancellation and never claims
+ * to be.
  */
 export function useConnectorAuthorizationRevoke(input: {
   authorization: ConnectorAuthorization | null;
@@ -27,11 +38,13 @@ export function useConnectorAuthorizationRevoke(input: {
 }) {
   const { authorization, csrfToken, blocked, onSessionExpired, onAuthorization } = input;
   const [pending, setPending] = useState(false);
-  const [unresolved, setUnresolved] = useState(false);
+  const [unresolvedKind, setUnresolvedKind] = useState<RevokeUnresolved>('none');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   // A ref, not state: two clicks in the same tick must not both pass the guard.
   const inFlight = useRef(false);
+  // What the backend said when it refused the last revoke, kept for the status re-check message.
+  const rejection = useRef('');
 
   const readCurrent = useCallback(async (target: ConnectorAuthorization) => {
     return request(
@@ -47,30 +60,38 @@ export function useConnectorAuthorizationRevoke(input: {
     );
   }, []);
 
+  /** Re-read the authorization; only a successful read clears an unresolved state. */
   const recheck = useCallback(
-    async (target: ConnectorAuthorization, afterUncertainRevoke: boolean) => {
+    async (target: ConnectorAuthorization, kind: Exclude<RevokeUnresolved, 'none'>) => {
       try {
         const current = await readCurrent(target);
         onAuthorization(current);
-        setUnresolved(false);
+        setUnresolvedKind('none');
+        const stillActive = current.status === 'authorized' && current.consumedAt === null;
         if (current.status === 'revoked') {
           setError('');
           setNotice('Approval confirmed revoked. It can no longer be used.');
-        } else if (afterUncertainRevoke) {
+        } else if (kind === 'rejected-unverified') {
           setError(
-            current.status === 'authorized' && current.consumedAt === null
+            stillActive
+              ? `The approval was not revoked. ${rejection.current} It is still active.`
+              : `The approval was not revoked. ${rejection.current} Its status is now ${current.status}.`,
+          );
+        } else {
+          setError(
+            stillActive
               ? 'The revocation did not take effect. This approval is still active.'
               : `The revocation was not confirmed. The approval is now ${current.status}.`,
           );
         }
       } catch (cause) {
         if (onSessionExpired(cause)) return;
-        if (afterUncertainRevoke) {
-          setUnresolved(true);
-          setError(
-            'The revoke result is unknown and its status could not be re-checked. Do not assume the approval was revoked. Check approval status again before taking another action.',
-          );
-        }
+        setUnresolvedKind(kind); // still unknown: stay closed
+        setError(
+          kind === 'rejected-unverified'
+            ? `Omnis OS rejected the revoke request, but this approval's current status could not be confirmed. ${rejection.current} Do not rely on the approval shown; check approval status before taking another action.`
+            : 'The revoke result is unknown and its status could not be re-checked. Do not assume the approval was revoked. Check approval status again before taking another action.',
+        );
       }
     },
     [onAuthorization, onSessionExpired, readCurrent],
@@ -100,22 +121,23 @@ export function useConnectorAuthorizationRevoke(input: {
           return result;
         },
       );
-      setUnresolved(false);
+      setUnresolvedKind('none');
       onAuthorization(revoked);
       setNotice('Approval revoked. It can no longer be used, and no Run was started from it.');
     } catch (cause) {
       if (onSessionExpired(cause)) return;
       const rejected = cause instanceof ApiRequestError && cause.outcome === 'rejected';
-      if (rejected) {
-        setUnresolved(false);
-        setError(`The approval was not revoked. ${cause.message}`);
-      } else {
-        setUnresolved(true);
-        setError(
-          'The revoke result is unknown. Omnis OS has not confirmed that this approval was revoked, so it is still treated as active. Re-checking its status…',
-        );
-      }
-      await recheck(target, !rejected);
+      rejection.current = rejected ? cause.message : '';
+      // Fail closed BEFORE the status read: whatever it returns (or fails to), the authorization
+      // held by the UI can no longer be trusted until a read succeeds.
+      const kind = rejected ? 'rejected-unverified' : 'unknown-outcome';
+      setUnresolvedKind(kind);
+      setError(
+        rejected
+          ? `Omnis OS rejected the revoke request. ${cause.message} Re-checking the approval's status…`
+          : 'The revoke result is unknown. Omnis OS has not confirmed that this approval was revoked, so it is still treated as active. Re-checking its status…',
+      );
+      await recheck(target, kind);
     } finally {
       inFlight.current = false;
       setPending(false);
@@ -124,21 +146,30 @@ export function useConnectorAuthorizationRevoke(input: {
 
   const refreshStatus = useCallback(async () => {
     const target = authorization;
-    if (!target || inFlight.current || blocked) return;
+    if (!target || inFlight.current || blocked || unresolvedKind === 'none') return;
     inFlight.current = true;
     setPending(true);
     try {
-      await recheck(target, true);
+      await recheck(target, unresolvedKind);
     } finally {
       inFlight.current = false;
       setPending(false);
     }
-  }, [authorization, blocked, recheck]);
+  }, [authorization, blocked, recheck, unresolvedKind]);
 
   const clearMessages = useCallback(() => {
     setError('');
     setNotice('');
   }, []);
 
-  return { pending, unresolved, error, notice, revoke, refreshStatus, clearMessages };
+  return {
+    pending,
+    unresolved: unresolvedKind !== 'none',
+    unresolvedKind,
+    error,
+    notice,
+    revoke,
+    refreshStatus,
+    clearMessages,
+  };
 }
