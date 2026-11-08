@@ -6,7 +6,7 @@ The worker's bounded broker recovery window ends by persisting Run `unknown` and
 
 ## Read-only reconciliation boundary
 
-Only the explicit synthetic test mode enables the worker's periodic projection pass. Each pass discovers at most 20 unknown synthetic Runs from the existing runtime-owned Run table. An in-memory cursor advances across pages and wraps; a nonoverlap guard bounds each process to one pass. Restart begins discovery again from durable unknown rows. No additional queue, service, attempt store or approval system is introduced.
+Only the explicit synthetic test mode enables the worker's periodic projection pass. Projection lookups have a separate bounded broker slot, so a slow authorizer read cannot reserve the provider-submission slot. Each pass discovers at most 20 unknown synthetic Runs from the existing runtime-owned Run table. An in-memory cursor advances across pages and wraps; a nonoverlap guard bounds each process to one pass. Restart begins discovery again from durable unknown rows. No additional queue, service, attempt store or approval system is introduced.
 
 The worker sends the persisted immutable request binding, authorization ID and request ID to the separately authenticated broker projection route. No rendered prompt is sent. That route uses an authenticated, read-only authorizer lookup, which verifies the grant fingerprint and finds the existing attempt by authorization/request identity. It cannot admit, claim, begin or submit an operation. The broker verifies the existing signed decision envelope and all immutable request fields before returning the persisted attempt outcome and signed correlation ID. Historical envelope verification permits reading an already-submitted outcome after grant expiry; it does not confer execution authority. Both existing socket gateways allow only the additional exact projection path. No database credentials or grants change.
 
@@ -18,12 +18,12 @@ A runtime transaction locks the Run and validates its unknown status, captured e
 | --- | --- | --- |
 | unknown | completed with validated output | completed, one run.completed event |
 | unknown | failed | failed, one run.failed event |
-| unknown | interrupted with durable owner stop event | cancelled, one run.cancelled event |
-| unknown | interrupted without owner stop event | interrupted, one run.interrupted event |
+| unknown | interrupted with durable owner stop event and authoritative cancellation preceding outcome | cancelled, one run.cancelled event |
+| unknown | interrupted without both cancellation proofs | interrupted, one run.interrupted event |
 | unknown | admitted/submitting/accepted/running/unknown or unavailable/conflicting evidence | unchanged and eligible for another pass |
 | any other status, stale Run generation, or active lease | any | no repair |
 
-An owner stop request alone never proves provider termination. Only the authoritative interrupted attempt permits cancelled projection. Completion and cancellation races retain the authoritative attempt's terminal outcome. Unknown continues to block admission until a definitive projection is validated. Ordinary execution terminal protections remain intact. Earlier unknown events remain in history; SSE keeps streaming through uncertainty and replays the later definitive event after browser refresh. An owner tab may keep its event connection open while the outcome is unknown, just as for other ongoing Runs; normal disconnect/navigation cleanup closes it. This does not keep an execution job alive or cause provider I/O. Projection requests have an absolute 10-second deadline, each pass examines at most 20 rows, and overlapping passes are suppressed.
+An owner stop request alone never proves provider termination. Only the authoritative interrupted attempt permits cancelled projection, together with its persisted cancellation request timestamp no later than the outcome timestamp and a durable Run stop event. A later owner stop request cannot relabel an independently interrupted attempt. Completion and cancellation races retain the authoritative attempt's terminal outcome. Unknown continues to block admission until a definitive projection is validated. Ordinary execution terminal protections remain intact. Earlier unknown events remain in history; SSE keeps streaming through uncertainty and replays the later definitive event after browser refresh. An owner tab may keep its event connection open while the outcome is unknown, just as for other ongoing Runs; normal disconnect/navigation cleanup closes it. This does not keep an execution job alive or cause provider I/O. Projection requests have an absolute 10-second deadline, each pass examines at most 20 rows, and overlapping passes are suppressed.
 
 ## Regression evidence
 

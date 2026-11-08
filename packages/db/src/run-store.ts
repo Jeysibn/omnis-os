@@ -690,6 +690,12 @@ export class PostgresRunStore {
   ): Promise<DurableEvent[]> {
     const evidence = SyntheticTaskRunResponseSchema.parse(evidenceInput);
     if (!['completed', 'failed', 'interrupted'].includes(evidence.status)) return [];
+    if (
+      evidence.cancellationRequestedAt &&
+      (!evidence.outcomeRecordedAt ||
+        Date.parse(evidence.cancellationRequestedAt) > Date.parse(evidence.outcomeRecordedAt))
+    )
+      return [];
     return inTransaction(this.pool, async (client) => {
       const current = await lockRun(client, link.run.id);
       if (current.status !== 'unknown' || current.execution_generation !== link.generation)
@@ -715,7 +721,10 @@ export class PostgresRunStore {
       const terminalStatus = evidence.status as 'completed' | 'failed' | 'interrupted';
       const status =
         terminalStatus === 'interrupted'
-          ? stopped.rows[0]?.requested
+          ? stopped.rows[0]?.requested &&
+            evidence.cancellationRequestedAt &&
+            evidence.outcomeRecordedAt &&
+            Date.parse(evidence.cancellationRequestedAt) <= Date.parse(evidence.outcomeRecordedAt)
             ? 'cancelled'
             : 'interrupted'
           : terminalStatus;

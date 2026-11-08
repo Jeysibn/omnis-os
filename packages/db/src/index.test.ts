@@ -1083,6 +1083,8 @@ const postgresSuite = describe(
         correlationId: runId,
         attemptId: pending.attemptId!,
         status: 'interrupted' as const,
+        cancellationRequestedAt: new Date().toISOString(),
+        outcomeRecordedAt: new Date().toISOString(),
         submitted: true,
         usage: {
           kind: 'unknown' as const,
@@ -1095,6 +1097,14 @@ const postgresSuite = describe(
         [],
       );
       assert.equal((await store.getSyntheticBrokerRun(runId))?.run.status, 'unknown');
+      assert.deepEqual(
+        await store.reconcileSyntheticBrokerRun(pending, {
+          ...authoritative,
+          cancellationRequestedAt: '2099-01-01T00:00:00.000Z',
+          outcomeRecordedAt: '2026-01-01T00:00:00.000Z',
+        }),
+        [],
+      );
       await assert.rejects(
         store.reconcileSyntheticBrokerRun(pending, { ...authoritative, attemptId: randomUUID() }),
         /identity conflicts/,
@@ -1140,7 +1150,7 @@ const postgresSuite = describe(
     });
 
     it('repairs late completed and failed projections without duplicate events or usage', async () => {
-      for (const status of ['completed', 'failed'] as const) {
+      for (const status of ['completed', 'failed', 'interrupted'] as const) {
         const fixture = await connectorFixture();
         const grant = await fixture.authorizations.request(fixture.request, randomUUID());
         await fixture.authorizations.decide(grant.id, 'owner', {
@@ -1161,6 +1171,7 @@ const postgresSuite = describe(
           async () => 'projection-job',
         );
         const lease = await store.beginSyntheticBrokerRun(runId, 'projection-worker', 30);
+        if (status === 'interrupted') await store.requestSyntheticBrokerStop(runId, grant.id);
         await store.finishSyntheticBrokerRun(runId, 'projection-worker', lease.generation, {
           status: 'unknown',
         });

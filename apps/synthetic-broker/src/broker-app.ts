@@ -44,6 +44,7 @@ export function createSyntheticBrokerApp(input: {
 
   const busyAttempts = new Set<string>();
   let activeSubmissions = 0;
+  let activeProjections = 0;
 
   const app = Fastify({
     bodyLimit: 64 * 1024,
@@ -82,12 +83,15 @@ export function createSyntheticBrokerApp(input: {
     ) {
       return reply.code(403).send({ error: { code: 'request_binding_failed' } });
     }
-    if (busyAttempts.has(input.requestId))
+    if (!projectionOnly && busyAttempts.has(input.requestId))
       return reply.code(409).send({ error: { code: 'attempt_in_progress' } });
-    if (activeSubmissions >= 1)
+    if ((projectionOnly ? activeProjections : activeSubmissions) >= 1)
       return reply.code(429).send({ error: { code: 'concurrency_limit' } });
-    activeSubmissions += 1;
-    busyAttempts.add(input.requestId);
+    if (projectionOnly) activeProjections += 1;
+    else {
+      activeSubmissions += 1;
+      busyAttempts.add(input.requestId);
+    }
     try {
       const admission = await (
         projectionOnly
@@ -130,6 +134,10 @@ export function createSyntheticBrokerApp(input: {
           attemptId: admission.attempt.id,
           correlationId: envelope.claims.correlationId,
           status: admission.attempt.status,
+          ...(admission.attempt.cancelRequestedAt
+            ? { cancellationRequestedAt: admission.attempt.cancelRequestedAt }
+            : {}),
+          outcomeRecordedAt: admission.attempt.updatedAt ?? admission.attempt.createdAt,
           submitted: Boolean(admission.attempt.submissionStartedAt),
           ...(admission.attempt.responseText
             ? { responseText: admission.attempt.responseText }
@@ -253,8 +261,11 @@ export function createSyntheticBrokerApp(input: {
         },
       });
     } finally {
-      busyAttempts.delete(input.requestId);
-      activeSubmissions -= 1;
+      if (projectionOnly) activeProjections -= 1;
+      else {
+        busyAttempts.delete(input.requestId);
+        activeSubmissions -= 1;
+      }
     }
   }
   app.post('/internal/broker/v1/submit', (request, reply) =>

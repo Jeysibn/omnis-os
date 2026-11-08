@@ -13,6 +13,8 @@ const BrokerResponseSchema = z
     attemptId: z.string().uuid(),
     status: ConnectorExecutionStatusSchema,
     submitted: z.boolean(),
+    cancellationRequestedAt: z.string().datetime().optional(),
+    outcomeRecordedAt: z.string().datetime().optional(),
     correlationId: z.string().uuid(),
     responseText: z.string().min(1).max(32_000).optional(),
   })
@@ -72,6 +74,12 @@ export class SyntheticBrokerClient implements SyntheticBrokerExecutor {
       attemptId: brokerResult.attemptId,
       status: brokerResult.status,
       submitted: brokerResult.submitted,
+      ...(brokerResult.cancellationRequestedAt
+        ? { cancellationRequestedAt: brokerResult.cancellationRequestedAt }
+        : {}),
+      ...(brokerResult.outcomeRecordedAt
+        ? { outcomeRecordedAt: brokerResult.outcomeRecordedAt }
+        : {}),
       usage:
         brokerResult.status === 'unknown'
           ? { kind: 'unknown', reason: 'submission_uncertain', billingExposure: 'unknown' }

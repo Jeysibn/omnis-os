@@ -97,6 +97,7 @@ describe('synthetic broker submission boundary', () => {
       throw new Error('Mutation or provider access forbidden');
     };
     let reads = 0;
+    let heldLookup: Promise<void> | undefined;
     const app = createSyntheticBrokerApp({
       callerToken: 'a'.repeat(96),
       verificationKeys: [
@@ -114,6 +115,7 @@ describe('synthetic broker submission boundary', () => {
         claim: forbidden,
         lookup: async () => {
           reads++;
+          if (heldLookup) await heldLookup;
           return {
             version: 'omnis.broker-authorizer-ipc.v1' as const,
             envelope,
@@ -159,6 +161,30 @@ describe('synthetic broker submission boundary', () => {
         assert.equal(result.json().attemptId, attemptId);
       }
       assert.equal(reads, 3);
+      let release!: () => void;
+      heldLookup = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const pending = app.inject({
+        method: 'POST',
+        url: '/internal/broker/v1/projection',
+        headers: { authorization: `Bearer ${'a'.repeat(96)}` },
+        payload: projectionRequest,
+      });
+      while (reads < 4) await new Promise<void>((resolve) => setImmediate(resolve));
+      try {
+        const submission = await app.inject({
+          method: 'POST',
+          url: '/internal/broker/v1/submit',
+          headers: { authorization: `Bearer ${'a'.repeat(96)}` },
+          payload: request,
+        });
+        // The admission stub fails closed, but a projection must not reserve its slot (429).
+        assert.equal(submission.statusCode, 503);
+      } finally {
+        release();
+      }
+      assert.equal((await pending).statusCode, 200);
     } finally {
       await app.close();
     }
