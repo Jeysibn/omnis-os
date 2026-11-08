@@ -11,6 +11,7 @@ import {
   CreateTaskSchema,
   RunEventSchema,
   RunSchema,
+  AgentProfileVersionResponseSchema,
   SetTaskExecutionAssignmentSchema,
   TaskSchema,
   type Authorization,
@@ -19,10 +20,18 @@ import {
   type RunEvent,
   type Task,
 } from '@omnis/contracts';
+import {
+  ConnectorAuthorizationDecisionSchema,
+  ConnectorAuthorizationSchema,
+  CreateConnectorAuthorizationSchema,
+} from '@omnis/contracts/connector-authorization-schema';
+import { RuntimeCapabilitiesSchema } from '@omnis/contracts/runtime-capabilities';
 
 const now = '2026-11-03T10:00:00.000Z';
 const csrfToken = 'csrf-browser-fixture-token';
 const authorizationId = 'b7cece2c-2e6f-4b3b-92da-f0352c24debb';
+const connectorAuthorizationId = 'd7cece2c-2e6f-4b3b-92da-f0352c24debb';
+const connectorCorrelationId = 'e7cece2c-2e6f-4b3b-92da-f0352c24debb';
 
 const makeTask = (id: string, title: string, status: Task['status'] = 'open'): Task => ({
   id,
@@ -115,6 +124,7 @@ type FixtureOptions = {
   eventDisconnects?: boolean;
   eventOrder?: 'reverse';
   eventDuplicates?: boolean;
+  syntheticEnabled?: boolean;
   /** Scripted native-EventSource scenario: deliver event 1, drop, then replay 1 and send 2. */
   eventReconnectScenario?: boolean;
 };
@@ -184,6 +194,8 @@ function createMockApi(page: Page) {
   let currentRuns = [...defaultRuns];
   let currentProjects = [...defaultProjects];
   let currentAuthorization: Authorization | null = null;
+  let currentConnectorAuthorization: ReturnType<typeof ConnectorAuthorizationSchema.parse> | null =
+    null;
   let authenticated = true;
   let currentCsrfToken = csrfToken;
   let taskGetFailures = 0;
@@ -237,6 +249,7 @@ function createMockApi(page: Page) {
     currentRuns = [...(options.runs ?? defaultRuns)];
     currentProjects = [...(options.projects ?? defaultProjects)];
     currentAuthorization = null;
+    currentConnectorAuthorization = null;
     authenticated = !options.signedOut;
     currentCsrfToken = csrfToken;
     taskGetFailures = options.taskGetFailures ?? 0;
@@ -358,6 +371,43 @@ function createMockApi(page: Page) {
         }),
       });
     }
+    if (path === '/api/v1/runtime-capabilities' && method === 'GET') {
+      return route.fulfill({
+        json: RuntimeCapabilitiesSchema.parse({
+          version: 'omnis.runtime-capabilities.v1',
+          mockRuntime: { enabled: true, synthetic: true },
+          syntheticConnectorFixture: {
+            enabled: options.syntheticEnabled ?? false,
+            providerId: 'synthetic',
+            modelId: 'synthetic-text-only-v1',
+            synthetic: true,
+          },
+        }),
+      });
+    }
+    const profileMatch = path.match(/^\/api\/v1\/agents\/([^/]+)\/versions\/(\d+)$/);
+    if (profileMatch && method === 'GET') {
+      const version = {
+        versionId: 'profile-version-3',
+        agentId: profileMatch[1]!,
+        versionNo: Number(profileMatch[2]),
+        profession: 'Research Analyst',
+        seniority: 'senior',
+        specialties: ['research'],
+        personality: { traits: ['careful'], tone: 'clear', principles: ['cite evidence'] },
+        behavior: { autonomy: 'low', escalation: 'ask owner' },
+        instructions: 'Summarize the supplied task.',
+        createdBy: { id: 'owner', displayName: 'Director' },
+        createdAt: now,
+      };
+      return route.fulfill({
+        json: AgentProfileVersionResponseSchema.parse({
+          agent: fixtureAgent,
+          version,
+          isCurrent: true,
+        }),
+      });
+    }
     if (path === '/api/v1/auth/login' && method === 'POST') {
       authenticated = true;
       return route.fulfill({ json: { authenticated: true } });
@@ -424,6 +474,99 @@ function createMockApi(page: Page) {
       });
       currentTasks = [created, ...currentTasks];
       return route.fulfill({ status: 201, json: created });
+    }
+    if (path === '/api/v1/connector-authorizations' && method === 'POST') {
+      const input = CreateConnectorAuthorizationSchema.safeParse(body);
+      const key = headers['idempotency-key'] ?? '';
+      if (!input.success || !zodUuid(key))
+        return fulfillError(
+          route,
+          400,
+          'invalid_input',
+          'Connector authorization input is invalid.',
+        );
+      const { renderedRequest, ...binding } = input.data;
+      const digest = `sha256:${'a'.repeat(64)}`;
+      currentConnectorAuthorization = ConnectorAuthorizationSchema.parse({
+        id: connectorAuthorizationId,
+        requestId: key,
+        correlationId: connectorCorrelationId,
+        requestingActor: 'owner',
+        ...binding,
+        promptDigest: digest,
+        status: 'pending',
+        policyVersion: 'r1p1-synthetic-connector-v1',
+        createdAt: now,
+        consentedAt: now,
+        decidedAt: null,
+        decidedBy: null,
+        revokedAt: null,
+        revokedBy: null,
+        revocationGeneration: 0,
+        expiresAt: new Date(Date.now() + 20 * 60_000).toISOString(),
+        consumedAt: null,
+        consumedRequestId: null,
+        synthetic: true,
+      });
+      void renderedRequest;
+      return route.fulfill({ status: 201, json: currentConnectorAuthorization });
+    }
+    const connectorAuthorizationMatch = path.match(
+      /^\/api\/v1\/connector-authorizations\/([^/]+)$/,
+    );
+    if (connectorAuthorizationMatch && method === 'GET') {
+      return currentConnectorAuthorization?.id === connectorAuthorizationMatch[1]
+        ? route.fulfill({ json: currentConnectorAuthorization })
+        : fulfillError(route, 404, 'not_found', 'Connector authorization was not found.');
+    }
+    const connectorDecisionMatch = path.match(
+      /^\/api\/v1\/connector-authorizations\/([^/]+)\/decision$/,
+    );
+    if (connectorDecisionMatch && method === 'POST') {
+      const decision = ConnectorAuthorizationDecisionSchema.safeParse(body);
+      if (!decision.success || currentConnectorAuthorization?.id !== connectorDecisionMatch[1])
+        return fulfillError(route, 400, 'invalid_input', 'Connector decision is invalid.');
+      currentConnectorAuthorization = ConnectorAuthorizationSchema.parse({
+        ...currentConnectorAuthorization,
+        status: decision.data.decision === 'approve' ? 'authorized' : 'denied',
+        decidedAt: now,
+        decidedBy: 'owner',
+      });
+      return route.fulfill({ json: currentConnectorAuthorization });
+    }
+    const syntheticRunMatch = path.match(/^\/api\/v1\/tasks\/([^/]+)\/synthetic-runs$/);
+    if (syntheticRunMatch && method === 'POST') {
+      if (!currentConnectorAuthorization || currentConnectorAuthorization.status !== 'authorized')
+        return fulfillError(
+          route,
+          403,
+          'authorization_denied',
+          'An exact owner approval is required.',
+        );
+      if (headers['idempotency-key'] !== currentConnectorAuthorization.requestId)
+        return fulfillError(
+          route,
+          409,
+          'request_binding_failed',
+          'Run request identity did not match.',
+        );
+      currentConnectorAuthorization = ConnectorAuthorizationSchema.parse({
+        ...currentConnectorAuthorization,
+        consumedAt: now,
+        consumedRequestId: currentConnectorAuthorization.requestId,
+      });
+      const task = currentTasks.find((item) => item.id === syntheticRunMatch[1]);
+      const run = RunSchema.parse(
+        makeRun(
+          connectorCorrelationId,
+          syntheticRunMatch[1]!,
+          task?.title ?? 'Synthetic task',
+          'queued',
+          connectorAuthorizationId,
+        ),
+      );
+      currentRuns = [run, ...currentRuns];
+      return route.fulfill({ status: 201, json: run });
     }
     const assignmentMatch = path.match(/^\/api\/v1\/tasks\/([^/]+)\/execution-assignment$/);
     if (assignmentMatch && method === 'PUT') {
@@ -976,6 +1119,52 @@ test('assigns an available immutable profile to a task on the synthetic runtime'
   });
   expect(api.assignmentWrites[0]?.key).toMatch(/^[0-9a-f-]{36}$/i);
   await expect(page.getByLabel('Agent profile')).toHaveValue('agent-analyst');
+});
+
+test('reviews an exact synthetic operation, explicitly approves it, and starts one persisted Run', async ({
+  page,
+  api,
+}) => {
+  const task = TaskSchema.parse({
+    ...makeTask('task-synthetic', 'Summarize policy changes'),
+    projectId: defaultProjects[0]!.id,
+    associationRevision: 1,
+    agentId: 'agent-analyst',
+    profileVersion: 3,
+    runtimeId: 'mock',
+  });
+  api.configure({ tasks: [task], runs: [], syntheticEnabled: true });
+  await openWorkspace(page, '#tasks');
+  await page.getByRole('button', { name: 'Load available projects' }).click();
+  await page.getByRole('button', { name: 'Summarize policy changes' }).click();
+  await page.getByRole('button', { name: 'Review synthetic operation' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Review synthetic operation' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText('synthetic / synthetic-text-only-v1')).toBeVisible();
+  await expect(dialog.locator('#synthetic-rendered-request')).toContainText(
+    'Summarize policy changes',
+  );
+  await expect(dialog.getByText(/sha256:a{64}/)).toBeVisible();
+  await dialog.getByRole('button', { name: 'Approve exact operation' }).click();
+  await expect(
+    page.getByText('Exact synthetic operation approved. No run has started yet.'),
+  ).toBeVisible();
+  await dialog.getByRole('button', { name: 'Start authorized synthetic Run' }).click();
+  await expect(page.getByRole('heading', { name: 'Runs' })).toBeVisible();
+  await expect(page.getByText(connectorCorrelationId)).toBeVisible();
+  expect(api.runs[0]?.id).toBe(connectorCorrelationId);
+  expect(
+    api.requests.find((item) => item.path === '/api/v1/connector-authorizations')?.headers[
+      'x-omnis-csrf'
+    ],
+  ).toBe(csrfToken);
+  const runRequest = api.requests.find(
+    (item) => item.path === `/api/v1/tasks/${task.id}/synthetic-runs`,
+  );
+  expect(runRequest?.headers['idempotency-key']).toMatch(/^[0-9a-f-]{36}$/i);
+  expect(
+    api.requests.filter((item) => item.path === `/api/v1/tasks/${task.id}/synthetic-runs`),
+  ).toHaveLength(1);
 });
 
 test('an uncertain task assignment retries the exact request with the same key', async ({

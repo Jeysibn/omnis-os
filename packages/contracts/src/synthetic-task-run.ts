@@ -1,8 +1,14 @@
 import { z } from 'zod';
-import { ConnectorAuthorizationRequestSchema } from './connector-authorization.ts';
-import { ConnectorExecutionAttemptSchema } from './connector-authorization.ts';
+import { ConnectorAuthorizationRequestSchema } from './connector-authorization-schema.ts';
+import { ConnectorExecutionAttemptSchema } from './connector-authorization-schema.ts';
 import { ConnectorExecutionStatusSchema, UsageProvenanceSchema } from './connector-broker.ts';
 import { RunSchema } from './index.ts';
+
+export {
+  RuntimeCapabilitiesSchema,
+  runtimeCapabilities,
+  type RuntimeCapabilities,
+} from './runtime-capabilities.ts';
 export {
   SyntheticTaskRunEventSchema,
   SyntheticTaskRunEventsQuerySchema,
