@@ -45,7 +45,10 @@ export const TaskSchema = z
       (value) => value !== undefined && value !== null,
     ).length;
     if (assigned !== 0 && assigned !== 3) {
-      context.addIssue({ code: 'custom', message: 'Task execution assignment must be complete.' });
+      context.addIssue({
+        code: 'custom',
+        message: 'Task execution assignment must be complete.',
+      });
     }
   });
 export type Task = z.infer<typeof TaskSchema>;
@@ -518,6 +521,185 @@ export const RunEventSchema = z.object({
 });
 export type RunEvent = z.infer<typeof RunEventSchema>;
 
+export const MissionEventTypeSchema = z.enum([
+  'task.created',
+  'task.project_assigned',
+  'task.project_unassigned',
+  'task.project_reassigned',
+  'task.epic_assigned',
+  'task.epic_unassigned',
+  'task.epic_reassigned',
+  'task.status_changed',
+  'run.queued',
+  'run.started',
+  'run.stop_requested',
+  'run.outcome_unknown',
+  'run.completed',
+  'run.cancelled',
+  'run.failed',
+  'run.interrupted',
+]);
+export type MissionEventType = z.infer<typeof MissionEventTypeSchema>;
+
+const MissionEventPayloadSchema = z.union([
+  z.object({}).strict(),
+  z
+    .object({
+      previousEpicId: z.string().min(1).nullable(),
+      epicId: z.string().min(1).nullable(),
+    })
+    .strict(),
+  z.object({ from: TaskStatusSchema, to: TaskStatusSchema }).strict(),
+]);
+
+/** Strict provisional UI contract for the append-only Mission Lane ledger. */
+export const MissionEventSchema = z
+  .object({
+    globalSequence: z.string().regex(/^[1-9][0-9]*$/),
+    eventId: z.string().uuid(),
+    sourceKey: z.string().min(1).max(200),
+    sourceKind: z.enum(['task', 'run']),
+    sourceRecordId: z.string().min(1),
+    type: MissionEventTypeSchema,
+    actor: z.enum(['owner', 'service:omnis-runtime', 'service:omnis-worker']),
+    origin: z.enum(['api', 'mock-worker']),
+    synthetic: z.boolean(),
+    taskId: TaskIdSchema,
+    runId: z.string().min(1).nullable(),
+    projectId: ProjectIdSchema.nullable(),
+    previousProjectId: ProjectIdSchema.nullable(),
+    occurredAt: z.string().datetime(),
+    payload: MissionEventPayloadSchema,
+  })
+  .strict()
+  .superRefine((event, context) => {
+    const runEvent = event.type.startsWith('run.');
+    const emptyPayloadEvent =
+      event.type === 'task.created' || event.type.startsWith('task.project_') || runEvent;
+    if (runEvent !== (event.sourceKind === 'run') || runEvent !== (event.runId !== null)) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Mission event source identity is inconsistent.',
+      });
+    }
+    const taskStatusEvent = event.type === 'task.status_changed';
+    const ordinaryTaskEvent = event.type.startsWith('task.') && !taskStatusEvent;
+    const validProvenance =
+      (runEvent &&
+        event.sourceKind === 'run' &&
+        event.runId !== null &&
+        event.actor === 'service:omnis-worker' &&
+        event.origin === 'mock-worker' &&
+        event.synthetic) ||
+      (taskStatusEvent &&
+        event.sourceKind === 'task' &&
+        event.runId === null &&
+        ['service:omnis-runtime', 'service:omnis-worker'].includes(event.actor) &&
+        ['api', 'mock-worker'].includes(event.origin) &&
+        event.synthetic) ||
+      (ordinaryTaskEvent &&
+        event.sourceKind === 'task' &&
+        event.runId === null &&
+        event.actor === 'owner' &&
+        event.origin === 'api' &&
+        !event.synthetic);
+    if (!validProvenance) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Mission event provenance is inconsistent.',
+      });
+    }
+    if (emptyPayloadEvent && Object.keys(event.payload).length !== 0) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Mission event payload is not allowed.',
+      });
+    }
+    if (
+      event.type.startsWith('task.epic_') &&
+      !('epicId' in event.payload && 'previousEpicId' in event.payload)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Epic events require an epic reference payload.',
+      });
+    }
+    if (event.type.startsWith('task.project_')) {
+      const projectTransitionValid =
+        (event.type === 'task.project_assigned' &&
+          event.previousProjectId === null &&
+          event.projectId !== null) ||
+        (event.type === 'task.project_unassigned' &&
+          event.previousProjectId !== null &&
+          event.projectId === null) ||
+        (event.type === 'task.project_reassigned' &&
+          event.previousProjectId !== null &&
+          event.projectId !== null &&
+          event.previousProjectId !== event.projectId);
+      if (!projectTransitionValid) {
+        context.addIssue({
+          code: 'custom',
+          message: 'Project event references do not match its transition type.',
+        });
+      }
+    }
+    if (event.type.startsWith('task.epic_')) {
+      const epicPayload = event.payload;
+      const epicTransitionValid =
+        'epicId' in epicPayload &&
+        'previousEpicId' in epicPayload &&
+        ((event.type === 'task.epic_assigned' &&
+          epicPayload.previousEpicId === null &&
+          epicPayload.epicId !== null) ||
+          (event.type === 'task.epic_unassigned' &&
+            epicPayload.previousEpicId !== null &&
+            epicPayload.epicId === null) ||
+          (event.type === 'task.epic_reassigned' &&
+            epicPayload.previousEpicId !== null &&
+            epicPayload.epicId !== null &&
+            epicPayload.previousEpicId !== epicPayload.epicId));
+      if (!epicTransitionValid) {
+        context.addIssue({
+          code: 'custom',
+          message: 'Epic event references do not match its transition type.',
+        });
+      }
+    }
+    if (
+      event.type === 'task.status_changed' &&
+      !('from' in event.payload && 'to' in event.payload)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Task status events require transition states.',
+      });
+    }
+    if (event.type.startsWith('task.') && event.runId !== null) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Task events cannot carry a Run identity.',
+      });
+    }
+    if (event.previousProjectId !== null && event.previousProjectId === event.projectId) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Previous and current project must differ.',
+      });
+    }
+    if (
+      event.type === 'task.status_changed' &&
+      'from' in event.payload &&
+      'to' in event.payload &&
+      event.payload.from === event.payload.to
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Task status events require an actual transition.',
+      });
+    }
+  });
+export type MissionEvent = z.infer<typeof MissionEventSchema>;
+
 export const CreateRunSchema = z.object({
   taskId: z.string().min(1),
   authorizationId: z.string().uuid(),
@@ -636,7 +818,10 @@ export const AgentPageSchema = z
 export type AgentPage = z.infer<typeof AgentPageSchema>;
 
 export const AgentDirectoryResponseSchema = z
-  .object({ agents: z.array(AgentSummarySchema).max(1000), page: AgentPageSchema })
+  .object({
+    agents: z.array(AgentSummarySchema).max(1000),
+    page: AgentPageSchema,
+  })
   .refine(
     (result) =>
       result.page.complete &&
@@ -802,7 +987,10 @@ export const DepartmentListQuerySchema = z
   .object({ includeArchived: z.enum(['true', 'false']).optional() })
   .strict();
 export const DepartmentListResponseSchema = z
-  .object({ departments: z.array(DepartmentSchema).max(500), total: z.number().int().min(0) })
+  .object({
+    departments: z.array(DepartmentSchema).max(500),
+    total: z.number().int().min(0),
+  })
   .strict()
   .refine((result) => result.departments.length === result.total);
 export type DepartmentListResponse = z.infer<typeof DepartmentListResponseSchema>;
@@ -904,6 +1092,10 @@ export const AgentVersionRouteParamSchema = z
   .pipe(z.number().int().min(1).max(2_147_483_647));
 
 export const ApiErrorSchema = z.object({
-  error: z.object({ code: z.string(), message: z.string(), requestId: z.string().optional() }),
+  error: z.object({
+    code: z.string(),
+    message: z.string(),
+    requestId: z.string().optional(),
+  }),
 });
 export type ApiError = z.infer<typeof ApiErrorSchema>;

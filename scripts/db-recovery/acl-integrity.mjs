@@ -101,6 +101,8 @@ const applicationReadTables = new Set([
   'runs',
   'run_events',
   'run_idempotency',
+  'mission_lane_clock',
+  'mission_lane_events',
   'runtime_authorizations',
   'departments',
   'agents',
@@ -133,14 +135,6 @@ const applicationColumnPrivileges = new Map([
     ]),
   ],
   [
-    'run_events',
-    new Set(
-      ['id', 'run_id', 'sequence', 'event_type', 'at', 'message'].map(
-        (column) => `INSERT:${column}`,
-      ),
-    ),
-  ],
-  [
     'run_idempotency',
     new Set(
       ['idempotency_key', 'request_fingerprint', 'run_id'].map((column) => `INSERT:${column}`),
@@ -153,6 +147,7 @@ const approvedSecurityDefinerRoutineArities = new Map([
   ['lock_run_authorization_for_admission', 2],
   ['append_runtime_admission_denial', 3],
   ['append_runtime_authorization_audit', 3],
+  ['append_runtime_run_event', 3],
 ]);
 const approvedTaskProjectRoutines = new Set([
   'create_task(p_title text, p_detail text, p_project_id text, p_request_id uuid, p_fingerprint bytea)',

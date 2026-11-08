@@ -42,6 +42,7 @@ import {
   ProjectWorkspaceQuerySchema,
   ProjectWorkspaceResponseSchema,
   RunEventSchema,
+  MissionEventSchema,
   RunSchema,
   RunStatusSchema,
 } from './index.ts';
@@ -81,7 +82,9 @@ describe('project epic management contracts', () => {
   it('validates Epic lifecycle shape and bounded complete pagination', () => {
     assert.equal(EpicSchema.safeParse(epic).success, true);
     assert.equal(EpicSchema.safeParse({ ...epic, status: 'archived' }).success, false);
-    assert.deepEqual(EpicListQuerySchema.parse({ limit: '100' }), { limit: 100 });
+    assert.deepEqual(EpicListQuerySchema.parse({ limit: '100' }), {
+      limit: 100,
+    });
     assert.equal(EpicListQuerySchema.safeParse({ limit: '101' }).success, false);
     assert.equal(EpicListQuerySchema.safeParse({ extra: true }).success, false);
     assert.equal(
@@ -95,6 +98,56 @@ describe('project epic management contracts', () => {
       EpicListResponseSchema.safeParse({
         epics: [epic],
         page: { observedTotal: 1, complete: false, nextCursor: null },
+      }).success,
+      false,
+    );
+  });
+});
+
+describe('Mission Lane event contract', () => {
+  const base = {
+    globalSequence: '1',
+    eventId: '016c99e3-9d49-4b35-9730-fd9fa0023210',
+    sourceKey: 'run:run-0001:1',
+    sourceKind: 'run',
+    sourceRecordId: 'evt-run-0001-0001',
+    type: 'run.queued',
+    actor: 'service:omnis-worker',
+    origin: 'mock-worker',
+    synthetic: true,
+    taskId: 'task-0001',
+    runId: 'run-0001',
+    projectId: null,
+    previousProjectId: null,
+    occurredAt: '2026-11-09T12:00:00.000Z',
+    payload: {},
+  } as const;
+
+  it('accepts strict synthetic Run events and rejects unsafe or inconsistent payloads', () => {
+    assert.equal(MissionEventSchema.parse(base).globalSequence, '1');
+    assert.equal(MissionEventSchema.safeParse({ ...base, message: 'raw output' }).success, false);
+    assert.equal(MissionEventSchema.safeParse({ ...base, synthetic: false }).success, false);
+    assert.equal(
+      MissionEventSchema.safeParse({
+        ...base,
+        type: 'run.provider_submission_requested',
+      }).success,
+      false,
+    );
+    assert.equal(
+      MissionEventSchema.safeParse({ ...base, type: 'task.epic_assigned' }).success,
+      false,
+    );
+    assert.equal(
+      MissionEventSchema.safeParse({
+        ...base,
+        sourceKind: 'task',
+        runId: null,
+        type: 'task.status_changed',
+        actor: 'service:omnis-runtime',
+        origin: 'api',
+        synthetic: true,
+        payload: { from: 'open', to: 'in_progress', unexpected: 'value' },
       }).success,
       false,
     );
@@ -117,20 +170,32 @@ describe('Epic-to-task association contracts', () => {
 
   it('validates assignment, unlink, and owner-facing Epic lookup shapes', () => {
     assert.equal(
-      SetTaskEpicSchema.safeParse({ expectedAssociationRevision: 1, epicId: epic.id }).success,
+      SetTaskEpicSchema.safeParse({
+        expectedAssociationRevision: 1,
+        epicId: epic.id,
+      }).success,
       true,
     );
     assert.equal(
-      SetTaskEpicSchema.safeParse({ expectedAssociationRevision: 2, epicId: null }).success,
+      SetTaskEpicSchema.safeParse({
+        expectedAssociationRevision: 2,
+        epicId: null,
+      }).success,
       true,
     );
     assert.equal(
-      SetTaskEpicSchema.safeParse({ expectedAssociationRevision: 0, epicId: null }).success,
+      SetTaskEpicSchema.safeParse({
+        expectedAssociationRevision: 0,
+        epicId: null,
+      }).success,
       false,
     );
     assert.equal(
-      SetTaskEpicSchema.safeParse({ expectedAssociationRevision: 1, epicId: epic.id, extra: true })
-        .success,
+      SetTaskEpicSchema.safeParse({
+        expectedAssociationRevision: 1,
+        epicId: epic.id,
+        extra: true,
+      }).success,
       false,
     );
     assert.equal(
@@ -168,7 +233,10 @@ describe('Epic-to-task association contracts', () => {
         tasks: [],
         page: { observedTotal: 0, complete: true, nextCursor: null },
       }),
-      { tasks: [], page: { observedTotal: 0, complete: true, nextCursor: null } },
+      {
+        tasks: [],
+        page: { observedTotal: 0, complete: true, nextCursor: null },
+      },
     );
     assert.equal(
       ProjectEpicTaskPageSchema.safeParse({
@@ -209,7 +277,9 @@ describe('project workspace read contracts', () => {
   } as const;
 
   it('validates strict bounded pagination and narrow task/run summaries', () => {
-    assert.deepEqual(ProjectWorkspaceQuerySchema.parse({ limit: '100' }), { limit: 100 });
+    assert.deepEqual(ProjectWorkspaceQuerySchema.parse({ limit: '100' }), {
+      limit: 100,
+    });
     assert.equal(ProjectWorkspaceQuerySchema.safeParse({ limit: '0' }).success, false);
     assert.equal(ProjectWorkspaceQuerySchema.safeParse({ limit: '101' }).success, false);
     assert.equal(ProjectWorkspaceQuerySchema.safeParse({ limit: '1.5' }).success, false);
@@ -268,25 +338,39 @@ describe('task project association contracts', () => {
     assert.equal(CreateTaskSchema.parse({ ...task, projectId }).projectId, projectId);
     assert.equal(CreateTaskSchema.parse(task).projectId, undefined);
     assert.equal(
-      SetTaskProjectSchema.safeParse({ projectId, expectedAssociationRevision: 1 }).success,
+      SetTaskProjectSchema.safeParse({
+        projectId,
+        expectedAssociationRevision: 1,
+      }).success,
       true,
     );
     assert.equal(
-      SetTaskProjectSchema.safeParse({ projectId: null, expectedAssociationRevision: 1 }).success,
+      SetTaskProjectSchema.safeParse({
+        projectId: null,
+        expectedAssociationRevision: 1,
+      }).success,
       true,
     );
     assert.equal(
-      SetTaskProjectSchema.safeParse({ projectId: 'unknown', expectedAssociationRevision: 1 })
-        .success,
+      SetTaskProjectSchema.safeParse({
+        projectId: 'unknown',
+        expectedAssociationRevision: 1,
+      }).success,
       false,
     );
     assert.equal(
-      SetTaskProjectSchema.safeParse({ projectId, expectedAssociationRevision: 0 }).success,
+      SetTaskProjectSchema.safeParse({
+        projectId,
+        expectedAssociationRevision: 0,
+      }).success,
       false,
     );
     assert.equal(
-      SetTaskProjectSchema.safeParse({ projectId, expectedAssociationRevision: 1, extra: true })
-        .success,
+      SetTaskProjectSchema.safeParse({
+        projectId,
+        expectedAssociationRevision: 1,
+        extra: true,
+      }).success,
       false,
     );
   });
@@ -298,7 +382,10 @@ describe('task project association contracts', () => {
       runtimeId: 'mock',
       assignmentRevision: 3,
     };
-    assert.deepEqual(TaskSchema.parse({ ...task, ...assigned }), { ...task, ...assigned });
+    assert.deepEqual(TaskSchema.parse({ ...task, ...assigned }), {
+      ...task,
+      ...assigned,
+    });
     assert.equal(
       TaskSchema.safeParse({ ...task, agentId: 'agent-001', profileVersion: 2 }).success,
       false,
@@ -362,13 +449,21 @@ describe('run contracts', () => {
       status: 'queued',
       runtimeKind: 'mock',
       synthetic: true,
-      usage: { quality: 'unknown', inputTokens: null, outputTokens: null, cost: null },
+      usage: {
+        quality: 'unknown',
+        inputTokens: null,
+        outputTokens: null,
+        cost: null,
+      },
       createdAt: '2026-11-02T00:00:00.000Z',
       updatedAt: '2026-11-02T00:00:00.000Z',
     };
     assert.equal(RunSchema.parse(run).usage.inputTokens, null);
     assert.equal(
-      RunSchema.safeParse({ ...run, usage: { quality: 'measured', inputTokens: 0 } }).success,
+      RunSchema.safeParse({
+        ...run,
+        usage: { quality: 'measured', inputTokens: 0 },
+      }).success,
       false,
     );
   });
@@ -381,13 +476,20 @@ describe('run contracts', () => {
       status: 'queued',
       runtimeKind: 'mock',
       synthetic: true,
-      usage: { quality: 'unknown', inputTokens: null, outputTokens: null, cost: null },
+      usage: {
+        quality: 'unknown',
+        inputTokens: null,
+        outputTokens: null,
+        cost: null,
+      },
       createdAt: '2026-11-02T00:00:00.000Z',
       updatedAt: '2026-11-02T00:00:00.000Z',
     };
     assert.equal(
-      RunSchema.parse({ ...run, authorizationId: 'b7cece2c-2e6f-4b3b-92da-f0352c24debb' })
-        .authorizationId,
+      RunSchema.parse({
+        ...run,
+        authorizationId: 'b7cece2c-2e6f-4b3b-92da-f0352c24debb',
+      }).authorizationId,
       'b7cece2c-2e6f-4b3b-92da-f0352c24debb',
     );
     assert.equal(RunSchema.parse({ ...run, authorizationId: null }).authorizationId, null);
@@ -448,24 +550,50 @@ describe('project management contracts', () => {
 
   it('validates bounded owner-created project input and defaults priority', () => {
     assert.deepEqual(
-      CreateProjectSchema.parse({ key: 'OMNIS-OS', name: ' Omnis OS ', objective: ' Objective ' }),
-      { key: 'OMNIS-OS', name: 'Omnis OS', objective: 'Objective', priority: 'normal' },
+      CreateProjectSchema.parse({
+        key: 'OMNIS-OS',
+        name: ' Omnis OS ',
+        objective: ' Objective ',
+      }),
+      {
+        key: 'OMNIS-OS',
+        name: 'Omnis OS',
+        objective: 'Objective',
+        priority: 'normal',
+      },
     );
     assert.equal(
-      CreateProjectSchema.safeParse({ key: 'bad key', name: 'x', objective: 'y' }).success,
+      CreateProjectSchema.safeParse({
+        key: 'bad key',
+        name: 'x',
+        objective: 'y',
+      }).success,
       false,
     );
     assert.equal(
-      CreateProjectSchema.safeParse({ key: 'OK', name: 'x', objective: 'y', status: 'active' })
-        .success,
+      CreateProjectSchema.safeParse({
+        key: 'OK',
+        name: 'x',
+        objective: 'y',
+        status: 'active',
+      }).success,
       false,
     );
     assert.equal(
-      CreateProjectSchema.safeParse({ key: 'OK', name: 'x', objective: 'y', extra: true }).success,
+      CreateProjectSchema.safeParse({
+        key: 'OK',
+        name: 'x',
+        objective: 'y',
+        extra: true,
+      }).success,
       false,
     );
     assert.equal(
-      CreateProjectSchema.safeParse({ key: 'OK', name: 'x\0y', objective: 'objective' }).success,
+      CreateProjectSchema.safeParse({
+        key: 'OK',
+        name: 'x\0y',
+        objective: 'objective',
+      }).success,
       false,
     );
   });
@@ -483,23 +611,35 @@ describe('project management contracts', () => {
       updatedAt: project.updatedAt,
     };
     assert.equal(
-      ProjectListResponseSchema.safeParse({ projects: [summary], total: 1, complete: true })
-        .success,
+      ProjectListResponseSchema.safeParse({
+        projects: [summary],
+        total: 1,
+        complete: true,
+      }).success,
       true,
     );
     assert.equal(
-      ProjectListResponseSchema.safeParse({ projects: [project], total: 1, complete: true })
-        .success,
+      ProjectListResponseSchema.safeParse({
+        projects: [project],
+        total: 1,
+        complete: true,
+      }).success,
       false,
     );
     assert.equal(
-      ProjectListResponseSchema.safeParse({ projects: [project], total: 2, complete: true })
-        .success,
+      ProjectListResponseSchema.safeParse({
+        projects: [project],
+        total: 2,
+        complete: true,
+      }).success,
       false,
     );
     assert.equal(
-      ProjectListResponseSchema.safeParse({ projects: [project], total: 1, complete: false })
-        .success,
+      ProjectListResponseSchema.safeParse({
+        projects: [project],
+        total: 1,
+        complete: false,
+      }).success,
       false,
     );
   });
@@ -555,11 +695,17 @@ describe('project milestone contracts', () => {
     assert.equal(CreateMilestoneSchema.safeParse({ title: 'x', unexpected: true }).success, false);
     assert.equal(CreateMilestoneSchema.safeParse({ title: '  ' }).success, false);
     assert.equal(
-      CreateMilestoneSchema.safeParse({ title: 'Review', targetDate: '2027-02-29' }).success,
+      CreateMilestoneSchema.safeParse({
+        title: 'Review',
+        targetDate: '2027-02-29',
+      }).success,
       false,
     );
     assert.equal(
-      CreateMilestoneSchema.safeParse({ title: 'Review', targetDate: '0000-01-01' }).success,
+      CreateMilestoneSchema.safeParse({
+        title: 'Review',
+        targetDate: '0000-01-01',
+      }).success,
       false,
     );
     assert.equal(
@@ -568,7 +714,10 @@ describe('project milestone contracts', () => {
     );
     assert.equal(UpdateMilestoneSchema.safeParse({ expectedRevision: 1 }).success, false);
     assert.equal(
-      UpdateMilestoneSchema.safeParse({ expectedRevision: 1, status: 'archived' }).success,
+      UpdateMilestoneSchema.safeParse({
+        expectedRevision: 1,
+        status: 'archived',
+      }).success,
       false,
     );
   });
@@ -598,17 +747,29 @@ describe('agent profile read contracts', () => {
     identityRevision: 1,
     name: 'Atlas',
     slug: 'atlas',
-    department: { id: 'dep_engineering', slug: 'engineering', name: 'Engineering' },
+    department: {
+      id: 'dep_engineering',
+      slug: 'engineering',
+      name: 'Engineering',
+    },
     lifecycle: 'available',
     archivedAt: null,
-    currentVersion: { versionNo: 2, profession: 'Systems Architect', seniority: 'senior' },
+    currentVersion: {
+      versionNo: 2,
+      profession: 'Systems Architect',
+      seniority: 'senior',
+    },
     provenance: 'owner_created',
     createdAt: at,
     updatedAt: at,
   };
 
   it('validates optimistic identity updates and strict, versioned receipts', () => {
-    const input = { expectedIdentityRevision: 1, name: ' Atlas ', slug: 'atlas-next' };
+    const input = {
+      expectedIdentityRevision: 1,
+      name: ' Atlas ',
+      slug: 'atlas-next',
+    };
     assert.deepEqual(UpdateAgentIdentityInputSchema.parse(input), {
       expectedIdentityRevision: 1,
       name: 'Atlas',
@@ -702,7 +863,11 @@ describe('agent profile read contracts', () => {
 
   it('validates immutable snapshot shape and exact version identity', () => {
     assert.equal(
-      AgentProfileVersionResponseSchema.safeParse({ agent, version, isCurrent: true }).success,
+      AgentProfileVersionResponseSchema.safeParse({
+        agent,
+        version,
+        isCurrent: true,
+      }).success,
       true,
     );
     assert.equal(
@@ -779,13 +944,19 @@ describe('agent profile read contracts', () => {
   });
 
   it('accepts only bounded canonical version pagination parameters', () => {
-    assert.deepEqual(AgentVersionQuerySchema.parse({ limit: '50' }), { limit: 50 });
+    assert.deepEqual(AgentVersionQuerySchema.parse({ limit: '50' }), {
+      limit: 50,
+    });
     assert.deepEqual(AgentVersionQuerySchema.parse({ cursor: 'opaque_cursor', limit: '10' }), {
       cursor: 'opaque_cursor',
       limit: 10,
     });
-    assert.deepEqual(AgentVersionQuerySchema.parse({ limit: '1' }), { limit: 1 });
-    assert.deepEqual(AgentVersionQuerySchema.parse({ limit: '100' }), { limit: 100 });
+    assert.deepEqual(AgentVersionQuerySchema.parse({ limit: '1' }), {
+      limit: 1,
+    });
+    assert.deepEqual(AgentVersionQuerySchema.parse({ limit: '100' }), {
+      limit: 100,
+    });
     for (const query of [{ limit: '0' }, { limit: '01' }, { limit: '101' }, { other: 'x' }]) {
       assert.equal(AgentVersionQuerySchema.safeParse(query).success, false);
     }
@@ -804,12 +975,19 @@ describe('AO-104 management input contracts', () => {
 
   it('validates owner-managed agent creation and expected profile revisions', () => {
     assert.deepEqual(
-      CreateAgentInputSchema.parse({ name: 'Atlas', slug: 'atlas', departmentId: null }),
+      CreateAgentInputSchema.parse({
+        name: 'Atlas',
+        slug: 'atlas',
+        departmentId: null,
+      }),
       { name: 'Atlas', slug: 'atlas', departmentId: null },
     );
     assert.equal(
-      CreateAgentInputSchema.safeParse({ name: 'Atlas', slug: 'Atlas', departmentId: null })
-        .success,
+      CreateAgentInputSchema.safeParse({
+        name: 'Atlas',
+        slug: 'Atlas',
+        departmentId: null,
+      }).success,
       false,
     );
     assert.equal(
@@ -899,8 +1077,10 @@ describe('AO-104 management input contracts', () => {
     };
     assert.equal(AgentMutationReceiptSchema.safeParse(receipt).success, true);
     assert.equal(
-      AgentMutationReceiptSchema.safeParse({ ...receipt, instructions: 'must not be echoed' })
-        .success,
+      AgentMutationReceiptSchema.safeParse({
+        ...receipt,
+        instructions: 'must not be echoed',
+      }).success,
       false,
     );
   });
@@ -916,8 +1096,10 @@ describe('AO-104 management input contracts', () => {
     };
     assert.equal(AgentProfileWriteInputSchema.safeParse(profile).success, true);
     assert.equal(
-      AgentProfileWriteInputSchema.safeParse({ ...profile, instructions: 'x'.repeat(16_385) })
-        .success,
+      AgentProfileWriteInputSchema.safeParse({
+        ...profile,
+        instructions: 'x'.repeat(16_385),
+      }).success,
       false,
     );
     assert.equal(
@@ -928,11 +1110,17 @@ describe('AO-104 management input contracts', () => {
 
   it('rejects malformed department input and requires complete directory metadata', () => {
     assert.equal(
-      CreateDepartmentSchema.safeParse({ slug: 'Engineering', name: 'Engineering' }).success,
+      CreateDepartmentSchema.safeParse({
+        slug: 'Engineering',
+        name: 'Engineering',
+      }).success,
       false,
     );
     assert.equal(
-      CreateDepartmentSchema.safeParse({ slug: 'engineering', name: ' Engineering ' }).success,
+      CreateDepartmentSchema.safeParse({
+        slug: 'engineering',
+        name: ' Engineering ',
+      }).success,
       true,
     );
     assert.equal(

@@ -18,6 +18,8 @@ const allowed = [
   acl('table', 'omnis', 'runs', 'SELECT'),
   acl('table', 'omnis', 'run_events', 'SELECT'),
   acl('table', 'omnis', 'run_idempotency', 'SELECT'),
+  acl('table', 'omnis', 'mission_lane_clock', 'SELECT'),
+  acl('table', 'omnis', 'mission_lane_events', 'SELECT'),
   acl('table', 'omnis', 'runtime_authorizations', 'SELECT'),
   acl('table', 'omnis', 'departments', 'SELECT'),
   acl('table', 'omnis', 'agents', 'SELECT'),
@@ -267,6 +269,15 @@ const allowed = [
     'omnis_runtime',
     true,
   ),
+  acl(
+    'routine',
+    'omnis',
+    'append_runtime_run_event(p_run_id text, p_event_type text, p_message text)',
+    'EXECUTE',
+    null,
+    'omnis_runtime',
+    true,
+  ),
   acl('column', 'omnis', 'tasks', 'UPDATE', 'status'),
   ...[
     'connector_authorization_id',
@@ -321,10 +332,22 @@ describe('post-restore PostgreSQL ACL integrity', () => {
     );
   });
 
+  it('allows Mission Lane reads but rejects direct ledger and cursor writes', () => {
+    for (const object of ['mission_lane_clock', 'mission_lane_events']) {
+      for (const privilege of ['INSERT', 'UPDATE', 'DELETE']) {
+        assert.throws(
+          () => assertRuntimeAclPolicy([...allowed, acl('table', 'omnis', object, privilege)]),
+          new RegExp(`${privilege} is prohibited on omnis\\.${object}`),
+        );
+      }
+    }
+  });
+
   it('rejects direct task identity/project writes and task sequence access', () => {
     for (const entry of [
       acl('column', 'omnis', 'tasks', 'INSERT', 'id'),
       acl('column', 'omnis', 'tasks', 'UPDATE', 'project_id'),
+      acl('column', 'omnis', 'run_events', 'INSERT', 'event_type'),
       acl('sequence', 'omnis', 'task_id_seq', 'USAGE'),
     ]) {
       assert.throws(() => assertRuntimeAclPolicy([...allowed, entry]));

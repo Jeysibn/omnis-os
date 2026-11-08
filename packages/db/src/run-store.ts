@@ -265,7 +265,10 @@ export class PostgresRunStore {
           parsed.data.expectedAssociationRevision,
           parsed.data.projectId,
           requestId,
-          taskFingerprint('task.project_set', { taskId: parsedTaskId.data, input: parsed.data }),
+          taskFingerprint('task.project_set', {
+            taskId: parsedTaskId.data,
+            input: parsed.data,
+          }),
         ],
       );
       const current = await this.getTask(parsedTaskId.data);
@@ -432,9 +435,8 @@ export class PostgresRunStore {
     }
     const fingerprint = JSON.stringify({ taskId, authorizationId });
     return inTransaction(this.pool, async (client) => {
-      // Bound waits on row locks and the publicly callable capacity lock. The
-      // transaction rolls back on timeout, before admission state is committed.
-      await client.query("SET LOCAL lock_timeout = '3s'");
+      await lockMissionLaneWriter(client);
+      // The shared Mission Lane lock is first in the event-writer lock order.
       await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [admissionLock]);
       const previous = await client.query<
         QueryResultRow & { request_fingerprint: string; run_id: string }
@@ -524,7 +526,9 @@ export class PostgresRunStore {
       );
 
       // pg-boss writes the durable job in this exact transaction. A crash cannot commit only one side.
-      const jobId = await enqueue(asPgBossTransaction(client), { runId: run.id });
+      const jobId = await enqueue(asPgBossTransaction(client), {
+        runId: run.id,
+      });
       if (!jobId) throw new StoreError('conflict', 'The durable mock job was not admitted.', 409);
       await client.query('UPDATE omnis.runs SET pg_boss_job_id = $2 WHERE id = $1', [
         run.id,
@@ -535,7 +539,11 @@ export class PostgresRunStore {
         [idempotencyKey, fingerprint, run.id],
       );
       await client.query("UPDATE omnis.tasks SET status = 'in_progress' WHERE id = $1", [task.id]);
-      return { run, created: true, events: [{ runId: run.id, event: queuedEvent }] };
+      return {
+        run,
+        created: true,
+        events: [{ runId: run.id, event: queuedEvent }],
+      };
     }).catch((error: unknown) => {
       if ((error as { code?: string })?.code === 'P2001') return mapStoreError(error);
       throw error;
@@ -583,7 +591,7 @@ export class PostgresRunStore {
     });
 
     return inTransaction(this.pool, async (client) => {
-      await client.query("SET LOCAL lock_timeout = '3s'");
+      await lockMissionLaneWriter(client);
       await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [admissionLock]);
       const previous = await client.query<
         QueryResultRow & { request_fingerprint: string; run_id: string }
@@ -657,7 +665,9 @@ export class PostgresRunStore {
         'run.queued',
         'Queued as a synthetic broker run. No real provider or runtime is connected.',
       );
-      const jobId = await enqueue(asPgBossTransaction(client), { runId: run.id });
+      const jobId = await enqueue(asPgBossTransaction(client), {
+        runId: run.id,
+      });
       if (!jobId)
         throw new StoreError('conflict', 'The durable synthetic job was not admitted.', 409);
       await client.query('UPDATE omnis.runs SET pg_boss_job_id = $2 WHERE id = $1', [
@@ -698,6 +708,7 @@ export class PostgresRunStore {
     )
       return [];
     return inTransaction(this.pool, async (client) => {
+      await lockMissionLaneWriter(client);
       const current = await lockRun(client, link.run.id);
       if (current.status !== 'unknown' || current.execution_generation !== link.generation)
         return [];
@@ -794,8 +805,14 @@ export class PostgresRunStore {
     runId: string,
     workerId: string,
     leaseSeconds: number,
-  ): Promise<{ run: Run; started: boolean; events: DurableEvent[]; generation: number }> {
+  ): Promise<{
+    run: Run;
+    started: boolean;
+    events: DurableEvent[];
+    generation: number;
+  }> {
     return inTransaction(this.pool, async (client) => {
+      await lockMissionLaneWriter(client);
       const current = await lockRun(client, runId);
       if (!current.connector_authorization_id) {
         throw new StoreError('invalid_transition', 'The run is not a synthetic broker run.', 409);
@@ -874,6 +891,7 @@ export class PostgresRunStore {
     authorizationId: string,
   ): Promise<{ run: Run; events: DurableEvent[] }> {
     return inTransaction(this.pool, async (client) => {
+      await lockMissionLaneWriter(client);
       const current = await lockRun(client, runId);
       if (current.connector_authorization_id !== authorizationId) {
         throw new StoreError('not_found', 'Synthetic Run was not found.', 404);
@@ -905,6 +923,7 @@ export class PostgresRunStore {
       throw new StoreError('invalid_input', 'Synthetic broker result is invalid.', 400);
     }
     return inTransaction(this.pool, async (client) => {
+      await lockMissionLaneWriter(client);
       const current = await lockRun(client, runId);
       if (
         !current.connector_authorization_id ||
@@ -1046,6 +1065,7 @@ export class PostgresRunStore {
     generation: number;
   }> {
     return inTransaction(this.pool, async (client) => {
+      await lockMissionLaneWriter(client);
       const current = await lockRun(client, runId);
       if (current.status === 'stopping') {
         const result = await client.query<RunRow>(
@@ -1204,6 +1224,7 @@ export class PostgresRunStore {
 
   async requestStop(runId: string): Promise<{ run: Run; events: DurableEvent[] }> {
     return inTransaction(this.pool, async (client) => {
+      await lockMissionLaneWriter(client);
       const current = await lockRun(client, runId);
       if (current.connector_authorization_id) {
         throw new StoreError(
@@ -1244,6 +1265,7 @@ export class PostgresRunStore {
     evidenceRefs: string[] = [],
   ): Promise<{ run: Run; events: DurableEvent[] }> {
     return inTransaction(this.pool, async (client) => {
+      await lockMissionLaneWriter(client);
       const current = await lockRun(client, runId);
       if (
         current.status === 'stopping' &&
@@ -1299,7 +1321,10 @@ export class PostgresRunStore {
           'run.interrupted',
           'Authorization was revoked or expired before completion was committed.',
         );
-        return { run: mapRun(interrupted.rows[0]!), events: [{ runId, event }] };
+        return {
+          run: mapRun(interrupted.rows[0]!),
+          events: [{ runId, event }],
+        };
       }
       if (
         current.status !== 'running' ||
@@ -1336,6 +1361,7 @@ export class PostgresRunStore {
     generation: number,
   ): Promise<{ run: Run; events: DurableEvent[] }> {
     return inTransaction(this.pool, async (client) => {
+      await lockMissionLaneWriter(client);
       const current = await lockRun(client, runId);
       if (current.status !== 'stopping') {
         if (terminalStatuses.has(current.status)) {
@@ -1377,6 +1403,7 @@ export class PostgresRunStore {
     message: string,
   ): Promise<{ run: Run; events: DurableEvent[] }> {
     return inTransaction(this.pool, async (client) => {
+      await lockMissionLaneWriter(client);
       const current = await lockRun(client, runId);
       if (current.status === 'stopping') {
         if (current.lease_owner !== workerId || current.execution_generation !== generation) {
@@ -1421,6 +1448,7 @@ export class PostgresRunStore {
     message = 'The worker stopped before the run reached a terminal state.',
   ): Promise<{ run: Run; events: DurableEvent[] } | undefined> {
     return inTransaction(this.pool, async (client) => {
+      await lockMissionLaneWriter(client);
       const current = await lockRun(client, runId);
       if (!['running', 'stopping'].includes(current.status)) return undefined;
       if (current.lease_owner !== workerId || current.execution_generation !== generation)
@@ -1442,6 +1470,7 @@ export class PostgresRunStore {
 
   async reconcileExpiredRuns(): Promise<DurableEvent[]> {
     return inTransaction(this.pool, async (client) => {
+      await lockMissionLaneWriter(client);
       const expired = await client.query<RunRow>(
         `
           SELECT ${runColumns}
@@ -1518,10 +1547,18 @@ export class PostgresRunStore {
   }
 
   async listQueuedJobs(): Promise<
-    Array<{ runId: string; status: 'queued' | 'stopping'; jobId: string | null }>
+    Array<{
+      runId: string;
+      status: 'queued' | 'stopping';
+      jobId: string | null;
+    }>
   > {
     const result = await this.pool.query<
-      QueryResultRow & { id: string; status: 'queued' | 'stopping'; pg_boss_job_id: string | null }
+      QueryResultRow & {
+        id: string;
+        status: 'queued' | 'stopping';
+        pg_boss_job_id: string | null;
+      }
     >(
       `
         SELECT id, status, pg_boss_job_id FROM omnis.runs
@@ -1543,6 +1580,7 @@ export class PostgresRunStore {
     message: string,
   ): Promise<{ run: Run; events: DurableEvent[] } | undefined> {
     return inTransaction(this.pool, async (client) => {
+      await lockMissionLaneWriter(client);
       const current = await lockRun(client, runId);
       if (current.status === 'stopping' && !current.lease_owner) {
         // No worker ever claimed this stop-requested job; the reconciler acknowledges
@@ -1568,6 +1606,7 @@ export class PostgresRunStore {
     runId: string,
   ): Promise<{ run: Run; events: DurableEvent[] } | undefined> {
     return inTransaction(this.pool, async (client) => {
+      await lockMissionLaneWriter(client);
       const current = await lockRun(client, runId);
       if (current.status !== 'stopping') return undefined;
       return this.cancelLocked(client, current);
@@ -1595,7 +1634,10 @@ export class PostgresRunStore {
     );
     if (!current.connector_authorization_id)
       await appendRunAuthorizationAudit(client, current.id, 'operation.cancelled');
-    return { run: mapRun(updated.rows[0]!), events: [{ runId: current.id, event }] };
+    return {
+      run: mapRun(updated.rows[0]!),
+      events: [{ runId: current.id, event }],
+    };
   }
 }
 
@@ -1633,43 +1675,47 @@ async function lockRun(client: PoolClient, runId: string): Promise<RunRow> {
   return result.rows[0];
 }
 
+async function lockMissionLaneWriter(client: PoolClient): Promise<void> {
+  // Mission Lane's serialized cursor must precede authorization, task, and Run
+  // row locks in every event-producing transaction. The fixed key is internal.
+  await client.query("SET LOCAL lock_timeout = '3s'");
+  await client.query('SELECT pg_advisory_xact_lock($1::bigint)', ['70463909136525']);
+}
+
 async function appendEvent(
   client: PoolClient,
   runId: string,
   type: RunEventType,
   message: string,
 ): Promise<RunEvent> {
-  const sequenceResult = await client.query<
-    QueryResultRow & { last_event_sequence: number; updated_at: Date | string }
-  >(
-    `
-      UPDATE omnis.runs
-      SET last_event_sequence = last_event_sequence + 1, updated_at = now()
-      WHERE id = $1
-      RETURNING last_event_sequence, updated_at
-    `,
-    [runId],
-  );
-  const runSequence = sequenceResult.rows[0];
-  if (!runSequence) throw new StoreError('not_found', 'Run was not found.', 404);
-  const event = RunEventSchema.parse({
-    id: `evt-${runId}-${String(runSequence.last_event_sequence).padStart(4, '0')}`,
+  const result = await client.query<
+    QueryResultRow & {
+      id: string;
+      run_id: string;
+      sequence: number;
+      event_type: RunEventType;
+      at: Date | string;
+      source: 'mock';
+      synthetic: true;
+      message: string;
+    }
+  >('SELECT * FROM omnis.append_runtime_run_event($1, $2, $3)', [
     runId,
-    sequence: runSequence.last_event_sequence,
-    at: asIso(runSequence.updated_at),
     type,
-    source: 'mock',
-    synthetic: true,
-    message: message.slice(0, 2000),
+    message.slice(0, 2000),
+  ]);
+  const row = result.rows[0];
+  if (!row) throw new StoreError('not_found', 'Run was not found.', 404);
+  return RunEventSchema.parse({
+    id: row.id,
+    runId: row.run_id,
+    sequence: row.sequence,
+    at: asIso(row.at),
+    type: row.event_type,
+    source: row.source,
+    synthetic: row.synthetic,
+    message: row.message,
   });
-  await client.query(
-    `
-    INSERT INTO omnis.run_events (id, run_id, sequence, event_type, at, message)
-    VALUES ($1, $2, $3, $4, $5, $6)
-    `,
-    [event.id, event.runId, event.sequence, event.type, event.at, event.message],
-  );
-  return event;
 }
 
 function requiredWorkspaceValue<T>(value: T | null): T {
