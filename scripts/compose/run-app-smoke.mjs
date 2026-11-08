@@ -201,12 +201,41 @@ try {
     ['OMNIS_CI_LAUNCHER_SOCKET_DIRECTORY', join(directory, 'launcher-fixture')],
   ]);
 
+  const renderedConfig = JSON.parse(compose(['config', '--format', 'json']).stdout);
+  assert.deepEqual(
+    renderedConfig.services.postgres.ports,
+    [
+      {
+        mode: 'ingress',
+        target: 5432,
+        published: String(dbPort),
+        host_ip: '127.0.0.1',
+        protocol: 'tcp',
+      },
+    ],
+    'disposable PostgreSQL must publish only on the selected loopback port',
+  );
+
   stackStarted = true;
   compose(['up', '--detach', '--wait', '--wait-timeout', '90', 'postgres'], { timeout: 120_000 });
   assert.equal(
     compose(['exec', '-T', 'postgres', 'pg_isready', '-U', 'omnis', '-d', dbName]).status,
     0,
   );
+  const postgresId = compose(['ps', '-q', 'postgres']).stdout.trim();
+  assert.ok(postgresId, 'running disposable PostgreSQL container has an ID');
+  const postgresPortInspection = runDocker(
+    'docker',
+    ['inspect', postgresId, '--format', '{{json .NetworkSettings.Ports}}'],
+    { encoding: 'utf8' },
+  );
+  assert.equal(
+    postgresPortInspection.status,
+    0,
+    `could not inspect disposable PostgreSQL port binding: ${redact(postgresPortInspection.stderr || 'unknown Docker error')}`,
+  );
+  const postgresPorts = JSON.parse(postgresPortInspection.stdout);
+  assert.deepEqual(postgresPorts['5432/tcp'], [{ HostIp: '127.0.0.1', HostPort: String(dbPort) }]);
   const provision = spawnSync(
     process.execPath,
     ['--experimental-strip-types', 'packages/db/src/provision.ts'],
