@@ -2430,3 +2430,18 @@ button:disabled {
     width: 100%;
   }
 }
+
+.synthetic-revoke-confirm {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-soft);
+}
+.synthetic-revoke-confirm h3 {
+  margin: 0 0 6px;
+  font-size: 1rem;
+}
+.synthetic-revoke-confirm p {
+  margin: 0 0 8px;
+}

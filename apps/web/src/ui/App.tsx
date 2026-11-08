@@ -40,6 +40,8 @@ import {
   type Task,
 } from '@omnis/contracts';
 import { ApiRequestError, request } from './api.js';
+import { formatDate } from './manilaTime.js';
+import { createRunStreamRecovery, type SessionProbeResult } from './runStreamRecovery.js';
 import { AgentsWorkspace } from './agents/AgentsWorkspace.js';
 import { DepartmentsWorkspace } from './departments/DepartmentsWorkspace.js';
 import { ProjectsWorkspace } from './projects/ProjectsWorkspace.js';
@@ -222,15 +224,6 @@ function statusLabel(status: Run['status'] | Task['status']): string {
   return status.replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
-function formatDate(value: string, options: Intl.DateTimeFormatOptions = {}) {
-  return new Intl.DateTimeFormat('en-PH', {
-    timeZone: 'Asia/Manila',
-    dateStyle: 'medium',
-    timeStyle: 'short',
-    ...options,
-  }).format(new Date(value));
-}
-
 function App() {
   const [owner, setOwner] = useState<Owner | null>(null);
   const [checking, setChecking] = useState(true);
@@ -251,6 +244,8 @@ function App() {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [events, setEvents] = useState<RunEvent[]>([]);
   const [streamState, setStreamState] = useState<StreamState>('connecting');
+  const [streamEpoch, setStreamEpoch] = useState(0);
+  const recreatingStream = useRef(false);
   const [page, setPage] = useState<Page>(() => readRoute().page);
   const [restoredTaskCreate] = useState(readPendingTaskCreate);
   const [title, setTitle] = useState(() => restoredTaskCreate?.operation.title ?? '');
@@ -465,6 +460,27 @@ function App() {
     [expireSessionIfNeeded],
   );
 
+  // Authenticated Run read used to tell a dropped network from an ended owner session after a
+  // stream error. 401 goes through the existing sign-out flow; 403 and other refusals are shown
+  // without signing out; network and server trouble never sign the owner out.
+  const probeRunSession = useCallback(
+    async (runId: string): Promise<SessionProbeResult> => {
+      try {
+        const run = await request(`/api/v1/runs/${encodeURIComponent(runId)}`, {}, (value) =>
+          RunSchema.parse(value),
+        );
+        setRuns((current) => current.map((entry) => (entry.id === run.id ? run : entry)));
+        return 'valid';
+      } catch (cause) {
+        if (expireSessionIfNeeded(cause)) return 'unauthorized';
+        if (cause instanceof ApiRequestError && cause.outcome === 'uncertain') return 'unreachable';
+        setReconcileError(failureMessage(cause, 'Access to this run could not be confirmed.'));
+        return 'rejected';
+      }
+    },
+    [expireSessionIfNeeded],
+  );
+
   useEffect(() => {
     const onHashChange = () => {
       navigatedInApp.current = true;
@@ -516,12 +532,25 @@ function App() {
       setStreamState('closed');
       return;
     }
-    setEvents([]);
-    setReconcileError('');
-    setAnnouncement('');
-    seenSequences.current.set(selectedRunId, new Set());
+    // A recreated stream (after a confirmed-valid session) keeps what is on screen: the new
+    // connection replays from the start and the sequence set below drops the duplicates.
+    const recreated = recreatingStream.current;
+    recreatingStream.current = false;
+    if (!recreated) {
+      setEvents([]);
+      setReconcileError('');
+      setAnnouncement('');
+      seenSequences.current.set(selectedRunId, new Set());
+    }
     setStreamState('connecting');
     let terminalHandled = false;
+    const recovery = createRunStreamRecovery({
+      probe: () => probeRunSession(selectedRunId),
+      recreate: () => {
+        recreatingStream.current = true;
+        setStreamEpoch((epoch) => epoch + 1);
+      },
+    });
     const source = new EventSource(`/api/v1/runs/${encodeURIComponent(selectedRunId)}/events`);
     const eventNames = [
       'run.queued',
@@ -535,7 +564,10 @@ function App() {
       'run.interrupted',
       'run.outcome_unknown',
     ];
-    source.onopen = () => setStreamState('connected');
+    source.onopen = () => {
+      recovery.progress();
+      setStreamState('connected');
+    };
     const handlers = eventNames.map((name) => {
       const handler = (message: Event) => {
         try {
@@ -548,6 +580,7 @@ function App() {
           ) {
             throw new Error('The event stream cursor or run identity did not match its event.');
           }
+          recovery.progress();
           const received = seenSequences.current.get(selectedRunId) ?? new Set<number>();
           if (received.has(parsed.sequence)) return;
           const newestSequence = Math.max(0, ...received);
@@ -600,14 +633,18 @@ function App() {
       return [name, handler] as const;
     });
     source.onerror = () => {
-      if (!terminalHandled)
-        setStreamState(source.readyState === EventSource.CLOSED ? 'closed' : 'reconnecting');
+      if (terminalHandled) return;
+      const closed = source.readyState === EventSource.CLOSED;
+      setStreamState(closed ? 'closed' : 'reconnecting');
+      // EventSource hides the HTTP status; ask the authenticated API whether the session is valid.
+      recovery.streamError(closed);
     };
     return () => {
+      recovery.dispose();
       handlers.forEach(([name, handler]) => source.removeEventListener(name, handler));
       source.close();
     };
-  }, [owner, page, reconcileRun, selectedRunExists, selectedRunId]);
+  }, [owner, page, probeRunSession, reconcileRun, selectedRunExists, selectedRunId, streamEpoch]);
 
   async function signIn(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
