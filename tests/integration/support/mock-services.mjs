@@ -88,6 +88,22 @@ export async function startMockServices({
   const syntheticBrokerTestToken = randomBytes(48).toString('hex');
   const sessionSecret = randomBytes(48).toString('hex');
   const agentIdempotencyKey = randomBytes(32).toString('hex');
+  const sensitiveLogCanaries = [
+    canary,
+    testOwnerPassword,
+    databaseUrl,
+    migrationUrl,
+    authorizerUrl,
+    launcherUrl,
+    adminAuditUrl,
+    internalToken,
+    authorizerToken,
+    brokerAuthorizerToken,
+    syntheticBrokerTestToken,
+    sessionSecret,
+    agentIdempotencyKey,
+    passwordHash,
+  ];
   const decisionKeyFile = join(tempDirectory, 'authorizer-ed25519.pem');
   const decisionKeyNotBefore = new Date(Date.now() - 5_000).toISOString();
   const decisionKeyNotAfter = new Date(Date.now() + 60 * 60_000).toISOString();
@@ -203,23 +219,28 @@ export async function startMockServices({
     if (process.env.OMNIS_RECOVERY_INTEGRATION === '1') {
       env.OMNIS_MOCK_TEST_DELAY_MS = '1000';
     }
-    return startService('apps/worker', workerEnvPath, env);
+    return startService('apps/worker', workerEnvPath, env, sensitiveLogCanaries);
   };
   const startApi = async () => {
     const env = withoutDatabaseSecrets(process.env);
     delete env[canaryName];
     if (enableSyntheticBrokerTestMode) env.NODE_ENV = 'test';
-    return startService('apps/api', apiEnvPath, env);
+    return startService('apps/api', apiEnvPath, env, sensitiveLogCanaries);
   };
   const startAuthorizer = async () => {
     const env = withoutDatabaseSecrets(process.env);
     delete env.OMNIS_TEST_DATABASE_URL;
     delete env.OMNIS_TEST_MIGRATION_DATABASE_URL;
     delete env.OMNIS_TEST_ADMIN_DATABASE_URL;
-    return startService('apps/authorizer', authorizerEnvPath, env);
+    return startService('apps/authorizer', authorizerEnvPath, env, sensitiveLogCanaries);
   };
   const startLauncher = async () =>
-    startService('apps/sandbox-launcher', launcherEnvPath, withoutDatabaseSecrets(process.env));
+    startService(
+      'apps/sandbox-launcher',
+      launcherEnvPath,
+      withoutDatabaseSecrets(process.env),
+      sensitiveLogCanaries,
+    );
   const cleanup = (processes = {}) => {
     cleanupPromise ??= (async () => {
       const stopped = await Promise.allSettled(
@@ -252,6 +273,7 @@ export async function startMockServices({
         testToken: syntheticBrokerTestToken,
         authorizerSocket: brokerAuthorizerSocket,
         authorizerToken: brokerAuthorizerToken,
+        sensitiveValues: sensitiveLogCanaries,
       });
       syntheticBrokerProcess = syntheticBrokerFixture.process;
     }
@@ -306,30 +328,12 @@ export async function startMockServices({
       syntheticBrokerFixture,
       syntheticBrokerProcess,
       assertSensitiveValuesAbsentFromLogs: () =>
-        assertSensitiveValuesAbsentFromLogs(
-          [
-            canary,
-            testOwnerPassword,
-            databaseUrl,
-            migrationUrl,
-            authorizerUrl,
-            launcherUrl,
-            adminAuditUrl,
-            internalToken,
-            authorizerToken,
-            brokerAuthorizerToken,
-            syntheticBrokerTestToken,
-            sessionSecret,
-            agentIdempotencyKey,
-            passwordHash,
-          ],
-          [
-            { name: 'API', process: api },
-            { name: 'worker', process: worker },
-            { name: 'authorizer', process: authorizer },
-            { name: 'synthetic broker', process: syntheticBrokerProcess },
-          ],
-        ),
+        assertSensitiveValuesAbsentFromLogs(sensitiveLogCanaries, [
+          { name: 'API', process: api },
+          { name: 'worker', process: worker },
+          { name: 'authorizer', process: authorizer },
+          { name: 'synthetic broker', process: syntheticBrokerProcess },
+        ]),
       auditPool,
       api,
       worker,
@@ -633,10 +637,26 @@ export function socketRequest(socketPath, requestPath, init = {}) {
   });
 }
 
+export function appendCapturedLogChunk(child, chunk, values, maxBytes = 262_144) {
+  const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
+  const previousTail = child.sensitiveLogOverlap ?? '';
+  const searchable = `${previousTail}${text}`;
+  const maxCanaryLength = values.reduce(
+    (length, value) => (typeof value === 'string' ? Math.max(length, value.length) : length),
+    0,
+  );
+  child.sensitiveCanaryDetected ||= values.some(
+    (value) => typeof value === 'string' && value.length > 0 && searchable.includes(value),
+  );
+  child.sensitiveLogOverlap = maxCanaryLength > 1 ? searchable.slice(-(maxCanaryLength - 1)) : '';
+  child.capturedLogs = `${child.capturedLogs ?? ''}${text}`.slice(-maxBytes);
+}
+
 export function assertSensitiveValuesAbsentFromLogs(values, processes) {
   for (const { name, process: child } of processes) {
     const logs = child?.capturedLogs ?? '';
     if (
+      child?.sensitiveCanaryDetected ||
       values.some((value) => typeof value === 'string' && value.length > 0 && logs.includes(value))
     ) {
       throw new Error(`A sensitive test value was written to ${name} logs.`);
@@ -649,6 +669,7 @@ export async function startSyntheticBrokerFixture({
   testToken,
   authorizerSocket,
   authorizerToken,
+  sensitiveValues = [],
 }) {
   const inherited = {};
   for (const name of ['PATH', 'HOME', 'TMPDIR']) {
@@ -670,9 +691,11 @@ export async function startSyntheticBrokerFixture({
     },
   );
   child.capturedLogs = '';
-  child.stderr?.on('data', (chunk) => {
-    child.capturedLogs = `${child.capturedLogs}${chunk.toString('utf8')}`.slice(-65_536);
-  });
+  child.sensitiveCanaryDetected = false;
+  child.sensitiveLogOverlap = '';
+  child.stderr?.on('data', (chunk) =>
+    appendCapturedLogChunk(child, chunk, sensitiveValues, 65_536),
+  );
   const timeoutAt = Date.now() + 5_000;
   let ready = false;
   while (Date.now() < timeoutAt && !ready) {
@@ -736,7 +759,7 @@ function parseLoopbackOrigin(value) {
   return parsed;
 }
 
-async function startService(appDirectory, envFile, env) {
+async function startService(appDirectory, envFile, env, sensitiveValues) {
   const child = await startManagedProcess(
     process.execPath,
     ['--experimental-strip-types', `--env-file=${envFile}`, 'src/server.ts'],
@@ -747,9 +770,11 @@ async function startService(appDirectory, envFile, env) {
     },
   );
   child.capturedLogs = '';
+  child.sensitiveCanaryDetected = false;
+  child.sensitiveLogOverlap = '';
   for (const stream of [child.stdout, child.stderr]) {
     stream?.on('data', (chunk) => {
-      child.capturedLogs = `${child.capturedLogs}${chunk.toString('utf8')}`.slice(-262_144);
+      appendCapturedLogChunk(child, chunk, sensitiveValues);
     });
   }
   return child;

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import {
+  appendCapturedLogChunk,
   assertSensitiveValuesAbsentFromLogs,
   assertNoExecutableWork,
   buildBrowserEnvironment,
@@ -39,6 +40,19 @@ test('checks test credential canaries across isolated service logs without echoi
       error instanceof Error &&
       error.message === 'A sensitive test value was written to synthetic broker logs.' &&
       !error.message.includes(canary),
+  );
+});
+
+test('detects a split canary even after its log text falls outside the bounded capture', () => {
+  const canary = 'synthetic-canary-value-for-test-only';
+  const child = { capturedLogs: '', sensitiveCanaryDetected: false, sensitiveLogOverlap: '' };
+  const splitAt = 19;
+  appendCapturedLogChunk(child, `prefix ${canary.slice(0, splitAt)}`, [canary], 16);
+  appendCapturedLogChunk(child, `${canary.slice(splitAt)} suffix`, [canary], 16);
+  assert.equal(child.capturedLogs.includes(canary), false);
+  assert.throws(
+    () => assertSensitiveValuesAbsentFromLogs([canary], [{ name: 'worker', process: child }]),
+    (error) => error instanceof Error && !error.message.includes(canary),
   );
 });
 
