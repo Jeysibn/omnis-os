@@ -24,6 +24,7 @@ export async function startMockServices({
   origin,
   requireAuditPool = false,
   composeManagedApplication = false,
+  databaseSocketDirectory,
   reservedPorts = [],
   enableSyntheticBrokerTestMode = false,
   enableSyntheticBrokerProcessTestMode = false,
@@ -35,6 +36,7 @@ export async function startMockServices({
   }
   const databaseConfig = validateTestDatabaseConfiguration(process.env, {
     requireAdmin: requireAuditPool,
+    unixSocketDirectory: composeManagedApplication ? databaseSocketDirectory : undefined,
   });
   const {
     urls: {
@@ -500,7 +502,10 @@ export async function startMockServices({
   }
 }
 
-export function validateTestDatabaseConfiguration(environment, { requireAdmin = false } = {}) {
+export function validateTestDatabaseConfiguration(
+  environment,
+  { requireAdmin = false, unixSocketDirectory } = {},
+) {
   const definitions = [
     ['OMNIS_TEST_DATABASE_URL', 'omnis_runtime', true],
     ['OMNIS_TEST_MIGRATION_DATABASE_URL', 'omnis_migrator', true],
@@ -517,7 +522,7 @@ export function validateTestDatabaseConfiguration(environment, { requireAdmin = 
       if (required) throw new Error(`${name} must be configured for the disposable test database.`);
       continue;
     }
-    const parsed = parseTestDatabaseUrl(name, value, username);
+    const parsed = parseTestDatabaseUrl(name, value, username, { unixSocketDirectory });
     urls[name] = value;
     parsedUrls.push({ name, ...parsed });
   }
@@ -545,7 +550,7 @@ export function validateTestDatabaseConfiguration(environment, { requireAdmin = 
   };
 }
 
-function parseTestDatabaseUrl(name, value, expectedUsername) {
+function parseTestDatabaseUrl(name, value, expectedUsername, { unixSocketDirectory } = {}) {
   if (/%(?![0-9a-fA-F]{2})/.test(value)) {
     throw new Error(`${name} uses an unsupported PostgreSQL URL form.`);
   }
@@ -559,26 +564,33 @@ function parseTestDatabaseUrl(name, value, expectedUsername) {
   const pathname = parsed.pathname;
   const databaseName = pathname.startsWith('/') ? pathname.slice(1) : '';
   const isLoopback = host === '127.0.0.1' || host === '::1';
+  const socketHost = parsed.searchParams.get('host');
+  const usesAllowedUnixSocket =
+    typeof unixSocketDirectory === 'string' &&
+    unixSocketDirectory.startsWith('/') &&
+    host === 'localhost' &&
+    socketHost === unixSocketDirectory &&
+    parsed.searchParams.size === 1;
   const port = parsed.port ? Number(parsed.port) : 5432;
   if (
     parsed.protocol !== 'postgresql:' ||
     parsed.username !== expectedUsername ||
     !parsed.password ||
-    parsed.search ||
+    (parsed.search && !usesAllowedUnixSocket) ||
     parsed.hash ||
     !/^[A-Za-z0-9_-]+$/.test(databaseName) ||
-    !isLoopback ||
+    (!isLoopback && !usesAllowedUnixSocket) ||
     !Number.isInteger(port) ||
     port < 1 ||
     port > 65_535
   ) {
     throw new Error(
-      `${name} must use a supported PostgreSQL URL, the expected restricted role, and a loopback PostgreSQL endpoint.`,
+      `${name} must use a supported PostgreSQL URL, the expected restricted role, and a loopback PostgreSQL endpoint or explicitly approved test Unix-socket endpoint.`,
     );
   }
   return {
     databaseName,
-    host,
+    host: usesAllowedUnixSocket ? socketHost : host,
     port,
     isTestDatabase: /(?:^|[_-])test(?:s)?$/i.test(databaseName),
   };

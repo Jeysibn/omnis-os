@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash, randomBytes, randomUUID, scrypt as scryptCallback } from 'node:crypto';
-import { createConnection, createServer, isIPv4 } from 'node:net';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createServer, isIPv4 } from 'node:net';
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promisify, TextDecoder } from 'node:util';
@@ -35,17 +35,17 @@ const directory = await mkdtemp(join(tmpdir(), 'omnis-compose-smoke-'));
 const composeEnvPath = join(directory, 'compose.env');
 const apiEnvPath = join(directory, 'api.env');
 const workerEnvPath = join(directory, 'worker.env');
+const postgresSocketDirectory = join(directory, 'postgres-socket');
 const dbPassword = randomBytes(32).toString('hex');
 const migrationPassword = randomBytes(32).toString('hex');
 const runtimePassword = randomBytes(32).toString('hex');
 const authorizerPassword = randomBytes(32).toString('hex');
 const launcherPassword = randomBytes(32).toString('hex');
 const occupiedPorts = new Set();
-const dbPort = await freePort(occupiedPorts);
-occupiedPorts.add(dbPort);
+const dbPort = 5432;
 const webPort = await freePort(occupiedPorts);
 const origin = `http://127.0.0.1:${webPort}`;
-const databaseHost = '127.0.0.1';
+const databaseHost = 'localhost';
 let dbAdminUrl;
 const redactions = [
   dbPassword,
@@ -59,10 +59,9 @@ let fixtures;
 let stackStarted = false;
 let failed = false;
 const auxiliaryProjects = new Set();
-let databaseProxyServer;
 
 function dbUrl(user, password) {
-  return `postgresql://${user}:${encodeURIComponent(password)}@${databaseHost}:${dbPort}/${dbName}`;
+  return `postgresql://${user}:${encodeURIComponent(password)}@${databaseHost}:${dbPort}/${dbName}?host=${encodeURIComponent(postgresSocketDirectory)}`;
 }
 
 function configureDatabaseUrls() {
@@ -80,24 +79,6 @@ function configureDatabaseUrls() {
     OMNIS_RUNTIME_DB_PASSWORD: runtimePassword,
     OMNIS_AUTHORIZER_DB_PASSWORD: authorizerPassword,
     OMNIS_LAUNCHER_DB_PASSWORD: launcherPassword,
-  });
-}
-
-function startDatabaseProxy(targetHost) {
-  const server = createServer((client) => {
-    const upstream = createConnection({ host: targetHost, port: 5432 });
-    client.on('error', () => upstream.destroy());
-    upstream.on('error', () => client.destroy());
-    client.pipe(upstream);
-    upstream.pipe(client);
-  });
-  return new Promise((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(dbPort, '127.0.0.1', () => {
-      server.removeListener('error', reject);
-      databaseProxyServer = server;
-      resolve();
-    });
   });
 }
 
@@ -176,7 +157,12 @@ try {
   await Promise.all([
     mkdir(join(directory, 'authorizer-fixture'), { mode: 0o770 }),
     mkdir(join(directory, 'launcher-fixture'), { mode: 0o770 }),
+    mkdir(postgresSocketDirectory, { mode: 0o2770 }),
   ]);
+  await chmod(postgresSocketDirectory, 0o2770);
+  const socketDirectoryStat = await lstat(postgresSocketDirectory);
+  assert.equal(socketDirectoryStat.gid, Number(process.getgid?.() ?? 1001));
+  assert.equal(socketDirectoryStat.mode & 0o7777, 0o2770);
   const temporaryOwnerSalt = randomBytes(16);
   const temporaryOwnerHash = (await scrypt(testOwnerPassword, temporaryOwnerSalt, 64)).toString(
     'hex',
@@ -217,6 +203,8 @@ try {
     ['OMNIS_WEB_PORT', String(webPort)],
     ['OMNIS_AUTHORIZER_SOCKET_GID', gid],
     ['OMNIS_LAUNCHER_SOCKET_GID', gid],
+    ['OMNIS_CI_POSTGRES_SOCKET_GID', gid],
+    ['OMNIS_CI_POSTGRES_SOCKET_DIRECTORY', postgresSocketDirectory],
     ['OMNIS_API_ENV_FILE', apiEnvPath],
     ['OMNIS_WORKER_ENV_FILE', workerEnvPath],
     ['OMNIS_CI_AUTHORIZER_SOCKET_DIRECTORY', join(directory, 'authorizer-fixture')],
@@ -233,7 +221,18 @@ try {
   stackStarted = true;
   compose(['up', '--detach', '--wait', '--wait-timeout', '90', 'postgres'], { timeout: 120_000 });
   assert.equal(
-    compose(['exec', '-T', 'postgres', 'pg_isready', '-U', 'omnis', '-d', dbName]).status,
+    compose([
+      'exec',
+      '-T',
+      'postgres',
+      'pg_isready',
+      '-h',
+      '/run/omnis-postgres-socket',
+      '-U',
+      'omnis',
+      '-d',
+      dbName,
+    ]).status,
     0,
   );
   const postgresId = compose(['ps', '-q', 'postgres']).stdout.trim();
@@ -252,7 +251,19 @@ try {
   assert.equal(postgresNetworks.length, 1, 'PostgreSQL joins only the internal data network');
   const postgresAddress = postgresNetworks[0]?.IPAddress;
   assert.ok(isIPv4(postgresAddress), 'PostgreSQL has a data-network IPv4 address');
-  await startDatabaseProxy(postgresAddress);
+  const postgresSocket = join(postgresSocketDirectory, '.s.PGSQL.5432');
+  const socketStat = await lstat(postgresSocket);
+  assert.ok(socketStat.isSocket(), 'PostgreSQL Unix socket is available to host test fixtures');
+  assert.equal(
+    socketStat.gid,
+    Number(gid),
+    'PostgreSQL socket is group-owned by the CI runner group',
+  );
+  assert.equal(
+    socketStat.mode & 0o777,
+    0o770,
+    'PostgreSQL socket grants access only to owner and CI group',
+  );
   configureDatabaseUrls();
   const postgresPortInspection = runDocker(
     'docker',
@@ -320,8 +331,9 @@ try {
     origin,
     requireAuditPool: true,
     composeManagedApplication: true,
+    databaseSocketDirectory: postgresSocketDirectory,
   });
-  // Host-side fixtures keep their restricted roles on the loopback-only database proxy.
+  // Host fixtures use the group-restricted socket; application containers use internal TCP.
   await writeEnv(composeEnvPath, [
     ['OMNIS_DB_NAME', dbName],
     ['OMNIS_DB_PASSWORD', dbPassword],
@@ -329,6 +341,8 @@ try {
     ['OMNIS_WEB_PORT', String(webPort)],
     ['OMNIS_AUTHORIZER_SOCKET_GID', gid],
     ['OMNIS_LAUNCHER_SOCKET_GID', gid],
+    ['OMNIS_CI_POSTGRES_SOCKET_GID', gid],
+    ['OMNIS_CI_POSTGRES_SOCKET_DIRECTORY', postgresSocketDirectory],
     ['OMNIS_API_ENV_FILE', apiEnvPath],
     ['OMNIS_WORKER_ENV_FILE', workerEnvPath],
     ['OMNIS_CI_AUTHORIZER_SOCKET_DIRECTORY', dirname(fixtures.authorizerSocket)],
@@ -499,11 +513,6 @@ try {
         failed = true;
         process.stderr.write(`Host fixture cleanup failed: ${redact(error)}\n`);
       }
-    }
-    if (databaseProxyServer) {
-      const proxyCloseTimeout = setTimeout(() => databaseProxyServer.closeAllConnections(), 5_000);
-      await new Promise((resolve) => databaseProxyServer.close(resolve));
-      clearTimeout(proxyCloseTimeout);
     }
     await rm(directory, { recursive: true, force: true });
   }
@@ -701,7 +710,7 @@ async function assertRuntimeRestrictions() {
       Object.values(ports).every((bindings) => !bindings?.some((binding) => binding?.HostPort)),
     );
   }
-  for (const service of ['web', 'postgres']) {
+  for (const service of ['web']) {
     const id = compose(['ps', '-q', service]).stdout.trim();
     const ports = JSON.parse(
       runDocker('docker', ['inspect', id, '--format', '{{json .NetworkSettings.Ports}}'], {

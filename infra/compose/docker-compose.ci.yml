@@ -1,6 +1,36 @@
 services:
   postgres:
     ports: !reset []
+    environment:
+      POSTGRES_INITDB_ARGS: --auth-local=scram-sha-256 --auth-host=scram-sha-256
+    command:
+      [
+        'postgres',
+        '-c',
+        'unix_socket_directories=/run/omnis-postgres-socket',
+        '-c',
+        'unix_socket_permissions=0770',
+      ]
+    group_add:
+      - '${OMNIS_CI_POSTGRES_SOCKET_GID:?CI Postgres socket group is required}'
+    volumes:
+      - type: bind
+        source: ${OMNIS_CI_POSTGRES_SOCKET_DIRECTORY:?CI Postgres socket directory is required}
+        target: /run/omnis-postgres-socket
+        bind:
+          create_host_path: false
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'pg_isready',
+          '-h',
+          '/run/omnis-postgres-socket',
+          '-U',
+          'omnis',
+          '-d',
+          '${OMNIS_DB_NAME:-omnis}',
+        ]
 
   api:
     image: omnis-api:ci
