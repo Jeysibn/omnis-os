@@ -48,6 +48,7 @@ export function createSyntheticFakeProviderServer(input: {
       response: unknown;
       events: unknown[];
       eventReads: number;
+      cancellationConfirmed: boolean;
     }
   >();
   const server = createServer((request, response) => {
@@ -143,7 +144,12 @@ export function createSyntheticFakeProviderServer(input: {
                   event: { ...completion.event, eventId: acceptedEvent.eventId },
                 },
               ]
-            : [{ version: 'omnis.fake-provider.v1', attemptId, event: acceptedEvent }, completion];
+            : fixture === 'delayed-cancel-confirmed-events'
+              ? [{ version: 'omnis.fake-provider.v1', attemptId, event: acceptedEvent }]
+              : [
+                  { version: 'omnis.fake-provider.v1', attemptId, event: acceptedEvent },
+                  completion,
+                ];
       submissions.set(attemptId, {
         digest,
         attemptId,
@@ -152,6 +158,7 @@ export function createSyntheticFakeProviderServer(input: {
         response: result,
         events: providerEvents,
         eventReads: 0,
+        cancellationConfirmed: false,
       });
       if (fixture === 'lost-ack') {
         console.info('synthetic_fake_provider_lost_ack_acceptance_recorded');
@@ -170,7 +177,8 @@ export function createSyntheticFakeProviderServer(input: {
       if (!found) return send(response, 404, { error: 'unknown_submission' });
       if (
         ['delayed-events', 'delayed-cancel-confirmed-events'].includes(found.fixture) &&
-        found.eventReads === 0
+        found.eventReads === 0 &&
+        !found.cancellationConfirmed
       ) {
         console.info('synthetic_fake_provider_delayed_event_lookup');
         found.eventReads += 1;
@@ -201,15 +209,24 @@ export function createSyntheticFakeProviderServer(input: {
           'delayed-cancel-confirmed-events',
         ].includes(submission.fixture)
       ) {
+        const event = {
+          eventId: `interrupted-${parsed.data.attemptId}`,
+          status: 'interrupted' as const,
+          providerSubmissionId: cancelMatch[1],
+        };
+        if (submission.fixture === 'delayed-cancel-confirmed-events') {
+          submission.cancellationConfirmed = true;
+          submission.events.push({
+            version: 'omnis.fake-provider.v1',
+            attemptId: parsed.data.attemptId,
+            event,
+          });
+        }
         return send(response, 200, {
           version: 'omnis.fake-provider.v1',
           attemptId: parsed.data.attemptId,
           cancellation: 'confirmed',
-          event: {
-            eventId: `interrupted-${parsed.data.attemptId}`,
-            status: 'interrupted',
-            providerSubmissionId: cancelMatch[1],
-          },
+          event,
         });
       }
       return send(response, 200, {

@@ -14,9 +14,11 @@ const notBefore = new Date(now.getTime() - 60_000).toISOString();
 const notAfter = new Date(now.getTime() + 10 * 60_000).toISOString();
 const attemptId = randomUUID();
 const cancelAttemptId = randomUUID();
+const delayedCancelAttemptId = randomUUID();
 const fixtures = {
   [attemptId]: 'completed',
   [cancelAttemptId]: 'cancel-confirmed',
+  [delayedCancelAttemptId]: 'delayed-cancel-confirmed-events',
 } as const;
 const server = createSyntheticFakeProviderServer({
   token,
@@ -213,5 +215,50 @@ describe('synthetic fake-provider HTTP boundary', () => {
     assert.equal(body.attemptId, cancelAttemptId);
     assert.equal(body.cancellation, 'confirmed');
     assert.equal(body.event.status, 'interrupted');
+  });
+
+  it('keeps a delayed cancellation fixture at accepted until confirmed interruption', async () => {
+    const payload = submission(delayedCancelAttemptId);
+    const accepted = await fetch(`${origin}/v1/submissions`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    assert.equal(accepted.status, 200);
+    const acceptedBody = await accepted.json();
+    assert.equal(acceptedBody.event.status, 'accepted');
+
+    const pendingEvents = await fetch(
+      `${origin}/v1/submissions/${encodeURIComponent(acceptedBody.providerSubmissionId)}/events`,
+      { headers: { authorization: `Bearer ${token}` } },
+    );
+    assert.equal(pendingEvents.status, 200);
+    assert.equal((await pendingEvents.json()).event.status, 'accepted');
+
+    const cancelled = await fetch(
+      `${origin}/v1/submissions/${encodeURIComponent(acceptedBody.providerSubmissionId)}`,
+      {
+        method: 'DELETE',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          version: 'omnis.fake-provider.v1',
+          attemptId: delayedCancelAttemptId,
+          providerSubmissionId: acceptedBody.providerSubmissionId,
+        }),
+      },
+    );
+    assert.equal(cancelled.status, 200);
+    const cancellationBody = await cancelled.json();
+    assert.equal(cancellationBody.cancellation, 'confirmed');
+    assert.equal(cancellationBody.event.status, 'interrupted');
+
+    const events = await fetch(
+      `${origin}/v1/submissions/${encodeURIComponent(acceptedBody.providerSubmissionId)}/events`,
+      { headers: { authorization: `Bearer ${token}` } },
+    );
+    assert.equal(events.status, 200);
+    const eventBody = await events.json();
+    assert.equal(eventBody.event.status, 'interrupted');
+    assert.equal(eventBody.event.eventId, cancellationBody.event.eventId);
   });
 });
