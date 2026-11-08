@@ -4,12 +4,11 @@ services:
     user: '${OMNIS_CI_POSTGRES_UID:-70}:${OMNIS_CI_POSTGRES_GID:-70}'
     environment:
       POSTGRES_INITDB_ARGS: --auth-local=scram-sha-256 --auth-host=scram-sha-256
-      PGHOST: /run/omnis-postgres-socket
     command:
       [
         'postgres',
         '-c',
-        'unix_socket_directories=/run/omnis-postgres-socket',
+        'unix_socket_directories=/var/run/postgresql,/run/omnis-postgres-socket',
         '-c',
         'unix_socket_permissions=0770',
       ]
