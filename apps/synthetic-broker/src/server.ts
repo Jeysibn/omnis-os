@@ -1,4 +1,4 @@
-import { createPublicKey } from 'node:crypto';
+import { createPublicKey, randomUUID } from 'node:crypto';
 import { chmod, lstat, mkdir, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { readConfig } from './config.ts';
@@ -13,12 +13,14 @@ const config = readConfig();
 const verificationKeys = parseTrustAnchors(config.trustAnchors);
 const authorizer = new AuthorizerClient(config.authorizerSocketPath, config.authorizerToken);
 const provider = new FakeProviderClient(config.providerToken);
-await reconcileDurableAttempts(authorizer, provider);
+const brokerInstanceId = randomUUID();
+await reconcileDurableAttempts(authorizer, provider, brokerInstanceId);
 const app = createSyntheticBrokerApp({
   callerToken: config.callerToken,
   verificationKeys,
   authorizer,
   provider,
+  brokerInstanceId,
 });
 
 await mkdir(path.dirname(config.socketPath), { recursive: true, mode: 0o750 });
@@ -33,7 +35,7 @@ if (existing) {
 await app.listen({ path: config.socketPath });
 await chmod(config.socketPath, 0o660);
 const recoveryTimer = setInterval(() => {
-  void reconcileDurableAttempts(authorizer, provider).catch(() => undefined);
+  void reconcileDurableAttempts(authorizer, provider, brokerInstanceId).catch(() => undefined);
 }, 2_000);
 recoveryTimer.unref();
 

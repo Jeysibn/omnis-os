@@ -101,6 +101,8 @@ describe('synthetic broker submission boundary', () => {
       synthetic: true as const,
       createdAt: now.toISOString(),
       updatedAt: now.toISOString(),
+      brokerGeneration: 0,
+      brokerLeaseExpiresAt: null,
       submissionStartedAt: null,
       providerSubmissionId: null,
       cancelRequestedAt: null,
@@ -130,9 +132,27 @@ describe('synthetic broker submission boundary', () => {
         },
         async begin() {
           assert.equal(replayAttempt, false, 'Unknown attempts must not begin another submission.');
-          return { ...attempt, status: 'submitting' as const };
+          return {
+            ...attempt,
+            status: 'submitting' as const,
+            brokerGeneration: 1,
+            brokerLeaseExpiresAt: now.toISOString(),
+          };
         },
-        async record(_id, event) {
+        async claim() {
+          return {
+            version: 'omnis.broker-authorizer-ipc.v1',
+            owned: true,
+            attempt: {
+              ...attempt,
+              status: 'unknown' as const,
+              submissionStartedAt: now.toISOString(),
+              brokerGeneration: 1,
+              brokerLeaseExpiresAt: null,
+            },
+          };
+        },
+        async record(_id, _instance, _generation, event) {
           recordedEvents.push(event.eventId);
           replayAttempt = true;
           return { ...attempt, status: event.status };
@@ -194,6 +214,8 @@ describe('synthetic broker submission boundary', () => {
       createdAt: now.toISOString(),
       updatedAt: now.toISOString(),
       submissionStartedAt: now.toISOString(),
+      brokerGeneration: 2,
+      brokerLeaseExpiresAt: now.toISOString(),
       providerSubmissionId: `synthetic-${attemptId}`,
       cancelRequestedAt: null,
     };
@@ -233,7 +255,14 @@ describe('synthetic broker submission boundary', () => {
         async begin() {
           throw new Error('An accepted attempt must not begin a new submission.');
         },
-        async record(_id, event) {
+        async claim() {
+          return {
+            version: 'omnis.broker-authorizer-ipc.v1',
+            owned: true,
+            attempt: acceptedAttempt,
+          };
+        },
+        async record(_id, _instance, _generation, event) {
           assert.equal(event.eventId, completion.eventId);
           return {
             ...acceptedAttempt,

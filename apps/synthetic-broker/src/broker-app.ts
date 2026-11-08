@@ -1,4 +1,5 @@
 import Fastify from 'fastify';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import {
   ConnectorAuthorizationRequestSchema,
@@ -30,13 +31,15 @@ const RequestSchema = z
 
 export function createSyntheticBrokerApp(input: {
   callerToken: string;
+  brokerInstanceId?: string;
   verificationKeys: VerificationKey[];
-  authorizer: Pick<AuthorizerClient, 'admit' | 'begin' | 'record'>;
+  authorizer: Pick<AuthorizerClient, 'admit' | 'begin' | 'record' | 'claim'>;
   provider: Pick<FakeProviderClient, 'submit' | 'events'> & {
     cancel?: FakeProviderClient['cancel'];
   };
 }) {
   const { callerToken, verificationKeys, authorizer, provider } = input;
+  const brokerInstanceId = input.brokerInstanceId ?? randomUUID();
 
   const busyAttempts = new Set<string>();
   let activeSubmissions = 0;
@@ -104,7 +107,15 @@ export function createSyntheticBrokerApp(input: {
         throw new Error('Authorizer envelope binding did not match the broker request.');
 
       if (retryingExistingAttempt) {
-        const attempt = await reconcileAttempt(authorizer, provider, admission.attempt);
+        const claim = await authorizer.claim(admission.attempt.id, brokerInstanceId);
+        if (!claim.owned)
+          return reply.code(503).send({ error: { code: 'attempt_owned_elsewhere' } });
+        const attempt = await reconcileAttempt(
+          authorizer,
+          provider,
+          brokerInstanceId,
+          claim.attempt,
+        );
 
         const result = {
           attemptId: attempt.id,
@@ -117,10 +128,17 @@ export function createSyntheticBrokerApp(input: {
           ),
           ...(attempt.responseText ? { responseText: attempt.responseText } : {}),
         };
-        return reply.code(attempt.status === 'unknown' ? 202 : 200).send(result);
+        return reply
+          .code(['submitting', 'unknown'].includes(attempt.status) ? 202 : 200)
+          .send(result);
       }
 
-      const started = await authorizer.begin(admission.attempt.id, envelope, input.renderedRequest);
+      const started = await authorizer.begin(
+        admission.attempt.id,
+        brokerInstanceId,
+        envelope,
+        input.renderedRequest,
+      );
       if (started.status !== 'submitting')
         throw new Error('Authorizer did not persist the submission boundary.');
 
@@ -131,10 +149,15 @@ export function createSyntheticBrokerApp(input: {
         );
       } catch (error) {
         if (error instanceof FakeProviderResponseError && error.status === 422) {
-          const failed = await authorizer.record(admission.attempt.id, {
-            eventId: `rejected:${admission.attempt.id}`,
-            status: 'failed',
-          });
+          const failed = await authorizer.record(
+            admission.attempt.id,
+            brokerInstanceId,
+            started.brokerGeneration,
+            {
+              eventId: `rejected:${admission.attempt.id}`,
+              status: 'failed',
+            },
+          );
           return reply.code(200).send({
             attemptId: admission.attempt.id,
             correlationId: envelope.claims.correlationId,
@@ -143,7 +166,7 @@ export function createSyntheticBrokerApp(input: {
           });
         }
         // Once the request may have crossed the network, record uncertainty and never POST again.
-        await authorizer.record(admission.attempt.id, {
+        await authorizer.record(admission.attempt.id, brokerInstanceId, started.brokerGeneration, {
           eventId: `unknown:${admission.attempt.id}`,
           status: 'unknown',
           usage: { kind: 'unknown', reason: 'submission_uncertain', billingExposure: 'unknown' },
@@ -157,13 +180,23 @@ export function createSyntheticBrokerApp(input: {
       }
       if (providerResponse.attemptId !== admission.attempt.id)
         throw new Error('Provider correlation mismatch.');
-      const accepted = await authorizer.record(admission.attempt.id, providerResponse.event);
+      const accepted = await authorizer.record(
+        admission.attempt.id,
+        brokerInstanceId,
+        started.brokerGeneration,
+        providerResponse.event,
+      );
       if (providerResponse.event.status === 'accepted') {
         const completion = await provider.events(
           admission.attempt.id,
           providerResponse.providerSubmissionId,
         );
-        const persisted = await authorizer.record(admission.attempt.id, completion.event);
+        const persisted = await authorizer.record(
+          admission.attempt.id,
+          brokerInstanceId,
+          started.brokerGeneration,
+          completion.event,
+        );
         return reply.code(200).send({
           attemptId: admission.attempt.id,
           correlationId: envelope.claims.correlationId,

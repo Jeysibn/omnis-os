@@ -16,6 +16,8 @@ function attempt(
     status,
     synthetic: true as const,
     createdAt: now,
+    brokerGeneration: 1,
+    brokerLeaseExpiresAt: now,
     submissionStartedAt: status === 'submitting' ? now : null,
     providerSubmissionId: options.providerSubmissionId ?? null,
     cancelRequestedAt: options.cancelRequestedAt ?? null,
@@ -46,7 +48,14 @@ describe('synthetic broker durable recovery', () => {
         async recovery() {
           return [item];
         },
-        async record(_attemptId, event) {
+        async claim() {
+          return {
+            version: 'omnis.broker-authorizer-ipc.v1',
+            owned: true,
+            attempt: { ...item, brokerLeaseExpiresAt: now },
+          };
+        },
+        async record(_attemptId, _brokerInstanceId, _generation, event) {
           recorded.push(event);
           return item;
         },
@@ -64,15 +73,15 @@ describe('synthetic broker durable recovery', () => {
           throw new Error('no cancellation was requested');
         },
       },
+      'c22db4c2-27bc-4b1d-a73e-236199111111',
     );
 
     assert.deepEqual(lookedUp, [item.id, 'synthetic-known']);
     assert.deepEqual(recorded, [completion]);
   });
 
-  it('marks interrupted submission boundaries unknown without resubmitting or looking up', async () => {
+  it('does not reconcile a submitting attempt until the durable recovery claim resolves it', async () => {
     const item = attempt('submitting');
-    const recorded: unknown[] = [];
     let providerCalls = 0;
 
     await reconcileDurableAttempts(
@@ -80,9 +89,20 @@ describe('synthetic broker durable recovery', () => {
         async recovery() {
           return [item];
         },
-        async record(_attemptId, event) {
-          recorded.push(event);
-          return item;
+        async claim() {
+          return {
+            version: 'omnis.broker-authorizer-ipc.v1',
+            owned: true,
+            attempt: {
+              ...item,
+              status: 'unknown' as const,
+              brokerGeneration: item.brokerGeneration + 1,
+              brokerLeaseExpiresAt: null,
+            },
+          };
+        },
+        async record() {
+          throw new Error('an unknown attempt without a provider ID must not be recorded');
         },
       },
       {
@@ -95,15 +115,10 @@ describe('synthetic broker durable recovery', () => {
           throw new Error('cancellation was not requested');
         },
       },
+      'c22db4c2-27bc-4b1d-a73e-236199111111',
     );
 
-    assert.deepEqual(recorded, [
-      {
-        eventId: `restart-unknown:${item.id}`,
-        status: 'unknown',
-        usage: { kind: 'unknown', reason: 'submission_uncertain', billingExposure: 'unknown' },
-      },
-    ]);
+    assert.equal(providerCalls, 0);
     assert.equal(providerCalls, 0);
   });
 
@@ -125,7 +140,10 @@ describe('synthetic broker durable recovery', () => {
         async recovery() {
           return [item];
         },
-        async record(_attemptId, event) {
+        async claim() {
+          return { version: 'omnis.broker-authorizer-ipc.v1', owned: true, attempt: item };
+        },
+        async record(_attemptId, _brokerInstanceId, _generation, event) {
           recorded.push(event);
           return item;
         },
@@ -144,6 +162,7 @@ describe('synthetic broker durable recovery', () => {
           };
         },
       },
+      'c22db4c2-27bc-4b1d-a73e-236199111111',
     );
 
     assert.equal(eventLookups, 0);

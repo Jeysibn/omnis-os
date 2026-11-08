@@ -35,6 +35,7 @@ export const SyntheticTaskRunEventSchema = z
       'connector.execution_unknown',
       'connector.cancellation_requested',
       'connector.cancellation_confirmed',
+      'connector.recovery_claimed',
     ]),
     outcome: z.enum(['allowed', 'denied', 'recorded']),
     revocationGeneration: z.union([z.literal(0), z.literal(1)]),

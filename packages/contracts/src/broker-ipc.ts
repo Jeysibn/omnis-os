@@ -35,6 +35,7 @@ export const BrokerBeginSubmissionRequestSchema = z
   .object({
     version: Version,
     attemptId: Uuid,
+    brokerInstanceId: Uuid,
     envelope: ConnectorDecisionEnvelopeSchema,
     renderedRequest: z
       .string()
@@ -48,7 +49,25 @@ export const BrokerRecordEventRequestSchema = z
   .object({
     version: Version,
     attemptId: Uuid,
+    brokerInstanceId: Uuid,
+    brokerGeneration: z.number().int().positive().safe(),
     event: SyntheticProviderEventSchema,
+  })
+  .strict();
+
+export const BrokerClaimRecoveryRequestSchema = z
+  .object({
+    version: Version,
+    attemptId: Uuid,
+    brokerInstanceId: Uuid,
+  })
+  .strict();
+
+export const BrokerClaimRecoveryResponseSchema = z
+  .object({
+    version: Version,
+    attempt: ConnectorExecutionAttemptSchema,
+    owned: z.boolean(),
   })
   .strict();
 

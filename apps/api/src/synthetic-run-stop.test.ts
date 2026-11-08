@@ -184,6 +184,8 @@ test('standard run stop requests cancellation of an active attempt even after gr
             authorizationId,
             requestId,
             status: 'submitting',
+            brokerGeneration: 1,
+            brokerLeaseExpiresAt: null,
             synthetic: true,
             createdAt: '2026-01-01T00:00:00.000Z',
             submissionStartedAt: '2026-01-01T00:00:00.000Z',

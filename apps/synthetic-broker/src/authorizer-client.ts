@@ -1,6 +1,7 @@
 import { request as httpRequest } from 'node:http';
 import {
   BrokerAttemptResponseSchema,
+  BrokerClaimRecoveryResponseSchema,
   BrokerConsumeResponseSchema,
   BrokerRecoveryResponseSchema,
 } from '@omnis/contracts/broker-ipc';
@@ -32,23 +33,45 @@ export class AuthorizerClient {
     return BrokerConsumeResponseSchema.parse(body);
   }
 
-  async begin(attemptId: string, envelope: ConnectorDecisionEnvelope, renderedRequest: string) {
+  async begin(
+    attemptId: string,
+    brokerInstanceId: string,
+    envelope: ConnectorDecisionEnvelope,
+    renderedRequest: string,
+  ) {
     const body = await this.post('/internal/broker/v1/submissions/begin', {
       version,
       attemptId,
+      brokerInstanceId,
       envelope,
       renderedRequest,
     });
     return BrokerAttemptResponseSchema.parse(body).attempt;
   }
 
-  async record(attemptId: string, event: SyntheticProviderEvent) {
+  async record(
+    attemptId: string,
+    brokerInstanceId: string,
+    brokerGeneration: number,
+    event: SyntheticProviderEvent,
+  ) {
     const body = await this.post('/internal/broker/v1/provider-events', {
       version,
       attemptId,
+      brokerInstanceId,
+      brokerGeneration,
       event,
     });
     return BrokerAttemptResponseSchema.parse(body).attempt;
+  }
+
+  async claim(attemptId: string, brokerInstanceId: string) {
+    const body = await this.post('/internal/broker/v1/recovery/claim', {
+      version,
+      attemptId,
+      brokerInstanceId,
+    });
+    return BrokerClaimRecoveryResponseSchema.parse(body);
   }
 
   async recovery(limit = 100, afterAttemptId: string | null = null) {

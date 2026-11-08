@@ -6,14 +6,11 @@ import type { FakeProviderClient } from './fake-provider-client.ts';
 export async function reconcileAttempt(
   authorizer: Pick<AuthorizerClient, 'record'>,
   provider: Pick<FakeProviderClient, 'events'> & Partial<Pick<FakeProviderClient, 'cancel'>>,
+  brokerInstanceId: string,
   attempt: ConnectorExecutionAttempt,
 ): Promise<ConnectorExecutionAttempt> {
   if (attempt.status === 'submitting') {
-    return authorizer.record(attempt.id, {
-      eventId: `restart-unknown:${attempt.id}`,
-      status: 'unknown',
-      usage: { kind: 'unknown', reason: 'submission_uncertain', billingExposure: 'unknown' },
-    });
+    return attempt;
   }
 
   if (
@@ -25,7 +22,12 @@ export async function reconcileAttempt(
     try {
       const cancellation = await provider.cancel(attempt.id, attempt.providerSubmissionId);
       if (cancellation.cancellation === 'confirmed' && cancellation.event) {
-        return await authorizer.record(attempt.id, cancellation.event);
+        return await authorizer.record(
+          attempt.id,
+          brokerInstanceId,
+          attempt.brokerGeneration,
+          cancellation.event,
+        );
       }
     } catch {
       // Without a correlated interruption event, durable cancellation remains pending.
@@ -37,7 +39,12 @@ export async function reconcileAttempt(
   if (attempt.providerSubmissionId && ['accepted', 'running', 'unknown'].includes(attempt.status)) {
     try {
       const completion = await provider.events(attempt.id, attempt.providerSubmissionId);
-      return await authorizer.record(attempt.id, completion.event);
+      return await authorizer.record(
+        attempt.id,
+        brokerInstanceId,
+        attempt.brokerGeneration,
+        completion.event,
+      );
     } catch {
       // Read-only reconciliation can be retried; provider submission is never repeated.
     }
