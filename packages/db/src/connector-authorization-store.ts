@@ -941,8 +941,11 @@ export class PostgresConnectorAuthorizationStore {
         execution.broker_lease_expires_at &&
         toEpoch(execution.broker_lease_expires_at) > Date.now(),
       );
-      if (leaseIsActive && execution.broker_lease_owner_id === brokerInstanceId) {
-        return { attempt: mapAttempt(execution), owned: true };
+      if (leaseIsActive) {
+        return {
+          attempt: mapAttempt(execution),
+          owned: execution.broker_lease_owner_id === brokerInstanceId,
+        };
       }
 
       const nextGeneration = execution.broker_generation! + 1;

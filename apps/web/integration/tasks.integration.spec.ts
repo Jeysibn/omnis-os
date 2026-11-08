@@ -289,7 +289,7 @@ test('owner sees an authorized synthetic broker Run, ordered events, result and 
         persistedAttemptStatus = detail.body?.attempt?.status;
         return { runStatus: state.body.status, attemptStatus: persistedAttemptStatus };
       },
-      { timeout: 15_000 },
+      { timeout: 50_000 },
     )
     .toEqual({ runStatus: 'completed', attemptStatus: 'completed' });
   expect(persistedRun.runtimeKind).toBe('mock');

@@ -799,7 +799,7 @@ async function startSyntheticBrokerCompose({
                 if (response && [401, 404].includes(response.status)) break;
                 await delay(100);
               }
-              const attemptDeadline = Date.now() + 20_000;
+              const attemptDeadline = Date.now() + 50_000;
               while (Date.now() < attemptDeadline) {
                 const recovered = await auditPool.query(
                   'SELECT status FROM omnis.connector_execution_attempts WHERE id = $1',
@@ -854,7 +854,7 @@ async function startSyntheticBrokerCompose({
                 if (response && [401, 404].includes(response.status)) break;
                 await delay(100);
               }
-              const terminalDeadline = Date.now() + 20_000;
+              const terminalDeadline = Date.now() + 50_000;
               while (Date.now() < terminalDeadline) {
                 const recovered = await auditPool.query(
                   `SELECT attempt.status AS attempt_status, run.status AS run_status

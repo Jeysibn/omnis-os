@@ -58,7 +58,8 @@ export class SyntheticBrokerRunCoordinator {
     this.broker = input.broker;
     this.enqueue = input.enqueue;
     this.publish = input.publish;
-    this.recoveryTimeoutMs = input.recoveryTimeoutMs ?? 12_000;
+    // Exceeds the broker's 30-second lease plus the fake provider's delayed event fixture.
+    this.recoveryTimeoutMs = input.recoveryTimeoutMs ?? 45_000;
   }
 
   async admit(input: {

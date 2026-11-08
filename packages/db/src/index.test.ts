@@ -404,7 +404,7 @@ const postgresSuite = describe(
       );
     });
 
-    it('fences a restarted broker immediately without resubmitting an uncertain attempt', async () => {
+    it('fences a restarted broker after lease expiry without resubmitting an uncertain attempt', async () => {
       const fixture = await connectorFixture();
       const grant = await fixture.authorizations.request(fixture.request, randomUUID());
       await fixture.authorizations.decide(grant.id, 'owner', {
@@ -432,6 +432,17 @@ const postgresSuite = describe(
       );
       assert.equal(submitting.brokerGeneration, 1);
 
+      const activeClaim = await brokerStore.claimBrokerRecoveryAttempt(
+        admission.attempt.id,
+        newBroker,
+      );
+      assert.equal(activeClaim.owned, false);
+      await adminPool!.query(
+        `UPDATE omnis.connector_execution_attempts
+            SET broker_lease_expires_at = now() - interval '1 second'
+          WHERE id = $1`,
+        [admission.attempt.id],
+      );
       const recovered = await brokerStore.claimBrokerRecoveryAttempt(
         admission.attempt.id,
         newBroker,
