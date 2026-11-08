@@ -218,6 +218,47 @@ try {
     'disposable PostgreSQL must remain unpublished outside its internal data network',
   );
 
+  const postgresImagePull = runDocker('docker', ['pull', renderedConfig.services.postgres.image], {
+    encoding: 'utf8',
+    timeout: 120_000,
+  });
+  assert.equal(
+    postgresImagePull.status,
+    0,
+    `could not pull disposable PostgreSQL image: ${redact(postgresImagePull.stderr || 'unknown Docker error')}`,
+  );
+  const postgresIdentity = runDocker(
+    'docker',
+    [
+      'run',
+      '--rm',
+      '--network',
+      'none',
+      '--entrypoint',
+      'sh',
+      renderedConfig.services.postgres.image,
+      '-c',
+      'id -u postgres; id -g postgres',
+    ],
+    { encoding: 'utf8', timeout: 30_000 },
+  );
+  assert.equal(
+    postgresIdentity.status,
+    0,
+    `could not inspect disposable PostgreSQL image identity: ${redact(postgresIdentity.stderr || 'unknown Docker error')}`,
+  );
+  const [postgresUid, postgresGid] = postgresIdentity.stdout.trim().split(/\s+/).map(Number);
+  assert.ok(Number.isInteger(postgresUid) && postgresUid > 0);
+  assert.ok(Number.isInteger(postgresGid) && postgresGid > 0);
+  await replaceEnv(
+    composeEnvPath,
+    await readFile(composeEnvPath, 'utf8').then((value) => value.split(/\r?\n/)),
+    {
+      OMNIS_CI_POSTGRES_UID: String(postgresUid),
+      OMNIS_CI_POSTGRES_GID: String(postgresGid),
+    },
+  );
+
   stackStarted = true;
   compose(['up', '--detach', '--wait', '--wait-timeout', '90', 'postgres'], { timeout: 120_000 });
   assert.equal(
@@ -697,6 +738,8 @@ async function assertRuntimeRestrictions() {
   const postgresInspect = JSON.parse(
     runDocker('docker', ['inspect', postgresId], { encoding: 'utf8' }).stdout,
   )[0];
+  const postgresUid = Number(postgresInspect.Config.User.split(':')[0]);
+  assert.ok(Number.isInteger(postgresUid) && postgresUid > 0);
   assert.equal(postgresInspect.HostConfig.Privileged, false);
   assert.ok(!postgresInspect.Mounts.some((mount) => /docker\.sock$/.test(mount.Source)));
   for (const service of ['api', 'worker']) {

@@ -1,6 +1,7 @@
 services:
   postgres:
     ports: !reset []
+    user: '${OMNIS_CI_POSTGRES_UID:-70}:${OMNIS_CI_POSTGRES_GID:-70}'
     environment:
       POSTGRES_INITDB_ARGS: --auth-local=scram-sha-256 --auth-host=scram-sha-256
     command:
