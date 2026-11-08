@@ -6,6 +6,7 @@ const frontendOrigin = process.env.OMNIS_TEST_FRONTEND_ORIGIN;
 const taskDetail = 'Verify that a synthetic task persists through the owner Tasks page and reload.';
 const syntheticProjectId = process.env.OMNIS_TEST_SYNTHETIC_PROJECT_ID;
 const lostAckRequestId = process.env.OMNIS_TEST_SYNTHETIC_LOST_ACK_REQUEST_ID;
+const cancellationRequestId = process.env.OMNIS_TEST_SYNTHETIC_CANCELLATION_REQUEST_ID;
 
 if (!frontendOrigin) throw new Error('The integration frontend Origin is not configured.');
 if (!ownerPassword) throw new Error('The disposable owner password is not configured.');
@@ -397,12 +398,13 @@ test('owner sees an authorized synthetic broker Run, ordered events, result and 
     },
   );
   expect(cancellationApproval.status).toBe(200);
+  expect(cancellationRequestId).toMatch(/^[0-9a-f-]{36}$/i);
   const cancellationRun = await ownerRequest(
     page,
     `/api/v1/tasks/${cancellationAssignment.body.id}/synthetic-runs`,
     {
       method: 'POST',
-      idempotencyKey: randomUUID(),
+      idempotencyKey: cancellationRequestId,
       body: {
         authorizationId: cancellationAuthorization.id,
         request: {

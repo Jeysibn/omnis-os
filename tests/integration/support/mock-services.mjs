@@ -27,6 +27,7 @@ export async function startMockServices({
   enableSyntheticBrokerTestMode = false,
   enableSyntheticBrokerProcessTestMode = false,
   syntheticLostAckRequestId,
+  syntheticCancellationRequestId,
 }) {
   if (enableSyntheticBrokerProcessTestMode && !enableSyntheticBrokerTestMode) {
     throw new Error('The synthetic broker process test requires the owner-authorized test mode.');
@@ -366,6 +367,7 @@ export async function startMockServices({
         providerTokenPath: join(brokerSecretDirectory, 'provider.token'),
         sensitiveValues: sensitiveLogCanaries,
         lostAckRequestId: syntheticLostAckRequestId,
+        cancellationRequestId: syntheticCancellationRequestId,
       });
     }
     return {
@@ -538,7 +540,15 @@ function parseTestDatabaseUrl(name, value, expectedUsername) {
 
 export function buildBrowserEnvironment(
   source,
-  { apiTarget, frontendOrigin, frontendPort, ownerPassword, syntheticProjectId, lostAckRequestId },
+  {
+    apiTarget,
+    frontendOrigin,
+    frontendPort,
+    ownerPassword,
+    syntheticProjectId,
+    lostAckRequestId,
+    cancellationRequestId,
+  },
 ) {
   const allowed = [
     'PATH',
@@ -572,6 +582,9 @@ export function buildBrowserEnvironment(
     OMNIS_TEST_OWNER_PASSWORD: ownerPassword,
     ...(syntheticProjectId ? { OMNIS_TEST_SYNTHETIC_PROJECT_ID: syntheticProjectId } : {}),
     ...(lostAckRequestId ? { OMNIS_TEST_SYNTHETIC_LOST_ACK_REQUEST_ID: lostAckRequestId } : {}),
+    ...(cancellationRequestId
+      ? { OMNIS_TEST_SYNTHETIC_CANCELLATION_REQUEST_ID: cancellationRequestId }
+      : {}),
   });
   return environment;
 }
@@ -717,6 +730,7 @@ async function startSyntheticBrokerCompose({
   providerTokenPath,
   sensitiveValues,
   lostAckRequestId,
+  cancellationRequestId,
 }) {
   const projectName = `omnis-broker-e2e-${process.pid}-${randomUUID().replaceAll('-', '').slice(0, 10)}`;
   const compose = [
@@ -736,7 +750,10 @@ async function startSyntheticBrokerCompose({
     ...(process.env.DOCKER_CONFIG ? { DOCKER_CONFIG: process.env.DOCKER_CONFIG } : {}),
     OMNIS_FAKE_PROVIDER_TOKEN_FILE: providerTokenPath,
     OMNIS_BROKER_TEST_PROVIDER_FIXTURES: JSON.stringify({
-      default: 'delayed-cancel-confirmed-events',
+      default: 'completed',
+      ...(cancellationRequestId
+        ? { [cancellationRequestId]: 'delayed-cancel-confirmed-events' }
+        : {}),
       ...(lostAckRequestId ? { [lostAckRequestId]: 'lost-ack' } : {}),
     }),
     OMNIS_BROKER_TEST_TRUST_ANCHORS: trustAnchors,

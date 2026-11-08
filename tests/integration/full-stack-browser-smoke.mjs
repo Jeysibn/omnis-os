@@ -31,6 +31,7 @@ try {
   const frontendPort = await freePort();
   const frontendOrigin = `http://127.0.0.1:${frontendPort}`;
   const lostAckRequestId = randomUUID();
+  const cancellationRequestId = randomUUID();
   services = await startMockServices({
     origin: frontendOrigin,
     reservedPorts: [frontendPort],
@@ -38,6 +39,7 @@ try {
     enableSyntheticBrokerTestMode: true,
     enableSyntheticBrokerProcessTestMode: true,
     syntheticLostAckRequestId: lostAckRequestId,
+    syntheticCancellationRequestId: cancellationRequestId,
   });
   if (interrupted) throw new Error('The full-stack smoke was interrupted during service startup.');
   stages.push('api-worker-authorizer-launcher-broker-and-fake-provider-ready');
@@ -50,6 +52,7 @@ try {
     ownerPassword: services.password,
     syntheticProjectId,
     lostAckRequestId,
+    cancellationRequestId,
   });
 
   const recoveryCreatedAfter = new Date();

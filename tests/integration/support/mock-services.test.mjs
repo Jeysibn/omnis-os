@@ -222,6 +222,8 @@ test('browser environment allowlists only explicit runtime and test values', () 
       frontendOrigin: 'http://127.0.0.1:5174',
       frontendPort: 5174,
       ownerPassword: 'SYNTHETIC_OWNER_PASSWORD',
+      lostAckRequestId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      cancellationRequestId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
     },
   );
   assert.deepEqual(
@@ -233,8 +235,10 @@ test('browser environment allowlists only explicit runtime and test values', () 
       'NPM_CONFIG_GLOBALCONFIG',
       'NPM_CONFIG_USERCONFIG',
       'OMNIS_TEST_API_PROXY_TARGET',
+      'OMNIS_TEST_SYNTHETIC_CANCELLATION_REQUEST_ID',
       'OMNIS_TEST_FRONTEND_ORIGIN',
       'OMNIS_TEST_FRONTEND_PORT',
+      'OMNIS_TEST_SYNTHETIC_LOST_ACK_REQUEST_ID',
       'OMNIS_TEST_OWNER_PASSWORD',
       'PATH',
       'PLAYWRIGHT_BROWSERS_PATH',
@@ -270,6 +274,14 @@ test('browser environment allowlists only explicit runtime and test values', () 
   assert.equal(probe.status, 0);
   assert.equal(probe.stdout, 'true');
   assert.equal(environment.OMNIS_TEST_OWNER_PASSWORD, 'SYNTHETIC_OWNER_PASSWORD');
+  assert.equal(
+    environment.OMNIS_TEST_SYNTHETIC_CANCELLATION_REQUEST_ID,
+    'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+  );
+  assert.equal(
+    environment.OMNIS_TEST_SYNTHETIC_LOST_ACK_REQUEST_ID,
+    'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+  );
   assert.equal(environment.NPM_CONFIG_USERCONFIG, '/dev/null');
   assert.equal(environment.NPM_CONFIG_GLOBALCONFIG, '/dev/null');
 });
