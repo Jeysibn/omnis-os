@@ -394,7 +394,7 @@ test('owner sees an authorized synthetic broker Run, ordered events, result and 
     '/api/v1/connector-authorizations',
     {
       method: 'POST',
-      idempotencyKey: lostAckRequestId,
+      idempotencyKey: randomUUID(),
       body: lostAckAuthorizationInput,
     },
   );
@@ -415,7 +415,6 @@ test('owner sees an authorized synthetic broker Run, ordered events, result and 
     },
   );
   expect(lostAckApproval.status).toBe(200);
-  const lostAckRunRequestId = randomUUID();
   const lostAckRunRequestBody = {
     authorizationId: lostAckAuthorization.id,
     request: {
@@ -441,7 +440,7 @@ test('owner sees an authorized synthetic broker Run, ordered events, result and 
     `/api/v1/tasks/${lostAckTaskAssignment.body.id}/synthetic-runs`,
     {
       method: 'POST',
-      idempotencyKey: lostAckRunRequestId,
+      idempotencyKey: lostAckRequestId,
       body: lostAckRunRequestBody,
     },
   );
@@ -452,7 +451,7 @@ test('owner sees an authorized synthetic broker Run, ordered events, result and 
     `/api/v1/tasks/${lostAckTaskAssignment.body.id}/synthetic-runs`,
     {
       method: 'POST',
-      idempotencyKey: lostAckRunRequestId,
+      idempotencyKey: lostAckRequestId,
       body: lostAckRunRequestBody,
     },
   );
@@ -476,7 +475,7 @@ test('owner sees an authorized synthetic broker Run, ordered events, result and 
     `/api/v1/tasks/${lostAckTaskAssignment.body.id}/synthetic-runs`,
     {
       method: 'POST',
-      idempotencyKey: lostAckRunRequestId,
+      idempotencyKey: lostAckRequestId,
       body: lostAckRunRequestBody,
     },
   );
