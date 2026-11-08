@@ -88,6 +88,13 @@ export async function startMockServices({
   const syntheticBrokerTestToken = randomBytes(48).toString('hex');
   const sessionSecret = randomBytes(48).toString('hex');
   const agentIdempotencyKey = randomBytes(32).toString('hex');
+  const decisionKeyFile = join(tempDirectory, 'authorizer-ed25519.pem');
+  const decisionKeyNotBefore = new Date(Date.now() - 5_000).toISOString();
+  const decisionKeyNotAfter = new Date(Date.now() + 60 * 60_000).toISOString();
+  const decisionKeyPair = enableSyntheticBrokerTestMode
+    ? generateKeyPairSync('ed25519')
+    : undefined;
+  const passwordHash = (await scrypt(testOwnerPassword, salt, 64)).toString('hex');
   const sensitiveLogCanaries = [
     canary,
     testOwnerPassword,
@@ -104,13 +111,6 @@ export async function startMockServices({
     agentIdempotencyKey,
     passwordHash,
   ];
-  const decisionKeyFile = join(tempDirectory, 'authorizer-ed25519.pem');
-  const decisionKeyNotBefore = new Date(Date.now() - 5_000).toISOString();
-  const decisionKeyNotAfter = new Date(Date.now() + 60 * 60_000).toISOString();
-  const decisionKeyPair = enableSyntheticBrokerTestMode
-    ? generateKeyPairSync('ed25519')
-    : undefined;
-  const passwordHash = (await scrypt(testOwnerPassword, salt, 64)).toString('hex');
   const sharedEnvLines = [
     `OMNIS_OWNER_PASSWORD_HASH=${salt.toString('hex')}:${passwordHash}`,
     `OMNIS_SESSION_SECRET=${sessionSecret}`,
