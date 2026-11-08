@@ -455,7 +455,7 @@ test('owner sees an authorized synthetic broker Run, ordered events, result and 
       body: lostAckRunRequestBody,
     },
   );
-  expect(lostAckRunReplay.status).toBe(202);
+  expect(lostAckRunReplay.status).toBe(200);
   expect(lostAckRunReplay.body.id).toBe(lostAckRunId);
   await expect
     .poll(
@@ -479,7 +479,7 @@ test('owner sees an authorized synthetic broker Run, ordered events, result and 
       body: lostAckRunRequestBody,
     },
   );
-  expect(lostAckRunAfterRecoveryReplay.status).toBe(202);
+  expect(lostAckRunAfterRecoveryReplay.status).toBe(200);
   expect(lostAckRunAfterRecoveryReplay.body.id).toBe(lostAckRunId);
   const lostAckDetail = await ownerRequest(
     page,
