@@ -1268,7 +1268,7 @@ async function reproducePublication() {
         pids_limit: 64,
         mem_limit: '256m',
         cpus: 0.5,
-        environment: { OMNIS_WEB_PORT: '8080', OMNIS_API_URL: 'http://127.0.0.1:1' },
+        environment: { OMNIS_WEB_PORT: '8080', OMNIS_API_URL: 'http://api:4100' },
         ports: [`127.0.0.1:${ports[index]}:8080`],
         networks: [name],
         healthcheck: {
