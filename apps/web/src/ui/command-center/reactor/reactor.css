@@ -1,0 +1,83 @@
+/*
+ * Reactor layout and tinting. Scoped to `.ccx-reactor*`. The Canvas renderer reads its own palette
+ * (reactor/visual.ts, the same NEXUS values); this file tints the static SVG with the design tokens
+ * and sizes the visualisation. It animates nothing: all motion lives in the renderer.
+ */
+.ccx-reactor {
+  position: relative;
+  width: min(100%, 440px);
+  aspect-ratio: 1;
+  color: var(--nx-status-ok);
+}
+.ccx-reactor-static,
+.ccx-reactor-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.ccx-reactor[data-reactor-state='queued'] {
+  color: var(--nx-status-info);
+}
+.ccx-reactor[data-reactor-state='interrupted'] {
+  color: var(--nx-status-attention);
+}
+.ccx-reactor[data-reactor-state='failed'] {
+  color: var(--nx-status-danger);
+}
+.ccx-reactor[data-reactor-state='loading'],
+.ccx-reactor[data-reactor-state='unavailable'],
+.ccx-reactor[data-reactor-state='unknown'],
+.ccx-reactor[data-reactor-state='cancelled'] {
+  color: var(--nx-status-neutral);
+}
+/* States that are not "alive" are dimmed in the static drawing; the renderer does the same. */
+.ccx-reactor[data-reactor-state='loading'] .ccx-reactor-static,
+.ccx-reactor[data-reactor-state='unavailable'] .ccx-reactor-static {
+  opacity: 0.5;
+}
+.ccx-reactor[data-reactor-state='unknown'] .ccx-reactor-static,
+.ccx-reactor[data-reactor-state='cancelled'] .ccx-reactor-static {
+  opacity: 0.78;
+}
+.ccx-m-jade {
+  fill: #91f2cd;
+}
+.ccx-m-amber {
+  fill: #f0bd76;
+}
+.ccx-m-red {
+  fill: #ff8a8a;
+}
+.ccx-m-blue {
+  stroke: #9db8ff;
+}
+.ccx-m-frost {
+  stroke: #eaf4ee;
+}
+.ccx-m-ring {
+  fill: none;
+  stroke-width: 1.6;
+}
+.ccx-m-dash {
+  stroke-dasharray: 2 2;
+}
+/* Large desktop: the spec wants the Reactor to take roughly 60-75% of the stage height. */
+@media (min-width: 1600px) {
+  .ccx-reactor {
+    width: min(100%, 500px);
+  }
+}
+/* Stacked layouts (below the 1200px wide layout): the stage is full width and the controls and
+   attention panel must stay near the top, so the graphic is smaller. Must match WIDE_LAYOUT_QUERY. */
+@media not all and (min-width: 1200px) {
+  .ccx-reactor {
+    width: min(100%, 300px);
+  }
+}
+@media (max-width: 719px) {
+  .ccx-reactor {
+    width: min(100%, 60vw, 200px);
+  }
+}

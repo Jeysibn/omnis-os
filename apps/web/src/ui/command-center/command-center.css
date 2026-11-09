@@ -166,26 +166,6 @@ body:has(.app-shell[data-view='command-center']) {
     radial-gradient(ellipse at 50% 0%, rgb(145 242 205 / 0.1), transparent 70%),
     var(--nx-surface-panel);
 }
-.ccx-mark {
-  width: clamp(110px, 20vw, 200px);
-  height: auto;
-  color: var(--nx-status-ok);
-}
-.ccx-state[data-state='loading'] .ccx-mark,
-.ccx-state[data-state='unavailable'] .ccx-mark,
-.ccx-state[data-state='unknown'] .ccx-mark,
-.ccx-state[data-state='cancelled'] .ccx-mark {
-  color: var(--nx-status-neutral);
-}
-.ccx-state[data-state='queued'] .ccx-mark {
-  color: var(--nx-status-info);
-}
-.ccx-state[data-state='interrupted'] .ccx-mark {
-  color: var(--nx-status-attention);
-}
-.ccx-state[data-state='failed'] .ccx-mark {
-  color: var(--nx-status-danger);
-}
 .ccx-state-label .nx-status {
   padding: var(--nx-space-1) var(--nx-space-4);
   font-size: 15px;
