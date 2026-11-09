@@ -10,9 +10,20 @@ if [[ "${OMNIS_SYSTEMD_VERIFICATION_REQUIRED:-}" != true ]]; then
   echo "Required CI systemd verification was not explicitly enabled." >&2
   exit 1
 fi
+pid1_comm="$(ps -p 1 -o comm= 2>/dev/null | tr -d ' ' || true)"
+systemd_startup_timeout_seconds=60
+systemd_startup_deadline=$((SECONDS + systemd_startup_timeout_seconds))
+systemd_startup_waited_seconds=0
 systemd_state="$(systemctl is-system-running 2>/dev/null || true)"
-if [[ "$(ps -p 1 -o comm= | tr -d ' ')" != systemd ]] || [[ "$systemd_state" != active && "$systemd_state" != degraded ]]; then
-  pid1_comm="$(ps -p 1 -o comm= 2>/dev/null | tr -d ' ' || true)"
+# GitHub-hosted Ubuntu may expose systemd as PID 1 before its units finish
+# starting. Poll readiness only for that transient state and fail closed at a
+# fixed deadline; no host resources are created before this preflight passes.
+while [[ "$systemd_state" == starting ]] && ((SECONDS < systemd_startup_deadline)); do
+  sleep 1
+  systemd_startup_waited_seconds=$((systemd_startup_waited_seconds + 1))
+  systemd_state="$(systemctl is-system-running 2>/dev/null || true)"
+done
+if [[ "$pid1_comm" != systemd ]] || [[ "$systemd_state" != active && "$systemd_state" != degraded ]]; then
   init_pid_namespace="$(readlink /proc/1/ns/pid 2>/dev/null || printf unavailable)"
   current_pid_namespace="$(readlink /proc/self/ns/pid 2>/dev/null || printf unavailable)"
   container_marker=none
@@ -21,8 +32,9 @@ if [[ "$(ps -p 1 -o comm= | tr -d ' ')" != systemd ]] || [[ "$systemd_state" != 
   elif [[ -e /run/.containerenv ]]; then
     container_marker=/run/.containerenv
   fi
-  printf 'Systemd preflight diagnostics: pid1_comm=%s systemd_state=%s init_pid_namespace=%s current_pid_namespace=%s container_marker=%s runner_os=%s runner_environment=%s\n' \
-    "${pid1_comm:-unavailable}" "${systemd_state:-unavailable}" "$init_pid_namespace" \
+  printf 'Systemd preflight diagnostics: pid1_comm=%s systemd_state=%s startup_waited_seconds=%s startup_timeout_seconds=%s init_pid_namespace=%s current_pid_namespace=%s container_marker=%s runner_os=%s runner_environment=%s\n' \
+    "${pid1_comm:-unavailable}" "${systemd_state:-unavailable}" "$systemd_startup_waited_seconds" \
+    "$systemd_startup_timeout_seconds" "$init_pid_namespace" \
     "$current_pid_namespace" "$container_marker" "${RUNNER_OS:-unavailable}" \
     "${RUNNER_ENVIRONMENT:-unavailable}" >&2
   echo "Required CI verification unavailable: a running systemd PID 1 is required." >&2
