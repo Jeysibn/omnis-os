@@ -249,8 +249,6 @@ jobs:
           node-version: 24.22.1
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Install Chromium for the Compose owner journey
-        run: pnpm --filter @omnis/web exec playwright install --with-deps chromium
       - name: Build images and verify non-root metadata, runtime-only configuration, and secret exclusion
         run: |
           set -euo pipefail

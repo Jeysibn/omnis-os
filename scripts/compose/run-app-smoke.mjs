@@ -1,13 +1,12 @@
 import assert from 'node:assert/strict';
-import { createHash, randomBytes, randomUUID, scrypt as scryptCallback } from 'node:crypto';
+import { createHash, randomBytes, scrypt as scryptCallback } from 'node:crypto';
 import { createConnection, createServer, isIPv4 } from 'node:net';
 import { chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { promisify, TextDecoder } from 'node:util';
+import { promisify } from 'node:util';
 import { spawnSync } from 'node:child_process';
 import {
-  buildBrowserEnvironment,
   startMockServices,
   testOwnerPassword,
 } from '../../tests/integration/support/mock-services.mjs';
@@ -35,6 +34,8 @@ const directory = await mkdtemp(join(tmpdir(), 'omnis-compose-smoke-'));
 const composeEnvPath = join(directory, 'compose.env');
 const apiEnvPath = join(directory, 'api.env');
 const workerEnvPath = join(directory, 'worker.env');
+const browserEnvPath = join(directory, 'browser.env');
+const browserResultsDirectory = join(directory, 'browser-results');
 const postgresSocketDirectory = join(directory, 'postgres-socket');
 const dbPassword = randomBytes(32).toString('hex');
 const migrationPassword = randomBytes(32).toString('hex');
@@ -45,6 +46,9 @@ const occupiedPorts = new Set();
 const dbPort = 5432;
 const webPort = await freePort(occupiedPorts);
 const origin = `http://127.0.0.1:${webPort}`;
+const browserOrigin = 'http://web:8080';
+const browserImage =
+  'mcr.microsoft.com/playwright@sha256:ee15712262f017b8157421b212b12099146645f44b1bc5c0514cbbe6a229b1d0';
 const databaseHost = 'localhost';
 let dbAdminUrl;
 const redactions = [
@@ -158,6 +162,7 @@ try {
     mkdir(join(directory, 'authorizer-fixture'), { mode: 0o770 }),
     mkdir(join(directory, 'launcher-fixture'), { mode: 0o770 }),
     mkdir(postgresSocketDirectory, { mode: 0o2770 }),
+    mkdir(browserResultsDirectory, { mode: 0o700 }),
   ]);
   await chmod(postgresSocketDirectory, 0o2770);
   const socketDirectoryStat = await lstat(postgresSocketDirectory);
@@ -172,7 +177,7 @@ try {
     ['OMNIS_SESSION_SECRET', randomBytes(48).toString('hex')],
     ['OMNIS_INTERNAL_TOKEN', randomBytes(48).toString('hex')],
     ['OMNIS_API_AUTHORIZER_TOKEN', randomBytes(48).toString('hex')],
-    ['OMNIS_ALLOWED_ORIGIN', origin],
+    ['OMNIS_ALLOWED_ORIGIN', browserOrigin],
     ['OMNIS_SECURE_COOKIES', 'false'],
     ['OMNIS_API_HOST', '0.0.0.0'],
     ['OMNIS_API_PORT', '4100'],
@@ -191,11 +196,18 @@ try {
     ['OMNIS_WORKER_PORT', '4101'],
   ]);
   const gid = String(process.getgid?.() ?? 1001);
-  if ((process.getuid?.() ?? 0) === 0 || gid === '0') {
+  const uid = String(process.getuid?.() ?? 0);
+  if (uid === '0' || gid === '0') {
     throw new Error(
       'Compose smoke requires a non-root CI host identity with a non-root primary group.',
     );
   }
+  await writeEnv(browserEnvPath, [
+    ['OMNIS_TEST_FRONTEND_ORIGIN', browserOrigin],
+    ['OMNIS_TEST_OWNER_PASSWORD', testOwnerPassword],
+    ['OMNIS_COMPOSE_JOURNEY_RESULT_PATH', '/results/compose-journey.json'],
+    ['OMNIS_TEST_OUTPUT_DIR', '/tmp/playwright-output'],
+  ]);
   await writeEnv(composeEnvPath, [
     ['OMNIS_DB_NAME', dbName],
     ['OMNIS_DB_PASSWORD', dbPassword],
@@ -209,6 +221,11 @@ try {
     ['OMNIS_WORKER_ENV_FILE', workerEnvPath],
     ['OMNIS_CI_AUTHORIZER_SOCKET_DIRECTORY', join(directory, 'authorizer-fixture')],
     ['OMNIS_CI_LAUNCHER_SOCKET_DIRECTORY', join(directory, 'launcher-fixture')],
+    ['OMNIS_CI_BROWSER_UID', uid],
+    ['OMNIS_CI_BROWSER_GID', gid],
+    ['OMNIS_CI_BROWSER_ENV_FILE', browserEnvPath],
+    ['OMNIS_CI_BROWSER_WORKSPACE', root],
+    ['OMNIS_CI_BROWSER_RESULTS_DIRECTORY', browserResultsDirectory],
   ]);
 
   const renderedConfig = JSON.parse(compose(['config', '--format', 'json']).stdout);
@@ -393,6 +410,13 @@ try {
     ['OMNIS_WORKER_ENV_FILE', workerEnvPath],
     ['OMNIS_CI_AUTHORIZER_SOCKET_DIRECTORY', dirname(fixtures.authorizerSocket)],
     ['OMNIS_CI_LAUNCHER_SOCKET_DIRECTORY', dirname(fixtures.launcherSocket)],
+    ['OMNIS_CI_POSTGRES_UID', String(postgresUid)],
+    ['OMNIS_CI_POSTGRES_GID', String(postgresGid)],
+    ['OMNIS_CI_BROWSER_UID', uid],
+    ['OMNIS_CI_BROWSER_GID', gid],
+    ['OMNIS_CI_BROWSER_ENV_FILE', browserEnvPath],
+    ['OMNIS_CI_BROWSER_WORKSPACE', root],
+    ['OMNIS_CI_BROWSER_RESULTS_DIRECTORY', browserResultsDirectory],
   ]);
   const generatedApi = (await readFile(fixtures.apiEnvPath, 'utf8')).split(/\r?\n/).filter(Boolean);
   const generatedWorker = (await readFile(fixtures.workerEnvPath, 'utf8'))
@@ -403,7 +427,7 @@ try {
     OMNIS_API_PORT: '4100',
     OMNIS_WORKER_HOST: 'worker',
     OMNIS_WORKER_PORT: '4101',
-    OMNIS_ALLOWED_ORIGIN: origin,
+    OMNIS_ALLOWED_ORIGIN: browserOrigin,
     OMNIS_AUTHORIZER_SOCKET: '/run/omnis-authorizer/authorizer.sock',
   });
   await replaceEnv(workerEnvPath, generatedWorker, {
@@ -435,78 +459,57 @@ try {
   } else {
     compose(['build', 'api', 'worker', 'web'], { timeout: 600_000 });
   }
-  compose(['up', '--detach', '--wait', '--wait-timeout', '180', 'api', 'worker', 'web'], {
-    timeout: 600_000,
+  const pulledBrowserImage = runDocker('docker', ['pull', browserImage], {
+    encoding: 'utf8',
+    timeout: 180_000,
   });
+  assert.equal(
+    pulledBrowserImage.status,
+    0,
+    `could not pull the digest-pinned Playwright browser image: ${redact(pulledBrowserImage.stderr || 'unknown Docker error')}`,
+  );
+  compose(
+    ['up', '--detach', '--wait', '--wait-timeout', '180', 'api', 'worker', 'web', 'browser'],
+    {
+      timeout: 600_000,
+    },
+  );
   await probeWebPath(false);
   await assertRuntimeRestrictions();
   await assertSocketPermissionDenials();
   await assertDeniedEgress();
   await assertMissingSocketFailsClosed();
-  await probeWebPath(true);
+  await assertBrowserNetworkIsolation();
 
-  const browserEnvironment = buildBrowserEnvironment(process.env, {
-    apiTarget: 'http://api:4100',
-    frontendOrigin: origin,
-    frontendPort: webPort,
-    ownerPassword: testOwnerPassword,
-  });
-  browserEnvironment.OMNIS_TEST_EXTERNAL_WEB = '1';
-  const browser = spawnSync('pnpm', ['--filter', '@omnis/web', 'test:e2e:integration'], {
-    cwd: root,
-    env: browserEnvironment,
-    encoding: 'utf8',
-    timeout: 240_000,
-    maxBuffer: 4 * 1024 * 1024,
-  });
-  if (browser.error || browser.status !== 0) {
-    const browserOutput = `${browser.stdout ?? ''}\n${browser.stderr ?? ''}`.trim();
-    throw new Error(
-      `Compose browser journey failed: ${redact(browserOutput || browser.error?.message || 'unknown error')}`,
-    );
-  }
-
-  const run = await runMockJourney(origin, testOwnerPassword);
-  const persistedBeforeRestart = await getRun(origin, run.id, run.cookie);
-  assert.equal(persistedBeforeRestart.status, 'completed');
-  const eventsBeforeRestart = await getEvents(origin, run.id, run.cookie);
-  assert.ok(eventsBeforeRestart.length > 0);
+  runBrowserPlaywright();
+  const browserJourney = JSON.parse(
+    await readFile(join(browserResultsDirectory, 'compose-journey.json'), 'utf8'),
+  );
+  assert.ok(browserJourney.taskId && browserJourney.runId);
+  assert.ok(browserJourney.events.length > 0);
   assert.ok(
-    eventsBeforeRestart.every((event) => event.synthetic === true && event.source === 'mock'),
+    browserJourney.events.every((event) => event.synthetic === true && event.source === 'mock'),
+    'durable browser journey events retain mock provenance',
   );
 
   compose(['restart', 'worker']);
   await waitForHealthy('worker', 60_000);
+  runBrowserRecovery();
   compose(['restart', 'api']);
   await waitForHealthy('api', 60_000);
-  const ownerAfterApiRestart = await signInOwner(origin, testOwnerPassword);
-  run.cookie = ownerAfterApiRestart.cookie;
-  const persistedAfterRestart = await getRun(origin, run.id, run.cookie);
-  assert.equal(persistedAfterRestart.status, 'completed');
-  assert.deepEqual(await getEvents(origin, run.id, run.cookie), eventsBeforeRestart);
+  runBrowserRecovery();
 
   compose(['restart', 'postgres']);
   await waitForHealthy('postgres', 60_000);
-  await waitForHttp(`${origin}/api/v1/health`, 30_000);
-  const afterDatabaseRestart = await waitForRunAvailable(origin, run.id, run.cookie, 30_000);
-  assert.equal(afterDatabaseRestart.status, 'completed');
-  assert.deepEqual(await getEvents(origin, run.id, run.cookie), eventsBeforeRestart);
-  const taskList = await globalThis.fetch(`${origin}/api/v1/tasks`, {
-    headers: { cookie: run.cookie },
-  });
-  assert.equal(taskList.status, 200);
-  const persistedTask = (await taskList.json()).find((task) => task.id === run.taskId);
-  assert.equal(persistedTask?.runtimeId, 'mock');
-  assert.ok(persistedTask?.agentId);
-  const postDatabaseRun = await runMockJourney(origin, testOwnerPassword);
-  assert.equal(
-    (await getRun(origin, postDatabaseRun.id, postDatabaseRun.cookie)).status,
-    'completed',
-  );
+  await waitForHealthy('api', 30_000);
+  runBrowserRecovery();
   assertComposeLogsContainNoSecrets();
   fixtures.assertSensitiveValuesAbsentFromLogs();
   process.stdout.write(
-    'Disposable Compose smoke passed: health, browser owner flow, mock Run persistence, restart recovery, network policy, and fail-closed socket mount.\n',
+    'CI-INTERNAL-BROWSER-INTEGRATION=PASS: health, authenticated mock owner flow, Task/Run/event persistence, worker/API/PostgreSQL restart recovery, network denial probes, and fail-closed socket mount.\n',
+  );
+  process.stdout.write(
+    'HOST-LOOPBACK-INGRESS=NOT VERIFIED BY THIS OPTION C RUN; historical Docker Engine 28.0.4 run 42543015445 recorded ECONNREFUSED, and target WSL2 ingress remains NOT VERIFIED.\n',
   );
 } catch (error) {
   failed = true;
@@ -708,19 +711,6 @@ async function waitForHealthy(service, timeout) {
   throw new Error(`${service} did not become healthy within ${timeout}ms.`);
 }
 
-async function waitForHttp(url, timeout) {
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    try {
-      if ((await globalThis.fetch(url)).ok) return;
-    } catch {
-      /* service is reconnecting */
-    }
-    await new Promise((resolve) => setTimeout(resolve, 400));
-  }
-  throw new Error(`HTTP health endpoint did not recover before ${timeout}ms: ${url}`);
-}
-
 async function assertRuntimeRestrictions() {
   for (const service of ['api', 'worker', 'web']) {
     const id = compose(['ps', '-q', service]).stdout.trim();
@@ -745,6 +735,51 @@ async function assertRuntimeRestrictions() {
       ),
     );
   }
+  const browserId = compose(['ps', '-q', 'browser']).stdout.trim();
+  assert.ok(browserId, 'isolated Playwright browser container is running');
+  const browserInspect = JSON.parse(
+    runDocker('docker', ['inspect', browserId], { encoding: 'utf8' }).stdout,
+  )[0];
+  assert.equal(browserInspect.Config.User, `${process.getuid()}:${process.getgid()}`);
+  assert.equal(browserInspect.Config.Image, browserImage);
+  assert.equal(browserInspect.HostConfig.Privileged, false);
+  assert.equal(browserInspect.HostConfig.NetworkMode, `${project}_browser_web`);
+  assert.equal(browserInspect.HostConfig.ReadonlyRootfs, true);
+  assert.equal(browserInspect.HostConfig.RestartPolicy.Name, 'no');
+  assert.deepEqual(browserInspect.HostConfig.CapAdd ?? [], []);
+  assert.deepEqual(browserInspect.HostConfig.Devices ?? [], []);
+  assert.deepEqual(browserInspect.HostConfig.DeviceRequests ?? [], []);
+  assert.ok(browserInspect.HostConfig.CapDrop.includes('ALL'));
+  assert.ok(browserInspect.HostConfig.SecurityOpt.includes('no-new-privileges:true'));
+  assert.ok(browserInspect.HostConfig.PidsLimit > 0);
+  assert.ok(browserInspect.HostConfig.Memory > 0);
+  assert.ok(browserInspect.HostConfig.NanoCpus > 0);
+  assert.deepEqual(
+    browserInspect.Mounts.map((mount) => mount.Destination).sort(),
+    ['/results', '/workspace'],
+    'browser sees only its read-only workspace and disposable result directory',
+  );
+  assert.equal(
+    browserInspect.Mounts.find((mount) => mount.Destination === '/workspace')?.RW,
+    false,
+  );
+  assert.equal(browserInspect.Mounts.find((mount) => mount.Destination === '/results')?.RW, true);
+  assert.ok(
+    Object.values(browserInspect.NetworkSettings.Ports ?? {}).every(
+      (bindings) => !bindings?.some((binding) => binding?.HostPort),
+    ),
+    'browser container has no host-published ports',
+  );
+  assert.ok(!browserInspect.Mounts.some((mount) => /docker\.sock$/.test(mount.Source)));
+  assert.ok(
+    !browserInspect.Config.Env.some((value) => value.startsWith('OMNIS_TEST_API_PROXY_TARGET=')),
+    'browser receives no direct API target configuration',
+  );
+  assert.ok(
+    !browserInspect.Config.Env.some((value) =>
+      /(?:OPENAI|ANTHROPIC|GOOGLE|PROVIDER)_API_KEY=/i.test(value),
+    ),
+  );
   const postgresId = compose(['ps', '-q', 'postgres']).stdout.trim();
   const postgresInspect = JSON.parse(
     runDocker('docker', ['inspect', postgresId], { encoding: 'utf8' }).stdout,
@@ -781,10 +816,13 @@ async function assertRuntimeRestrictions() {
   const config = JSON.parse(compose(['config', '--format', 'json']).stdout);
   assert.equal(config.networks.edge.internal, true);
   assert.equal(config.networks.data.internal, true);
+  assert.equal(config.networks.browser_web.internal, true);
+  assert.deepEqual(Object.keys(config.services.browser.networks), ['browser_web']);
+  assert.deepEqual(Object.keys(config.services.web.networks).sort(), ['browser_web', 'edge']);
   assert.equal(config.services.api.ports?.length ?? 0, 0);
   assert.equal(config.services.worker.ports?.length ?? 0, 0);
   const networksByService = {};
-  for (const service of ['api', 'worker', 'web', 'postgres']) {
+  for (const service of ['api', 'worker', 'web', 'postgres', 'browser']) {
     const id = compose(['ps', '-q', service]).stdout.trim();
     const inspect = JSON.parse(
       runDocker('docker', ['inspect', id], { encoding: 'utf8' }).stdout,
@@ -795,9 +833,10 @@ async function assertRuntimeRestrictions() {
   }
   assert.deepEqual(networksByService.api, ['data', 'edge']);
   assert.deepEqual(networksByService.worker, ['data']);
-  assert.deepEqual(networksByService.web, ['edge']);
+  assert.deepEqual(networksByService.web, ['browser_web', 'edge']);
   assert.deepEqual(networksByService.postgres, ['data']);
-  for (const network of ['edge', 'data']) {
+  assert.deepEqual(networksByService.browser, ['browser_web']);
+  for (const network of ['edge', 'data', 'browser_web']) {
     const inspect = JSON.parse(
       runDocker('docker', ['network', 'inspect', `${project}_${network}`], {
         encoding: 'utf8',
@@ -829,6 +868,102 @@ async function assertRuntimeRestrictions() {
   }
 }
 
+async function assertBrowserNetworkIsolation() {
+  const addresses = {};
+  for (const service of ['api', 'worker', 'postgres']) {
+    const id = compose(['ps', '-q', service]).stdout.trim();
+    const inspected = JSON.parse(
+      runDocker('docker', ['inspect', id, '--format', '{{json .NetworkSettings.Networks}}'], {
+        encoding: 'utf8',
+      }).stdout,
+    );
+    addresses[service] = Object.values(inspected)
+      .map((network) => network.IPAddress)
+      .find((value) => isIPv4(value));
+    assert.ok(addresses[service], `${service} IPv4 address is available for direct-denial probe`);
+  }
+  const browserNetwork = JSON.parse(
+    runDocker('docker', ['network', 'inspect', `${project}_browser_web`], {
+      encoding: 'utf8',
+    }).stdout,
+  )[0];
+  assert.equal(browserNetwork.Internal, true, 'browser-to-web network is internal at runtime');
+  const attachedIds = Object.keys(browserNetwork.Containers ?? {}).sort();
+  const expectedIds = [
+    compose(['ps', '-q', 'browser']).stdout.trim(),
+    compose(['ps', '-q', 'web']).stdout.trim(),
+  ].sort();
+  assert.deepEqual(attachedIds, expectedIds, 'only browser and web join browser_web');
+  const gateway = browserNetwork.IPAM.Config?.[0]?.Gateway;
+  assert.ok(isIPv4(gateway), 'internal browser network gateway is inspected at runtime');
+  const beforeProbe = JSON.parse(
+    runDocker('docker', ['inspect', compose(['ps', '-q', 'web']).stdout.trim()], {
+      encoding: 'utf8',
+    }).stdout,
+  )[0];
+  const beforeBrowser = JSON.parse(
+    runDocker('docker', ['inspect', compose(['ps', '-q', 'browser']).stdout.trim()], {
+      encoding: 'utf8',
+    }).stdout,
+  )[0];
+  assert.equal(beforeProbe.State.Health?.Status, 'healthy');
+  assert.equal(beforeBrowser.State.Health?.Status, 'healthy');
+  const probe = compose(
+    [
+      'exec',
+      '-T',
+      'browser',
+      'node',
+      'scripts/compose/assert-browser-network.mjs',
+      addresses.api,
+      addresses.worker,
+      addresses.postgres,
+      gateway,
+    ],
+    { timeout: 45_000 },
+  );
+  process.stdout.write(redact(probe.stdout));
+  for (const [service, id] of [
+    ['web', compose(['ps', '-q', 'web']).stdout.trim()],
+    ['browser', compose(['ps', '-q', 'browser']).stdout.trim()],
+  ]) {
+    const after = JSON.parse(runDocker('docker', ['inspect', id], { encoding: 'utf8' }).stdout)[0];
+    assert.equal(
+      after.State.Health?.Status,
+      'healthy',
+      `${service} health remains after denial probes`,
+    );
+    assert.equal(after.RestartCount, 0, `${service} did not restart during denial probes`);
+  }
+}
+
+function runBrowserPlaywright(recovery = false) {
+  const args = [
+    'exec',
+    '-T',
+    ...(recovery ? ['-e', 'OMNIS_COMPOSE_RECOVERY=1'] : []),
+    'browser',
+    'node',
+    'apps/web/node_modules/@playwright/test/cli.js',
+    'test',
+    '--config',
+    'apps/web/playwright.integration.config.ts',
+    ...(recovery ? ['--grep', 'Compose recovery preserves'] : []),
+  ];
+  const browser = compose(args, { timeout: 240_000, allowFailure: true });
+  if (browser.error || browser.status !== 0) {
+    const output = redact(`${browser.stdout ?? ''}\n${browser.stderr ?? ''}`.trim());
+    throw new Error(
+      `Isolated Compose Playwright ${recovery ? 'recovery' : 'journey'} failed: ${output}`,
+    );
+  }
+  process.stdout.write(redact(browser.stdout));
+}
+
+function runBrowserRecovery() {
+  runBrowserPlaywright(true);
+}
+
 async function assertDeniedEgress() {
   const apiId = compose(['ps', '-q', 'api']).stdout.trim();
   const probe = runDocker(
@@ -842,7 +977,11 @@ async function assertDeniedEgress() {
     ],
     { encoding: 'utf8', timeout: 8_000 },
   );
-  assert.equal(probe.status, 0, 'API outbound Internet request must fail on internal networks');
+  assert.equal(
+    probe.status,
+    0,
+    'API TCP connection to the sampled 1.1.1.1:443 endpoint must fail on internal networks',
+  );
 }
 
 async function assertSocketPermissionDenials() {
@@ -941,254 +1080,7 @@ async function assertMissingSocketFailsClosed() {
   assert.match(failureText, /no such file|does not exist|not found|bind source/i);
 }
 
-async function runMockJourney(origin, password) {
-  const { cookie, ownerCsrf } = await signInOwner(origin, password);
-  assert.equal(
-    (await globalThis.fetch(`${origin}/api/v1/me`, { headers: { cookie } })).status,
-    200,
-  );
-  const deniedCsrf = await globalThis.fetch(`${origin}/api/v1/tasks`, {
-    method: 'POST',
-    headers: {
-      cookie,
-      origin,
-      'x-omnis-csrf': 'invalid-test-token',
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify({ title: 'Denied mutation', detail: 'CSRF protection remains enabled.' }),
-  });
-  assert.equal(deniedCsrf.status, 403);
-  const headers = { cookie, origin, 'x-omnis-csrf': ownerCsrf, 'content-type': 'application/json' };
-  const taskResponse = await globalThis.fetch(`${origin}/api/v1/tasks`, {
-    method: 'POST',
-    headers: { ...headers, 'idempotency-key': randomUUID() },
-    body: JSON.stringify({
-      title: `Compose synthetic ${randomUUID()}`,
-      detail: 'CI-only deterministic mock execution.',
-    }),
-  });
-  assert.equal(taskResponse.status, 201, await taskResponse.clone().text());
-  const task = await taskResponse.json();
-  const agentResponse = await globalThis.fetch(`${origin}/api/v1/agents`, {
-    method: 'POST',
-    headers: { ...headers, 'idempotency-key': randomUUID() },
-    body: JSON.stringify({
-      name: 'Compose smoke agent',
-      slug: `compose-${randomUUID().slice(0, 8)}`,
-      departmentId: null,
-    }),
-  });
-  assert.equal(agentResponse.status, 201, await agentResponse.clone().text());
-  const agentId = (await agentResponse.json()).agentId;
-  const profile = {
-    profession: 'Synthetic integration assistant',
-    seniority: null,
-    specialties: ['CI validation'],
-    personality: { traits: ['careful'], tone: 'plain', principles: ['report only fixture data'] },
-    behavior: { autonomy: 'No external actions.', escalation: null },
-    instructions: 'Return the deterministic mock result.',
-  };
-  const draft = await globalThis.fetch(`${origin}/api/v1/agents/${agentId}/draft-profile`, {
-    method: 'PUT',
-    headers: { ...headers, 'idempotency-key': randomUUID() },
-    body: JSON.stringify({ expectedDraftRevision: 0, baseVersionNo: null, profile }),
-  });
-  assert.equal(draft.status, 200, await draft.clone().text());
-  const publish = await globalThis.fetch(`${origin}/api/v1/agents/${agentId}/publish`, {
-    method: 'POST',
-    headers: { ...headers, 'idempotency-key': randomUUID() },
-    body: JSON.stringify({ expectedVersionNo: null, expectedDraftRevision: 1 }),
-  });
-  assert.equal(publish.status, 201, await publish.clone().text());
-  const assignment = await globalThis.fetch(
-    `${origin}/api/v1/tasks/${task.id}/execution-assignment`,
-    {
-      method: 'PUT',
-      headers: { ...headers, 'idempotency-key': randomUUID() },
-      body: JSON.stringify({
-        agentId,
-        profileVersion: 1,
-        runtimeId: 'mock',
-        expectedAssignmentRevision: task.assignmentRevision,
-      }),
-    },
-  );
-  assert.equal(assignment.status, 200, await assignment.clone().text());
-  const assignedTask = await assignment.json();
-  assert.equal(assignedTask.agentId, agentId);
-  assert.equal(assignedTask.runtimeId, 'mock');
-  const requestKey = randomUUID();
-  const requested = await globalThis.fetch(`${origin}/api/v1/authorizations`, {
-    method: 'POST',
-    headers: { ...headers, 'idempotency-key': requestKey },
-    body: JSON.stringify({ taskId: task.id }),
-  });
-  assert.equal(requested.status, 201, await requested.clone().text());
-  const authorization = await requested.json();
-  assert.equal(authorization.status, 'pending');
-  const decision = await globalThis.fetch(
-    `${origin}/api/v1/authorizations/${authorization.id}/decision`,
-    {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ decision: 'approve' }),
-    },
-  );
-  assert.equal(decision.status, 200, await decision.clone().text());
-  const approved = await decision.json();
-  const runKey = randomUUID();
-  const runBody = JSON.stringify({ taskId: task.id, authorizationId: approved.id });
-  const admitted = await globalThis.fetch(`${origin}/api/v1/runs`, {
-    method: 'POST',
-    headers: { ...headers, 'idempotency-key': runKey },
-    body: runBody,
-  });
-  assert.equal(admitted.status, 201, await admitted.clone().text());
-  const run = await admitted.json();
-  assert.equal(run.runtimeKind, 'mock');
-  assert.equal(run.synthetic, true);
-  const replay = await globalThis.fetch(`${origin}/api/v1/runs`, {
-    method: 'POST',
-    headers: { ...headers, 'idempotency-key': runKey },
-    body: runBody,
-  });
-  assert.ok([200, 201].includes(replay.status));
-  assert.equal((await replay.json()).id, run.id);
-  const deadline = Date.now() + 45_000;
-  let current = run;
-  while (current.status !== 'completed' && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 350));
-    current = await getRun(origin, run.id, cookie);
-    assert.ok(
-      !['unknown', 'failed'].includes(current.status),
-      `unexpected synthetic Run status ${current.status}`,
-    );
-  }
-  assert.equal(current.status, 'completed', 'deterministic mock Run reaches completed state');
-  return { id: run.id, taskId: task.id, cookie };
-}
-
-async function signInOwner(origin, password) {
-  const csrfResponse = await globalThis.fetch(`${origin}/api/v1/auth/csrf`);
-  assert.equal(csrfResponse.status, 200);
-  const anonymousCookie = cookieHeader(csrfResponse);
-  const csrf = (await csrfResponse.json()).csrfToken;
-  const login = await globalThis.fetch(`${origin}/api/v1/auth/login`, {
-    method: 'POST',
-    headers: {
-      cookie: anonymousCookie,
-      origin,
-      'x-omnis-csrf': csrf,
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify({ password }),
-  });
-  assert.equal(login.status, 200);
-  const cookie = mergeCookies(anonymousCookie, cookieHeader(login));
-  const ownerCsrfResponse = await globalThis.fetch(`${origin}/api/v1/auth/csrf`, {
-    headers: { cookie },
-  });
-  assert.equal(ownerCsrfResponse.status, 200);
-  return { cookie, ownerCsrf: (await ownerCsrfResponse.json()).csrfToken };
-}
-
-async function getRun(origin, id, cookie) {
-  const response = await globalThis.fetch(`${origin}/api/v1/runs/${id}`, { headers: { cookie } });
-  assert.equal(response.status, 200);
-  return response.json();
-}
-
-async function waitForRunAvailable(origin, id, cookie, timeout) {
-  const deadline = Date.now() + timeout;
-  let lastStatus = 'no response';
-  while (Date.now() < deadline) {
-    try {
-      const response = await globalThis.fetch(`${origin}/api/v1/runs/${id}`, {
-        headers: { cookie },
-      });
-      lastStatus = String(response.status);
-      if (response.status === 200) return response.json();
-      if (response.status < 500 || response.status > 504) {
-        throw new Error(`Run read failed with non-retryable HTTP ${response.status}.`);
-      }
-    } catch (error) {
-      if (error instanceof Error && error.message.startsWith('Run read failed')) throw error;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 300));
-  }
-  throw new Error(
-    `Run read did not recover after PostgreSQL restart before the deadline (last HTTP status: ${lastStatus}).`,
-  );
-}
-
-async function getEvents(origin, id, cookie) {
-  const controller = new globalThis.AbortController();
-  const response = await globalThis.fetch(`${origin}/api/v1/runs/${id}/events`, {
-    headers: { cookie },
-    signal: controller.signal,
-  });
-  assert.equal(response.status, 200);
-  assert.match(response.headers.get('content-type') ?? '', /text\/event-stream/);
-  assert.ok(response.body);
-  const reader = response.body.getReader();
-  const events = [];
-  let buffer = '';
-  const deadline = Date.now() + 10_000;
-  try {
-    while (Date.now() < deadline) {
-      const result = await Promise.race([
-        reader.read(),
-        new Promise((resolve) => setTimeout(() => resolve({ timeout: true }), 1_000)),
-      ]);
-      if ('timeout' in result) break;
-      if (result.done) break;
-      buffer += new TextDecoder().decode(result.value, { stream: true });
-      const lines = buffer.split(/\r?\n/);
-      buffer = lines.pop() ?? '';
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        events.push(JSON.parse(line.slice(6)));
-      }
-      if (events.some((event) => event.type === 'run.completed')) break;
-    }
-  } finally {
-    controller.abort();
-    await reader.cancel().catch(() => undefined);
-  }
-  assert.ok(
-    events.some((event) => event.type === 'run.completed'),
-    'persisted SSE history includes the terminal Run event',
-  );
-  const sequences = events.map((event) => event.sequence);
-  assert.deepEqual(
-    sequences,
-    Array.from({ length: sequences.length }, (_, index) => index + 1),
-  );
-  return events;
-}
-
-function cookieHeader(response) {
-  return (
-    response.headers
-      .getSetCookie?.()
-      .map((value) => value.split(';', 1)[0])
-      .join('; ') ??
-    response.headers.get('set-cookie')?.split(';', 1)[0] ??
-    ''
-  );
-}
-
-function mergeCookies(first, second) {
-  const values = new Map(
-    `${first}; ${second}`
-      .split('; ')
-      .filter(Boolean)
-      .map((item) => item.split('=', 2)),
-  );
-  return [...values.entries()].map(([name, value]) => `${name}=${value}`).join('; ');
-}
-
-async function probeWebPath(required) {
+async function probeWebPath() {
   const id = compose(['ps', '-q', 'web']).stdout.trim();
   const inspected = JSON.parse(
     runDocker('docker', ['inspect', id], { encoding: 'utf8' }).stdout,
@@ -1237,98 +1129,7 @@ async function probeWebPath(required) {
     http = error.cause?.code ?? error.name;
   }
   process.stdout.write(
-    `${JSON.stringify({ phase: required ? 'after-security-probes' : 'before-security-probes', destination: origin, port: webPort, health: inspected.State.Health?.Status, restartCount: inspected.RestartCount, configuredPorts: inspected.HostConfig.PortBindings, effectivePorts: inspected.NetworkSettings.Ports, internalHttp: internal.stdout.trim(), internalStatus: internal.status, listeners: listeners.stdout.trim(), runnerTcp: tcp, runnerHttp: http })}\n`,
+    `${JSON.stringify({ phase: 'ci-runner-host-publication-observation', destination: origin, port: webPort, health: inspected.State.Health?.Status, restartCount: inspected.RestartCount, configuredPorts: inspected.HostConfig.PortBindings, effectivePorts: inspected.NetworkSettings.Ports, internalHttp: internal.stdout.trim(), internalStatus: internal.status, listeners: listeners.stdout.trim(), runnerTcp: tcp, runnerHttp: http })}\n`,
   );
-  if (required && tcp !== 'connected') await reproducePublication();
-  if (required) {
-    assert.equal(internal.status, 0, 'web internal HTTP failed');
-    assert.equal(
-      tcp,
-      'connected',
-      'runner IPv4 TCP cannot reach Docker publication; inspect preceding path diagnostics',
-    );
-    assert.equal(http, 200, 'runner HTTP must succeed before Playwright');
-  }
-}
-
-async function reproducePublication() {
-  const diagnosticProject = `${project}-publication`;
-  auxiliaryProjects.add(diagnosticProject);
-  const path = join(directory, 'publication.yml');
-  const ports = [await freePort(occupiedPorts), await freePort(occupiedPorts)];
-  const services = Object.fromEntries(
-    ['isolated', 'control'].map((name, index) => [
-      name,
-      {
-        image: 'omnis-web:ci',
-        user: '10001:10001',
-        read_only: true,
-        cap_drop: ['ALL'],
-        security_opt: ['no-new-privileges:true'],
-        pids_limit: 64,
-        mem_limit: '256m',
-        cpus: 0.5,
-        environment: { OMNIS_WEB_PORT: '8080', OMNIS_API_URL: 'http://api:4100' },
-        ports: [`127.0.0.1:${ports[index]}:8080`],
-        networks: [name],
-        healthcheck: {
-          test: [
-            'CMD',
-            'node',
-            '-e',
-            "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
-          ],
-          interval: '1s',
-          timeout: '3s',
-          retries: 10,
-        },
-      },
-    ]),
-  );
-  await writeFile(
-    path,
-    JSON.stringify({
-      services,
-      networks: { isolated: { internal: true }, control: { internal: false } },
-    }),
-  );
-  const args = ['compose', '--project-name', diagnosticProject, '-f', path];
-  const invoke = (extra) =>
-    runDocker('docker', [...args, ...extra], { encoding: 'utf8', timeout: 60000 });
-  try {
-    const startup = invoke(['up', '-d', '--wait', '--wait-timeout', '30']);
-    assert.equal(
-      startup.status,
-      0,
-      `publication reproduction startup: ${startup.stderr} ${startup.stdout}`,
-    );
-    process.stdout.write(
-      `Publication reproduction Docker server: ${runDocker('docker', ['version', '--format', '{{.Server.Version}}'], { encoding: 'utf8', timeout: 5000 }).stdout.trim()}\n`,
-    );
-    for (const [index, name] of ['isolated', 'control'].entries()) {
-      const id = invoke(['ps', '-q', name]).stdout.trim();
-      const inspected = JSON.parse(
-        runDocker('docker', ['inspect', id], { encoding: 'utf8', timeout: 5000 }).stdout,
-      )[0];
-      let http;
-      try {
-        http = (
-          await globalThis.fetch(`http://127.0.0.1:${ports[index]}/health`, {
-            signal: globalThis.AbortSignal.timeout(3000),
-          })
-        ).status;
-      } catch (error) {
-        http = error.cause?.code ?? error.name;
-      }
-      process.stdout.write(
-        `${JSON.stringify({ reproduction: name, networkInternal: JSON.parse(runDocker('docker', ['network', 'inspect', `${diagnosticProject}_${name}`], { encoding: 'utf8', timeout: 5000 }).stdout)[0].Internal, health: inspected.State.Health?.Status, configuredPorts: inspected.HostConfig.PortBindings, effectivePorts: inspected.NetworkSettings.Ports, runnerHttp: http })}\n`,
-      );
-    }
-  } finally {
-    assert.equal(
-      invoke(['down', '--volumes', '--remove-orphans']).status,
-      0,
-      'publication reproduction cleanup',
-    );
-  }
+  assert.equal(internal.status, 0, 'web container responds on its internal health endpoint');
 }
