@@ -1,0 +1,39 @@
+# Docker-only WSL2 deployment threat model
+
+**Status:** Proposed; no implementation or deployment approval. **Date:** 2026-11-10.
+
+This supplements the [existing threat model](THREAT_MODEL.md) and [ADR-0012](../07-governance/adr/0012-docker-only-wsl2-control-plane.md). Network memberships, identity allocation, persistence policy and sequential gates are normative proposals in that ADR. All new controls below require evidence; they are not implemented merely by being documented.
+
+## Assets and adversaries
+
+Protect owner authorization, service secrets, database contents, durable Run/audit identity, private agent workspaces, rootful Docker authority, encrypted backups and decryption material. Assume compromise of web, API, worker, synthetic agent, dependency/build artifact, unauthorized LAN client or untrusted PR/CI code. Host administrator, daemon and kernel compromise defeats this deployment boundary. A compromised launcher has effectively equivalent authority. A compromised API can abuse its current trusted single-owner attribution; do not claim the authorizer independently proves human intent.
+
+## Boundary analysis and required negative tests
+
+| Boundary | Attacker capability / escalation | Required controls | Acceptance evidence |
+|---|---|---|---|
+| Browser → ingress | LAN client, forged Host/Origin, session theft | Loopback-only HTTPS, trusted certificate, exact Host/origin, secure session cookies | Windows trusted TLS/API availability; LAN IPv4/IPv6 denial; malformed Host and unauthenticated requests denied |
+| Ingress → web | Compromised ingress pivots to host/data services | Dedicated membership and directional host policy; leaf key only; no forward proxy | Live probes deny API/DB/control-plane/host/LAN/Internet; only web:8080 succeeds |
+| Web → API | Compromised web forwards forged credentials or probes DB | Existing authentication/CSRF boundary; no DB secrets; API-only network permission | Session/CSRF/revocation tests; DB and UDS denial; no secret-file reads |
+| API → authorizer | Compromised API impersonates owner or replays decision | Narrow UDS/token, unique mapped identity, DB idempotency/expiry/revocation; residual trusted API documented | Wrong token/UID/group, stale/revoked grants, duplicate/conflicting request IDs and response-loss readback; Codex #1 decision on signed assertions |
+| Worker → launcher | Compromised worker requests arbitrary containers or stale execution | Strict Run/worker/generation schema; current lease and consumed grant; fixed configuration | Reject arbitrary image/path/command/env/network, stale lease, wrong generation/token and duplicate reservation |
+| Launcher → daemon | Launcher compromise becomes host root | Exclusive access; immutable reviewed code and mounts; narrow code contract | Other services cannot open socket; inspect launched configuration; explicitly acknowledge launcher compromise remains host-root risk |
+| Application → database | Stolen runtime credential escalates to grants/migrations | Separate role credentials and networks; least-privilege ACLs; no runtime admin | Cross-role DDL/grant/authorizer mutation denied; protected role/sequence ACL checks and authenticated database startup |
+| Agent → host | Malicious mock image or dependency escapes workspace | Network none; fixed image/program; non-root, read-only root, no Docker/host secrets/devices, scoped workspace | Actual host-file/socket/network denial; resource/time bounds; workspace symlink escape denial |
+| Network → host/DNS | Compromised service uses gateway, metadata, IPv6 or DNS tunnel | Default-deny INPUT/FORWARD policy; non-forwarding discovery; no NET_ADMIN | Temporary gateway listeners denied with counters; external TCP/UDP/DNS/AAAA/metadata/LAN probes; internal discovery allowed |
+| Backup → restore | Stolen key, corrupted backup, stale privileges or event history | Authenticated encryption, separate keys/copies, fresh-volume verification | Tampered/wrong-key restore denied; ACL/sequence/event fingerprints verified; primary volume untouched |
+| CI/PR → deployment | Untrusted code steals secrets or controls persistent daemon | Disposable hosted CI, synthetic credentials, no production secrets/host mounts | Workflow permission review; fork trust checks; scoped cleanup and no cross-project deletion |
+
+## Failure containment and recovery
+
+Fail startup on missing/wrong socket, unsafe ownership, wrong credentials, absent network enforcement, migration failure or TLS material. Do not fall back to unauthenticated TCP, shared UID, HTTP or broader daemon access. Readiness must distinguish database health from role readiness and application admission.
+
+Exercise response loss at authorization and launch reservation, worker death, launcher death, database reconnect, daemon restart and WSL restart. Durable state and container identity must resolve outcomes; absent authority remains unknown. Never resubmit uncertain execution to obtain a passing test. Verify same Task/Run/event identities and no duplicate launch after each supported recovery.
+
+Cleanup uses unique project labels and positively identified run resources only. Never Docker prune. Rollback stops new admission, preserves DB and audit state, removes only proposed components/policies after endpoint shutdown, and restores the previously approved configuration; no automatic hybrid fallback. Restore requires explicit approval and fresh-volume verification.
+
+## Evidence limitations and review
+
+PR #91's internal browser journey and restart tests are disposable application evidence. They do not establish deployed HTTPS, Windows ingress, full DNS/IPv6/protocol egress denial, containerized authorizer equivalence, real credential custody or provider authorization. Current CI source references: `scripts/compose/run-app-smoke.mjs`, `infra/compose/docker-compose.ci.yml`, and `.github/workflows/ci.yml`. Existing security contracts: `apps/authorizer/src`, `apps/sandbox-launcher/src`, `infra/systemd/omnis-authorizer.service`, `infra/systemd/omnis-sandbox-launcher.service`, and `packages/db/src/provision.ts`.
+
+Codex #1 must review backend contracts and arrange an independent read-only security reviewer. Review must cite exact documentation commits and return APPROVE / REQUEST CHANGES / BLOCKED. Owner approval of this design does not authorize implementation or target-host deployment. All five ADR gates remain open. Real-provider execution and production broker activation remain blocked.
