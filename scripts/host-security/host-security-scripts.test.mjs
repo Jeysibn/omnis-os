@@ -94,6 +94,14 @@ test('systemd deployment preflight refuses before registering cleanup and CI can
   assert.match(script, /created_application_tree\)\); then rm -rf -- \/opt\/omnis-os/);
   assert.doesNotMatch(script, /rm -rf -- \/opt\/omnis-os \/etc\/omnis/);
   assert.match(script, /RUNNER_ENVIRONMENT:-\}" != github-hosted/);
+  assert.match(script, /Systemd preflight diagnostics: pid1_comm=/);
+  assert.match(script, /init_pid_namespace=%s current_pid_namespace=%s/);
+  assert.match(script, /container_marker=%s runner_os=%s runner_environment=%s/);
+  assert.match(script, /systemd_startup_timeout_seconds=60/);
+  assert.match(script, /while \[\[ "\$systemd_state" == starting \]\]/);
+  assert.ok(script.includes('SECONDS < systemd_startup_deadline'));
+  assert.match(script, /sleep 1/);
+  assert.match(script, /startup_waited_seconds=%s startup_timeout_seconds=%s/);
   assert.match(script, /Required CI verification unavailable: a running systemd PID 1 is required/);
   assert.match(
     script,
