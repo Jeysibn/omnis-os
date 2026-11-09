@@ -78,24 +78,70 @@ test('sensitive changes request the matching early integration suites', () => {
     containerSensitive: true,
     databaseSensitive: false,
     fullStackSensitive: false,
+    fullFrontendSensitive: false,
   });
   assert.deepEqual(classifyChangedFiles(['packages/db/src/run-store.ts']), {
     securitySensitive: true,
     containerSensitive: false,
     databaseSensitive: true,
     fullStackSensitive: true,
+    fullFrontendSensitive: false,
   });
   assert.deepEqual(classifyChangedFiles(['apps/synthetic-broker/src/server.ts']), {
     securitySensitive: true,
     containerSensitive: true,
     databaseSensitive: false,
     fullStackSensitive: true,
+    fullFrontendSensitive: false,
   });
   assert.deepEqual(classifyChangedFiles(['apps/web/src/ui/command-center-order.spec.ts']), {
     securitySensitive: false,
     containerSensitive: false,
     databaseSensitive: false,
     fullStackSensitive: false,
+    fullFrontendSensitive: false,
+  });
+  assert.deepEqual(classifyChangedFiles(['infra/systemd/omnis-authorizer.service']), {
+    securitySensitive: true,
+    containerSensitive: false,
+    databaseSensitive: false,
+    fullStackSensitive: false,
+    fullFrontendSensitive: false,
+  });
+  assert.deepEqual(classifyChangedFiles(['apps/web/playwright.config.ts']), {
+    securitySensitive: false,
+    containerSensitive: false,
+    databaseSensitive: false,
+    fullStackSensitive: false,
+    fullFrontendSensitive: true,
+  });
+  assert.deepEqual(classifyChangedFiles(['apps/web/playwright.integration.config.ts']), {
+    securitySensitive: true,
+    containerSensitive: false,
+    databaseSensitive: false,
+    fullStackSensitive: true,
+    fullFrontendSensitive: true,
+  });
+  assert.deepEqual(classifyChangedFiles(['apps/web/integration/tasks.integration.spec.ts']), {
+    securitySensitive: true,
+    containerSensitive: false,
+    databaseSensitive: false,
+    fullStackSensitive: true,
+    fullFrontendSensitive: false,
+  });
+  assert.deepEqual(classifyChangedFiles(['tests/integration/backup-restore-ci.mjs']), {
+    securitySensitive: true,
+    containerSensitive: true,
+    databaseSensitive: true,
+    fullStackSensitive: true,
+    fullFrontendSensitive: false,
+  });
+  assert.deepEqual(classifyChangedFiles(['scripts/container-images/verify-built-images.mjs']), {
+    securitySensitive: true,
+    containerSensitive: true,
+    databaseSensitive: false,
+    fullStackSensitive: false,
+    fullFrontendSensitive: false,
   });
 });
 
@@ -140,6 +186,7 @@ test('full mode fails closed for missing, skipped, cancelled, and failed jobs', 
       validation_mode: 'success',
       checks_core: 'success',
       frontend_browser: 'success',
+      frontend_browser_full_suite: 'true',
       platform_security: 'success',
       database_integration: 'skipped',
       full_stack_browser_integration: 'cancelled',
@@ -162,6 +209,7 @@ test('full mode passes only when every full acceptance job passes', () => {
         validation_mode: 'success',
         checks_core: 'success',
         frontend_browser: 'success',
+        frontend_browser_full_suite: 'true',
         platform_security: 'success',
         database_integration: 'success',
         full_stack_browser_integration: 'success',
@@ -195,6 +243,22 @@ test('fast mode requires every suite selected by sensitive changed files', () =>
       },
     }),
     ['full_validation_deferred=fast mode cannot satisfy the required merge gate'],
+  );
+  assert.deepEqual(
+    getGateFailures({
+      mode: 'fast',
+      sensitive: { full_frontend_sensitive: true },
+      results: {
+        validation_mode: 'success',
+        checks_core: 'success',
+        frontend_browser: 'success',
+        frontend_browser_full_suite: 'false',
+      },
+    }),
+    [
+      'frontend_browser_full_suite=false',
+      'full_validation_deferred=fast mode cannot satisfy the required merge gate',
+    ],
   );
   assert.deepEqual(
     getGateFailures({

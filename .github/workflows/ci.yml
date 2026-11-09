@@ -31,6 +31,7 @@ jobs:
       container_sensitive: ${{ steps.plan.outputs.containerSensitive }}
       database_sensitive: ${{ steps.plan.outputs.databaseSensitive }}
       full_stack_sensitive: ${{ steps.plan.outputs.fullStackSensitive }}
+      full_frontend_sensitive: ${{ steps.plan.outputs.fullFrontendSensitive }}
       browser_specs: ${{ steps.plan.outputs.browserSpecs }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -53,6 +54,8 @@ jobs:
 
   frontend-browser:
     needs: validation_mode
+    outputs:
+      full_suite: ${{ steps.select_suite.outputs.full_suite }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -69,11 +72,22 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Install Playwright Chromium and system dependencies
         run: pnpm --filter @omnis/web exec playwright install --with-deps chromium
+      - name: Select full or targeted browser suite
+        id: select_suite
+        env:
+          FULL_VALIDATION: ${{ needs.validation_mode.outputs.full }}
+          FULL_FRONTEND_SENSITIVE: ${{ needs.validation_mode.outputs.full_frontend_sensitive }}
+        run: |
+          if [[ "$FULL_VALIDATION" == 'true' || "$FULL_FRONTEND_SENSITIVE" == 'true' ]]; then
+            echo 'full_suite=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'full_suite=false' >> "$GITHUB_OUTPUT"
+          fi
       - name: Run full frontend browser tests
-        if: needs.validation_mode.outputs.full == 'true'
+        if: needs.validation_mode.outputs.full == 'true' || needs.validation_mode.outputs.full_frontend_sensitive == 'true'
         run: pnpm --filter @omnis/web test:e2e
       - name: Run changed-area browser tests plus shell smoke
-        if: needs.validation_mode.outputs.full != 'true'
+        if: needs.validation_mode.outputs.full != 'true' && needs.validation_mode.outputs.full_frontend_sensitive != 'true'
         env:
           BROWSER_SPECS: ${{ needs.validation_mode.outputs.browser_specs }}
         run: |
@@ -410,8 +424,10 @@ jobs:
           CONTAINER_SENSITIVE: ${{ needs.validation_mode.outputs.container_sensitive }}
           DATABASE_SENSITIVE: ${{ needs.validation_mode.outputs.database_sensitive }}
           FULL_STACK_SENSITIVE: ${{ needs.validation_mode.outputs.full_stack_sensitive }}
+          FULL_FRONTEND_SENSITIVE: ${{ needs.validation_mode.outputs.full_frontend_sensitive }}
           CORE_RESULT: ${{ needs.checks-core.result }}
           FRONTEND_RESULT: ${{ needs.frontend-browser.result }}
+          FRONTEND_FULL_SUITE: ${{ needs.frontend-browser.outputs.full_suite }}
           PLATFORM_RESULT: ${{ needs.platform-security.result }}
           DATABASE_RESULT: ${{ needs.database-integration.result }}
           FULL_STACK_RESULT: ${{ needs.full-stack-browser-integration.result }}

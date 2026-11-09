@@ -45,6 +45,8 @@ export function classifyChangedFiles(paths) {
       prefix(path, 'scripts/compose/') ||
       prefix(path, 'scripts/container-boundary/') ||
       prefix(path, 'scripts/platform/') ||
+      prefix(path, 'scripts/container-images/') ||
+      prefix(path, 'tests/integration/') ||
       prefix(path, 'apps/api/') ||
       prefix(path, 'apps/authorizer/') ||
       prefix(path, 'apps/sandbox-launcher/') ||
@@ -54,9 +56,25 @@ export function classifyChangedFiles(paths) {
       prefix(path, 'packages/policy/'),
   );
 
+  const integrationHarnessChanged = any(
+    paths,
+    (path) =>
+      prefix(path, 'tests/integration/') ||
+      prefix(path, 'apps/web/integration/') ||
+      path === 'apps/web/playwright.integration.config.ts' ||
+      path === 'apps/web/vite.integration.config.ts',
+  );
+
+  const fullFrontendSensitive = any(paths, (path) =>
+    /^apps\/web\/playwright(?:\.[^/]+)?\.config\.ts$/.test(path),
+  );
+
   const databaseSensitive = any(
     paths,
-    (path) => prefix(path, 'packages/db/') || prefix(path, 'scripts/db-recovery/'),
+    (path) =>
+      prefix(path, 'packages/db/') ||
+      prefix(path, 'scripts/db-recovery/') ||
+      prefix(path, 'tests/integration/'),
   );
 
   const backendSensitive = any(
@@ -75,14 +93,23 @@ export function classifyChangedFiles(paths) {
     containerSensitive ||
     databaseSensitive ||
     backendSensitive ||
+    integrationHarnessChanged ||
+    any(paths, (path) => prefix(path, 'infra/systemd/')) ||
     any(paths, (path) => prefix(path, 'scripts/host-security/'));
 
   const fullStackSensitive =
     databaseSensitive ||
     backendSensitive ||
+    integrationHarnessChanged ||
     any(paths, (path) => path === 'apps/web/server.ts' || path === 'apps/web/src/ui/api.ts');
 
-  return { securitySensitive, containerSensitive, databaseSensitive, fullStackSensitive };
+  return {
+    securitySensitive,
+    containerSensitive,
+    databaseSensitive,
+    fullStackSensitive,
+    fullFrontendSensitive,
+  };
 }
 
 export function selectDraftBrowserSpecs(paths) {
@@ -150,6 +177,14 @@ export function getGateFailures({ mode, results = {}, sensitive = {} }) {
     if (sensitive.full_stack_sensitive) required.push('full_stack_browser_integration');
   } else {
     failures.push('validation mode is missing or invalid');
+  }
+
+  if (mode === 'full' || sensitive.full_frontend_sensitive) {
+    if (results.frontend_browser_full_suite !== 'true') {
+      failures.push(
+        `frontend_browser_full_suite=${results.frontend_browser_full_suite || 'missing'}`,
+      );
+    }
   }
 
   for (const name of required) {
