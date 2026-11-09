@@ -177,6 +177,10 @@ test('Compose owner creates an authorized mock Run through the web gateway', asy
   await expect(page.getByLabel('Agent profile')).toBeVisible();
   await page.getByLabel('Agent profile').selectOption(agent.body.agentId);
   await expect(page.getByLabel('Runtime')).toHaveValue('mock');
+  const browserCryptoContext = await page.evaluate(() => ({
+    secureContext: window.isSecureContext,
+    randomUUIDAvailable: typeof globalThis.crypto?.randomUUID === 'function',
+  }));
   const assignmentResponsePromise = page
     .waitForResponse(
       (response) => {
@@ -195,7 +199,7 @@ test('Compose owner creates an authorized mock Run through the web gateway', asy
   if (!assignmentResponse) {
     const assignmentErrorVisible = (await page.getByRole('alert').count()) > 0;
     throw new Error(
-      `Execution assignment request was not sent through the web gateway; UI error visible: ${assignmentErrorVisible}`,
+      `Execution assignment request was not sent through the web gateway; UI error visible: ${assignmentErrorVisible}; secure context: ${browserCryptoContext.secureContext}; crypto.randomUUID available: ${browserCryptoContext.randomUUIDAvailable}`,
     );
   }
   expect(assignmentResponse.status()).toBe(200);
