@@ -69,6 +69,7 @@ export function classifyChangedFiles(paths) {
   const integrationHarnessChanged = any(
     paths,
     (path) =>
+      prefix(path, 'scripts/ci/') ||
       prefix(path, 'tests/integration/') ||
       prefix(path, 'apps/web/integration/') ||
       path === 'apps/web/playwright.integration.config.ts' ||
@@ -90,6 +91,7 @@ export function classifyChangedFiles(paths) {
     (path) =>
       prefix(path, 'packages/db/') ||
       prefix(path, 'scripts/db-recovery/') ||
+      prefix(path, 'scripts/ci/') ||
       prefix(path, 'tests/integration/') ||
       dependencyManifestChanged,
   );

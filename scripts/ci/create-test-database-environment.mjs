@@ -1,4 +1,4 @@
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, rmSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 
 const passwordNames = [
@@ -27,16 +27,34 @@ export function createTestDatabaseEnvironment({
   };
 }
 
-export function registerTestDatabaseEnvironment(environment, githubEnvPath, stdout) {
+export function registerTestDatabaseEnvironment(
+  environment,
+  githubEnvPath,
+  credentialsFilePath,
+  stdout,
+) {
   const passwords = Object.entries(environment).filter(([name]) => name.endsWith('_PASSWORD'));
   for (const [, password] of passwords) stdout.write(`::add-mask::${password}\n`);
 
-  appendFileSync(
-    githubEnvPath,
-    Object.entries(environment)
-      .map(([name, value]) => `${name}=${value}`)
-      .join('\n') + '\n',
-  );
+  try {
+    writeFileSync(
+      credentialsFilePath,
+      passwords.map(([name, value]) => `${name}=${value}`).join('\n') + '\n',
+      { mode: 0o600 },
+    );
+    chmodSync(credentialsFilePath, 0o600);
+
+    appendFileSync(
+      githubEnvPath,
+      [
+        `OMNIS_CI_POSTGRES_CONTAINER_NAME=${environment.OMNIS_CI_POSTGRES_CONTAINER_NAME}`,
+        `OMNIS_CI_POSTGRES_ENV_FILE=${credentialsFilePath}`,
+      ].join('\n') + '\n',
+    );
+  } catch (error) {
+    rmSync(credentialsFilePath, { force: true });
+    throw error;
+  }
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
@@ -48,5 +66,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     runAttempt: process.env.GITHUB_RUN_ATTEMPT,
     job: process.env.GITHUB_JOB,
   });
-  registerTestDatabaseEnvironment(environment, githubEnvPath, process.stdout);
+  const runnerTemp = process.env.RUNNER_TEMP;
+  if (!runnerTemp) throw new Error('RUNNER_TEMP is required for disposable database credentials');
+  const credentialsFilePath = `${runnerTemp}/omnis-ci-db-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}-${process.env.GITHUB_JOB}.env`;
+  registerTestDatabaseEnvironment(environment, githubEnvPath, credentialsFilePath, process.stdout);
 }

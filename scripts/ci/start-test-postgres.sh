@@ -2,11 +2,22 @@
 set -euo pipefail
 
 : "${OMNIS_CI_POSTGRES_CONTAINER_NAME:?disposable PostgreSQL container name is required}"
+: "${OMNIS_CI_POSTGRES_ENV_FILE:?disposable PostgreSQL credential file is required}"
+expected_environment_file="${RUNNER_TEMP:?RUNNER_TEMP is required}/omnis-ci-db-${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}-${GITHUB_JOB:?}.env"
+if [[ "$OMNIS_CI_POSTGRES_ENV_FILE" != "$expected_environment_file" || ! -f "$expected_environment_file" ]]; then
+  echo 'Disposable PostgreSQL credential file is outside its expected run-scoped path.' >&2
+  exit 1
+fi
+if [[ "$(stat -c '%a' "$expected_environment_file")" != 600 ]]; then
+  echo 'Disposable PostgreSQL credential file must have mode 0600.' >&2
+  exit 1
+fi
+source "$OMNIS_CI_POSTGRES_ENV_FILE"
 : "${OMNIS_CI_POSTGRES_ADMIN_PASSWORD:?disposable PostgreSQL administrator password is required}"
 
-export POSTGRES_PASSWORD="$OMNIS_CI_POSTGRES_ADMIN_PASSWORD"
 image='postgres:17.6-alpine@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94'
 docker pull "$image"
+export POSTGRES_PASSWORD="$OMNIS_CI_POSTGRES_ADMIN_PASSWORD"
 docker run --detach \
   --name "$OMNIS_CI_POSTGRES_CONTAINER_NAME" \
   --label "omnis.ci.run=${GITHUB_RUN_ID:?}" \

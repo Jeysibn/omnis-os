@@ -164,6 +164,13 @@ test('sensitive changes request the matching early integration suites', () => {
     fullStackSensitive: false,
     fullFrontendSensitive: false,
   });
+  assert.deepEqual(classifyChangedFiles(['scripts/ci/start-test-postgres.sh']), {
+    securitySensitive: true,
+    containerSensitive: false,
+    databaseSensitive: true,
+    fullStackSensitive: true,
+    fullFrontendSensitive: false,
+  });
   for (const path of ['pnpm-lock.yaml', 'apps/web/package.json', 'packages/db/package.json']) {
     assert.deepEqual(classifyChangedFiles([path]), {
       securitySensitive: true,

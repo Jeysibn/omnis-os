@@ -147,14 +147,14 @@ jobs:
         with:
           node-version: 24.22.1
           cache: pnpm
-      - name: Generate and mask run-scoped PostgreSQL credentials
-        run: node scripts/ci/create-test-database-environment.mjs
-      - name: Start disposable PostgreSQL on loopback
-        run: bash scripts/ci/start-test-postgres.sh
       - run: docker pull node@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85
       - run: pnpm install --frozen-lockfile
       - name: Verify disposable Linux service identity boundaries
         run: sudo --preserve-env=CI bash scripts/host-security/test-disposable-identities.sh
+      - name: Generate and mask run-scoped PostgreSQL credentials
+        run: node scripts/ci/create-test-database-environment.mjs
+      - name: Start disposable PostgreSQL on loopback
+        run: bash scripts/ci/start-test-postgres.sh
       - name: Provision restricted PostgreSQL roles
         run: |
           source scripts/ci/export-test-database-environment.sh
@@ -196,12 +196,12 @@ jobs:
         with:
           node-version: 24.22.1
           cache: pnpm
+      - run: docker pull node@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85
+      - run: pnpm install --frozen-lockfile
       - name: Generate and mask run-scoped PostgreSQL credentials
         run: node scripts/ci/create-test-database-environment.mjs
       - name: Start disposable PostgreSQL on loopback
         run: bash scripts/ci/start-test-postgres.sh
-      - run: docker pull node@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85
-      - run: pnpm install --frozen-lockfile
       - name: Provision restricted PostgreSQL roles
         run: |
           source scripts/ci/export-test-database-environment.sh
@@ -230,17 +230,17 @@ jobs:
         with:
           node-version: 24.22.1
           cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install Playwright Chromium and system dependencies
+        run: pnpm --filter @omnis/web exec playwright install --with-deps chromium
       - name: Generate and mask run-scoped PostgreSQL credentials
         run: node scripts/ci/create-test-database-environment.mjs
       - name: Start disposable PostgreSQL on loopback
         run: bash scripts/ci/start-test-postgres.sh
-      - run: pnpm install --frozen-lockfile
       - name: Provision restricted PostgreSQL roles
         run: |
           source scripts/ci/export-test-database-environment.sh
           node --experimental-strip-types packages/db/src/provision.ts
-      - name: Install Playwright Chromium and system dependencies
-        run: pnpm --filter @omnis/web exec playwright install --with-deps chromium
       - name: Run real browser to PostgreSQL smoke test
         run: |
           source scripts/ci/export-test-database-environment.sh
