@@ -176,6 +176,11 @@ overload remain unmeasured.
   future request above four active writers, repeated overload, another API
   process, or a failed critical-operation latency objective triggers renewed
   D5 and admission design review.
+- The bounded fourth pending slot is reserved for critical callers, but the
+  shared `omnis_runtime` database identity can request critical admission.
+  Priority is a trusted-caller scheduling convention, not a separate
+  authorization boundary. A distinct database identity is needed if code
+  under that role ceases to be trusted.
 - Any future sequencing alternative, including an outbox or partitioned
   cursors, requires explicit owner reapproval of D5 and review of event
   visibility, replay, ordering, and recovery semantics. No performance benefit
@@ -185,8 +190,21 @@ overload remain unmeasured.
 
 ## Current PR state
 
-The reviewed implementation is a Draft update to PR #90. Local database
-integration, typecheck, lint, format, and workspace tests passed after the
-admission changes. Exact-head GitHub CI and independent exact-head security and
-benchmark-methodology review remain required. The independent security review
-must review the final diff; the earlier design approval is not code approval.
+PR #90 remains Draft. Exact-head CI run
+[`42686107681`](https://github.com/Jeysibn/omnis-os/actions/runs/42686107681)
+on `5d30894486039dafeba14a61bc15348ba78cac93` failed in two places: the
+critical-slot concurrency test reached its three-second bounded lock timeout,
+and the disposable queue-startup guard fixture inserted a Task without taking
+the new admission and cursor locks. The other CI jobs passed. The test now
+observes all four pending slots in one bounded wait, and the fixture creates
+its Task through the runtime store. Exact-head CI rerun is pending.
+
+The exact-head backend/security review found no blocking lock-order, writer
+coverage, ACL/restore, or state-integrity defect. Its verdict was REQUEST
+CHANGES because performance acceptance failed and the earlier candidate was
+not fingerprinted; it also recorded that the shared runtime database identity
+can request the critical slot, making that reservation a trusted-caller
+scheduling convention. The separate methodology review confirmed the CSV
+cursor-wait statistics, while the full raw run bundle and original PostgreSQL
+log lines remain unavailable in this repository. Exact final-tree performance
+measurement and CI rerun remain required.

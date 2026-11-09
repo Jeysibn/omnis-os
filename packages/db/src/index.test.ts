@@ -211,35 +211,42 @@ const postgresSuite = describe(
           normalAcquires.push(client.query('SELECT omnis.acquire_mission_lane_admission(false)'));
         }
 
-        const waitForNormalQueue = async () => {
-          const deadline = Date.now() + 2_000;
-          while (Date.now() < deadline) {
-            const result = await adminPool!.query<{ key: string }>(`
-              SELECT DISTINCT ((classid::bigint << 32) | objid::bigint)::text AS key
-              FROM pg_locks
-              WHERE locktype='advisory' AND objsubid=1 AND granted
-                AND ((classid::bigint << 32) | objid::bigint)
-                  BETWEEN 70463909136610 AND 70463909136613
-            `);
-            const keys = new Set(result.rows.map((row) => row.key));
-            if (
-              keys.size === 3 &&
-              [36610, 36611, 36612].every((suffix) =>
-                keys.has(String(70463909136600 + suffix - 36600)),
-              )
-            ) {
-              return keys;
-            }
-            await delay(10);
-          }
-          return new Set<string>();
-        };
-        const normalQueueKeys = await waitForNormalQueue();
-        assert.deepEqual([...normalQueueKeys].sort(), [
+        criticalClient = await firstPool.connect();
+        clients.push(criticalClient);
+        await criticalClient.query('BEGIN');
+        criticalAcquire = criticalClient.query('SELECT omnis.acquire_mission_lane_admission(true)');
+
+        const deadline = Date.now() + 2_000;
+        let queueKeys = new Set<string>();
+        let reservedCriticalSlotObserved = false;
+        while (Date.now() < deadline) {
+          const result = await adminPool!.query<{ username: string; key: string }>(`
+            SELECT activity.usename AS username,
+                   ((lock.classid::bigint << 32) | lock.objid::bigint)::text AS key
+            FROM pg_locks AS lock
+            JOIN pg_stat_activity AS activity ON activity.pid=lock.pid
+            WHERE lock.locktype='advisory' AND lock.objsubid=1 AND lock.granted
+              AND ((lock.classid::bigint << 32) | lock.objid::bigint)
+                BETWEEN 70463909136610 AND 70463909136613
+          `);
+          queueKeys = new Set(result.rows.map((row) => row.key));
+          reservedCriticalSlotObserved = result.rows.some(
+            (row) => row.key === '70463909136613' && row.username === 'omnis_runtime',
+          );
+          if (queueKeys.size === 4 && reservedCriticalSlotObserved) break;
+          await delay(10);
+        }
+        assert.deepEqual([...queueKeys].sort(), [
           '70463909136610',
           '70463909136611',
           '70463909136612',
+          '70463909136613',
         ]);
+        assert.equal(
+          reservedCriticalSlotObserved,
+          true,
+          'A critical caller must own the reserved global slot.',
+        );
 
         const overflow = await firstPool.connect();
         clients.push(overflow);
@@ -249,33 +256,6 @@ const postgresSuite = describe(
           (error: unknown) => (error as { code?: string }).code === 'PML01',
         );
         await overflow.query('ROLLBACK');
-
-        criticalClient = await firstPool.connect();
-        clients.push(criticalClient);
-        await criticalClient.query('BEGIN');
-        criticalAcquire = criticalClient.query('SELECT omnis.acquire_mission_lane_admission(true)');
-        const deadline = Date.now() + 2_000;
-        let reservedCriticalSlotObserved = false;
-        while (Date.now() < deadline) {
-          const reserved = await adminPool!.query<{ username: string; key: string }>(`
-            SELECT activity.usename AS username,
-                   ((lock.classid::bigint << 32) | lock.objid::bigint)::text AS key
-            FROM pg_locks AS lock
-            JOIN pg_stat_activity AS activity ON activity.pid=lock.pid
-            WHERE lock.locktype='advisory' AND lock.objsubid=1 AND lock.granted
-              AND ((lock.classid::bigint << 32) | lock.objid::bigint)=70463909136613
-          `);
-          if (reserved.rows[0]?.username === 'omnis_runtime') {
-            reservedCriticalSlotObserved = true;
-            break;
-          }
-          await delay(10);
-        }
-        assert.equal(
-          reservedCriticalSlotObserved,
-          true,
-          'A critical caller must own the reserved global slot.',
-        );
 
         await Promise.all(activeClients.map((client) => client.query('COMMIT')));
         await Promise.all(normalAcquires);
