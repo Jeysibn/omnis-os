@@ -1,18 +1,57 @@
 import assert from 'node:assert/strict';
-import { lookup } from 'node:dns/promises';
+import { Resolver } from 'node:dns/promises';
 import { createSocket } from 'node:dgram';
 import { readFile } from 'node:fs/promises';
 import { networkInterfaces } from 'node:os';
 import { createConnection } from 'node:net';
 
-const [apiAddress, workerAddress, postgresAddress, gateway] = process.argv.slice(2);
+const [
+  apiAddress,
+  workerAddress,
+  postgresAddress,
+  gateway,
+  hostControlPortValue,
+  hostGatewayIpv6,
+  hostIpv6ControlPortValue,
+] = process.argv.slice(2);
 for (const [name, value] of Object.entries({
   apiAddress,
   workerAddress,
   postgresAddress,
   gateway,
+  hostControlPortValue,
 })) {
   assert.ok(value, `${name} is required for the browser isolation probe`);
+}
+
+async function lookupBounded(hostname) {
+  const resolveFamily = async (family) => {
+    const resolver = new Resolver();
+    let timer;
+    const query = family === 4 ? resolver.resolve4(hostname) : resolver.resolve6(hostname);
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        resolver.cancel();
+        const error = new Error('DNS query deadline exceeded');
+        error.code = 'ETIMEOUT';
+        reject(error);
+      }, 2_500);
+    });
+    try {
+      const records = await Promise.race([query, timeout]);
+      return records.map((address) => ({ address, family }));
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  const outcomes = await Promise.allSettled([resolveFamily(4), resolveFamily(6)]);
+  const records = outcomes.flatMap((outcome) =>
+    outcome.status === 'fulfilled' ? outcome.value : [],
+  );
+  const errors = outcomes.flatMap((outcome) =>
+    outcome.status === 'rejected' ? [outcome.reason.code ?? 'lookup-failed'] : [],
+  );
+  return { records, errors };
 }
 
 async function denied(host, port, label) {
@@ -45,7 +84,7 @@ async function deniedPublicDnsUdp() {
     name,
     Buffer.from([0x00, 0x01, 0x00, 0x01]),
   ]);
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     const socket = createSocket('udp4');
     const timer = setTimeout(() => {
       socket.close();
@@ -65,7 +104,7 @@ async function deniedPublicDnsUdp() {
       if (!error) return;
       clearTimeout(timer);
       socket.close();
-      reject(error);
+      resolve(error.code ?? 'send-failed');
     });
   });
 }
@@ -88,35 +127,75 @@ assert.equal(
 );
 
 const directServices = {};
-for (const [service, address, port] of [
-  ['API', apiAddress, 4100],
-  ['worker', workerAddress, 4101],
-  ['PostgreSQL', postgresAddress, 5432],
-]) {
-  directServices[service] = await denied(address, port, `the ${service} container directly`);
-}
+const directServiceResults = await Promise.all(
+  [
+    ['API', apiAddress, 4100],
+    ['worker', workerAddress, 4101],
+    ['PostgreSQL', postgresAddress, 5432],
+  ].map(async ([service, address, port]) => [
+    service,
+    await denied(address, port, `the ${service} container directly`),
+  ]),
+);
+Object.assign(directServices, Object.fromEntries(directServiceResults));
 
 const dns = {};
-for (const service of ['web', 'api', 'worker', 'postgres', 'host.docker.internal']) {
-  try {
-    const records = await lookup(service, { all: true, verbatim: true });
-    dns[service] = records.map(({ address, family }) => ({ address, family }));
-  } catch (error) {
-    dns[service] = error.code ?? 'lookup-failed';
-  }
-}
-assert.ok(Array.isArray(dns.web), 'Docker DNS resolves the permitted web service');
-for (const service of ['api', 'worker', 'postgres', 'host.docker.internal']) {
+await Promise.all(
+  ['web', 'api', 'worker', 'postgres', 'host.docker.internal'].map(async (service) => {
+    try {
+      dns[service] = await lookupBounded(service);
+    } catch (error) {
+      dns[service] = error.code ?? 'lookup-failed';
+    }
+  }),
+);
+assert.ok(dns.web.records.length > 0, 'Docker DNS resolves the permitted web service');
+const protectedAddresses = new Set([apiAddress, workerAddress, postgresAddress]);
+for (const service of ['api', 'worker', 'postgres']) {
   assert.ok(
-    !Array.isArray(dns[service]),
-    `Docker DNS does not expose non-member service ${service}`,
+    dns[service].records.every(({ address }) => !protectedAddresses.has(address)),
+    `DNS for non-member service ${service} does not disclose a protected service address`,
+  );
+}
+const hostAlias = dns['host.docker.internal'];
+if (hostAlias.records.length > 0) {
+  await Promise.all(
+    hostAlias.records.flatMap(({ address }) =>
+      [22, 80, 443, 2375, 2376, 5432].map((port) =>
+        denied(address, port, `host.docker.internal address ${address} port ${port}`),
+      ),
+    ),
   );
 }
 
 const gatewayPorts = {};
-for (const port of [22, 80, 443, 2375, 2376, 4100, 4101, 5432, 8080]) {
-  gatewayPorts[port] = await denied(gateway, port, `host gateway port ${port}`);
-}
+const gatewayPortResults = await Promise.all(
+  [22, 80, 443, 2375, 2376, 4100, 4101, 5432, 8080].map(async (port) => [
+    port,
+    await denied(gateway, port, `host gateway port ${port}`),
+  ]),
+);
+Object.assign(gatewayPorts, Object.fromEntries(gatewayPortResults));
+const hostControlPort = Number(hostControlPortValue);
+assert.ok(Number.isSafeInteger(hostControlPort) && hostControlPort > 0);
+const hostControl = await denied(
+  gateway,
+  hostControlPort,
+  'the live host gateway positive-control listener',
+);
+const browserIpv6Interface = Object.entries(networkInterfaces()).find(([, addresses]) =>
+  addresses?.some(
+    (address) => address.family === 'IPv6' && address.address.toLowerCase().startsWith('fe80:'),
+  ),
+);
+const ipv6HostGateway =
+  hostGatewayIpv6 && hostIpv6ControlPortValue && browserIpv6Interface
+    ? await denied(
+        `${hostGatewayIpv6}%${browserIpv6Interface[0]}`,
+        Number(hostIpv6ControlPortValue),
+        'the live IPv6 host gateway positive-control listener',
+      )
+    : 'not-tested-no-IPv6-host-bridge-address-or-browser-link-local-interface';
 const metadata = await denied('169.254.169.254', 80, 'the IPv4 metadata endpoint');
 const publicIpv4 = await denied('1.1.1.1', 443, 'public IPv4 egress');
 const publicIpv4Http = await denied('1.1.1.1', 80, 'public IPv4 HTTP egress');
@@ -124,16 +203,12 @@ const publicDnsUdp = await deniedPublicDnsUdp();
 assert.notEqual(publicDnsUdp, 'received-response', 'browser cannot use public UDP DNS directly');
 
 let externalDns;
-try {
-  const resolved = await lookup('example.com', { all: true, verbatim: true });
-  externalDns = resolved.map(({ address, family }) => ({ address, family }));
-  for (const record of resolved) {
-    await denied(record.address, 443, 'an externally resolved HTTPS endpoint');
-  }
-} catch (error) {
-  externalDns = error.code ?? 'lookup-failed';
-}
-assert.ok(externalDns, 'external DNS probe reports either resolution or a bounded lookup failure');
+externalDns = await lookupBounded('example.com');
+await Promise.all(
+  externalDns.records.map(({ address }) =>
+    denied(address, 443, 'an externally resolved HTTPS endpoint'),
+  ),
+);
 
 const ipv6AddressAvailable = Object.values(networkInterfaces())
   .flat()
@@ -168,6 +243,8 @@ process.stdout.write(
     denied: {
       directServices,
       gatewayPorts,
+      liveHostGatewayPositiveControl: hostControl,
+      ipv6HostGatewayPositiveControl: ipv6HostGateway,
       metadata,
       publicIpv4,
       publicIpv4Http,

@@ -292,6 +292,7 @@ jobs:
         run: pnpm integration:compose-smoke
         env:
           OMNIS_CI_PREBUILT_IMAGES: '1'
+          OMNIS_CI_HOST_GATEWAY_GUARD: '1'
           OMNIS_COMPOSE_DIAGNOSTICS_PATH: ${{ runner.temp }}/omnis-compose-smoke-diagnostics.txt
       - name: Upload sanitized Compose diagnostics
         if: always()

@@ -62,6 +62,7 @@ const redactions = [
 let fixtures;
 let stackStarted = false;
 let failed = false;
+let hostGatewayGuard;
 const auxiliaryProjects = new Set();
 
 function dbUrl(user, password) {
@@ -155,6 +156,134 @@ function writeEnv(path, entries) {
   return writeFile(path, `${entries.map(([name, value]) => `${name}=${value}`).join('\n')}\n`, {
     mode: 0o600,
   });
+}
+
+function runIptables(args, { allowFailure = false } = {}) {
+  return runFirewall('iptables', args, { allowFailure });
+}
+
+function runIp6tables(args, { allowFailure = false } = {}) {
+  return runFirewall('ip6tables', args, { allowFailure });
+}
+
+function runFirewall(binary, args, { allowFailure = false } = {}) {
+  const result = spawnSync('sudo', [binary, '-w', '5', ...args], {
+    encoding: 'utf8',
+    timeout: 15_000,
+  });
+  if (!allowFailure && (result.error || result.status !== 0)) {
+    throw new Error(
+      `Could not manage the test-scoped CI host gateway rule: ${redact(result.stderr || result.error?.message || 'iptables returned no status')}`,
+    );
+  }
+  return result;
+}
+
+function installRunnerHostGatewayGuard() {
+  if (process.env.OMNIS_CI_HOST_GATEWAY_GUARD !== '1') {
+    throw new Error(
+      'The disposable Compose browser test requires its test-scoped CI host gateway guard.',
+    );
+  }
+  assert.equal(process.env.GITHUB_ACTIONS, 'true', 'host gateway guard is CI-only');
+  assert.equal(
+    process.env.RUNNER_OS,
+    'Linux',
+    'host gateway guard requires the disposable Linux runner',
+  );
+  const inspection = runDocker('docker', ['network', 'inspect', `${project}_browser_web`], {
+    encoding: 'utf8',
+  });
+  assert.equal(inspection.status, 0, 'browser network is inspectable before guard setup');
+  const inspected = JSON.parse(inspection.stdout)[0];
+  assert.equal(inspected.Internal, true, 'host gateway guard applies only to an internal network');
+  assert.equal(inspected.Labels?.['com.docker.compose.project'], project);
+  assert.equal(inspected.Labels?.['com.docker.compose.network'], 'browser_web');
+  const config = inspected.IPAM?.Config?.find((entry) => isIPv4(entry.Gateway));
+  const bridge =
+    inspected.Options?.['com.docker.network.bridge.name'] ?? `br-${inspected.Id.slice(0, 12)}`;
+  if (!config?.Subnet || !isIPv4(config.Gateway) || !/^br-[a-f0-9]{12}$/.test(bridge)) {
+    throw new Error(
+      'Browser network does not expose the expected disposable IPv4 bridge metadata.',
+    );
+  }
+  const ipv4Chain = `OMC${suffix.toUpperCase()}`;
+  const ipv6Chain = `OMV${suffix.toUpperCase()}`;
+  hostGatewayGuard = {
+    bridge,
+    ipv4Chain,
+    ipv6Chain,
+    gateway: config.Gateway,
+    subnet: config.Subnet,
+  };
+  runIptables(['-N', ipv4Chain]);
+  runIptables(['-A', ipv4Chain, '-s', config.Subnet, '-j', 'DROP']);
+  runIptables(['-I', 'INPUT', '1', '-i', bridge, '-j', ipv4Chain]);
+  assert.equal(
+    runIptables(['-C', 'INPUT', '-i', bridge, '-j', ipv4Chain], { allowFailure: true }).status,
+    0,
+    'the temporary IPv4 INPUT guard is installed only for the browser network bridge',
+  );
+  runIp6tables(['-N', ipv6Chain]);
+  runIp6tables(['-A', ipv6Chain, '-j', 'DROP']);
+  runIp6tables(['-I', 'INPUT', '1', '-i', bridge, '-j', ipv6Chain]);
+  assert.equal(
+    runIp6tables(['-C', 'INPUT', '-i', bridge, '-j', ipv6Chain], { allowFailure: true }).status,
+    0,
+    'the temporary IPv6 INPUT guard is installed only for the browser network bridge',
+  );
+  const bridgeIpv6 = spawnSync('ip', ['-o', '-6', 'addr', 'show', 'dev', bridge, 'scope', 'link'], {
+    encoding: 'utf8',
+    timeout: 5_000,
+  });
+  const hostGatewayIpv6 =
+    bridgeIpv6.status === 0
+      ? bridgeIpv6.stdout.match(/\binet6\s+(fe80:[0-9a-f:]+)/i)?.[1]
+      : undefined;
+  hostGatewayGuard.hostGatewayIpv6 = hostGatewayIpv6;
+  process.stdout.write(
+    `Installed disposable CI INPUT rules for browser-network traffic to the Docker host gateway (IPv4) and host (IPv6); bridge IPv6 ${hostGatewayIpv6 ? 'available for probing' : 'not configured'}.\n`,
+  );
+}
+
+function removeRunnerHostGatewayGuard() {
+  if (!hostGatewayGuard) return;
+  const { bridge, ipv4Chain, ipv6Chain } = hostGatewayGuard;
+  const cleanupErrors = [];
+  for (const [binary, chain] of [
+    ['iptables', ipv4Chain],
+    ['ip6tables', ipv6Chain],
+  ]) {
+    try {
+      const run = (args, options) => runFirewall(binary, args, options);
+      const exists = run(['-S', chain], { allowFailure: true });
+      if (exists.error) throw exists.error;
+      if (exists.status === 1 && /no chain|does not exist/i.test(exists.stderr ?? '')) continue;
+      if (exists.status !== 0) {
+        throw new Error(`could not determine whether chain ${chain} exists`);
+      }
+      const attached = run(['-C', 'INPUT', '-i', bridge, '-j', chain], { allowFailure: true });
+      if (
+        attached.error ||
+        (attached.status !== 0 && (attached.status !== 1 || (attached.stderr ?? '').trim()))
+      ) {
+        throw new Error(`could not determine whether ${chain} is attached to INPUT`);
+      }
+      if (attached.status === 0) run(['-D', 'INPUT', '-i', bridge, '-j', chain]);
+      run(['-F', chain]);
+      run(['-X', chain]);
+      const removed = run(['-S', chain], { allowFailure: true });
+      if (removed.error) throw removed.error;
+      if (removed.status === 0 || !/no chain|does not exist/i.test(removed.stderr ?? '')) {
+        throw new Error(`the test-scoped CI ${binary} chain remains or its status is uncertain`);
+      }
+    } catch (error) {
+      cleanupErrors.push(`${binary}: ${error.message}`);
+    }
+  }
+  if (cleanupErrors.length) throw new Error(cleanupErrors.join('; '));
+  hostGatewayGuard = undefined;
+  process.stdout.write('Removed the disposable CI host gateway INPUT rule and chain.\n');
 }
 
 try {
@@ -468,13 +597,13 @@ try {
     0,
     `could not pull the digest-pinned Playwright browser image: ${redact(pulledBrowserImage.stderr || 'unknown Docker error')}`,
   );
-  compose(
-    ['up', '--detach', '--wait', '--wait-timeout', '180', 'api', 'worker', 'web', 'browser'],
-    {
-      timeout: 600_000,
-    },
-  );
-  await probeWebPath(false);
+  compose(['up', '--no-start', 'api', 'worker', 'web', 'browser'], { timeout: 600_000 });
+  installRunnerHostGatewayGuard();
+  compose(['up', '--detach', '--wait', '--wait-timeout', '180', 'api', 'worker', 'web'], {
+    timeout: 600_000,
+  });
+  compose(['up', '--detach', '--wait', '--wait-timeout', '60', 'browser'], { timeout: 120_000 });
+  await probeWebPath();
   await assertRuntimeRestrictions();
   await assertSocketPermissionDenials();
   await assertDeniedEgress();
@@ -546,10 +675,33 @@ try {
     allowFailure: true,
     timeout: 60_000,
   });
+  let browserStopped = !down.error && down.status === 0;
   if (down.error || down.status !== 0) {
     failed = true;
     process.stderr.write(
       `Compose cleanup reported an error: ${redact(down.stderr || down.stdout || down.error?.message)}\n`,
+    );
+    const stopBrowser = compose(['stop', 'browser'], { allowFailure: true, timeout: 15_000 });
+    browserStopped = !stopBrowser.error && stopBrowser.status === 0;
+    if (!browserStopped) {
+      try {
+        browserStopped = areScopedBrowserContainersStopped();
+      } catch {
+        browserStopped = false;
+      }
+    }
+  }
+  if (browserStopped) {
+    try {
+      removeRunnerHostGatewayGuard();
+    } catch (error) {
+      failed = true;
+      process.stderr.write(`Test-scoped CI firewall cleanup failed: ${redact(error)}\n`);
+    }
+  } else if (hostGatewayGuard) {
+    failed = true;
+    process.stderr.write(
+      'Browser stop could not be verified; its host-gateway firewall guard is retained until disposable runner teardown.\n',
     );
   }
   try {
@@ -686,6 +838,25 @@ function cleanupScopedResources() {
       }
     }
   }
+}
+
+function areScopedBrowserContainersStopped() {
+  const ids = dockerIds(
+    [
+      'ps',
+      '-aq',
+      '--filter',
+      `label=com.docker.compose.project=${project}`,
+      '--filter',
+      'label=com.docker.compose.service=browser',
+    ],
+    'test-scoped browser containers before firewall cleanup',
+  );
+  return ids.every((id) => {
+    const inspected = runDocker('docker', ['inspect', id], { encoding: 'utf8' });
+    if (inspected.error || inspected.status !== 0) return false;
+    return JSON.parse(inspected.stdout)[0]?.State?.Running === false;
+  });
 }
 
 async function waitForHealthy(service, timeout) {
@@ -908,21 +1079,127 @@ async function assertBrowserNetworkIsolation() {
   )[0];
   assert.equal(beforeProbe.State.Health?.Status, 'healthy');
   assert.equal(beforeBrowser.State.Health?.Status, 'healthy');
-  const probe = compose(
+  const browserNetworkProbe = runDocker(
+    'docker',
     [
       'exec',
-      '-T',
-      'browser',
+      compose(['ps', '-q', 'browser']).stdout.trim(),
       'node',
-      'scripts/compose/assert-browser-network.mjs',
-      addresses.api,
-      addresses.worker,
-      addresses.postgres,
-      gateway,
+      '-e',
+      "console.log(JSON.stringify(Object.entries(require('node:os').networkInterfaces()).filter(([,addresses])=>addresses?.some(address=>address.family==='IPv6'&&address.address.toLowerCase().startsWith('fe80:'))).map(([name])=>name)))",
     ],
-    { timeout: 45_000 },
+    { encoding: 'utf8', timeout: 5_000 },
   );
-  process.stdout.write(redact(probe.stdout));
+  assert.equal(browserNetworkProbe.status, 0, 'browser IPv6 interface support is inspectable');
+  const browserIpv6Interfaces = JSON.parse(browserNetworkProbe.stdout.trim());
+  const ipv6ControlEnabled =
+    Boolean(hostGatewayGuard.hostGatewayIpv6) && browserIpv6Interfaces.length > 0;
+  const hostControlServer = createServer((socket) => socket.end('ci-host-gateway-control'));
+  let ipv6ControlServer;
+  let ipv6ControlPort = '';
+  let hostControlPort;
+  try {
+    await new Promise((resolve, reject) =>
+      hostControlServer.listen(0, gateway, resolve).once('error', reject),
+    );
+    hostControlPort = hostControlServer.address().port;
+    const hostPositiveControl = await new Promise((resolve) => {
+      const socket = createConnection({ host: gateway, port: hostControlPort, family: 4 });
+      socket.setTimeout(2_000);
+      socket.once('connect', () => {
+        socket.destroy();
+        resolve(true);
+      });
+      socket.once('error', () => resolve(false));
+      socket.once('timeout', () => {
+        socket.destroy();
+        resolve(false);
+      });
+    });
+    assert.equal(
+      hostPositiveControl,
+      true,
+      'the disposable host gateway listener accepts a host-side connection',
+    );
+    if (ipv6ControlEnabled) {
+      ipv6ControlServer = createServer((socket) => socket.end('ci-host-gateway-ipv6-control'));
+      await new Promise((resolve, reject) =>
+        ipv6ControlServer
+          .listen(0, `${hostGatewayGuard.hostGatewayIpv6}%${hostGatewayGuard.bridge}`, resolve)
+          .once('error', reject),
+      );
+      ipv6ControlPort = String(ipv6ControlServer.address().port);
+      const ipv6HostPositiveControl = await new Promise((resolve) => {
+        const socket = createConnection({
+          host: `${hostGatewayGuard.hostGatewayIpv6}%${hostGatewayGuard.bridge}`,
+          port: Number(ipv6ControlPort),
+          family: 6,
+        });
+        socket.setTimeout(2_000);
+        socket.once('connect', () => {
+          socket.destroy();
+          resolve(true);
+        });
+        socket.once('error', () => resolve(false));
+        socket.once('timeout', () => {
+          socket.destroy();
+          resolve(false);
+        });
+      });
+      assert.equal(
+        ipv6HostPositiveControl,
+        true,
+        'the disposable IPv6 host gateway listener accepts a host-side connection',
+      );
+    }
+    const probe = compose(
+      [
+        'exec',
+        '-T',
+        'browser',
+        'node',
+        'scripts/compose/assert-browser-network.mjs',
+        addresses.api,
+        addresses.worker,
+        addresses.postgres,
+        gateway,
+        String(hostControlPort),
+        ipv6ControlEnabled ? hostGatewayGuard.hostGatewayIpv6 : '',
+        ipv6ControlPort,
+      ],
+      { timeout: 45_000 },
+    );
+    process.stdout.write(redact(probe.stdout));
+  } finally {
+    for (const server of [hostControlServer, ipv6ControlServer]) {
+      if (!server?.listening) continue;
+      await new Promise((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  }
+  const ruleCounters = runIptables(['-L', hostGatewayGuard.ipv4Chain, '-n', '-v', '-x']);
+  const dropPackets = Number(ruleCounters.stdout.match(/^\s*(\d+)\s+\d+\s+DROP\b/m)?.[1] ?? 0);
+  assert.ok(
+    dropPackets > 0,
+    'browser positive-control traffic increments the scoped IPv4 DROP rule',
+  );
+  process.stdout.write(
+    `Browser-to-host positive control was dropped by the scoped runner rule (${dropPackets} packet(s)).\n`,
+  );
+  if (ipv6ControlPort) {
+    const ipv6RuleCounters = runIp6tables(['-L', hostGatewayGuard.ipv6Chain, '-n', '-v', '-x']);
+    const ipv6DropPackets = Number(
+      ipv6RuleCounters.stdout.match(/^\s*(\d+)\s+\d+\s+DROP\b/m)?.[1] ?? 0,
+    );
+    assert.ok(
+      ipv6DropPackets > 0,
+      'browser IPv6 positive-control traffic increments the scoped DROP rule',
+    );
+    process.stdout.write(
+      `Browser-to-host IPv6 positive control was dropped by the scoped runner rule (${ipv6DropPackets} packet(s)).\n`,
+    );
+  }
   for (const [service, id] of [
     ['web', compose(['ps', '-q', 'web']).stdout.trim()],
     ['browser', compose(['ps', '-q', 'browser']).stdout.trim()],
