@@ -37,17 +37,17 @@ flowchart LR
 
 All networks below are internal except `ingress_publish`, whose ordinary bridge is prohibited until the explicit host policy is independently approved. No host networking is permitted. The diagram omits separate database access networks for clarity.
 
-| Service | Membership | Allowed initiation | Secrets and identity |
-|---|---|---|---|
-| HTTPS ingress | ingress_publish, ingress_link | Web:8080 only | Dedicated non-root UID 11001; TLS leaf key only |
-| Web | ingress_link, edge | API:4100 only | UID 11002; no DB/control-plane secret |
-| API | edge, data | Worker:4101, DB:5432; authorizer UDS | UID 11003; runtime DB and API-authorizer token |
-| Worker | data | DB:5432; launcher UDS | UID 11004; runtime DB and launcher token |
-| PostgreSQL | data, auth_db, launch_db, ops_db | No initiated network traffic | UID from pinned image; database volume |
-| Authorizer | auth_db | DB:5432 only | UID 11005; authorizer DB, decision-signing material |
-| Launcher | launch_db | DB:5432; Docker UDS | UID 11006; launcher DB, worker-launcher token |
-| Migration/backup jobs | ops_db, only while running | DB:5432 only | Separate short-lived operational credentials |
-| Synthetic agents | network none | None | Non-root fixed identity; scoped workspace only |
+| Service               | Membership                       | Allowed initiation                   | Secrets and identity                                |
+| --------------------- | -------------------------------- | ------------------------------------ | --------------------------------------------------- |
+| HTTPS ingress         | ingress_publish, ingress_link    | Web:8080 only                        | Dedicated non-root UID 11001; TLS leaf key only     |
+| Web                   | ingress_link, edge               | API:4100 only                        | UID 11002; no DB/control-plane secret               |
+| API                   | edge, data                       | Worker:4101, DB:5432; authorizer UDS | UID 11003; runtime DB and API-authorizer token      |
+| Worker                | data                             | DB:5432; launcher UDS                | UID 11004; runtime DB and launcher token            |
+| PostgreSQL            | data, auth_db, launch_db, ops_db | No initiated network traffic         | UID from pinned image; database volume              |
+| Authorizer            | auth_db                          | DB:5432 only                         | UID 11005; authorizer DB, decision-signing material |
+| Launcher              | launch_db                        | DB:5432; Docker UDS                  | UID 11006; launcher DB, worker-launcher token       |
+| Migration/backup jobs | ops_db, only while running       | DB:5432 only                         | Separate short-lived operational credentials        |
+| Synthetic agents      | network none                     | None                                 | Non-root fixed identity; scoped workspace only      |
 
 No database port is published in this proposal. API/worker retain a shared data network for compatibility, but network membership is not permission: directional filtering must deny PostgreSQL/worker initiation to API except explicitly required established replies. Control-plane sockets use distinct volumes, mounted only into their two participants. Authorizer and launcher share neither sockets nor secrets.
 
@@ -101,11 +101,11 @@ PR #90 remains an independent open workstream. Do not assume migration 0029 or M
 
 ## Alternatives
 
-| Option | Benefits | Limitations and gates | Effort/recovery |
-|---|---|---|---|
-| A: hybrid | Reuses systemd identities and service hardening | Owner acceptance of host services; ingress and target-host validation still missing | Lowest implementation; coordinate Compose and systemd recovery |
-| B: Docker-managed control plane | Matches owner preference; one service lifecycle | Rootful daemon still trusted; identity, UDS, secrets, workspace and network equivalence unproven | Moderate/high; explicit socket/daemon/database reconciliation |
-| C: daemon gateway | Potential independent restriction of daemon operations | Extra root-equivalent TCB; duplicated authorization and new protocol/replay risks | Highest effort and recovery complexity; benefit must be demonstrated |
+| Option                          | Benefits                                               | Limitations and gates                                                                            | Effort/recovery                                                      |
+| ------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------- |
+| A: hybrid                       | Reuses systemd identities and service hardening        | Owner acceptance of host services; ingress and target-host validation still missing              | Lowest implementation; coordinate Compose and systemd recovery       |
+| B: Docker-managed control plane | Matches owner preference; one service lifecycle        | Rootful daemon still trusted; identity, UDS, secrets, workspace and network equivalence unproven | Moderate/high; explicit socket/daemon/database reconciliation        |
+| C: daemon gateway               | Potential independent restriction of daemon operations | Extra root-equivalent TCB; duplicated authorization and new protocol/replay risks                | Highest effort and recovery complexity; benefit must be demonstrated |
 
 All can run on existing WSL2 in principle. None is deployment-approved. Preferred B is conditional, not a claim of security equivalence.
 
@@ -117,15 +117,39 @@ All can run on existing WSL2 in principle. None is deployment-approved. Preferre
 4. **Gate 4: persistence.** Verify migration permissions, restart/recreation and fresh-volume restore, unknown-state preservation and scoped cleanup. Codex #1 owns backend semantics; independent review required.
 5. **Gate 5: owner host.** Separate authorization for Windows TLS/browser access, CSRF/SSE, LAN denial, host policy, daemon and WSL recovery. Preserve existing data with verified backup/rollback. No provider activation.
 
-| Owner decision | Proposed choice | Approval state |
-|---|---|---|
-| Trusted rootful daemon/launcher and API residual authority | Explicitly accept only within reviewed mock scope | Pending |
-| Docker-only control-plane design | Conditional Option B | Pending Codex #1 and independent review |
+| Owner decision                                                  | Proposed choice                                                 | Approval state                                      |
+| --------------------------------------------------------------- | --------------------------------------------------------------- | --------------------------------------------------- |
+| Trusted rootful daemon/launcher and API residual authority      | Explicitly accept only within reviewed mock scope               | Pending                                             |
+| Docker-only control-plane design                                | Conditional Option B                                            | Pending Codex #1 and independent review             |
 | Host policy allowed despite Docker-managed application services | Required for equivalent enforcement; no host application daemon | Pending; conflict blocks implementation if declined |
-| Origin/certificate trust | HTTPS localhost:8443, owner-controlled CA | Pending |
-| Backup location, retention, RPO/RTO and keys | Policy above with independent copy | Pending |
-| Implementation and target-host operations | Separate authorizations after design | Not authorized |
+| Origin/certificate trust                                        | HTTPS localhost:8443, owner-controlled CA                       | Pending                                             |
+| Backup location, retention, RPO/RTO and keys                    | Policy above with independent copy                              | Pending                                             |
+| Implementation and target-host operations                       | Separate authorizations after design                            | Not authorized                                      |
 
 ## Review record
 
 Codex #1 backend/security review: requested through the Draft PR handoff; pending. Codex #1 must arrange its own independent reviewer. A separate platform documentation review is supplementary and cannot replace that process. No approval is asserted here.
+
+## Concrete enforcement candidate and open design findings
+
+Supplementary platform review of commit `1ddb8cd` returned **REQUEST CHANGES**: network lifecycle/DNS enforcement, container hardening equivalence and UID/socket mapping require refinement. The candidate below addresses the design detail; it is not independently approved. Gate 1 remains blocked until Codex #1 and its reviewer confirm it.
+
+Use a dedicated nftables `inet` table with INPUT and FORWARD hooks that default-drop traffic selected by the project bridge interfaces. Maintain explicit source/destination/port allow sets and established-reply rules; never flush Docker or unrelated host tables. Select hook ordering against the actual Docker iptables/nftables backend in Gate 2. An authorized one-shot host orchestration tool installs the deny table before creating endpoints, renders address sets from inspected project endpoints, validates identity/ownership, and atomically applies allow sets before starting processes. Its privileges are host root for namespace policy installation; ordinary containers never receive them. Failure leaves deny rules in place and stops admission.
+
+For a first implementation, disable automatic application/control-plane restart (`restart: no`); recovery goes through the same explicit policy-first orchestration. Daemon/WSL restart therefore cannot automatically run an unguarded service. Policy loss while running is outside the trust model if caused by host root; accidental rule deletion must trigger admission stop and endpoint shutdown through a reviewed host watchdog. Whether a Docker-managed watchdog can safely enforce that requirement without broad host authority remains a blocking Gate 1 question. Do not claim autonomous unattended recovery until resolved.
+
+For deterministic discovery without upstream DNS, render inspected stable project addresses into per-container hosts mappings before process start and reject UDP/TCP DNS, including embedded resolver `127.0.0.11:53`, with per-network-namespace rules installed by the one-shot privileged orchestrator before entrypoint release. Block host/Internet DNS independently. Changed endpoint addresses require a controlled stop/re-render/restart; no live stale mapping fallback. Test that Docker embedded DNS cannot bypass namespace rules, including TCP and AAAA behavior. This candidate trades dynamic discovery for enforceability and requires Codex #1 review; it is not implemented.
+
+| Existing systemd guarantee                | Proposed container equivalent                                                                              | Acceptance                                                   |
+| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| ProtectSystem/ProtectHome                 | Read-only image/root; no home or repository mount                                                          | Writes and forbidden reads denied                            |
+| PrivateTmp/private devices                | Bounded noexec/nosuid/nodev tmpfs; default minimal devices, no device mounts                               | Cross-service temp/device access denied                      |
+| NoNewPrivileges/SUID restrictions         | no-new-privileges, cap_drop ALL, non-root, immutable image                                                 | Inspect effective caps; privilege escalation attempts denied |
+| Process/kernel/control-group restrictions | Private PID/IPC namespaces, no host proc/sys/cgroup mounts; default seccomp plus reviewed AppArmor profile | Namespace/LSM inspection and kernel-control write denials    |
+| Resource bounds                           | Authorizer: 0.5 CPU, 384 MiB, 64 PIDs; launcher proposed 0.5 CPU, 512 MiB, 128 PIDs                        | OOM/PID bounds and fail-closed recovery                      |
+| Private writable paths                    | Only authorizer socket directories; launcher socket and exact workspace root                               | Mount allowlist and symlink/ownership tests                  |
+| Protected deployed code                   | Digest-pinned images, no writable code/dependency mount                                                    | Image/mount inspection                                       |
+
+Explicit exception: launcher Docker socket authority defeats these protections after launcher compromise. No seccomp/LSM or read-only mount is claimed to constrain Docker daemon root authority.
+
+Proposed host socket groups: authorizer 12001 (API + authorizer only), launcher 12002 (worker + launcher only). The provisioning tool initializes separate volumes as service UID/private primary GID, socket directory group to the matching socket GID, directory mode 0750 and socket 0660. Validate collisions before provisioning. Docker socket supplemental GID is read from the actual socket and granted only to launcher; never assume a fixed daemon GID. Initial scope requires rootful Docker without user-namespace remapping; remapped/rootless modes fail preflight until a separate reviewed mapping exists. Never repair a mismatch with chmod 777, container root or disabled authentication.
