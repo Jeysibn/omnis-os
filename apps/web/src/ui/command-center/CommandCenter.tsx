@@ -7,6 +7,7 @@ import { PhtClock } from './PhtClock.js';
 import { RecentRecords } from './RecentRecords.js';
 import { SystemContext, VitalsPanel } from './VitalsPanel.js';
 import { deriveSystemState } from './systemState.js';
+import { useMediaQuery } from './useMediaQuery.js';
 import { computeVitals, type LoadState } from './vitals.js';
 import './command-center.css';
 
@@ -26,6 +27,14 @@ export type CommandCenterProps = {
   onCreate: () => void;
   onReviewApproval: (task: Task, trigger: HTMLButtonElement) => void;
 };
+
+/**
+ * The wide layout draws vitals | stage | attention. Narrower layouts draw the stage, then attention
+ * and vitals. The CSS grid areas place the panels; THIS query decides where the single vitals panel
+ * sits in the document, so reading order, Tab order and visual order agree at every width.
+ * Keep it in step with the `not all and (min-width: 1200px)` rule in command-center.css.
+ */
+export const WIDE_LAYOUT_QUERY = '(min-width: 1200px)';
 
 const loadState = (loading: boolean, error: string): LoadState =>
   loading ? 'loading' : error ? 'error' : 'ready';
@@ -59,11 +68,14 @@ export function CommandCenter(props: CommandCenterProps) {
     () => deriveSystemState({ tasksState, runsState, runs }),
     [tasksState, runsState, runs],
   );
+  const wide = useMediaQuery(WIDE_LAYOUT_QUERY);
   const approvalsHeading = useRef<HTMLHeadingElement>(null);
   const focusApprovals = () => {
     approvalsHeading.current?.scrollIntoView({ block: 'nearest' });
     approvalsHeading.current?.focus();
   };
+
+  const vitalsPanel = <VitalsPanel vitals={vitals} onNavigate={props.onNavigate} />;
 
   return (
     <NxTheme>
@@ -108,6 +120,10 @@ export function CommandCenter(props: CommandCenterProps) {
         ) : null}
 
         <div className="ccx-grid">
+          {/* One vitals panel, never two: first on wide screens, after attention on narrower ones.
+              The null slots keep the stage and attention panels in place, so they never remount
+              (focus survives a resize across the breakpoint). */}
+          {wide ? vitalsPanel : null}
           <section className="ccx-stage" aria-labelledby="ccx-state-heading">
             <span className="nx-label">Omnis Nexus</span>
             <h2 id="ccx-state-heading" className="ccx-visually-hidden">
@@ -152,8 +168,6 @@ export function CommandCenter(props: CommandCenterProps) {
             <SystemContext />
           </section>
 
-          <VitalsPanel vitals={vitals} onNavigate={props.onNavigate} />
-
           <AttentionPanel
             tasks={tasks}
             runs={runs}
@@ -166,6 +180,7 @@ export function CommandCenter(props: CommandCenterProps) {
             onNavigate={props.onNavigate}
             onReviewApproval={props.onReviewApproval}
           />
+          {wide ? null : vitalsPanel}
         </div>
 
         <RecentRecords

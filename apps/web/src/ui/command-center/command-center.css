@@ -98,8 +98,13 @@ body:has(.app-shell[data-view='command-center']) {
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
 }
 
-/* Layout. DOM order is stage, attention, vitals: what the system is doing, what needs the owner,
-   then the supporting counts. Wide screens place vitals on the left, as in the V2 composition. */
+/* Layout. The grid areas decide where each panel is drawn; they never change reading or focus order.
+   CommandCenter.tsx places the single vitals panel in the document to match, so the DOM order is
+   always the visual order:
+     wide (>= 1200px)  vitals | stage | attention
+     tablet            stage, then attention | vitals
+     mobile            stage, attention, vitals
+   The width must match WIDE_LAYOUT_QUERY in CommandCenter.tsx. */
 .ccx-grid {
   display: grid;
   gap: var(--nx-space-4);
@@ -117,7 +122,7 @@ body:has(.app-shell[data-view='command-center']) {
 .ccx-vitals {
   grid-area: vitals;
 }
-@media (max-width: 1199px) {
+@media not all and (min-width: 1200px) {
   .ccx-grid {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     grid-template-areas:
