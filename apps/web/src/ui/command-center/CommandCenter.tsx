@@ -4,6 +4,8 @@ import type { Run, Task } from '@omnis/contracts';
 import { ErrorState, LoadingState, NxButton, NxTheme, StatusBadge } from '../design/index.js';
 import { AttentionPanel } from './AttentionPanel.js';
 import { PhtClock } from './PhtClock.js';
+import { Reactor } from './reactor/Reactor.js';
+import { markerCounts } from './reactor/visual.js';
 import { RecentRecords } from './RecentRecords.js';
 import { SystemContext, VitalsPanel, type VitalsFocusHandoff } from './VitalsPanel.js';
 import { deriveSystemState } from './systemState.js';
@@ -67,6 +69,11 @@ export function CommandCenter(props: CommandCenterProps) {
   const state = useMemo(
     () => deriveSystemState({ tasksState, runsState, runs }),
     [tasksState, runsState, runs],
+  );
+  // Markers come from the same loaded run list as the vitals; unavailable data draws none.
+  const reactorMarkers = useMemo(
+    () => (runsState === 'ready' ? markerCounts(runs) : null),
+    [runsState, runs],
   );
   const wide = useMediaQuery(WIDE_LAYOUT_QUERY);
   const approvalsHeading = useRef<HTMLHeadingElement>(null);
@@ -134,25 +141,7 @@ export function CommandCenter(props: CommandCenterProps) {
               System state
             </h2>
             <div className="ccx-state" data-state={state.id}>
-              <svg className="ccx-mark" viewBox="0 0 120 120" aria-hidden="true" focusable="false">
-                <circle
-                  cx="60"
-                  cy="60"
-                  r="52"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeOpacity="0.35"
-                />
-                <circle
-                  cx="60"
-                  cy="60"
-                  r="34"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeOpacity="0.55"
-                />
-                <circle cx="60" cy="60" r="10" fill="currentColor" />
-              </svg>
+              <Reactor state={state.id} markers={reactorMarkers} />
               {state.id === 'loading' ? (
                 <LoadingState label={state.label} />
               ) : (
