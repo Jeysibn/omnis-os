@@ -36,6 +36,15 @@ export function getValidationMode({ eventName, event = {}, ref = '' }) {
 }
 
 export function classifyChangedFiles(paths) {
+  const dependencyManifestChanged = any(
+    paths,
+    (path) =>
+      path === 'package.json' ||
+      path === 'pnpm-lock.yaml' ||
+      path === 'pnpm-workspace.yaml' ||
+      /^(apps|packages)\/[^/]+\/package\.json$/.test(path),
+  );
+
   const containerSensitive = any(
     paths,
     (path) =>
@@ -47,6 +56,7 @@ export function classifyChangedFiles(paths) {
       prefix(path, 'scripts/platform/') ||
       prefix(path, 'scripts/container-images/') ||
       prefix(path, 'tests/integration/') ||
+      dependencyManifestChanged ||
       prefix(path, 'apps/api/') ||
       prefix(path, 'apps/authorizer/') ||
       prefix(path, 'apps/sandbox-launcher/') ||
@@ -65,8 +75,14 @@ export function classifyChangedFiles(paths) {
       path === 'apps/web/vite.integration.config.ts',
   );
 
-  const fullFrontendSensitive = any(paths, (path) =>
-    /^apps\/web\/playwright(?:\.[^/]+)?\.config\.ts$/.test(path),
+  const fullFrontendSensitive = any(
+    paths,
+    (path) =>
+      /^apps\/web\/playwright(?:\.[^/]+)?\.config\.ts$/.test(path) ||
+      path === 'apps/web/vite.config.ts' ||
+      path === 'apps/web/src/main.tsx' ||
+      path === 'apps/web/src/ui/api.ts' ||
+      dependencyManifestChanged,
   );
 
   const databaseSensitive = any(
@@ -74,7 +90,8 @@ export function classifyChangedFiles(paths) {
     (path) =>
       prefix(path, 'packages/db/') ||
       prefix(path, 'scripts/db-recovery/') ||
-      prefix(path, 'tests/integration/'),
+      prefix(path, 'tests/integration/') ||
+      dependencyManifestChanged,
   );
 
   const backendSensitive = any(
@@ -94,6 +111,7 @@ export function classifyChangedFiles(paths) {
     databaseSensitive ||
     backendSensitive ||
     integrationHarnessChanged ||
+    dependencyManifestChanged ||
     any(paths, (path) => prefix(path, 'infra/systemd/')) ||
     any(paths, (path) => prefix(path, 'scripts/host-security/'));
 
@@ -101,6 +119,7 @@ export function classifyChangedFiles(paths) {
     databaseSensitive ||
     backendSensitive ||
     integrationHarnessChanged ||
+    dependencyManifestChanged ||
     any(paths, (path) => path === 'apps/web/server.ts' || path === 'apps/web/src/ui/api.ts');
 
   return {

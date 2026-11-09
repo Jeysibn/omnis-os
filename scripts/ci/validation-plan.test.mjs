@@ -122,6 +122,27 @@ test('sensitive changes request the matching early integration suites', () => {
     fullStackSensitive: true,
     fullFrontendSensitive: true,
   });
+  assert.deepEqual(classifyChangedFiles(['apps/web/vite.config.ts']), {
+    securitySensitive: false,
+    containerSensitive: false,
+    databaseSensitive: false,
+    fullStackSensitive: false,
+    fullFrontendSensitive: true,
+  });
+  assert.deepEqual(classifyChangedFiles(['apps/web/src/main.tsx']), {
+    securitySensitive: false,
+    containerSensitive: false,
+    databaseSensitive: false,
+    fullStackSensitive: false,
+    fullFrontendSensitive: true,
+  });
+  assert.deepEqual(classifyChangedFiles(['apps/web/src/ui/api.ts']), {
+    securitySensitive: false,
+    containerSensitive: false,
+    databaseSensitive: false,
+    fullStackSensitive: true,
+    fullFrontendSensitive: true,
+  });
   assert.deepEqual(classifyChangedFiles(['apps/web/integration/tasks.integration.spec.ts']), {
     securitySensitive: true,
     containerSensitive: false,
@@ -143,6 +164,15 @@ test('sensitive changes request the matching early integration suites', () => {
     fullStackSensitive: false,
     fullFrontendSensitive: false,
   });
+  for (const path of ['pnpm-lock.yaml', 'apps/web/package.json', 'packages/db/package.json']) {
+    assert.deepEqual(classifyChangedFiles([path]), {
+      securitySensitive: true,
+      containerSensitive: true,
+      databaseSensitive: true,
+      fullStackSensitive: true,
+      fullFrontendSensitive: true,
+    });
+  }
 });
 
 test('Draft browser tests follow the affected UI area with a shell fallback', () => {
