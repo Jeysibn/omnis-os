@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash, randomBytes, randomUUID, scrypt as scryptCallback } from 'node:crypto';
-import { createServer, isIPv4 } from 'node:net';
+import { createConnection, createServer, isIPv4 } from 'node:net';
 import { chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -438,10 +438,12 @@ try {
   compose(['up', '--detach', '--wait', '--wait-timeout', '180', 'api', 'worker', 'web'], {
     timeout: 600_000,
   });
+  await probeWebPath(false);
   await assertRuntimeRestrictions();
   await assertSocketPermissionDenials();
   await assertDeniedEgress();
   await assertMissingSocketFailsClosed();
+  await probeWebPath(true);
 
   const browserEnvironment = buildBrowserEnvironment(process.env, {
     apiTarget: 'http://api:4100',
@@ -1181,4 +1183,66 @@ function mergeCookies(first, second) {
       .map((item) => item.split('=', 2)),
   );
   return [...values.entries()].map(([name, value]) => `${name}=${value}`).join('; ');
+}
+
+async function probeWebPath(required) {
+  const id = compose(['ps', '-q', 'web']).stdout.trim();
+  const inspected = JSON.parse(
+    runDocker('docker', ['inspect', id], { encoding: 'utf8' }).stdout,
+  )[0];
+  const internal = runDocker(
+    'docker',
+    [
+      'exec',
+      id,
+      'node',
+      '-e',
+      "fetch('http://127.0.0.1:8080/health',{signal:AbortSignal.timeout(3000)}).then(r=>{console.log('HTTP',r.status);process.exit(r.ok?0:1)}).catch(()=>process.exit(1))",
+    ],
+    { encoding: 'utf8', timeout: 5000 },
+  );
+  const listeners = runDocker(
+    'docker',
+    [
+      'exec',
+      id,
+      'node',
+      '-e',
+      "const fs=require('node:fs');for(const p of ['/proc/net/tcp','/proc/net/tcp6'])console.log(fs.readFileSync(p,'utf8').split('\\n').filter(l=>l.trim().split(/\\s+/)[1]?.endsWith(':1F90')).join('\\n'))",
+    ],
+    { encoding: 'utf8', timeout: 5000 },
+  );
+  const tcp = await new Promise((resolve) => {
+    const socket = createConnection({ host: '127.0.0.1', port: webPort, family: 4 });
+    socket.setTimeout(3000);
+    socket.once('connect', () => {
+      socket.destroy();
+      resolve('connected');
+    });
+    socket.once('error', (error) => resolve(error.code));
+    socket.once('timeout', () => {
+      socket.destroy();
+      resolve('timeout');
+    });
+  });
+  let http;
+  try {
+    http = (
+      await globalThis.fetch(`${origin}/health`, { signal: globalThis.AbortSignal.timeout(3000) })
+    ).status;
+  } catch (error) {
+    http = error.cause?.code ?? error.name;
+  }
+  process.stdout.write(
+    `${JSON.stringify({ phase: required ? 'after-security-probes' : 'before-security-probes', destination: origin, port: webPort, health: inspected.State.Health?.Status, restartCount: inspected.RestartCount, configuredPorts: inspected.HostConfig.PortBindings, effectivePorts: inspected.NetworkSettings.Ports, internalHttp: internal.stdout.trim(), internalStatus: internal.status, listeners: listeners.stdout.trim(), runnerTcp: tcp, runnerHttp: http })}\n`,
+  );
+  if (required) {
+    assert.equal(internal.status, 0, 'web internal HTTP failed');
+    assert.equal(
+      tcp,
+      'connected',
+      'runner IPv4 TCP cannot reach Docker publication; inspect preceding path diagnostics',
+    );
+    assert.equal(http, 200, 'runner HTTP must succeed before Playwright');
+  }
 }
