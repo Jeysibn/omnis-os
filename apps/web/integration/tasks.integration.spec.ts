@@ -177,7 +177,28 @@ test('Compose owner creates an authorized mock Run through the web gateway', asy
   await expect(page.getByLabel('Agent profile')).toBeVisible();
   await page.getByLabel('Agent profile').selectOption(agent.body.agentId);
   await expect(page.getByLabel('Runtime')).toHaveValue('mock');
+  const assignmentResponsePromise = page
+    .waitForResponse(
+      (response) => {
+        const url = new URL(response.url());
+        return (
+          url.origin === new URL(frontendOrigin).origin &&
+          url.pathname === `/api/v1/tasks/${encodeURIComponent(task.id)}/execution-assignment` &&
+          response.request().method() === 'PUT'
+        );
+      },
+      { timeout: 10_000 },
+    )
+    .catch(() => null);
   await page.getByRole('button', { name: 'Save assignment', exact: true }).click();
+  const assignmentResponse = await assignmentResponsePromise;
+  if (!assignmentResponse) {
+    const assignmentErrorVisible = (await page.getByRole('alert').count()) > 0;
+    throw new Error(
+      `Execution assignment request was not sent through the web gateway; UI error visible: ${assignmentErrorVisible}`,
+    );
+  }
+  expect(assignmentResponse.status()).toBe(200);
   await expect(page.getByText('Synthetic mock assignment saved.')).toBeVisible();
 
   const authorization = await ownerRequest(page, '/api/v1/authorizations', {
