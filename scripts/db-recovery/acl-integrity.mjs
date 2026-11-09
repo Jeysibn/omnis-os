@@ -154,10 +154,14 @@ const approvedTaskProjectRoutines = new Set([
   'set_task_project(p_task_id text, p_expected_association_revision integer, p_project_id text, p_request_id uuid, p_fingerprint bytea)',
   'set_task_execution_assignment(p_task_id text, p_expected_revision integer, p_agent_id text, p_profile_version_no integer, p_runtime_id text, p_request_id uuid, p_fingerprint bytea)',
 ]);
+const approvedRuntimeAdmissionRoutines = new Set([
+  'acquire_mission_lane_admission(p_critical boolean)',
+]);
 
 function isApprovedRuntimeSecurityDefiner(entry) {
   if (entry.objectType !== 'routine' || entry.schema !== 'omnis') return false;
   if (approvedTaskProjectRoutines.has(entry.object)) return true;
+  if (approvedRuntimeAdmissionRoutines.has(entry.object)) return entry.securityDefiner === true;
   const match = /^([a-z_][a-z0-9_]*)\((.*)\)$/.exec(entry.object);
   if (!match) return false;
   const arity = approvedSecurityDefinerRoutineArities.get(match[1]);

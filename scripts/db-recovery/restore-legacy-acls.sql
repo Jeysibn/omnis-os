@@ -339,6 +339,15 @@ BEGIN
     EXECUTE 'REVOKE ALL ON FUNCTION omnis.set_task_epic(text,integer,text,uuid,bytea) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
     EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.set_task_epic(text,integer,text,uuid,bytea) TO omnis_authorizer';
   END IF;
+  IF pg_catalog.to_regprocedure('omnis.create_task_mission_lane_admission_impl(text,text,text,uuid,bytea)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.create_task_mission_lane_admission_impl(text,text,text,uuid,bytea) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.set_task_project_mission_lane_admission_impl(text,integer,text,uuid,bytea)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.set_task_project_mission_lane_admission_impl(text,integer,text,uuid,bytea) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.set_task_epic_mission_lane_admission_impl(text,integer,text,uuid,bytea)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.set_task_epic_mission_lane_admission_impl(text,integer,text,uuid,bytea) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
 END
 $project_epic_acl$;
 GRANT USAGE, SELECT ON SEQUENCE omnis.run_id_seq TO omnis_runtime;
@@ -392,6 +401,15 @@ BEGIN
   END IF;
 END
 $task_execution_assignment_acl$;
+
+DO $mission_lane_admission_acl$
+BEGIN
+  IF pg_catalog.to_regprocedure('omnis.acquire_mission_lane_admission(boolean)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.acquire_mission_lane_admission(boolean) FROM PUBLIC, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.acquire_mission_lane_admission(boolean) TO omnis_runtime';
+  END IF;
+END
+$mission_lane_admission_acl$;
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA pgboss TO omnis_runtime;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA pgboss TO omnis_runtime;

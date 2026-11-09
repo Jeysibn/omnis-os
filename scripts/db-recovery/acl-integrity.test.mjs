@@ -464,6 +464,15 @@ describe('post-restore PostgreSQL ACL integrity', () => {
         'omnis_launcher',
         true,
       ),
+      acl(
+        'routine',
+        'omnis',
+        'acquire_mission_lane_admission(p_critical boolean)',
+        'EXECUTE',
+        null,
+        'omnis_runtime',
+        true,
+      ),
     ];
     assert.doesNotThrow(() => assertRuntimeAclPolicy([...allowed, ...safe]));
     assert.throws(

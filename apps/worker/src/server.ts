@@ -64,6 +64,11 @@ const connectionString = createRuntimeDatabaseUrl({
   privateCompose,
 });
 const pool = createPool({ connectionString, max: 8, application_name: 'omnis-worker' });
+const missionLaneWriterPool = createPool({
+  connectionString,
+  max: 8,
+  application_name: 'omnis-worker-mission-lane-writer',
+});
 
 const boss = new PgBoss({
   connectionString,
@@ -82,7 +87,7 @@ boss.on('error', (error) => {
 await boss.start({ attempts: 5 });
 await boss.createQueue(queueName, { retryLimit: 0, retryDelay: 0 });
 
-const store = new PostgresRunStore(pool, internalToken);
+const store = new PostgresRunStore(pool, internalToken, missionLaneWriterPool);
 const agentProfiles = new PostgresAgentProfileStore(pool, internalToken);
 const launcherSocket = process.env.OMNIS_SANDBOX_LAUNCHER_SOCKET;
 if (!launcherSocket || !launcherSocket.startsWith('/')) {
@@ -118,7 +123,16 @@ if (syntheticBrokerTestMode) {
       ),
   });
 }
-await coordinator.reconcileExpiredRuns();
+try {
+  await coordinator.reconcileExpiredRuns();
+} catch (error) {
+  const code = (error as { code?: string })?.code;
+  if (!['PML01', 'PML02', '55P03'].includes(code ?? '')) throw error;
+  app.log.warn(
+    { errorCode: code },
+    'Run reconciliation was deferred by bounded Mission Lane admission and will retry.',
+  );
+}
 await boss.work(queueName, { batchSize: 1, localConcurrency: 1 }, async ([job]) => {
   if (!job) return;
   if (syntheticBrokerCoordinator && (await syntheticBrokerCoordinator.isSyntheticJob(job.data))) {
@@ -504,6 +518,7 @@ app.addHook('onClose', async () => {
   clearInterval(recoveryTimer);
   await coordinator.shutdown();
   await boss.stop();
+  await missionLaneWriterPool.end();
   await pool.end();
 });
 

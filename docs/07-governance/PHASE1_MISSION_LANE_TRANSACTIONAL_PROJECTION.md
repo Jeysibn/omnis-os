@@ -1,6 +1,8 @@
 # Phase 1 Mission Lane Transactional Projection
 
-**Status:** Implementation candidate, pending independent review and owner approval.
+**Status:** Draft PR #90 implementation with migration 0030 admission control;
+performance acceptance failed, and exact-head independent implementation review
+is pending.
 
 ## Cutover and scope
 
@@ -36,6 +38,17 @@ sequence. Run lifecycle events are appended through a constrained database
 writer that checks the Run's persisted status and rejects direct runtime
 inserts into `run_events`.
 
+Migration `0030_mission_lane_admission.sql` adds global admission for
+participating event writers: at most four active transactions and four pending
+requests, including one pending slot reserved for critical Run recovery and
+cancellation work. The database advisory-lock protocol coordinates API, worker,
+and background connections across processes. A per-process no-wait gate runs
+before database-pool checkout. The ordering is pending slot, admission
+turnstile, transaction-scoped active permit, D5 cursor, then source/domain
+locks. The D5 cursor remains held through commit. Overload is rejected before
+source mutation; worker reconciliation defers retryable work without changing
+Run authority or replaying uncertain execution.
+
 This migration does not close the already documented N-8 limitation: the
 trusted `omnis_runtime` service credential can directly update approved Run
 lifecycle columns. The ledger mirrors committed source rows and is not a new
@@ -50,9 +63,16 @@ limited to 2 KiB. Backup/restore metrics include the feed epoch, cutover floor,
 last sequence, event count, and ledger fingerprint. Operations must monitor
 ledger row count and storage growth before any retention policy is proposed.
 
-The current 32-writer profile measures total Task mutation latency. It does not
-by itself establish the 0028-to-0029 overhead target or replace the independent
-mixed-workload platform load review. Those remain explicit review gates.
+The five-repetition, 10,000-operation-per-cell migration 0028 / 0029 / bounded
+admission comparison is recorded in
+[`PHASE1_MISSION_LANE_PERFORMANCE_ADR.md`](PHASE1_MISSION_LANE_PERFORMANCE_ADR.md).
+The old ≤10% relative p95 overhead gate remains failed. The candidate also
+missed proposed absolute project-assignment and reassignment limits at four
+writers, and its profiled cursor wait exceeded the proposed wait limits. The
+8/16/32 attempted-writer tests establish bounded rejection and no partial
+mutation, but sustained overload throughput and queue-duration acceptance
+remain unmeasured. PR #90 remains Draft pending exact-head independent review
+and further performance disposition.
 
 ## Synthetic runtime boundary
 

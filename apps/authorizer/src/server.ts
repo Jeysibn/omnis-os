@@ -22,6 +22,11 @@ const pool = createPool({
   max: 4,
   application_name: 'omnis-authorizer-service',
 });
+const missionLaneWriterPool = createPool({
+  connectionString: env.databaseUrl,
+  max: 4,
+  application_name: 'omnis-authorizer-mission-lane-writer',
+});
 const store = new PostgresAuthorizationStore(pool, pool, {
   agentLifecycle: new PostgresAgentLifecycleStore(
     pool,
@@ -42,6 +47,7 @@ const store = new PostgresAuthorizationStore(pool, pool, {
     pool,
     env.agentIdempotencyKey,
     env.agentIdempotencyKeyVersion,
+    missionLaneWriterPool,
   ),
 });
 const signingKey = env.decisionSigningKeyFile
@@ -85,6 +91,7 @@ expiryTimer.unref();
 
 app.addHook('onClose', async () => {
   clearInterval(expiryTimer);
+  await missionLaneWriterPool.end();
   await pool.end();
   await rm(env.socketPath, { force: true });
 });

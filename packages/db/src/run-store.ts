@@ -21,7 +21,13 @@ import {
   type SyntheticTaskRunResponse,
 } from '@omnis/contracts/synthetic-task-run';
 import type { Pool, PoolClient, QueryResultRow } from 'pg';
-import { asPgBossTransaction, inTransaction, type PgBossTransaction } from './database.ts';
+import {
+  asPgBossTransaction,
+  inMissionLaneTransaction,
+  inTransaction,
+  type PgBossTransaction,
+} from './database.ts';
+import { withLocalMissionLaneAdmission } from './mission-lane-admission.ts';
 import { createHmac, createHash, hkdfSync, randomUUID, timingSafeEqual } from 'node:crypto';
 import {
   ConnectorAuthorizationRequestSchema,
@@ -43,9 +49,9 @@ export type StoreErrorCode =
 
 export class StoreError extends Error {
   readonly code: StoreErrorCode;
-  readonly statusCode: 400 | 404 | 409 | 422;
+  readonly statusCode: 400 | 404 | 409 | 422 | 503;
 
-  constructor(code: StoreErrorCode, message: string, statusCode: 400 | 404 | 409 | 422) {
+  constructor(code: StoreErrorCode, message: string, statusCode: 400 | 404 | 409 | 422 | 503) {
     super(message);
     this.code = code;
     this.statusCode = statusCode;
@@ -213,10 +219,12 @@ function encodeWorkspaceCursor(cursor: WorkspaceCursor, key: Buffer): string {
 
 export class PostgresRunStore {
   private readonly pool: Pool;
+  private readonly writerPool: Pool;
   private readonly workspaceCursorKey?: Buffer;
 
-  constructor(pool: Pool, internalToken?: string) {
+  constructor(pool: Pool, internalToken?: string, writerPool: Pool = pool) {
     this.pool = pool;
+    this.writerPool = writerPool;
     if (internalToken !== undefined) {
       if (internalToken.length < 32) throw new Error('Worker internal token is invalid.');
       this.workspaceCursorKey = deriveWorkspaceCursorKey(internalToken);
@@ -236,15 +244,17 @@ export class PostgresRunStore {
       throw new StoreError('invalid_input', 'Idempotency-Key is invalid.', 400);
     const fingerprint = requestId ? taskFingerprint('task.created', parsed.data) : null;
     try {
-      const result = await this.pool.query<{ result: unknown }>(
-        'SELECT omnis.create_task($1,$2,$3,$4,$5) AS result',
-        [
-          parsed.data.title,
-          parsed.data.detail,
-          parsed.data.projectId ?? null,
-          requestId ?? null,
-          fingerprint,
-        ],
+      const result = await withLocalMissionLaneAdmission(this.writerPool, 'normal', () =>
+        this.writerPool.query<{ result: unknown }>(
+          'SELECT omnis.create_task($1,$2,$3,$4,$5) AS result',
+          [
+            parsed.data.title,
+            parsed.data.detail,
+            parsed.data.projectId ?? null,
+            requestId ?? null,
+            fingerprint,
+          ],
+        ),
       );
       return TaskSchema.parse(result.rows[0]?.result);
     } catch (error) {
@@ -258,18 +268,20 @@ export class PostgresRunStore {
     if (!parsedTaskId.success || !parsed.success || !isUuid(requestId))
       throw new StoreError('invalid_input', 'Task project input is invalid.', 400);
     try {
-      const result = await this.pool.query<{ result: unknown }>(
-        'SELECT omnis.set_task_project($1,$2,$3,$4,$5) AS result',
-        [
-          parsedTaskId.data,
-          parsed.data.expectedAssociationRevision,
-          parsed.data.projectId,
-          requestId,
-          taskFingerprint('task.project_set', {
-            taskId: parsedTaskId.data,
-            input: parsed.data,
-          }),
-        ],
+      const result = await withLocalMissionLaneAdmission(this.writerPool, 'normal', () =>
+        this.writerPool.query<{ result: unknown }>(
+          'SELECT omnis.set_task_project($1,$2,$3,$4,$5) AS result',
+          [
+            parsedTaskId.data,
+            parsed.data.expectedAssociationRevision,
+            parsed.data.projectId,
+            requestId,
+            taskFingerprint('task.project_set', {
+              taskId: parsedTaskId.data,
+              input: parsed.data,
+            }),
+          ],
+        ),
       );
       const current = await this.getTask(parsedTaskId.data);
       return current ?? TaskSchema.parse(result.rows[0]?.result);
@@ -434,7 +446,7 @@ export class PostgresRunStore {
       throw new StoreError('invalid_input', 'Idempotency-Key is invalid.', 400);
     }
     const fingerprint = JSON.stringify({ taskId, authorizationId });
-    return inTransaction(this.pool, async (client) => {
+    return inMissionLaneTransaction(this.writerPool, async (client) => {
       await lockMissionLaneWriter(client);
       // The shared Mission Lane lock is first in the event-writer lock order.
       await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [admissionLock]);
@@ -590,7 +602,7 @@ export class PostgresRunStore {
       binding: binding.data,
     });
 
-    return inTransaction(this.pool, async (client) => {
+    return inMissionLaneTransaction(this.writerPool, async (client) => {
       await lockMissionLaneWriter(client);
       await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [admissionLock]);
       const previous = await client.query<
@@ -707,63 +719,67 @@ export class PostgresRunStore {
       Date.parse(evidence.cancellationRequestedAt) > Date.parse(evidence.outcomeRecordedAt)
     )
       return [];
-    return inTransaction(this.pool, async (client) => {
-      await lockMissionLaneWriter(client);
-      const current = await lockRun(client, link.run.id);
-      if (current.status !== 'unknown' || current.execution_generation !== link.generation)
-        return [];
-      if (
-        current.lease_owner ||
-        current.connector_authorization_id !== evidence.authorizationId ||
-        current.connector_request_id !== evidence.requestId ||
-        current.task_id !== evidence.taskId ||
-        current.id !== evidence.correlationId ||
-        current.connector_correlation_id !== evidence.correlationId ||
-        (current.connector_attempt_id && current.connector_attempt_id !== evidence.attemptId)
-      )
-        throw new StoreError(
-          'conflict',
-          'Authoritative projection identity conflicts with Run.',
-          409,
+    return inMissionLaneTransaction(
+      this.writerPool,
+      async (client) => {
+        await lockMissionLaneWriter(client, 'critical');
+        const current = await lockRun(client, link.run.id);
+        if (current.status !== 'unknown' || current.execution_generation !== link.generation)
+          return [];
+        if (
+          current.lease_owner ||
+          current.connector_authorization_id !== evidence.authorizationId ||
+          current.connector_request_id !== evidence.requestId ||
+          current.task_id !== evidence.taskId ||
+          current.id !== evidence.correlationId ||
+          current.connector_correlation_id !== evidence.correlationId ||
+          (current.connector_attempt_id && current.connector_attempt_id !== evidence.attemptId)
+        )
+          throw new StoreError(
+            'conflict',
+            'Authoritative projection identity conflicts with Run.',
+            409,
+          );
+        const stopped = await client.query<{ requested: boolean }>(
+          "SELECT EXISTS(SELECT 1 FROM omnis.run_events WHERE run_id=$1 AND event_type='run.stop_requested') AS requested",
+          [current.id],
         );
-      const stopped = await client.query<{ requested: boolean }>(
-        "SELECT EXISTS(SELECT 1 FROM omnis.run_events WHERE run_id=$1 AND event_type='run.stop_requested') AS requested",
-        [current.id],
-      );
-      const terminalStatus = evidence.status as 'completed' | 'failed' | 'interrupted';
-      const status =
-        terminalStatus === 'interrupted'
-          ? stopped.rows[0]?.requested &&
-            evidence.cancellationRequestedAt &&
-            evidence.outcomeRecordedAt &&
-            Date.parse(evidence.cancellationRequestedAt) < Date.parse(evidence.outcomeRecordedAt)
-            ? 'cancelled'
-            : 'interrupted'
-          : terminalStatus;
-      await client.query(
-        `UPDATE omnis.runs SET status=$2, result_output=$3, connector_attempt_id=$4,
+        const terminalStatus = evidence.status as 'completed' | 'failed' | 'interrupted';
+        const status =
+          terminalStatus === 'interrupted'
+            ? stopped.rows[0]?.requested &&
+              evidence.cancellationRequestedAt &&
+              evidence.outcomeRecordedAt &&
+              Date.parse(evidence.cancellationRequestedAt) < Date.parse(evidence.outcomeRecordedAt)
+              ? 'cancelled'
+              : 'interrupted'
+            : terminalStatus;
+        await client.query(
+          `UPDATE omnis.runs SET status=$2, result_output=$3, connector_attempt_id=$4,
         execution_generation=execution_generation+1, updated_at=now() WHERE id=$1`,
-        [
+          [
+            current.id,
+            status,
+            status === 'completed' ? evidence.responseText : null,
+            evidence.attemptId,
+          ],
+        );
+        await client.query('UPDATE omnis.tasks SET status=$2 WHERE id=$1', [
+          current.task_id,
+          status === 'completed' ? 'completed' : 'open',
+        ]);
+        const event = await appendEvent(
+          client,
           current.id,
-          status,
-          status === 'completed' ? evidence.responseText : null,
-          evidence.attemptId,
-        ],
-      );
-      await client.query('UPDATE omnis.tasks SET status=$2 WHERE id=$1', [
-        current.task_id,
-        status === 'completed' ? 'completed' : 'open',
-      ]);
-      const event = await appendEvent(
-        client,
-        current.id,
-        `run.${status}`,
-        status === 'completed'
-          ? evidence.responseText!
-          : 'Authoritative synthetic attempt outcome reconciled.',
-      );
-      return [{ runId: current.id, event }];
-    });
+          `run.${status}`,
+          status === 'completed'
+            ? evidence.responseText!
+            : 'Authoritative synthetic attempt outcome reconciled.',
+        );
+        return [{ runId: current.id, event }];
+      },
+      'critical',
+    );
   }
 
   async getSyntheticBrokerRun(runId: string): Promise<SyntheticBrokerRun | undefined> {
@@ -811,60 +827,64 @@ export class PostgresRunStore {
     events: DurableEvent[];
     generation: number;
   }> {
-    return inTransaction(this.pool, async (client) => {
-      await lockMissionLaneWriter(client);
-      const current = await lockRun(client, runId);
-      if (!current.connector_authorization_id) {
-        throw new StoreError('invalid_transition', 'The run is not a synthetic broker run.', 409);
-      }
-      if (current.status === 'stopping') {
-        const cancelled = await client.query<RunRow>(
-          `UPDATE omnis.runs SET status='cancelled', lease_owner=NULL, lease_expires_at=NULL,
+    return inMissionLaneTransaction(
+      this.writerPool,
+      async (client) => {
+        await lockMissionLaneWriter(client, 'critical');
+        const current = await lockRun(client, runId);
+        if (!current.connector_authorization_id) {
+          throw new StoreError('invalid_transition', 'The run is not a synthetic broker run.', 409);
+        }
+        if (current.status === 'stopping') {
+          const cancelled = await client.query<RunRow>(
+            `UPDATE omnis.runs SET status='cancelled', lease_owner=NULL, lease_expires_at=NULL,
              updated_at=now() WHERE id=$1 RETURNING ${runColumns}`,
-          [runId],
-        );
-        await client.query("UPDATE omnis.tasks SET status='open' WHERE id=$1", [current.task_id]);
-        const event = await appendEvent(
-          client,
-          runId,
-          'run.cancelled',
-          'Cancellation was confirmed before the synthetic broker job started.',
-        );
-        return {
-          run: mapRun(cancelled.rows[0]!),
-          started: false,
-          events: [{ runId, event }],
-          generation: current.execution_generation,
-        };
-      }
-      if (current.status !== 'queued') {
-        return {
-          run: mapRun(current),
-          started: false,
-          events: [],
-          generation: current.execution_generation,
-        };
-      }
-      const updated = await client.query<RunRow>(
-        `UPDATE omnis.runs SET status='running', lease_owner=$2,
+            [runId],
+          );
+          await client.query("UPDATE omnis.tasks SET status='open' WHERE id=$1", [current.task_id]);
+          const event = await appendEvent(
+            client,
+            runId,
+            'run.cancelled',
+            'Cancellation was confirmed before the synthetic broker job started.',
+          );
+          return {
+            run: mapRun(cancelled.rows[0]!),
+            started: false,
+            events: [{ runId, event }],
+            generation: current.execution_generation,
+          };
+        }
+        if (current.status !== 'queued') {
+          return {
+            run: mapRun(current),
+            started: false,
+            events: [],
+            generation: current.execution_generation,
+          };
+        }
+        const updated = await client.query<RunRow>(
+          `UPDATE omnis.runs SET status='running', lease_owner=$2,
            lease_expires_at=now()+($3::text || ' seconds')::interval,
            execution_generation=execution_generation+1, updated_at=now()
          WHERE id=$1 RETURNING ${runColumns}`,
-        [runId, workerId, leaseSeconds],
-      );
-      const event = await appendEvent(
-        client,
-        runId,
-        'run.started',
-        'Synthetic broker execution started.',
-      );
-      return {
-        run: mapRun(updated.rows[0]!),
-        started: true,
-        generation: updated.rows[0]!.execution_generation,
-        events: [{ runId, event }],
-      };
-    });
+          [runId, workerId, leaseSeconds],
+        );
+        const event = await appendEvent(
+          client,
+          runId,
+          'run.started',
+          'Synthetic broker execution started.',
+        );
+        return {
+          run: mapRun(updated.rows[0]!),
+          started: true,
+          generation: updated.rows[0]!.execution_generation,
+          events: [{ runId, event }],
+        };
+      },
+      'critical',
+    );
   }
 
   async renewSyntheticBrokerLease(
@@ -890,27 +910,31 @@ export class PostgresRunStore {
     runId: string,
     authorizationId: string,
   ): Promise<{ run: Run; events: DurableEvent[] }> {
-    return inTransaction(this.pool, async (client) => {
-      await lockMissionLaneWriter(client);
-      const current = await lockRun(client, runId);
-      if (current.connector_authorization_id !== authorizationId) {
-        throw new StoreError('not_found', 'Synthetic Run was not found.', 404);
-      }
-      if (terminalStatuses.has(current.status)) return { run: mapRun(current), events: [] };
-      if (current.status === 'stopping') return { run: mapRun(current), events: [] };
-      const updated = await client.query<RunRow>(
-        `UPDATE omnis.runs SET status='stopping', updated_at=now()
+    return inMissionLaneTransaction(
+      this.writerPool,
+      async (client) => {
+        await lockMissionLaneWriter(client, 'critical');
+        const current = await lockRun(client, runId);
+        if (current.connector_authorization_id !== authorizationId) {
+          throw new StoreError('not_found', 'Synthetic Run was not found.', 404);
+        }
+        if (terminalStatuses.has(current.status)) return { run: mapRun(current), events: [] };
+        if (current.status === 'stopping') return { run: mapRun(current), events: [] };
+        const updated = await client.query<RunRow>(
+          `UPDATE omnis.runs SET status='stopping', updated_at=now()
          WHERE id=$1 RETURNING ${runColumns}`,
-        [runId],
-      );
-      const event = await appendEvent(
-        client,
-        runId,
-        'run.stop_requested',
-        'Owner cancellation was requested; provider termination is not yet confirmed.',
-      );
-      return { run: mapRun(updated.rows[0]!), events: [{ runId, event }] };
-    });
+          [runId],
+        );
+        const event = await appendEvent(
+          client,
+          runId,
+          'run.stop_requested',
+          'Owner cancellation was requested; provider termination is not yet confirmed.',
+        );
+        return { run: mapRun(updated.rows[0]!), events: [{ runId, event }] };
+      },
+      'critical',
+    );
   }
 
   async finishSyntheticBrokerRun(
@@ -922,74 +946,79 @@ export class PostgresRunStore {
     if (!ConnectorExecutionStatusSchema.safeParse(result.status).success) {
       throw new StoreError('invalid_input', 'Synthetic broker result is invalid.', 400);
     }
-    return inTransaction(this.pool, async (client) => {
-      await lockMissionLaneWriter(client);
-      const current = await lockRun(client, runId);
-      if (
-        !current.connector_authorization_id ||
-        current.lease_owner !== workerId ||
-        current.execution_generation !== generation ||
-        !['running', 'stopping'].includes(current.status)
-      ) {
-        throw new StoreError('conflict', 'The worker no longer owns this synthetic Run.', 409);
-      }
-      const nextStatus: Run['status'] =
-        result.status === 'completed'
-          ? 'completed'
-          : result.status === 'failed'
-            ? 'failed'
-            : result.status === 'interrupted'
-              ? current.status === 'stopping'
-                ? 'cancelled'
-                : 'interrupted'
-              : 'unknown';
-      const updated = await client.query<RunRow>(
-        `UPDATE omnis.runs SET status=$4, result_output=$5,
+    return inMissionLaneTransaction(
+      this.writerPool,
+      async (client) => {
+        await lockMissionLaneWriter(client, 'critical');
+        const current = await lockRun(client, runId);
+        if (
+          !current.connector_authorization_id ||
+          current.lease_owner !== workerId ||
+          current.execution_generation !== generation ||
+          !['running', 'stopping'].includes(current.status)
+        ) {
+          throw new StoreError('conflict', 'The worker no longer owns this synthetic Run.', 409);
+        }
+        const nextStatus: Run['status'] =
+          result.status === 'completed'
+            ? 'completed'
+            : result.status === 'failed'
+              ? 'failed'
+              : result.status === 'interrupted'
+                ? current.status === 'stopping'
+                  ? 'cancelled'
+                  : 'interrupted'
+                : 'unknown';
+        const updated = await client.query<RunRow>(
+          `UPDATE omnis.runs SET status=$4, result_output=$5,
            connector_attempt_id=COALESCE($6, connector_attempt_id),
            lease_owner=NULL, lease_expires_at=NULL, updated_at=now()
          WHERE id=$1 AND lease_owner=$2 AND execution_generation=$3
            AND lease_expires_at > now()
          RETURNING ${runColumns}`,
-        [
-          runId,
-          workerId,
-          generation,
-          nextStatus,
-          nextStatus === 'completed' ? (result.responseText ?? null) : null,
-          result.attemptId ?? null,
-        ],
-      );
-      if (!updated.rows[0]) throw new StoreError('conflict', 'The worker lost its Run lease.', 409);
-      if (nextStatus === 'completed') {
-        await client.query("UPDATE omnis.tasks SET status='completed' WHERE id=$1", [
-          current.task_id,
-        ]);
-      } else if (nextStatus !== 'unknown') {
-        await client.query("UPDATE omnis.tasks SET status='open' WHERE id=$1", [current.task_id]);
-      }
-      const eventType: RunEventType =
-        nextStatus === 'completed'
-          ? 'run.completed'
-          : nextStatus === 'failed'
-            ? 'run.failed'
-            : nextStatus === 'cancelled'
-              ? 'run.cancelled'
-              : nextStatus === 'unknown'
-                ? 'run.outcome_unknown'
-                : 'run.interrupted';
-      const message =
-        nextStatus === 'completed'
-          ? (result.responseText ?? 'Synthetic broker run completed.')
-          : nextStatus === 'failed'
-            ? 'Synthetic broker execution failed; see the authorized attempt record for details.'
-            : nextStatus === 'cancelled'
-              ? 'The synthetic provider confirmed interruption.'
-              : nextStatus === 'interrupted'
-                ? 'Synthetic broker execution stopped before a terminal result was confirmed.'
-                : 'The broker outcome is unknown. Do not resubmit this request.';
-      const event = await appendEvent(client, runId, eventType, message);
-      return { run: mapRun(updated.rows[0]), events: [{ runId, event }] };
-    });
+          [
+            runId,
+            workerId,
+            generation,
+            nextStatus,
+            nextStatus === 'completed' ? (result.responseText ?? null) : null,
+            result.attemptId ?? null,
+          ],
+        );
+        if (!updated.rows[0])
+          throw new StoreError('conflict', 'The worker lost its Run lease.', 409);
+        if (nextStatus === 'completed') {
+          await client.query("UPDATE omnis.tasks SET status='completed' WHERE id=$1", [
+            current.task_id,
+          ]);
+        } else if (nextStatus !== 'unknown') {
+          await client.query("UPDATE omnis.tasks SET status='open' WHERE id=$1", [current.task_id]);
+        }
+        const eventType: RunEventType =
+          nextStatus === 'completed'
+            ? 'run.completed'
+            : nextStatus === 'failed'
+              ? 'run.failed'
+              : nextStatus === 'cancelled'
+                ? 'run.cancelled'
+                : nextStatus === 'unknown'
+                  ? 'run.outcome_unknown'
+                  : 'run.interrupted';
+        const message =
+          nextStatus === 'completed'
+            ? (result.responseText ?? 'Synthetic broker run completed.')
+            : nextStatus === 'failed'
+              ? 'Synthetic broker execution failed; see the authorized attempt record for details.'
+              : nextStatus === 'cancelled'
+                ? 'The synthetic provider confirmed interruption.'
+                : nextStatus === 'interrupted'
+                  ? 'Synthetic broker execution stopped before a terminal result was confirmed.'
+                  : 'The broker outcome is unknown. Do not resubmit this request.';
+        const event = await appendEvent(client, runId, eventType, message);
+        return { run: mapRun(updated.rows[0]), events: [{ runId, event }] };
+      },
+      'critical',
+    );
   }
 
   async recordSyntheticBrokerSubmissionRequested(
@@ -1064,97 +1093,101 @@ export class PostgresRunStore {
     events: DurableEvent[];
     generation: number;
   }> {
-    return inTransaction(this.pool, async (client) => {
-      await lockMissionLaneWriter(client);
-      const current = await lockRun(client, runId);
-      if (current.status === 'stopping') {
-        const result = await client.query<RunRow>(
-          `
+    return inMissionLaneTransaction(
+      this.writerPool,
+      async (client) => {
+        await lockMissionLaneWriter(client, 'critical');
+        const current = await lockRun(client, runId);
+        if (current.status === 'stopping') {
+          const result = await client.query<RunRow>(
+            `
             UPDATE omnis.runs
             SET status = 'cancelled', lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
             WHERE id = $1 RETURNING ${runColumns}
           `,
+            [runId],
+          );
+          await client.query("UPDATE omnis.tasks SET status = 'open' WHERE id = $1", [
+            current.task_id,
+          ]);
+          const event = await appendEvent(
+            client,
+            runId,
+            'run.cancelled',
+            'Mock worker acknowledged cancellation before execution.',
+          );
+          return {
+            run: mapRun(result.rows[0]!),
+            started: false,
+            generation: current.execution_generation,
+            events: [{ runId, event }],
+          };
+        }
+        if (current.status !== 'queued')
+          return {
+            run: mapRun(current),
+            started: false,
+            generation: current.execution_generation,
+            events: [],
+          };
+
+        const authorizationLock = await client.query<{ allowed: boolean }>(
+          'SELECT omnis.lock_active_run_authorization($1) AS allowed',
           [runId],
         );
-        await client.query("UPDATE omnis.tasks SET status = 'open' WHERE id = $1", [
-          current.task_id,
-        ]);
-        const event = await appendEvent(
-          client,
-          runId,
-          'run.cancelled',
-          'Mock worker acknowledged cancellation before execution.',
-        );
-        return {
-          run: mapRun(result.rows[0]!),
-          started: false,
-          generation: current.execution_generation,
-          events: [{ runId, event }],
-        };
-      }
-      if (current.status !== 'queued')
-        return {
-          run: mapRun(current),
-          started: false,
-          generation: current.execution_generation,
-          events: [],
-        };
-
-      const authorizationLock = await client.query<{ allowed: boolean }>(
-        'SELECT omnis.lock_active_run_authorization($1) AS allowed',
-        [runId],
-      );
-      if (!authorizationLock.rows[0]?.allowed) {
-        const interrupted = await client.query<RunRow>(
-          `UPDATE omnis.runs SET status='interrupted', updated_at=now()
+        if (!authorizationLock.rows[0]?.allowed) {
+          const interrupted = await client.query<RunRow>(
+            `UPDATE omnis.runs SET status='interrupted', updated_at=now()
             WHERE id=$1 AND status='queued' RETURNING ${runColumns}`,
-          [runId],
-        );
-        await client.query("UPDATE omnis.tasks SET status='open' WHERE id=$1", [current.task_id]);
-        await appendRunAuthorizationAudit(
-          client,
-          runId,
-          'authorization.enforcement_denied',
-          'missing_expired_or_revoked',
-        );
-        const event = await appendEvent(
-          client,
-          runId,
-          'run.interrupted',
-          'Authorization is unavailable, expired, or revoked. The run was not executed.',
-        );
-        return {
-          run: mapRun(interrupted.rows[0]!),
-          started: false,
-          generation: current.execution_generation,
-          events: [{ runId, event }],
-        };
-      }
+            [runId],
+          );
+          await client.query("UPDATE omnis.tasks SET status='open' WHERE id=$1", [current.task_id]);
+          await appendRunAuthorizationAudit(
+            client,
+            runId,
+            'authorization.enforcement_denied',
+            'missing_expired_or_revoked',
+          );
+          const event = await appendEvent(
+            client,
+            runId,
+            'run.interrupted',
+            'Authorization is unavailable, expired, or revoked. The run was not executed.',
+          );
+          return {
+            run: mapRun(interrupted.rows[0]!),
+            started: false,
+            generation: current.execution_generation,
+            events: [{ runId, event }],
+          };
+        }
 
-      const result = await client.query<RunRow>(
-        `
+        const result = await client.query<RunRow>(
+          `
           UPDATE omnis.runs
           SET status = 'running', execution_generation = execution_generation + 1,
               lease_owner = $2, lease_expires_at = now() + ($3::int * interval '1 second'), updated_at = now()
           WHERE id = $1 AND status = 'queued'
           RETURNING ${runColumns}
         `,
-        [runId, workerId, leaseSeconds],
-      );
-      await appendRunAuthorizationAudit(client, runId, 'operation.started');
-      const event = await appendEvent(
-        client,
-        runId,
-        'run.started',
-        'Mock runtime started this synthetic run.',
-      );
-      return {
-        run: mapRun(result.rows[0]!),
-        started: true,
-        generation: result.rows[0]!.execution_generation,
-        events: [{ runId, event }],
-      };
-    });
+          [runId, workerId, leaseSeconds],
+        );
+        await appendRunAuthorizationAudit(client, runId, 'operation.started');
+        const event = await appendEvent(
+          client,
+          runId,
+          'run.started',
+          'Mock runtime started this synthetic run.',
+        );
+        return {
+          run: mapRun(result.rows[0]!),
+          started: true,
+          generation: result.rows[0]!.execution_generation,
+          events: [{ runId, event }],
+        };
+      },
+      'critical',
+    );
   }
 
   async appendOutput(
@@ -1223,38 +1256,42 @@ export class PostgresRunStore {
   }
 
   async requestStop(runId: string): Promise<{ run: Run; events: DurableEvent[] }> {
-    return inTransaction(this.pool, async (client) => {
-      await lockMissionLaneWriter(client);
-      const current = await lockRun(client, runId);
-      if (current.connector_authorization_id) {
-        throw new StoreError(
-          'invalid_transition',
-          'Synthetic broker runs must be cancelled through owner grant revocation.',
-          409,
-        );
-      }
-      if (terminalStatuses.has(current.status)) {
-        throw new StoreError('invalid_transition', `Cannot stop a ${current.status} run.`, 409);
-      }
-      if (current.status === 'stopping') return { run: mapRun(current), events: [] };
-      if (current.status !== 'queued' && current.status !== 'running') {
-        throw new StoreError('invalid_transition', `Cannot stop a ${current.status} run.`, 409);
-      }
-      const updated = await client.query<RunRow>(
-        `
+    return inMissionLaneTransaction(
+      this.writerPool,
+      async (client) => {
+        await lockMissionLaneWriter(client, 'critical');
+        const current = await lockRun(client, runId);
+        if (current.connector_authorization_id) {
+          throw new StoreError(
+            'invalid_transition',
+            'Synthetic broker runs must be cancelled through owner grant revocation.',
+            409,
+          );
+        }
+        if (terminalStatuses.has(current.status)) {
+          throw new StoreError('invalid_transition', `Cannot stop a ${current.status} run.`, 409);
+        }
+        if (current.status === 'stopping') return { run: mapRun(current), events: [] };
+        if (current.status !== 'queued' && current.status !== 'running') {
+          throw new StoreError('invalid_transition', `Cannot stop a ${current.status} run.`, 409);
+        }
+        const updated = await client.query<RunRow>(
+          `
           UPDATE omnis.runs SET status = 'stopping', updated_at = now()
           WHERE id = $1 RETURNING ${runColumns}
         `,
-        [runId],
-      );
-      const event = await appendEvent(
-        client,
-        runId,
-        'run.stop_requested',
-        'Stop requested; waiting for the mock worker to acknowledge it.',
-      );
-      return { run: mapRun(updated.rows[0]!), events: [{ runId, event }] };
-    });
+          [runId],
+        );
+        const event = await appendEvent(
+          client,
+          runId,
+          'run.stop_requested',
+          'Stop requested; waiting for the mock worker to acknowledge it.',
+        );
+        return { run: mapRun(updated.rows[0]!), events: [{ runId, event }] };
+      },
+      'critical',
+    );
   }
 
   async completeRun(
@@ -1264,26 +1301,134 @@ export class PostgresRunStore {
     output: string,
     evidenceRefs: string[] = [],
   ): Promise<{ run: Run; events: DurableEvent[] }> {
-    return inTransaction(this.pool, async (client) => {
-      await lockMissionLaneWriter(client);
-      const current = await lockRun(client, runId);
-      if (
-        current.status === 'stopping' &&
-        (current.lease_owner !== workerId || current.execution_generation !== generation)
-      ) {
-        throw new StoreError(
-          'conflict',
-          'The current worker does not own this execution generation.',
-          409,
-        );
-      }
-      if (current.status === 'stopping') {
-        const cancelled = await client.query<RunRow>(
-          `
+    return inMissionLaneTransaction(
+      this.writerPool,
+      async (client) => {
+        await lockMissionLaneWriter(client, 'critical');
+        const current = await lockRun(client, runId);
+        if (
+          current.status === 'stopping' &&
+          (current.lease_owner !== workerId || current.execution_generation !== generation)
+        ) {
+          throw new StoreError(
+            'conflict',
+            'The current worker does not own this execution generation.',
+            409,
+          );
+        }
+        if (current.status === 'stopping') {
+          const cancelled = await client.query<RunRow>(
+            `
             UPDATE omnis.runs SET status = 'cancelled', lease_owner = NULL,
               lease_expires_at = NULL, updated_at = now()
             WHERE id = $1 RETURNING ${runColumns}
           `,
+            [runId],
+          );
+          await client.query("UPDATE omnis.tasks SET status = 'open' WHERE id = $1", [
+            current.task_id,
+          ]);
+          const event = await appendEvent(
+            client,
+            runId,
+            'run.cancelled',
+            'Mock worker acknowledged cancellation.',
+          );
+          await appendRunAuthorizationAudit(client, runId, 'operation.cancelled');
+          return { run: mapRun(cancelled.rows[0]!), events: [{ runId, event }] };
+        }
+        const authorizationLock = await client.query<{ allowed: boolean }>(
+          'SELECT omnis.lock_active_run_authorization($1) AS allowed',
+          [runId],
+        );
+        if (!authorizationLock.rows[0]?.allowed) {
+          const interrupted = await client.query<RunRow>(
+            `UPDATE omnis.runs SET status='interrupted', lease_owner=NULL,
+             lease_expires_at=NULL, updated_at=now() WHERE id=$1 RETURNING ${runColumns}`,
+            [runId],
+          );
+          await client.query("UPDATE omnis.tasks SET status='open' WHERE id=$1", [current.task_id]);
+          await appendRunAuthorizationAudit(
+            client,
+            runId,
+            'authorization.enforcement_denied',
+            'revoked_before_completion',
+          );
+          const event = await appendEvent(
+            client,
+            runId,
+            'run.interrupted',
+            'Authorization was revoked or expired before completion was committed.',
+          );
+          return {
+            run: mapRun(interrupted.rows[0]!),
+            events: [{ runId, event }],
+          };
+        }
+        if (
+          current.status !== 'running' ||
+          current.lease_owner !== workerId ||
+          current.execution_generation !== generation
+        ) {
+          throw new StoreError(
+            'invalid_transition',
+            `The worker no longer owns this execution (state=${current.status}, ownerMatches=${current.lease_owner === workerId}).`,
+            409,
+          );
+        }
+        const updated = await client.query<RunRow>(
+          `
+          UPDATE omnis.runs SET status = 'completed', result_output = $3,
+            result_evidence_refs = $4::jsonb, lease_owner = NULL,
+            lease_expires_at = NULL, updated_at = now()
+          WHERE id = $1 AND lease_owner = $2 AND execution_generation = $5 RETURNING ${runColumns}
+        `,
+          [runId, workerId, output, JSON.stringify(evidenceRefs), generation],
+        );
+        await client.query("UPDATE omnis.tasks SET status = 'completed' WHERE id = $1", [
+          current.task_id,
+        ]);
+        const event = await appendEvent(client, runId, 'run.completed', output);
+        await appendRunAuthorizationAudit(client, runId, 'operation.completed');
+        return { run: mapRun(updated.rows[0]!), events: [{ runId, event }] };
+      },
+      'critical',
+    );
+  }
+
+  async cancelRun(
+    runId: string,
+    workerId: string,
+    generation: number,
+  ): Promise<{ run: Run; events: DurableEvent[] }> {
+    return inMissionLaneTransaction(
+      this.writerPool,
+      async (client) => {
+        await lockMissionLaneWriter(client, 'critical');
+        const current = await lockRun(client, runId);
+        if (current.status !== 'stopping') {
+          if (terminalStatuses.has(current.status)) {
+            throw new StoreError(
+              'invalid_transition',
+              `Cannot cancel a ${current.status} run.`,
+              409,
+            );
+          }
+          throw new StoreError(
+            'invalid_transition',
+            'A stop request is required before cancellation.',
+            409,
+          );
+        }
+        if (current.lease_owner !== workerId || current.execution_generation !== generation) {
+          throw new StoreError('conflict', 'The current worker does not own this run.', 409);
+        }
+        const updated = await client.query<RunRow>(
+          `
+          UPDATE omnis.runs SET status = 'cancelled', lease_owner = NULL,
+            lease_expires_at = NULL, updated_at = now()
+          WHERE id = $1 RETURNING ${runColumns}
+        `,
           [runId],
         );
         await client.query("UPDATE omnis.tasks SET status = 'open' WHERE id = $1", [
@@ -1296,104 +1441,10 @@ export class PostgresRunStore {
           'Mock worker acknowledged cancellation.',
         );
         await appendRunAuthorizationAudit(client, runId, 'operation.cancelled');
-        return { run: mapRun(cancelled.rows[0]!), events: [{ runId, event }] };
-      }
-      const authorizationLock = await client.query<{ allowed: boolean }>(
-        'SELECT omnis.lock_active_run_authorization($1) AS allowed',
-        [runId],
-      );
-      if (!authorizationLock.rows[0]?.allowed) {
-        const interrupted = await client.query<RunRow>(
-          `UPDATE omnis.runs SET status='interrupted', lease_owner=NULL,
-             lease_expires_at=NULL, updated_at=now() WHERE id=$1 RETURNING ${runColumns}`,
-          [runId],
-        );
-        await client.query("UPDATE omnis.tasks SET status='open' WHERE id=$1", [current.task_id]);
-        await appendRunAuthorizationAudit(
-          client,
-          runId,
-          'authorization.enforcement_denied',
-          'revoked_before_completion',
-        );
-        const event = await appendEvent(
-          client,
-          runId,
-          'run.interrupted',
-          'Authorization was revoked or expired before completion was committed.',
-        );
-        return {
-          run: mapRun(interrupted.rows[0]!),
-          events: [{ runId, event }],
-        };
-      }
-      if (
-        current.status !== 'running' ||
-        current.lease_owner !== workerId ||
-        current.execution_generation !== generation
-      ) {
-        throw new StoreError(
-          'invalid_transition',
-          `The worker no longer owns this execution (state=${current.status}, ownerMatches=${current.lease_owner === workerId}).`,
-          409,
-        );
-      }
-      const updated = await client.query<RunRow>(
-        `
-          UPDATE omnis.runs SET status = 'completed', result_output = $3,
-            result_evidence_refs = $4::jsonb, lease_owner = NULL,
-            lease_expires_at = NULL, updated_at = now()
-          WHERE id = $1 AND lease_owner = $2 AND execution_generation = $5 RETURNING ${runColumns}
-        `,
-        [runId, workerId, output, JSON.stringify(evidenceRefs), generation],
-      );
-      await client.query("UPDATE omnis.tasks SET status = 'completed' WHERE id = $1", [
-        current.task_id,
-      ]);
-      const event = await appendEvent(client, runId, 'run.completed', output);
-      await appendRunAuthorizationAudit(client, runId, 'operation.completed');
-      return { run: mapRun(updated.rows[0]!), events: [{ runId, event }] };
-    });
-  }
-
-  async cancelRun(
-    runId: string,
-    workerId: string,
-    generation: number,
-  ): Promise<{ run: Run; events: DurableEvent[] }> {
-    return inTransaction(this.pool, async (client) => {
-      await lockMissionLaneWriter(client);
-      const current = await lockRun(client, runId);
-      if (current.status !== 'stopping') {
-        if (terminalStatuses.has(current.status)) {
-          throw new StoreError('invalid_transition', `Cannot cancel a ${current.status} run.`, 409);
-        }
-        throw new StoreError(
-          'invalid_transition',
-          'A stop request is required before cancellation.',
-          409,
-        );
-      }
-      if (current.lease_owner !== workerId || current.execution_generation !== generation) {
-        throw new StoreError('conflict', 'The current worker does not own this run.', 409);
-      }
-      const updated = await client.query<RunRow>(
-        `
-          UPDATE omnis.runs SET status = 'cancelled', lease_owner = NULL,
-            lease_expires_at = NULL, updated_at = now()
-          WHERE id = $1 RETURNING ${runColumns}
-        `,
-        [runId],
-      );
-      await client.query("UPDATE omnis.tasks SET status = 'open' WHERE id = $1", [current.task_id]);
-      const event = await appendEvent(
-        client,
-        runId,
-        'run.cancelled',
-        'Mock worker acknowledged cancellation.',
-      );
-      await appendRunAuthorizationAudit(client, runId, 'operation.cancelled');
-      return { run: mapRun(updated.rows[0]!), events: [{ runId, event }] };
-    });
+        return { run: mapRun(updated.rows[0]!), events: [{ runId, event }] };
+      },
+      'critical',
+    );
   }
 
   async failRun(
@@ -1402,43 +1453,49 @@ export class PostgresRunStore {
     generation: number,
     message: string,
   ): Promise<{ run: Run; events: DurableEvent[] }> {
-    return inTransaction(this.pool, async (client) => {
-      await lockMissionLaneWriter(client);
-      const current = await lockRun(client, runId);
-      if (current.status === 'stopping') {
-        if (current.lease_owner !== workerId || current.execution_generation !== generation) {
+    return inMissionLaneTransaction(
+      this.writerPool,
+      async (client) => {
+        await lockMissionLaneWriter(client, 'critical');
+        const current = await lockRun(client, runId);
+        if (current.status === 'stopping') {
+          if (current.lease_owner !== workerId || current.execution_generation !== generation) {
+            throw new StoreError(
+              'conflict',
+              'The current worker does not own this execution generation.',
+              409,
+            );
+          }
+          return this.cancelLocked(client, current);
+        }
+        if (
+          current.status !== 'running' ||
+          current.lease_owner !== workerId ||
+          current.execution_generation !== generation
+        ) {
           throw new StoreError(
-            'conflict',
-            'The current worker does not own this execution generation.',
+            'invalid_transition',
+            'The worker no longer owns this execution.',
             409,
           );
         }
-        return this.cancelLocked(client, current);
-      }
-      if (
-        current.status !== 'running' ||
-        current.lease_owner !== workerId ||
-        current.execution_generation !== generation
-      ) {
-        throw new StoreError(
-          'invalid_transition',
-          'The worker no longer owns this execution.',
-          409,
-        );
-      }
-      const updated = await client.query<RunRow>(
-        `
+        const updated = await client.query<RunRow>(
+          `
           UPDATE omnis.runs SET status = 'failed', lease_owner = NULL,
             lease_expires_at = NULL, updated_at = now()
           WHERE id = $1 RETURNING ${runColumns}
         `,
-        [runId],
-      );
-      await client.query("UPDATE omnis.tasks SET status = 'open' WHERE id = $1", [current.task_id]);
-      const event = await appendEvent(client, runId, 'run.failed', message);
-      await appendRunAuthorizationAudit(client, runId, 'operation.failed', 'runtime_failed');
-      return { run: mapRun(updated.rows[0]!), events: [{ runId, event }] };
-    });
+          [runId],
+        );
+        await client.query("UPDATE omnis.tasks SET status = 'open' WHERE id = $1", [
+          current.task_id,
+        ]);
+        const event = await appendEvent(client, runId, 'run.failed', message);
+        await appendRunAuthorizationAudit(client, runId, 'operation.failed', 'runtime_failed');
+        return { run: mapRun(updated.rows[0]!), events: [{ runId, event }] };
+      },
+      'critical',
+    );
   }
 
   async interruptRun(
@@ -1447,32 +1504,40 @@ export class PostgresRunStore {
     generation: number,
     message = 'The worker stopped before the run reached a terminal state.',
   ): Promise<{ run: Run; events: DurableEvent[] } | undefined> {
-    return inTransaction(this.pool, async (client) => {
-      await lockMissionLaneWriter(client);
-      const current = await lockRun(client, runId);
-      if (!['running', 'stopping'].includes(current.status)) return undefined;
-      if (current.lease_owner !== workerId || current.execution_generation !== generation)
-        return undefined;
-      const updated = await client.query<RunRow>(
-        `
+    return inMissionLaneTransaction(
+      this.writerPool,
+      async (client) => {
+        await lockMissionLaneWriter(client, 'critical');
+        const current = await lockRun(client, runId);
+        if (!['running', 'stopping'].includes(current.status)) return undefined;
+        if (current.lease_owner !== workerId || current.execution_generation !== generation)
+          return undefined;
+        const updated = await client.query<RunRow>(
+          `
           UPDATE omnis.runs SET status = 'interrupted', lease_owner = NULL,
             lease_expires_at = NULL, updated_at = now()
           WHERE id = $1 RETURNING ${runColumns}
         `,
-        [runId],
-      );
-      await client.query("UPDATE omnis.tasks SET status = 'open' WHERE id = $1", [current.task_id]);
-      const event = await appendEvent(client, runId, 'run.interrupted', message);
-      await appendRunAuthorizationAudit(client, runId, 'operation.interrupted');
-      return { run: mapRun(updated.rows[0]!), events: [{ runId, event }] };
-    });
+          [runId],
+        );
+        await client.query("UPDATE omnis.tasks SET status = 'open' WHERE id = $1", [
+          current.task_id,
+        ]);
+        const event = await appendEvent(client, runId, 'run.interrupted', message);
+        await appendRunAuthorizationAudit(client, runId, 'operation.interrupted');
+        return { run: mapRun(updated.rows[0]!), events: [{ runId, event }] };
+      },
+      'critical',
+    );
   }
 
   async reconcileExpiredRuns(): Promise<DurableEvent[]> {
-    return inTransaction(this.pool, async (client) => {
-      await lockMissionLaneWriter(client);
-      const expired = await client.query<RunRow>(
-        `
+    return inMissionLaneTransaction(
+      this.writerPool,
+      async (client) => {
+        await lockMissionLaneWriter(client, 'critical');
+        const expired = await client.query<RunRow>(
+          `
           SELECT ${runColumns}
           FROM omnis.runs
           WHERE status IN ('running', 'stopping') AND lease_expires_at <= now()
@@ -1480,55 +1545,59 @@ export class PostgresRunStore {
           FOR UPDATE SKIP LOCKED
           LIMIT 100
         `,
-      );
-      const events: DurableEvent[] = [];
-      for (const row of expired.rows) {
-        const submission = row.connector_authorization_id
-          ? await client.query<{ requested: boolean }>(
-              `SELECT EXISTS (
+        );
+        const events: DurableEvent[] = [];
+        for (const row of expired.rows) {
+          const submission = row.connector_authorization_id
+            ? await client.query<{ requested: boolean }>(
+                `SELECT EXISTS (
                  SELECT 1 FROM omnis.run_events
                  WHERE run_id = $1 AND event_type = 'run.provider_submission_requested'
                ) AS requested`,
-              [row.id],
-            )
-          : undefined;
-        const submissionRequested = submission?.rows[0]?.requested ?? false;
-        const nextStatus = submissionRequested
-          ? 'unknown'
-          : row.connector_authorization_id && row.status === 'stopping'
-            ? 'cancelled'
-            : 'interrupted';
-        await client.query(
-          `
+                [row.id],
+              )
+            : undefined;
+          const submissionRequested = submission?.rows[0]?.requested ?? false;
+          const nextStatus = submissionRequested
+            ? 'unknown'
+            : row.connector_authorization_id && row.status === 'stopping'
+              ? 'cancelled'
+              : 'interrupted';
+          await client.query(
+            `
             UPDATE omnis.runs SET status = $2, lease_owner = NULL,
               lease_expires_at = NULL, updated_at = now()
             WHERE id = $1
           `,
-          [row.id, nextStatus],
-        );
-        if (nextStatus !== 'unknown') {
-          await client.query("UPDATE omnis.tasks SET status = 'open' WHERE id = $1", [row.task_id]);
+            [row.id, nextStatus],
+          );
+          if (nextStatus !== 'unknown') {
+            await client.query("UPDATE omnis.tasks SET status = 'open' WHERE id = $1", [
+              row.task_id,
+            ]);
+          }
+          const event = await appendEvent(
+            client,
+            row.id,
+            nextStatus === 'unknown'
+              ? 'run.outcome_unknown'
+              : nextStatus === 'cancelled'
+                ? 'run.cancelled'
+                : 'run.interrupted',
+            nextStatus === 'unknown'
+              ? 'The worker lease expired before the broker result was confirmed. The attempt was not retried; reconcile its authorizer record.'
+              : nextStatus === 'cancelled'
+                ? 'Cancellation was confirmed before broker submission began.'
+                : row.connector_authorization_id
+                  ? 'The worker lease expired before broker submission began. The execution was not retried automatically.'
+                  : 'The execution lease expired. The run was not replayed automatically.',
+          );
+          events.push({ runId: row.id, event });
         }
-        const event = await appendEvent(
-          client,
-          row.id,
-          nextStatus === 'unknown'
-            ? 'run.outcome_unknown'
-            : nextStatus === 'cancelled'
-              ? 'run.cancelled'
-              : 'run.interrupted',
-          nextStatus === 'unknown'
-            ? 'The worker lease expired before the broker result was confirmed. The attempt was not retried; reconcile its authorizer record.'
-            : nextStatus === 'cancelled'
-              ? 'Cancellation was confirmed before broker submission began.'
-              : row.connector_authorization_id
-                ? 'The worker lease expired before broker submission began. The execution was not retried automatically.'
-                : 'The execution lease expired. The run was not replayed automatically.',
-        );
-        events.push({ runId: row.id, event });
-      }
-      return events;
-    });
+        return events;
+      },
+      'critical',
+    );
   }
 
   async listActiveRunIds(runIds?: readonly string[]): Promise<string[]> {
@@ -1579,38 +1648,48 @@ export class PostgresRunStore {
     runId: string,
     message: string,
   ): Promise<{ run: Run; events: DurableEvent[] } | undefined> {
-    return inTransaction(this.pool, async (client) => {
-      await lockMissionLaneWriter(client);
-      const current = await lockRun(client, runId);
-      if (current.status === 'stopping' && !current.lease_owner) {
-        // No worker ever claimed this stop-requested job; the reconciler acknowledges
-        // cancellation after pg-boss confirms the job cannot begin.
-        return this.cancelLocked(client, current);
-      }
-      if (current.status !== 'queued') return undefined;
-      const updated = await client.query<RunRow>(
-        `
+    return inMissionLaneTransaction(
+      this.writerPool,
+      async (client) => {
+        await lockMissionLaneWriter(client, 'critical');
+        const current = await lockRun(client, runId);
+        if (current.status === 'stopping' && !current.lease_owner) {
+          // No worker ever claimed this stop-requested job; the reconciler acknowledges
+          // cancellation after pg-boss confirms the job cannot begin.
+          return this.cancelLocked(client, current);
+        }
+        if (current.status !== 'queued') return undefined;
+        const updated = await client.query<RunRow>(
+          `
           UPDATE omnis.runs SET status = 'interrupted', updated_at = now()
           WHERE id = $1 AND status = 'queued' RETURNING ${runColumns}
         `,
-        [runId],
-      );
-      if (!updated.rows[0]) return undefined;
-      await client.query("UPDATE omnis.tasks SET status = 'open' WHERE id = $1", [current.task_id]);
-      const event = await appendEvent(client, runId, 'run.interrupted', message);
-      return { run: mapRun(updated.rows[0]), events: [{ runId, event }] };
-    });
+          [runId],
+        );
+        if (!updated.rows[0]) return undefined;
+        await client.query("UPDATE omnis.tasks SET status = 'open' WHERE id = $1", [
+          current.task_id,
+        ]);
+        const event = await appendEvent(client, runId, 'run.interrupted', message);
+        return { run: mapRun(updated.rows[0]), events: [{ runId, event }] };
+      },
+      'critical',
+    );
   }
 
   async cancelRunAfterQueueTerminal(
     runId: string,
   ): Promise<{ run: Run; events: DurableEvent[] } | undefined> {
-    return inTransaction(this.pool, async (client) => {
-      await lockMissionLaneWriter(client);
-      const current = await lockRun(client, runId);
-      if (current.status !== 'stopping') return undefined;
-      return this.cancelLocked(client, current);
-    });
+    return inMissionLaneTransaction(
+      this.writerPool,
+      async (client) => {
+        await lockMissionLaneWriter(client, 'critical');
+        const current = await lockRun(client, runId);
+        if (current.status !== 'stopping') return undefined;
+        return this.cancelLocked(client, current);
+      },
+      'critical',
+    );
   }
 
   private async cancelLocked(
@@ -1675,10 +1754,14 @@ async function lockRun(client: PoolClient, runId: string): Promise<RunRow> {
   return result.rows[0];
 }
 
-async function lockMissionLaneWriter(client: PoolClient): Promise<void> {
-  // Mission Lane's serialized cursor must precede authorization, task, and Run
-  // row locks in every event-producing transaction. The fixed key is internal.
+async function lockMissionLaneWriter(
+  client: PoolClient,
+  priority: 'normal' | 'critical' = 'normal',
+): Promise<void> {
+  // Admission precedes D5; D5 remains ahead of authorization, task, and Run
+  // row locks and is retained through commit.
   await client.query("SET LOCAL lock_timeout = '3s'");
+  await client.query('SELECT omnis.acquire_mission_lane_admission($1)', [priority === 'critical']);
   await client.query('SELECT pg_advisory_xact_lock($1::bigint)', ['70463909136525']);
 }
 
@@ -1769,8 +1852,14 @@ function mapStoreError(error: unknown): never {
     throw new StoreError('conflict', 'Selected agent profile is not currently available.', 409);
   if (code === '22023' || code === '22001' || code === '23514')
     throw new StoreError('invalid_input', 'Task input is invalid.', 400);
-  if (code === '55P03')
-    throw new StoreError('concurrency_limit', 'Task admission is busy; retry the request.', 409);
+  if (code === 'PML01' || code === 'PML02' || code === '55P03')
+    throw new StoreError(
+      'concurrency_limit',
+      code === '55P03'
+        ? 'Mission Lane writer admission timed out; retry the request shortly.'
+        : 'Mission Lane writer capacity is full; retry the request shortly.',
+      503,
+    );
   throw error;
 }
 
