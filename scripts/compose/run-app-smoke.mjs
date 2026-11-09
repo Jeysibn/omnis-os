@@ -588,7 +588,10 @@ async function freePort(excluded) {
     await new Promise((resolve, reject) =>
       server.close((error) => (error ? reject(error) : resolve())),
     );
-    if (!excluded.has(address.port)) return address.port;
+    if (!excluded.has(address.port)) {
+      excluded.add(address.port);
+      return address.port;
+    }
   }
 }
 
@@ -1293,10 +1296,11 @@ async function reproducePublication() {
   const invoke = (extra) =>
     runDocker('docker', [...args, ...extra], { encoding: 'utf8', timeout: 60000 });
   try {
+    const startup = invoke(['up', '-d', '--wait', '--wait-timeout', '30']);
     assert.equal(
-      invoke(['up', '-d', '--wait', '--wait-timeout', '30']).status,
+      startup.status,
       0,
-      'publication reproduction startup',
+      `publication reproduction startup: ${startup.stderr} ${startup.stdout}`,
     );
     process.stdout.write(
       `Publication reproduction Docker server: ${runDocker('docker', ['version', '--format', '{{.Server.Version}}'], { encoding: 'utf8', timeout: 5000 }).stdout.trim()}\n`,
@@ -1317,7 +1321,7 @@ async function reproducePublication() {
         http = error.cause?.code ?? error.name;
       }
       process.stdout.write(
-        `${JSON.stringify({ reproduction: name, networkInternal: name === 'isolated', health: inspected.State.Health?.Status, configuredPorts: inspected.HostConfig.PortBindings, effectivePorts: inspected.NetworkSettings.Ports, runnerHttp: http })}\n`,
+        `${JSON.stringify({ reproduction: name, networkInternal: JSON.parse(runDocker('docker', ['network', 'inspect', `${diagnosticProject}_${name}`], { encoding: 'utf8', timeout: 5000 }).stdout)[0].Internal, health: inspected.State.Health?.Status, configuredPorts: inspected.HostConfig.PortBindings, effectivePorts: inspected.NetworkSettings.Ports, runnerHttp: http })}\n`,
       );
     }
   } finally {
