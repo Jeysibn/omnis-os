@@ -36,16 +36,19 @@ export function ErrorState({
   title,
   description,
   onRetry,
+  retryLabel = 'Retry',
 }: {
   title: string;
   description?: string | undefined;
   onRetry?: (() => void) | undefined;
+  /** Name the retry button after what it retries when several can appear on one screen. */
+  retryLabel?: string;
 }) {
   return (
     <div className="nx-state" data-kind="error" role="alert">
       <p className="nx-state__title">{title}</p>
       {description && <p className="nx-muted">{description}</p>}
-      {onRetry && <NxButton onClick={onRetry}>Retry</NxButton>}
+      {onRetry && <NxButton onClick={onRetry}>{retryLabel}</NxButton>}
     </div>
   );
 }
