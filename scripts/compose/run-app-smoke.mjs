@@ -1236,6 +1236,7 @@ async function probeWebPath(required) {
   process.stdout.write(
     `${JSON.stringify({ phase: required ? 'after-security-probes' : 'before-security-probes', destination: origin, port: webPort, health: inspected.State.Health?.Status, restartCount: inspected.RestartCount, configuredPorts: inspected.HostConfig.PortBindings, effectivePorts: inspected.NetworkSettings.Ports, internalHttp: internal.stdout.trim(), internalStatus: internal.status, listeners: listeners.stdout.trim(), runnerTcp: tcp, runnerHttp: http })}\n`,
   );
+  if (required && tcp !== 'connected') await reproducePublication();
   if (required) {
     assert.equal(internal.status, 0, 'web internal HTTP failed');
     assert.equal(
@@ -1244,5 +1245,86 @@ async function probeWebPath(required) {
       'runner IPv4 TCP cannot reach Docker publication; inspect preceding path diagnostics',
     );
     assert.equal(http, 200, 'runner HTTP must succeed before Playwright');
+  }
+}
+
+async function reproducePublication() {
+  const diagnosticProject = `${project}-publication`;
+  auxiliaryProjects.add(diagnosticProject);
+  const path = join(directory, 'publication.yml');
+  const ports = [await freePort(occupiedPorts), await freePort(occupiedPorts)];
+  const services = Object.fromEntries(
+    ['isolated', 'control'].map((name, index) => [
+      name,
+      {
+        image: 'omnis-web:ci',
+        user: '10001:10001',
+        read_only: true,
+        cap_drop: ['ALL'],
+        security_opt: ['no-new-privileges:true'],
+        pids_limit: 64,
+        mem_limit: '256m',
+        cpus: 0.5,
+        environment: { OMNIS_WEB_PORT: '8080', OMNIS_API_URL: 'http://127.0.0.1:1' },
+        ports: [`127.0.0.1:${ports[index]}:8080`],
+        networks: [name],
+        healthcheck: {
+          test: [
+            'CMD',
+            'node',
+            '-e',
+            "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+          ],
+          interval: '1s',
+          timeout: '3s',
+          retries: 10,
+        },
+      },
+    ]),
+  );
+  await writeFile(
+    path,
+    JSON.stringify({
+      services,
+      networks: { isolated: { internal: true }, control: { internal: false } },
+    }),
+  );
+  const args = ['compose', '--project-name', diagnosticProject, '-f', path];
+  const invoke = (extra) =>
+    runDocker('docker', [...args, ...extra], { encoding: 'utf8', timeout: 60000 });
+  try {
+    assert.equal(
+      invoke(['up', '-d', '--wait', '--wait-timeout', '30']).status,
+      0,
+      'publication reproduction startup',
+    );
+    process.stdout.write(
+      `Publication reproduction Docker server: ${runDocker('docker', ['version', '--format', '{{.Server.Version}}'], { encoding: 'utf8', timeout: 5000 }).stdout.trim()}\n`,
+    );
+    for (const [index, name] of ['isolated', 'control'].entries()) {
+      const id = invoke(['ps', '-q', name]).stdout.trim();
+      const inspected = JSON.parse(
+        runDocker('docker', ['inspect', id], { encoding: 'utf8', timeout: 5000 }).stdout,
+      )[0];
+      let http;
+      try {
+        http = (
+          await globalThis.fetch(`http://127.0.0.1:${ports[index]}/health`, {
+            signal: globalThis.AbortSignal.timeout(3000),
+          })
+        ).status;
+      } catch (error) {
+        http = error.cause?.code ?? error.name;
+      }
+      process.stdout.write(
+        `${JSON.stringify({ reproduction: name, networkInternal: name === 'isolated', health: inspected.State.Health?.Status, configuredPorts: inspected.HostConfig.PortBindings, effectivePorts: inspected.NetworkSettings.Ports, runnerHttp: http })}\n`,
+      );
+    }
+  } finally {
+    assert.equal(
+      invoke(['down', '--volumes', '--remove-orphans']).status,
+      0,
+      'publication reproduction cleanup',
+    );
   }
 }
