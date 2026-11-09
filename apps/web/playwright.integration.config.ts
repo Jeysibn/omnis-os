@@ -23,6 +23,13 @@ export default defineConfig({
   use: {
     ...devices['Desktop Chrome'],
     baseURL: frontendOrigin,
+    ...(externalWeb
+      ? {
+          launchOptions: {
+            args: ['--unsafely-treat-insecure-origin-as-secure=http://web:8080'],
+          },
+        }
+      : {}),
     trace: 'off',
     screenshot: 'off',
     video: 'off',

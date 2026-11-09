@@ -178,9 +178,15 @@ test('Compose owner creates an authorized mock Run through the web gateway', asy
   await page.getByLabel('Agent profile').selectOption(agent.body.agentId);
   await expect(page.getByLabel('Runtime')).toHaveValue('mock');
   const browserCryptoContext = await page.evaluate(() => ({
+    origin: window.location.origin,
     secureContext: window.isSecureContext,
     randomUUIDAvailable: typeof globalThis.crypto?.randomUUID === 'function',
   }));
+  expect(browserCryptoContext).toEqual({
+    origin: 'http://web:8080',
+    secureContext: true,
+    randomUUIDAvailable: true,
+  });
   const assignmentResponsePromise = page
     .waitForResponse(
       (response) => {
