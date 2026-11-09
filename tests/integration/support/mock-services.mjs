@@ -9,7 +9,7 @@ import { createServer } from 'node:net';
 import { request as httpRequest } from 'node:http';
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -23,6 +23,8 @@ export const testOwnerPassword = 'test-owner-password-2026';
 export async function startMockServices({
   origin,
   requireAuditPool = false,
+  composeManagedApplication = false,
+  databaseSocketDirectory,
   reservedPorts = [],
   enableSyntheticBrokerTestMode = false,
   enableSyntheticBrokerProcessTestMode = false,
@@ -34,6 +36,7 @@ export async function startMockServices({
   }
   const databaseConfig = validateTestDatabaseConfiguration(process.env, {
     requireAdmin: requireAuditPool,
+    unixSocketDirectory: composeManagedApplication ? databaseSocketDirectory : undefined,
   });
   const {
     urls: {
@@ -84,7 +87,10 @@ export async function startMockServices({
   const apiPort = await freePort(excludedPorts);
   excludedPorts.add(apiPort);
   const workerPort = await freePort(excludedPorts);
-  const authorizerSocket = join(tempDirectory, 'authorizer.sock');
+  const authorizerSocket = join(
+    composeManagedApplication ? join(tempDirectory, 'authorizer') : tempDirectory,
+    'authorizer.sock',
+  );
   const brokerSocketDirectory = enableSyntheticBrokerProcessTestMode
     ? join(tempDirectory, 'broker-runtime')
     : tempDirectory;
@@ -94,7 +100,10 @@ export async function startMockServices({
   const brokerSecretDirectory = join(tempDirectory, 'broker-secrets');
   const brokerAuthorizerSocket = join(brokerAuthorizerDirectory, 'broker-authorizer.sock');
   const syntheticBrokerSocket = join(brokerSocketDirectory, 'broker.sock');
-  const launcherSocket = join(tempDirectory, 'launcher.sock');
+  const launcherSocket = join(
+    composeManagedApplication ? join(tempDirectory, 'launcher') : tempDirectory,
+    'launcher.sock',
+  );
   const salt = randomBytes(16);
   const internalToken = randomBytes(48).toString('hex');
   const authorizerToken = randomBytes(48).toString('hex');
@@ -136,7 +145,7 @@ export async function startMockServices({
     `OMNIS_API_PORT=${apiPort}`,
     'OMNIS_WORKER_HOST=127.0.0.1',
     `OMNIS_WORKER_PORT=${workerPort}`,
-    `OMNIS_AUTHORIZER_SOCKET=${authorizerSocket}`,
+    `OMNIS_AUTHORIZER_SOCKET=${composeManagedApplication ? '/run/omnis-authorizer/authorizer.sock' : authorizerSocket}`,
     `OMNIS_ALLOWED_ORIGIN=${parsedOrigin.origin}`,
     'OMNIS_SECURE_COOKIES=false',
   ];
@@ -181,7 +190,7 @@ export async function startMockServices({
             ),
         ),
         `OMNIS_DATABASE_URL=${databaseUrl}`,
-        `OMNIS_SANDBOX_LAUNCHER_SOCKET=${launcherSocket}`,
+        `OMNIS_SANDBOX_LAUNCHER_SOCKET=${composeManagedApplication ? '/run/omnis-sandbox/launcher.sock' : launcherSocket}`,
         ...(enableSyntheticBrokerTestMode
           ? [
               'OMNIS_SYNTHETIC_BROKER_TEST_MODE=1',
@@ -200,7 +209,7 @@ export async function startMockServices({
         'OMNIS_AGENT_IDEMPOTENCY_KEY_VERSION=1',
         `OMNIS_AUTHORIZER_DATABASE_URL=${authorizerUrl}`,
         `OMNIS_AUTHORIZER_SOCKET=${authorizerSocket}`,
-        'OMNIS_AUTHORIZER_SOCKET_MODE=600',
+        `OMNIS_AUTHORIZER_SOCKET_MODE=${composeManagedApplication ? '660' : '600'}`,
         ...(enableSyntheticBrokerTestMode
           ? [
               `OMNIS_BROKER_AUTHORIZER_SOCKET=${brokerAuthorizerSocket}`,
@@ -229,7 +238,7 @@ export async function startMockServices({
       [
         `OMNIS_LAUNCHER_DATABASE_URL=${launcherUrl}`,
         `OMNIS_SANDBOX_LAUNCHER_SOCKET=${launcherSocket}`,
-        'OMNIS_SANDBOX_LAUNCHER_SOCKET_MODE=600',
+        `OMNIS_SANDBOX_LAUNCHER_SOCKET_MODE=${composeManagedApplication ? '660' : '600'}`,
         `OMNIS_SANDBOX_WORKSPACE_ROOT=${join(tempDirectory, 'workspaces')}`,
       ].join('\n') + '\n',
       { mode: 0o600 },
@@ -309,6 +318,16 @@ export async function startMockServices({
   };
 
   try {
+    if (composeManagedApplication) {
+      await Promise.all([
+        mkdir(dirname(authorizerSocket), { mode: 0o770 }),
+        mkdir(dirname(launcherSocket), { mode: 0o770 }),
+      ]);
+      await Promise.all([
+        chmod(dirname(authorizerSocket), 0o770),
+        chmod(dirname(launcherSocket), 0o770),
+      ]);
+    }
     if (enableSyntheticBrokerTestMode && !enableSyntheticBrokerProcessTestMode) {
       syntheticBrokerFixture = await startSyntheticBrokerFixture({
         socketPath: syntheticBrokerSocket,
@@ -326,27 +345,34 @@ export async function startMockServices({
         application_name: 'omnis-canary-check',
       });
     }
-    const started = await startServicesWithCleanup(
-      [startWorker, startAuthorizer, startLauncher, startApi],
-      async (children) => {
-        [worker, authorizer, launcher, api] = children;
-        await cleanup({ worker, authorizer, launcher, api });
-      },
-    );
-    [worker, authorizer, launcher, api] = started;
+    const starters = composeManagedApplication
+      ? [startAuthorizer, startLauncher]
+      : [startWorker, startAuthorizer, startLauncher, startApi];
+    const started = await startServicesWithCleanup(starters, async (children) => {
+      if (composeManagedApplication) [authorizer, launcher] = children;
+      else [worker, authorizer, launcher, api] = children;
+      await cleanup({ worker, authorizer, launcher, api });
+    });
+    if (composeManagedApplication) [authorizer, launcher] = started;
+    else [worker, authorizer, launcher, api] = started;
     const apiUrl = `http://127.0.0.1:${apiPort}`;
     const workerUrl = `http://127.0.0.1:${workerPort}`;
-    await waitForHealth({
-      apiUrl,
-      workerUrl,
-      internalToken,
-      workerProcess: worker,
-      apiProcess: api,
-      authorizerSocket,
-      authorizerProcess: authorizer,
-      launcherSocket,
-      launcherProcess: launcher,
-    });
+    if (!composeManagedApplication)
+      await waitForHealth({
+        apiUrl,
+        workerUrl,
+        internalToken,
+        workerProcess: worker,
+        apiProcess: api,
+        authorizerSocket,
+        authorizerProcess: authorizer,
+        launcherSocket,
+        launcherProcess: launcher,
+      });
+    else {
+      await waitForAuthorizer(authorizerSocket, authorizer);
+      await waitForLauncher(launcherSocket, launcher);
+    }
     if (enableSyntheticBrokerProcessTestMode) {
       const trustAnchors = JSON.stringify([
         {
@@ -476,7 +502,10 @@ export async function startMockServices({
   }
 }
 
-export function validateTestDatabaseConfiguration(environment, { requireAdmin = false } = {}) {
+export function validateTestDatabaseConfiguration(
+  environment,
+  { requireAdmin = false, unixSocketDirectory } = {},
+) {
   const definitions = [
     ['OMNIS_TEST_DATABASE_URL', 'omnis_runtime', true],
     ['OMNIS_TEST_MIGRATION_DATABASE_URL', 'omnis_migrator', true],
@@ -493,7 +522,7 @@ export function validateTestDatabaseConfiguration(environment, { requireAdmin = 
       if (required) throw new Error(`${name} must be configured for the disposable test database.`);
       continue;
     }
-    const parsed = parseTestDatabaseUrl(name, value, username);
+    const parsed = parseTestDatabaseUrl(name, value, username, { unixSocketDirectory });
     urls[name] = value;
     parsedUrls.push({ name, ...parsed });
   }
@@ -521,7 +550,7 @@ export function validateTestDatabaseConfiguration(environment, { requireAdmin = 
   };
 }
 
-function parseTestDatabaseUrl(name, value, expectedUsername) {
+function parseTestDatabaseUrl(name, value, expectedUsername, { unixSocketDirectory } = {}) {
   if (/%(?![0-9a-fA-F]{2})/.test(value)) {
     throw new Error(`${name} uses an unsupported PostgreSQL URL form.`);
   }
@@ -535,26 +564,33 @@ function parseTestDatabaseUrl(name, value, expectedUsername) {
   const pathname = parsed.pathname;
   const databaseName = pathname.startsWith('/') ? pathname.slice(1) : '';
   const isLoopback = host === '127.0.0.1' || host === '::1';
+  const socketHost = parsed.searchParams.get('host');
+  const usesAllowedUnixSocket =
+    typeof unixSocketDirectory === 'string' &&
+    unixSocketDirectory.startsWith('/') &&
+    host === 'localhost' &&
+    socketHost === unixSocketDirectory &&
+    parsed.searchParams.size === 1;
   const port = parsed.port ? Number(parsed.port) : 5432;
   if (
     parsed.protocol !== 'postgresql:' ||
     parsed.username !== expectedUsername ||
     !parsed.password ||
-    parsed.search ||
+    (parsed.search && !usesAllowedUnixSocket) ||
     parsed.hash ||
     !/^[A-Za-z0-9_-]+$/.test(databaseName) ||
-    !isLoopback ||
+    (!isLoopback && !usesAllowedUnixSocket) ||
     !Number.isInteger(port) ||
     port < 1 ||
     port > 65_535
   ) {
     throw new Error(
-      `${name} must use a supported PostgreSQL URL, the expected restricted role, and a loopback PostgreSQL endpoint.`,
+      `${name} must use a supported PostgreSQL URL, the expected restricted role, and a loopback PostgreSQL endpoint or explicitly approved test Unix-socket endpoint.`,
     );
   }
   return {
     databaseName,
-    host,
+    host: usesAllowedUnixSocket ? socketHost : host,
     port,
     isTestDatabase: /(?:^|[_-])test(?:s)?$/i.test(databaseName),
   };
@@ -1338,6 +1374,22 @@ async function waitForHealth({
     .map(([service]) => service)
     .join(', ');
   throw new Error(`Mock service readiness timed out for: ${missing || 'unknown service'}.`);
+}
+
+async function waitForLauncher(socketPath, process) {
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    if (process.exitCode !== null || process.signalCode !== null) {
+      throw new Error('Disposable host boundary process exited before its socket became ready.');
+    }
+    try {
+      if ((await socketRequest(socketPath, '/health')).ok) return;
+    } catch {
+      // The socket may not have been bound yet.
+    }
+    await delay(100);
+  }
+  throw new Error('Disposable host boundary socket did not become ready before the deadline.');
 }
 
 async function waitForAuthorizer(authorizerSocket, authorizerProcess) {
