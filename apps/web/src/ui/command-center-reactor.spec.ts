@@ -29,19 +29,54 @@ async function instrument(page: Page) {
       __visListeners: () => number;
       __observers: () => number;
       __hidden: (hidden: boolean) => void;
+      __timers: () => number;
+      __slots: () => number;
+      __work: () => { raf: number; timers: number; draws: number };
     };
     const w = window as unknown as W;
     const pending = new Set<number>();
+    // Callbacks the browser actually ran, and canvas draws (one clearRect per drawn frame).
+    const work = { raf: 0, timers: 0, draws: 0 };
+    w.__work = () => ({ ...work });
+    const clear2d = CanvasRenderingContext2D.prototype.clearRect;
+    CanvasRenderingContext2D.prototype.clearRect = function (
+      ...args: [number, number, number, number]
+    ) {
+      work.draws += 1;
+      return clear2d.apply(this, args);
+    };
     const raf = window.requestAnimationFrame.bind(window);
     const caf = window.cancelAnimationFrame.bind(window);
     window.requestAnimationFrame = (callback) => {
       const id = raf((time) => {
         pending.delete(id);
+        work.raf += 1;
         callback(time);
       });
       pending.add(id);
       return id;
     };
+    // Short timers (the Reactor's sleep between frames); long ones such as the clock's are ignored.
+    const shortTimers = new Set<number>();
+    const setT = window.setTimeout.bind(window) as (h: TimerHandler, t?: number) => number;
+    const clearT = window.clearTimeout.bind(window);
+    window.setTimeout = ((handler: TimerHandler, delay?: number) => {
+      if (typeof handler !== 'function' || (delay ?? 0) > 100) return setT(handler, delay);
+      const id: number = setT(() => {
+        shortTimers.delete(id);
+        work.timers += 1;
+        (handler as () => void)();
+      }, delay);
+      shortTimers.add(id);
+      return id;
+    }) as typeof window.setTimeout;
+    window.clearTimeout = ((id?: number) => {
+      if (id !== undefined) shortTimers.delete(id);
+      return clearT(id);
+    }) as typeof window.clearTimeout;
+    w.__timers = () => shortTimers.size;
+    // Both counts in ONE read: two separate reads can straddle a legitimate frame-to-sleep hand-over.
+    w.__slots = () => pending.size + shortTimers.size;
     window.cancelAnimationFrame = (id) => {
       pending.delete(id);
       caf(id);
@@ -97,6 +132,15 @@ async function instrument(page: Page) {
   });
 }
 
+const work = (page: Page) =>
+  page.evaluate(() =>
+    (window as never as { __work: () => { raf: number; timers: number; draws: number } }).__work(),
+  );
+const pendingTimers = (page: Page) =>
+  page.evaluate(() => (window as never as { __timers: () => number }).__timers());
+/** Pending animation frame plus pending sleep, read atomically: at most one, ever, per Reactor. */
+const slots = (page: Page) =>
+  page.evaluate(() => (window as never as { __slots: () => number }).__slots());
 const frames = (page: Page) =>
   page.evaluate(() => (window as never as { __frames: () => number }).__frames());
 const visListeners = (page: Page) =>
@@ -181,7 +225,7 @@ test.describe('lazy loading and enhanced rendering', () => {
     await expect(canvas(page)).toHaveAttribute('data-reactor-loop', 'running');
     await expect(canvas(page)).toHaveAttribute('data-reactor-quality', 'full');
     // Never more than one scheduled frame from the Reactor, however long it runs.
-    expect(await peak(page, () => frames(page), 15, 100)).toBeLessThanOrEqual(1);
+    expect(await peak(page, () => slots(page), 15, 100)).toBeLessThanOrEqual(1);
   });
 
   test('the Reactor is decorative: hidden from assistive technology and never a Tab stop', async ({
@@ -221,6 +265,7 @@ test.describe('reduced motion', () => {
     await expect(page.locator('svg[data-reactor-static]')).toBeVisible();
     await expect(canvas(page)).toHaveCount(0);
     expect(await peak(page, () => frames(page), 10, 100)).toBe(0);
+    expect(await pendingTimers(page)).toBe(0);
     expect(await page.evaluate(() => document.getAnimations().length)).toBe(0);
     expect(requested).toEqual([]);
   });
@@ -325,6 +370,7 @@ test.describe('lifecycle', () => {
     await expect(page.getByRole('heading', { level: 1, name: 'Tasks' })).toBeVisible();
     const baseline = {
       frames: await frames(page),
+      timers: await pendingTimers(page),
       vis: await visListeners(page),
       obs: await observers(page),
     };
@@ -343,6 +389,7 @@ test.describe('lifecycle', () => {
         .poll(
           async () => ({
             frames: await frames(page),
+            timers: await pendingTimers(page),
             vis: await visListeners(page),
             obs: await observers(page),
           }),
@@ -365,6 +412,8 @@ test.describe('lifecycle', () => {
     await expect(canvas(page)).toHaveAttribute('data-reactor-loop', 'running');
 
     await setHidden(page, true);
+    // Immediately: a 30-50 ms sleep left behind would otherwise expire unnoticed.
+    expect(await pendingTimers(page), 'a hidden tab must not leave a sleep pending').toBe(0);
     await expect(canvas(page)).toHaveAttribute('data-reactor-loop', 'idle');
     expect(await peak(page, () => frames(page), 6, 100)).toBe(0);
     await setHidden(page, false);
@@ -375,6 +424,7 @@ test.describe('lifecycle', () => {
     await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
     await expect(canvas(page)).toHaveAttribute('data-reactor-loop', 'idle');
     expect(await peak(page, () => frames(page), 6, 100)).toBe(0);
+    expect(await pendingTimers(page), 'an off-screen stage must not leave a sleep pending').toBe(0);
     await page.evaluate(() => window.scrollTo(0, 0));
     await expect(canvas(page)).toHaveAttribute('data-reactor-loop', 'running');
     expect(await peak(page, () => frames(page), 8, 100)).toBeLessThanOrEqual(1);
@@ -404,13 +454,197 @@ test.describe('lifecycle', () => {
           { message: `canvas matches its box at ${width}px` },
         )
         .toBe(true);
-      expect(await peak(page, () => frames(page), 4, 60), `${width}px`).toBeLessThanOrEqual(1);
+      expect(await peak(page, () => slots(page), 4, 60), `${width}px`).toBeLessThanOrEqual(1);
       expect(
         await page.evaluate(
           () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
         ),
       ).toBe(0);
     }
+  });
+});
+
+test.describe('scheduling', () => {
+  const cases = [
+    { name: 'idle', options: { tasks: [], runs: [] } as Options, draws: [12, 28] },
+    { name: 'active', options: { tasks, runs: mixedRuns } as Options, draws: [20, 40] },
+  ];
+  for (const item of cases) {
+    test(`${item.name}: one wake-up per drawn frame, not one per display refresh, in a single slot`, async ({
+      page,
+    }) => {
+      test.setTimeout(30_000);
+      await instrument(page);
+      mockApi(page, item.options);
+      await open(page);
+      await expectMode(page, 'enhanced');
+      await page.waitForTimeout(2_500); // past the intro easing
+      const started = Date.now();
+      const before = await work(page);
+      let slotsPeak = 0;
+      for (let i = 0; i < 30; i += 1) {
+        slotsPeak = Math.max(slotsPeak, await slots(page));
+        await page.waitForTimeout(100);
+      }
+      const after = await work(page);
+      const seconds = (Date.now() - started) / 1000;
+      const draws = after.draws - before.draws;
+      // The Reactor still draws at its intended cadence...
+      expect(draws / seconds).toBeGreaterThanOrEqual(item.draws[0]!);
+      expect(draws / seconds).toBeLessThanOrEqual(item.draws[1]!);
+      // ...but is woken about once per draw, where it used to take a callback on every refresh
+      // (60 per second here) and discard most of them.
+      expect(after.raf - before.raf, 'animation callbacks').toBeLessThanOrEqual(draws * 1.15 + 2);
+      expect(after.timers - before.timers, 'sleeps').toBeLessThanOrEqual(draws * 1.15 + 2);
+      // A timer and a frame are never both pending: one scheduler slot.
+      expect(slotsPeak).toBeLessThanOrEqual(1);
+    });
+  }
+
+  test('a settled state wakes the page zero times', async ({ page }) => {
+    await instrument(page);
+    mockApi(page, { tasks: [], runs: [makeRun('r', 't', 'Lost', 'unknown', 1)] });
+    await open(page);
+    await expectMode(page, 'enhanced');
+    await expect(canvas(page)).toHaveAttribute('data-reactor-loop', 'idle', { timeout: 6_000 });
+    const before = await work(page);
+    await page.waitForTimeout(1_500);
+    expect(await work(page)).toEqual(before);
+    expect(await pendingTimers(page)).toBe(0);
+  });
+
+  test('after leaving the Command Center nothing draws or wakes the page again', async ({
+    page,
+  }) => {
+    await instrument(page);
+    mockApi(page, { tasks, runs: mixedRuns });
+    await page.goto('/#tasks');
+    await expect(page.getByRole('heading', { level: 1, name: 'Tasks' })).toBeVisible();
+    await goToCommandCenter(page);
+    await expectMode(page, 'enhanced');
+    await page.waitForTimeout(600);
+    await leaveCommandCenter(page);
+    await expect(canvas(page)).toHaveCount(0);
+    expect(await pendingTimers(page), 'unmount must not leave a sleep pending').toBe(0);
+    const before = await work(page);
+    await page.waitForTimeout(1_000);
+    const after = await work(page);
+    expect(after.draws, 'no draw after unmount').toBe(before.draws);
+    expect(after.raf, 'no animation callback after unmount').toBe(before.raf);
+    expect(after.timers, 'no sleep fires after unmount').toBe(before.timers);
+    expect(await pendingTimers(page)).toBe(0);
+  });
+});
+
+test.describe('narrow screens: Create task is easy to find', () => {
+  /** Where "Create task" sat before this change (Stage 2 as merged), same fixture: 872 and 858. */
+  const before = { 390: 872, 320: 858 };
+  const RING = 4;
+
+  test('390x844: Create task and its focus ring are inside the first screen, with no scrolling', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    mockApi(page, { tasks, runs: mixedRuns });
+    await open(page);
+    await expectMode(page, 'enhanced');
+    const create = page.getByRole('button', { name: 'Create task' });
+    const box = (await create.boundingBox())!;
+    expect(await page.evaluate(() => window.scrollY)).toBe(0);
+    expect(box.y).toBeGreaterThanOrEqual(0);
+    expect(box.y + box.height + RING, 'bottom edge plus focus ring').toBeLessThanOrEqual(844);
+    expect(box.y, `was ${before[390]} before`).toBeLessThan(before[390] - 80);
+    // The whole first row of the deck is visible too, and focusing the button does not scroll.
+    const runs = (await page.getByRole('button', { name: 'View runs' }).boundingBox())!;
+    expect(runs.y + runs.height + RING).toBeLessThanOrEqual(844);
+    await create.focus();
+    expect(await page.evaluate(() => window.scrollY)).toBe(0);
+  });
+
+  test('320x640: pulled up by 100px or more, still reachable, controls keep their size', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 320, height: 640 });
+    mockApi(page, { tasks, runs: mixedRuns });
+    await open(page);
+    await expectMode(page, 'enhanced');
+    const create = page.getByRole('button', { name: 'Create task' });
+    const box = (await create.boundingBox())!;
+    const y = box.y + (await page.evaluate(() => window.scrollY));
+    // Not on the first 640px screen (the header, heading and strip already take ~330px): the
+    // honest result is a material reduction, not visibility.
+    expect(y, `was ${before[320]} before`).toBeLessThanOrEqual(before[320] - 100);
+    expect(box.height).toBeGreaterThanOrEqual(40);
+    expect(box.width).toBeGreaterThanOrEqual(44);
+    // One keyboard focus brings it, with its ring, fully on screen.
+    await create.focus();
+    const focused = (await create.boundingBox())!;
+    expect(focused.y).toBeGreaterThanOrEqual(0);
+    expect(focused.y + focused.height + RING).toBeLessThanOrEqual(640);
+  });
+
+  for (const viewport of [
+    { width: 390, height: 844 },
+    { width: 360, height: 740 },
+    { width: 320, height: 640 },
+  ]) {
+    test(`${viewport.width}px: nothing is lost, nothing overflows, targets keep their size`, async ({
+      page,
+    }) => {
+      await page.setViewportSize(viewport);
+      mockApi(page, { tasks, runs: mixedRuns });
+      await open(page);
+      await expectMode(page, 'enhanced');
+      const strip = page.getByRole('list', { name: 'Environment and connection' });
+      for (const fact of ['Local workspace', 'Mock-only', 'API: responding', 'Mock adapter', 'PHT'])
+        await expect(strip).toContainText(fact);
+      expect(
+        await page.evaluate(
+          () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        ),
+      ).toBe(0);
+      for (const name of ['Create task', 'View runs', 'Review approvals']) {
+        const box = (await page.getByRole('button', { name, exact: true }).boundingBox())!;
+        expect(box.height, `${name} height`).toBeGreaterThanOrEqual(40);
+        expect(box.x).toBeGreaterThanOrEqual(0);
+        expect(box.x + box.width).toBeLessThanOrEqual(viewport.width);
+      }
+    });
+  }
+
+  test('the duplicate chip is hidden only on this route and only below 720px', async ({ page }) => {
+    mockApi(page, { tasks, runs: mixedRuns });
+    const chip = page.locator('.local-status');
+    await page.setViewportSize({ width: 390, height: 844 });
+    await open(page);
+    await expect(chip).toBeHidden();
+    await page.setViewportSize({ width: 719, height: 900 });
+    await expect(chip).toBeHidden();
+    await page.setViewportSize({ width: 720, height: 900 });
+    await expect(chip).toBeVisible();
+    // Other screens keep it at phone width.
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.evaluate(() => (window.location.hash = '#tasks')); // the nav is a menu at this width
+    await expect(page.getByRole('heading', { level: 1, name: 'Tasks' })).toBeVisible();
+    await expect(chip).toBeVisible();
+  });
+
+  test('Tab order and breakpoint focus handoff are unchanged by the layout', async ({ page }) => {
+    mockApi(page, { tasks, runs: mixedRuns });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await open(page);
+    await expectMode(page, 'enhanced');
+    await page.getByRole('button', { name: 'Create task' }).focus();
+    await page.keyboard.press('Tab');
+    await expect(page.getByRole('button', { name: 'View runs' })).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(page.getByRole('button', { name: 'Review approvals' })).toBeFocused();
+    // Focus inside Vitals survives crossing 1200px (the Stage 1 handoff), with this layout in place.
+    await page.getByRole('button', { name: /^Running: / }).focus();
+    await page.setViewportSize({ width: 1200, height: 900 });
+    await expect
+      .poll(() => page.evaluate(() => document.activeElement?.getAttribute('aria-label') ?? ''))
+      .toMatch(/^Running: /);
   });
 });
 
@@ -585,8 +819,9 @@ test.describe('Stage 1 behaviour is preserved', () => {
   // "Create task" top edge on the merged Stage 1 page (static mark, no Reactor), measured at 900px
   // high with the same fixture, and the most the Reactor may push it down.
   const baselineDeckY: Record<number, number> = { 320: 781, 390: 788, 768: 653, 1440: 976 };
-  // Allowed push: none on desktop (the side panels set the height), 150 on tablet, 110 on mobile.
-  const maxPush: Record<number, number> = { 1440: 0, 768: 150, 390: 110, 320: 110 };
+  // Allowed push: none on desktop (the side panels set the height), 150 on tablet, and none on mobile:
+  // the space reclaimed on narrow screens now pays for the Reactor, so mobile is no worse than Stage 1.
+  const maxPush: Record<number, number> = { 1440: 0, 768: 150, 390: 0, 320: 0 };
   for (const { width, size } of widths) {
     test(`${width}px: the Reactor fits its panel, is at most ${size}px square, and no control is pushed off screen`, async ({
       page,
@@ -738,6 +973,68 @@ test.describe('measurements (only when NEXUS_PERF is set)', () => {
     console.log('PERF\n' + lines.map((l) => '  ' + l).join('\n'));
   });
 
+  /**
+   * Scheduling cost per state: how often the browser wakes the page (animation callbacks and
+   * timers) against how often the Reactor actually draws. Counters wrap the browser APIs from
+   * the outside, so the application carries no measurement code. Three windows per state give a
+   * median and the spread, because single CPU readings on a shared machine are noisy.
+   */
+  test('scheduler: wake-ups, draws and CPU per state', async ({ page }) => {
+    test.setTimeout(300_000);
+    await instrument(page);
+    const { read } = await metrics(page);
+    const median = (values: number[]) =>
+      [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)]!;
+    const scenarios: Array<{ name: string; options: Options; reduced?: boolean }> = [
+      { name: 'reduced motion (static SVG)', options: { tasks, runs: mixedRuns }, reduced: true },
+      { name: 'active (running work)', options: { tasks, runs: mixedRuns } },
+      { name: 'idle (ambient breathing)', options: { tasks: [], runs: [] } },
+      {
+        name: 'unknown outcome (settled)',
+        options: { tasks: [], runs: [makeRun('r', 't', 'Lost', 'unknown', 1)] },
+      },
+    ];
+    const rows: string[] = [];
+    for (const scenario of scenarios) {
+      await page.unrouteAll();
+      await page.emulateMedia({ reducedMotion: scenario.reduced ? 'reduce' : 'no-preference' });
+      mockApi(page, scenario.options);
+      await page.goto('/#command-center');
+      await page.reload();
+      await expect(page.getByRole('heading', { level: 1, name: 'Command Center' })).toBeVisible();
+      await expect(reactor(page)).toHaveAttribute(
+        'data-reactor-mode',
+        scenario.reduced ? 'reduced' : 'enhanced',
+        {
+          timeout: 15_000,
+        },
+      );
+      await page.waitForTimeout(2_500); // past the intro
+      const windows: Array<Record<string, number>> = [];
+      for (let w = 0; w < 3; w += 1) {
+        const before = await read();
+        const counts0 = await work(page);
+        await page.waitForTimeout(5_000);
+        const counts1 = await work(page);
+        const after = await read();
+        windows.push({
+          raf: (counts1.raf! - counts0.raf!) / 5,
+          timers: (counts1.timers! - counts0.timers!) / 5,
+          draws: (counts1.draws! - counts0.draws!) / 5,
+          task: ((after.TaskDuration! - before.TaskDuration!) / 5) * 100,
+          script: ((after.ScriptDuration! - before.ScriptDuration!) / 5) * 100,
+        });
+      }
+      const col = (key: string) => windows.map((x) => x[key]!);
+      const spread = (key: string) =>
+        `${Math.min(...col(key)).toFixed(1)}-${Math.max(...col(key)).toFixed(1)}`;
+      rows.push(
+        `${scenario.name.padEnd(30)} callbacks/s ${median(col('raf')).toFixed(1).padStart(5)}  timers/s ${median(col('timers')).toFixed(1).padStart(5)}  draws/s ${median(col('draws')).toFixed(1).padStart(5)}  CPU ${median(col('task')).toFixed(1).padStart(5)}% (${spread('task')})  script ${median(col('script')).toFixed(1).padStart(4)}% (${spread('script')})`,
+      );
+    }
+    console.log('SCHED\n' + rows.map((r) => '  ' + r).join('\n'));
+  });
+
   test('heap, nodes and listeners after repeated visits', async ({ page }) => {
     test.setTimeout(120_000);
     mockApi(page, { tasks, runs: mixedRuns });
@@ -780,6 +1077,27 @@ test.describe('visual evidence (only when NEXUS_SHOT_DIR is set)', () => {
       await page.screenshot({ path, type: 'jpeg', quality: 80, fullPage: true });
     else await page.locator('.ccx-stage').screenshot({ path, type: 'jpeg', quality: 80 });
   }
+
+  test('first screen on narrow phones (set NEXUS_SHOT_TAG=before|after)', async ({ page }) => {
+    const tag = process.env.NEXUS_SHOT_TAG ?? 'after';
+    mockApi(page, { tasks, runs: mixedRuns });
+    for (const viewport of [
+      { width: 390, height: 844 },
+      { width: 320, height: 640 },
+    ]) {
+      await page.setViewportSize(viewport);
+      await open(page);
+      await expectMode(page, 'enhanced');
+      await page.waitForTimeout(1_800);
+      await page.evaluate(() => window.scrollTo(0, 0));
+      // The viewport only, not the page: exactly what is visible without scrolling.
+      await page.screenshot({
+        path: `${process.env.NEXUS_SHOT_DIR}/mobile-first-screen-${tag}-${viewport.width}x${viewport.height}.jpg`,
+        type: 'jpeg',
+        quality: 80,
+      });
+    }
+  });
 
   test('modes, sizes and states', async ({ page }) => {
     test.setTimeout(90_000);

@@ -1,9 +1,9 @@
 /*
- * OMNIS NEXUS V2, Stage 1: Command Center layout. Colour, type, spacing, controls and status
- * indicators come from the NEXUS design system (../design/design.css); these rules only arrange
- * them. Everything is scoped to `.ccx-*` or to the Command Center route (`data-view`), so no other
- * screen changes. Nothing here animates; the design system disables motion for
- * prefers-reduced-motion in any case.
+ * OMNIS NEXUS V2 Command Center layout. Colour, type, spacing, controls and status indicators come
+ * from the NEXUS design system (../design/design.css); these rules only arrange them. Everything is
+ * scoped to `.ccx-*` or to the Command Center route (`data-view`), so no other screen changes. No
+ * CSS here animates: the Reactor's motion lives in reactor/renderer.ts, which is never mounted under
+ * prefers-reduced-motion, and the design system disables motion for that preference in any case.
  */
 
 /* Route environment: the page around the surface becomes the near-black NEXUS environment. */
@@ -143,8 +143,8 @@ body:has(.app-shell[data-view='command-center']) {
   min-width: 0;
 }
 
-/* Stage: the system state readout and command deck (the reactor slot of a later stage). It fills
-   the row so the side columns never leave an unexplained gap. */
+/* Stage: the Reactor, the system state readout and the command deck. It fills the row so the side
+   columns never leave an unexplained gap. */
 .ccx-stage {
   display: flex;
   flex-direction: column;
@@ -321,5 +321,31 @@ body:has(.app-shell[data-view='command-center']) {
 @media (max-width: 719px) {
   .ccx-strip-clock {
     margin-inline-start: 0;
+  }
+}
+
+/* Narrow screens: the command deck (Create task) must be reachable without scrolling past decoration.
+   Measured at 390x844 the deck started at y=872, below the fold. This reclaims vertical space only; it
+   changes no order, size of a control, or the Reactor. */
+@media (max-width: 719px) {
+  /* The "Local workspace | Asia/Manila time" chip repeats what the environment strip and the PHT
+     clock directly below already say, so it is dropped on this route (its facts stay in the strip). */
+  .app-shell[data-view='command-center'] .local-status {
+    display: none;
+  }
+  .app-shell[data-view='command-center'] .page-heading {
+    margin-bottom: var(--nx-space-4);
+  }
+  .app-shell[data-view='command-center'] .main-content {
+    padding-top: 24px;
+  }
+  .ccx-state {
+    padding: var(--nx-space-4) var(--nx-space-3);
+    gap: var(--nx-space-2);
+  }
+  /* The strip stacks one fact per row here; tighter row gap and padding, same text and size. */
+  .ccx-strip {
+    gap: var(--nx-space-1) var(--nx-space-5);
+    padding: var(--nx-space-2) var(--nx-space-3);
   }
 }
