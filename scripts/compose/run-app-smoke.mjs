@@ -10,6 +10,7 @@ import {
   startMockServices,
   testOwnerPassword,
 } from '../../tests/integration/support/mock-services.mjs';
+import { canRemoveBrowserBridgeGuard } from './firewall-guard-policy.mjs';
 
 const scrypt = promisify(scryptCallback);
 const root = process.cwd();
@@ -190,6 +191,11 @@ function installRunnerHostGatewayGuard() {
     process.env.RUNNER_OS,
     'Linux',
     'host gateway guard requires the disposable Linux runner',
+  );
+  assert.equal(
+    process.env.RUNNER_ENVIRONMENT,
+    'github-hosted',
+    'host gateway guard must never mutate a self-hosted runner firewall',
   );
   const inspection = runDocker('docker', ['network', 'inspect', `${project}_browser_web`], {
     encoding: 'utf8',
@@ -681,16 +687,16 @@ try {
     process.stderr.write(
       `Compose cleanup reported an error: ${redact(down.stderr || down.stdout || down.error?.message)}\n`,
     );
-    const stopBrowser = compose(['stop', 'browser'], { allowFailure: true, timeout: 15_000 });
-    browserStopped = !stopBrowser.error && stopBrowser.status === 0;
+    const stopEndpoints = compose(['stop', 'browser', 'web'], {
+      allowFailure: true,
+      timeout: 15_000,
+    });
+    browserStopped = !stopEndpoints.error && stopEndpoints.status === 0;
     if (!browserStopped) {
-      try {
-        browserStopped = areScopedBrowserContainersStopped();
-      } catch {
-        browserStopped = false;
-      }
+      browserStopped = isBrowserBridgeQuiescent();
     }
   }
+  if (browserStopped) browserStopped = isBrowserBridgeQuiescent();
   if (browserStopped) {
     try {
       removeRunnerHostGatewayGuard();
@@ -840,23 +846,38 @@ function cleanupScopedResources() {
   }
 }
 
-function areScopedBrowserContainersStopped() {
-  const ids = dockerIds(
-    [
-      'ps',
-      '-aq',
-      '--filter',
-      `label=com.docker.compose.project=${project}`,
-      '--filter',
-      'label=com.docker.compose.service=browser',
-    ],
-    'test-scoped browser containers before firewall cleanup',
-  );
-  return ids.every((id) => {
-    const inspected = runDocker('docker', ['inspect', id], { encoding: 'utf8' });
-    if (inspected.error || inspected.status !== 0) return false;
-    return JSON.parse(inspected.stdout)[0]?.State?.Running === false;
+function isBrowserBridgeQuiescent() {
+  const inspection = runDocker('docker', ['network', 'inspect', `${project}_browser_web`], {
+    encoding: 'utf8',
+    timeout: 15_000,
   });
+  if (inspection.error) return false;
+  if (inspection.status !== 0) {
+    const networkMissing = /network .+ not found/i.test(inspection.stderr ?? '');
+    return canRemoveBrowserBridgeGuard({
+      networkExists: false,
+      inspectionSucceeded: networkMissing,
+      endpoints: [],
+    });
+  }
+  try {
+    const network = JSON.parse(inspection.stdout)[0];
+    const endpoints = Object.keys(network.Containers ?? {}).map((id) => {
+      const container = runDocker('docker', ['inspect', id], {
+        encoding: 'utf8',
+        timeout: 10_000,
+      });
+      if (container.error || container.status !== 0) return { id, running: undefined };
+      return { id, running: JSON.parse(container.stdout)[0]?.State?.Running };
+    });
+    return canRemoveBrowserBridgeGuard({
+      networkExists: true,
+      inspectionSucceeded: true,
+      endpoints,
+    });
+  } catch {
+    return false;
+  }
 }
 
 async function waitForHealthy(service, timeout) {
@@ -1094,7 +1115,7 @@ async function assertBrowserNetworkIsolation() {
   const browserIpv6Interfaces = JSON.parse(browserNetworkProbe.stdout.trim());
   const ipv6ControlEnabled =
     Boolean(hostGatewayGuard.hostGatewayIpv6) && browserIpv6Interfaces.length > 0;
-  const hostControlServer = createServer((socket) => socket.end('ci-host-gateway-control'));
+  const hostControlServer = createServer((socket) => socket.on('error', () => {}));
   let ipv6ControlServer;
   let ipv6ControlPort = '';
   let hostControlPort;
@@ -1122,7 +1143,7 @@ async function assertBrowserNetworkIsolation() {
       'the disposable host gateway listener accepts a host-side connection',
     );
     if (ipv6ControlEnabled) {
-      ipv6ControlServer = createServer((socket) => socket.end('ci-host-gateway-ipv6-control'));
+      ipv6ControlServer = createServer((socket) => socket.on('error', () => {}));
       await new Promise((resolve, reject) =>
         ipv6ControlServer
           .listen(0, `${hostGatewayGuard.hostGatewayIpv6}%${hostGatewayGuard.bridge}`, resolve)
