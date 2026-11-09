@@ -12,6 +12,19 @@ if [[ "${OMNIS_SYSTEMD_VERIFICATION_REQUIRED:-}" != true ]]; then
 fi
 systemd_state="$(systemctl is-system-running 2>/dev/null || true)"
 if [[ "$(ps -p 1 -o comm= | tr -d ' ')" != systemd ]] || [[ "$systemd_state" != active && "$systemd_state" != degraded ]]; then
+  pid1_comm="$(ps -p 1 -o comm= 2>/dev/null | tr -d ' ' || true)"
+  init_pid_namespace="$(readlink /proc/1/ns/pid 2>/dev/null || printf unavailable)"
+  current_pid_namespace="$(readlink /proc/self/ns/pid 2>/dev/null || printf unavailable)"
+  container_marker=none
+  if [[ -e /.dockerenv ]]; then
+    container_marker=/.dockerenv
+  elif [[ -e /run/.containerenv ]]; then
+    container_marker=/run/.containerenv
+  fi
+  printf 'Systemd preflight diagnostics: pid1_comm=%s systemd_state=%s init_pid_namespace=%s current_pid_namespace=%s container_marker=%s runner_os=%s runner_environment=%s\n' \
+    "${pid1_comm:-unavailable}" "${systemd_state:-unavailable}" "$init_pid_namespace" \
+    "$current_pid_namespace" "$container_marker" "${RUNNER_OS:-unavailable}" \
+    "${RUNNER_ENVIRONMENT:-unavailable}" >&2
   echo "Required CI verification unavailable: a running systemd PID 1 is required." >&2
   exit 1
 fi
