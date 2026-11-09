@@ -25,6 +25,7 @@ export default defineConfig({
     baseURL: frontendOrigin,
     ...(externalWeb
       ? {
+          channel: 'chromium',
           launchOptions: {
             args: ['--unsafely-treat-insecure-origin-as-secure=http://web:8080'],
           },
