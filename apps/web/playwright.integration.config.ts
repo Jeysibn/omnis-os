@@ -6,7 +6,7 @@ const frontendOrigin = externalWeb
   : requiredLoopbackOrigin('OMNIS_TEST_FRONTEND_ORIGIN');
 const frontendPort = Number(new URL(frontendOrigin).port);
 if (!Number.isInteger(frontendPort) || frontendPort < 1 || frontendPort > 65_535) {
-  throw new Error('OMNIS_TEST_FRONTEND_ORIGIN must include a valid loopback port.');
+  throw new Error('OMNIS_TEST_FRONTEND_ORIGIN must include a valid explicit port.');
 }
 
 export default defineConfig({
