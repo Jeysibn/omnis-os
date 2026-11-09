@@ -35,11 +35,19 @@ export function VitalsPanel({
   useLayoutEffect(() => {
     const panel = root.current;
     // Mount: take over focus from the instance this one replaces. Same commit, so the user cannot
-    // have moved focus in between; preventScroll avoids a jump when the panel moved on screen.
+    // have moved focus in between.
     const id = focusHandoff.current;
     focusHandoff.current = null;
-    if (id)
-      panel?.querySelector<HTMLElement>(`[data-vital="${id}"]`)?.focus({ preventScroll: true });
+    const restored = id ? panel?.querySelector<HTMLElement>(`[data-vital="${id}"]`) : null;
+    if (restored) {
+      // The panel has moved on screen, so keeping focus is not enough: the control and its focus
+      // ring must also be visible. Focus without the browser's own (centring) scroll, then scroll
+      // only if the control is outside the viewport, and only to the nearest edge. This is a no-op
+      // when it is already visible, and instant (never animated) so reduced-motion users are safe.
+      // .ccx-vital-button's scroll-margin keeps the focus ring clear of the edge.
+      restored.focus({ preventScroll: true });
+      restored.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
+    }
     return () => {
       // Unmount: React runs this before the DOM is removed, so the focused control is still
       // attached and still the active element. Record it only if focus really is inside Vitals.

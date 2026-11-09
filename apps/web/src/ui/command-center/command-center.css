@@ -298,6 +298,8 @@ body:has(.app-shell[data-view='command-center']) {
   margin: 0;
 }
 .ccx-vital-button {
+  /* Room for the 2px focus ring + 2px offset when focus is restored by scrolling to the nearest edge. */
+  scroll-margin: 12px;
   display: inline-flex;
   align-items: center;
   gap: var(--nx-space-2);

@@ -238,9 +238,11 @@ test.describe('crossing the breakpoint', () => {
 });
 
 /**
- * Focus must survive the layout swap. The vitals panel is rendered at a different position in the
- * document on either side of 1200px, so React unmounts and remounts it; a naive implementation
- * drops focus to <body>. Everything below uses real keyboard focus and document.activeElement.
+ * Focus must survive the layout swap AND stay perceivable. The vitals panel is rendered at a
+ * different place in the document on either side of 1200px, so React unmounts and remounts it.
+ * Keeping the focused element is not enough: the panel also moves on screen, so the restored
+ * control must be inside the viewport with its focus ring visible. Everything below uses real
+ * keyboard focus, document.activeElement and bounding-rectangle measurements.
  */
 type Active = {
   label: string;
@@ -248,8 +250,18 @@ type Active = {
   tag: string;
   scrollY: number;
   outline: { style: string; width: number };
-  inViewportX: boolean;
+  top: number;
+  bottom: number;
+  left: number;
+  right: number;
+  vw: number;
+  vh: number;
+  /** Something other than the control (a sticky header, an overlay) paints over its centre. */
+  obscured: boolean;
 };
+
+/** Focus ring is a 2px outline offset by 2px; keep that much clear of every viewport edge. */
+const RING = 4;
 
 const active = (page: Page): Promise<Active> =>
   page.evaluate(() => {
@@ -265,25 +277,57 @@ const active = (page: Page): Promise<Active> =>
           : el.closest('header, nav')
             ? 'Shell'
             : 'none';
+    const hit = document.elementFromPoint(
+      Math.min(Math.max(rect.left + rect.width / 2, 0), window.innerWidth - 1),
+      Math.min(Math.max(rect.top + rect.height / 2, 0), window.innerHeight - 1),
+    );
     return {
       label: (el.getAttribute('aria-label') ?? el.innerText ?? '').replace(/\s+/g, ' ').trim(),
       panel,
       tag: el.tagName,
       scrollY: window.scrollY,
       outline: { style: style.outlineStyle, width: parseFloat(style.outlineWidth) },
-      inViewportX: rect.left >= 0 && rect.right <= window.innerWidth,
+      top: rect.top,
+      bottom: rect.bottom,
+      left: rect.left,
+      right: rect.right,
+      vw: window.innerWidth,
+      vh: window.innerHeight,
+      obscured: !(hit && (hit === el || el.contains(hit))),
     };
   });
+
+/** The control and its focus ring are fully inside the viewport and not painted over. */
+function expectPerceivable(a: Active, where: string) {
+  expect(a.tag, `${where}: focus must not be on <body>`).toBe('BUTTON');
+  expect(a.top, `${where}: top edge (ring clear of the viewport top)`).toBeGreaterThanOrEqual(RING);
+  expect(a.bottom, `${where}: bottom edge (ring clear of the viewport bottom)`).toBeLessThanOrEqual(
+    a.vh - RING,
+  );
+  expect(a.left, `${where}: left edge`).toBeGreaterThanOrEqual(RING);
+  expect(a.right, `${where}: right edge`).toBeLessThanOrEqual(a.vw - RING);
+  expect(a.obscured, `${where}: nothing may paint over the focused control`).toBe(false);
+  expect(a.outline.style, `${where}: focus outline`).not.toBe('none');
+  expect(a.outline.width).toBeGreaterThanOrEqual(2);
+}
 
 const vitalsPanels = (page: Page) => page.locator('section[aria-label="System vitals"]');
 const orderOf = (page: Page) =>
   page.locator('.ccx-root').getByRole('heading', { level: 2 }).allTextContents();
+const running = (page: Page) => page.getByRole('button', { name: /^Running: / });
 
-async function resizeTo(page: Page, width: number) {
-  await page.setViewportSize({ width, height: 900 });
+async function resizeTo(page: Page, width: number, height = 900) {
+  await page.setViewportSize({ width, height });
   await expect
     .poll(() => orderOf(page), { message: `layout at ${width}px` })
     .toEqual(width >= 1200 ? WIDE : NARROW);
+}
+
+/** Put the control in view the way a keyboard user would arrive at it, then focus it. */
+async function focusInView(page: Page, name: RegExp) {
+  const button = page.getByRole('button', { name });
+  await button.scrollIntoViewIfNeeded();
+  await button.focus();
 }
 
 test.describe('focus inside Vitals across the breakpoint', () => {
@@ -291,62 +335,102 @@ test.describe('focus inside Vitals across the breakpoint', () => {
     mockApi(page, { tasks, runs: mixedRuns });
   });
 
-  test('desktop to narrow (1440 to 1199): focus stays on the same Vitals control and Tab continues', async ({
+  test('desktop to narrow (1440x900 to 1199x900): same control, brought into view with the ring visible', async ({
     page,
   }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await open(page);
-    await page.getByRole('button', { name: /^Running: / }).focus();
-    expect((await active(page)).label).toMatch(/^Running: /);
+    await running(page).focus();
+    const before = await active(page);
+    expectPerceivable(before, '1440 before');
 
     await resizeTo(page, 1199);
     const after = await active(page);
-    expect(after.tag, 'focus must not fall to <body>').toBe('BUTTON');
+    if (process.env.NEXUS_PRINT_ORDER)
+      console.log(
+        `BOUNDS 1440->1199 top=${Math.round(after.top)} bottom=${Math.round(after.bottom)} vh=${after.vh} scrollY=${Math.round(after.scrollY)}`,
+      );
     expect(after.panel).toBe('System vitals');
     expect(after.label).toMatch(/^Running: /); // the same logical control
-    expect(after.outline.style).not.toBe('none');
-    expect(after.outline.width).toBeGreaterThanOrEqual(2);
-    expect(after.scrollY, 'restoring focus must not scroll the page').toBe(0);
+    expectPerceivable(after, '1199 after');
+    // Minimal scrolling: the control lands at the nearest edge (bottom), not centred or at the top.
+    expect(after.bottom).toBeGreaterThan(after.vh - 60);
+    expect(after.scrollY).toBeGreaterThan(0);
     await expect(vitalsPanels(page)).toHaveCount(1);
 
-    // Natural order continues from there: next is Queued, and Shift+Tab goes back to Running.
+    // Natural order continues from there, and every control we land on stays on screen.
     await page.keyboard.press('Tab');
-    expect((await active(page)).label).toMatch(/^Queued: /);
+    const queued = await active(page);
+    expect(queued.label).toMatch(/^Queued: /);
+    expectPerceivable(queued, 'Tab to Queued');
     await page.keyboard.press('Shift+Tab');
     expect((await active(page)).label).toMatch(/^Running: /);
-    // In the narrow order the control before Vitals is the last Attention control, not the stage.
     await page.keyboard.press('Shift+Tab');
-    const before = await active(page);
-    expect(before.panel).toBe('Requires attention');
-    expect(before.label).toMatch(/^Outcome unknown Lost acknowledgement/);
+    const previous = await active(page);
+    expect(previous.panel).toBe('Requires attention');
+    expect(previous.label).toMatch(/^Outcome unknown Lost acknowledgement/);
+    expectPerceivable(previous, 'Shift+Tab to the last Attention control');
   });
 
-  test('narrow to desktop (390 to 1200): focus stays on the same Vitals control and Tab continues', async ({
+  test('narrow to desktop (390x844 to 1200x844): same control, brought into view with the ring visible', async ({
     page,
   }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await open(page);
-    await page.getByRole('button', { name: /^Open tasks: / }).focus();
-    expect((await active(page)).label).toMatch(/^Open tasks: /);
+    await focusInView(page, /^Running: /); // the user has scrolled down to the vitals
+    const before = await active(page);
+    expectPerceivable(before, '390 before');
+    expect(before.scrollY, 'the user is scrolled far down the narrow page').toBeGreaterThan(1000);
 
-    await resizeTo(page, 1200);
+    await resizeTo(page, 1200, 844);
     const after = await active(page);
-    expect(after.tag, 'focus must not fall to <body>').toBe('BUTTON');
+    if (process.env.NEXUS_PRINT_ORDER)
+      console.log(
+        `BOUNDS 390->1200 top=${Math.round(after.top)} bottom=${Math.round(after.bottom)} vh=${after.vh} scrollY=${Math.round(after.scrollY)}`,
+      );
     expect(after.panel).toBe('System vitals');
-    expect(after.label).toMatch(/^Open tasks: /);
-    expect(after.outline.style).not.toBe('none');
-    expect(after.outline.width).toBeGreaterThanOrEqual(2);
-    expect(after.inViewportX).toBe(true);
+    expect(after.label).toMatch(/^Running: /);
+    expectPerceivable(after, '1200 after');
+    // Minimal scrolling: aligned to the nearest (top) edge rather than centred.
+    expect(after.top).toBeLessThan(80);
     await expect(vitalsPanels(page)).toHaveCount(1);
 
     await page.keyboard.press('Tab');
-    expect((await active(page)).label).toMatch(/^Failed or interrupted: /);
+    const queued = await active(page);
+    expect(queued.label).toMatch(/^Queued: /);
+    expectPerceivable(queued, 'Tab to Queued');
     await page.keyboard.press('Shift+Tab');
-    await page.keyboard.press('Shift+Tab');
-    expect((await active(page)).label).toMatch(/^Queued: /);
+    await page.keyboard.press('Shift+Tab'); // wide order: nothing precedes Vitals inside the page
+    expect((await active(page)).panel).not.toBe('System vitals');
   });
 
-  test('crossing the breakpoint repeatedly keeps focus on the same control, one panel, no drift', async ({
+  test('a control that is already visible after the swap does not cause any scrolling', async ({
+    page,
+  }) => {
+    // Tall viewport: both layouts fit, so nothing needs revealing.
+    await page.setViewportSize({ width: 1440, height: 3000 });
+    await open(page);
+    await running(page).focus();
+    for (const width of [1199, 1200, 1100, 1300]) {
+      await resizeTo(page, width, 3000);
+      const now = await active(page);
+      expectPerceivable(now, `${width} tall`);
+      expect(now.scrollY, `no scroll at ${width}px`).toBe(0);
+    }
+    // Scrolled a little, with the control still on screen on the other side of the swap.
+    await page.setViewportSize({ width: 1100, height: 1400 });
+    await expect.poll(() => orderOf(page)).toEqual(NARROW);
+    await running(page).focus();
+    await page.evaluate(() => window.scrollTo(0, 50));
+    const start = (await active(page)).scrollY;
+    expect(start).toBe(50);
+    await resizeTo(page, 1200, 1400);
+    const now = await active(page);
+    expectPerceivable(now, '1100 to 1200 scrolled 50');
+    expect(now.scrollY, 'already visible, so the page must not move').toBe(50);
+  });
+
+  test('crossing the breakpoint repeatedly keeps the same control, one panel, and always on screen', async ({
     page,
   }) => {
     await page.setViewportSize({ width: 1280, height: 900 });
@@ -357,14 +441,17 @@ test.describe('focus inside Vitals across the breakpoint', () => {
       const now = await active(page);
       expect(now.label, `focus at ${width}px`).toMatch(/^Failed or interrupted: /);
       expect(now.panel).toBe('System vitals');
+      expectPerceivable(now, `${width}px`);
       await expect(vitalsPanels(page)).toHaveCount(1);
       await expect(page.getByRole('button', { name: /^Failed or interrupted: / })).toHaveCount(1);
     }
-    // Rapid back-to-back changes with no waiting in between settle on the final layout, focused.
+    // Rapid back-to-back changes with no waiting in between settle on the final layout, in view.
     for (const width of [1199, 1200, 1199, 1200, 1199, 1200])
       await page.setViewportSize({ width, height: 900 });
     await expect.poll(() => orderOf(page)).toEqual(WIDE);
-    expect((await active(page)).label).toMatch(/^Failed or interrupted: /);
+    const settled = await active(page);
+    expect(settled.label).toMatch(/^Failed or interrupted: /);
+    expectPerceivable(settled, 'after rapid resizes');
   });
 
   test('focus elsewhere is never stolen by the swap', async ({ page }) => {
@@ -378,6 +465,8 @@ test.describe('focus inside Vitals across the breakpoint', () => {
       },
       { target: page.getByRole('link', { name: 'Runs' }), panel: 'Shell' },
     ];
+    // Scroll position is deliberately not asserted here: Chromium's own scroll anchoring may move
+    // the page when the layout reflows; what must hold is that focus identity is untouched.
     for (const { target, panel } of checks) {
       await target.focus();
       const label = (await active(page)).label;
@@ -394,6 +483,18 @@ test.describe('focus inside Vitals across the breakpoint', () => {
     expect((await active(page)).tag).toBe('BODY');
   });
 
+  test('the application header is not sticky or fixed, so it cannot cover a restored control', async ({
+    page,
+  }) => {
+    // If this ever changes, restored controls need scroll-margin for the header height: revisit
+    // VitalsPanel's scrolling and .ccx-vital-button's scroll-margin before relaxing this test.
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await open(page);
+    expect(
+      await page.evaluate(() => getComputedStyle(document.querySelector('header')!).position),
+    ).not.toMatch(/sticky|fixed/);
+  });
+
   test('leaving the Command Center does not leave a stale focus restoration behind', async ({
     page,
   }) => {
@@ -402,14 +503,14 @@ test.describe('focus inside Vitals across the breakpoint', () => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await open(page);
     await page.getByRole('button', { name: /^Queued: / }).focus();
-    await page.getByRole('link', { name: 'Tasks' }).click(); // unmounts the Command Center with focus in Vitals
+    await page.getByRole('link', { name: 'Tasks' }).click(); // unmounts with focus in Vitals
     await expect(page.getByRole('heading', { level: 1, name: 'Tasks' })).toBeVisible();
     await page.setViewportSize({ width: 1199, height: 900 });
     await page.getByRole('link', { name: 'Command Center' }).click();
     await expect(page.getByRole('heading', { level: 1, name: 'Command Center' })).toBeVisible();
-    expect((await active(page)).panel, 'a returning visit must not restore old focus').not.toBe(
-      'System vitals',
-    );
+    const back = await active(page);
+    expect(back.panel, 'a returning visit must not restore old focus').not.toBe('System vitals');
+    expect(back.scrollY, 'and must not scroll to a control it never focused').toBe(0);
     await resizeTo(page, 1440);
     expect((await active(page)).panel).not.toBe('System vitals');
     expect(errors).toEqual([]);
