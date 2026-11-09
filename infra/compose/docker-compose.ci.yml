@@ -1,0 +1,117 @@
+services:
+  postgres:
+    ports: !reset []
+    user: '${OMNIS_CI_POSTGRES_UID:-70}:${OMNIS_CI_POSTGRES_GID:-70}'
+    environment:
+      POSTGRES_INITDB_ARGS: --auth-local=scram-sha-256 --auth-host=scram-sha-256
+    command:
+      [
+        'postgres',
+        '-c',
+        'unix_socket_directories=/var/run/postgresql,/run/omnis-postgres-socket',
+        '-c',
+        'unix_socket_permissions=0770',
+      ]
+    group_add:
+      - '${OMNIS_CI_POSTGRES_SOCKET_GID:?CI Postgres socket group is required}'
+    volumes:
+      - type: bind
+        source: ${OMNIS_CI_POSTGRES_SOCKET_DIRECTORY:?CI Postgres socket directory is required}
+        target: /run/omnis-postgres-socket
+        bind:
+          create_host_path: false
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'pg_isready',
+          '-h',
+          '/run/omnis-postgres-socket',
+          '-U',
+          'omnis',
+          '-d',
+          '${OMNIS_DB_NAME:-omnis}',
+        ]
+
+  api:
+    image: omnis-api:ci
+    volumes:
+      - type: bind
+        source: ${OMNIS_CI_AUTHORIZER_SOCKET_DIRECTORY:?CI authorizer fixture directory is required}
+        target: /run/omnis-authorizer
+        read_only: true
+        bind:
+          create_host_path: false
+
+  worker:
+    image: omnis-worker:ci
+    volumes:
+      - type: bind
+        source: ${OMNIS_CI_LAUNCHER_SOCKET_DIRECTORY:?CI launcher fixture directory is required}
+        target: /run/omnis-sandbox
+        read_only: true
+        bind:
+          create_host_path: false
+
+  web:
+    image: omnis-web:ci
+    networks:
+      - edge
+      - browser_web
+
+  browser:
+    image: mcr.microsoft.com/playwright@sha256:ee15712262f017b8157421b212b12099146645f44b1bc5c0514cbbe6a229b1d0
+    user: '${OMNIS_CI_BROWSER_UID:?CI browser UID is required}:${OMNIS_CI_BROWSER_GID:?CI browser GID is required}'
+    working_dir: /workspace
+    entrypoint: ['node']
+    command: ['-e', 'setInterval(() => {}, 60_000)']
+    env_file:
+      - '${OMNIS_CI_BROWSER_ENV_FILE:?CI browser environment file is required}'
+    environment:
+      HOME: /tmp
+      CI: 'true'
+      OMNIS_TEST_EXTERNAL_WEB: '1'
+    volumes:
+      - type: bind
+        source: ${OMNIS_CI_BROWSER_WORKSPACE:?CI browser workspace is required}
+        target: /workspace
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${OMNIS_CI_BROWSER_RESULTS_DIRECTORY:?CI browser results directory is required}
+        target: /results
+        bind:
+          create_host_path: false
+    networks:
+      - browser_web
+    depends_on:
+      web:
+        condition: service_healthy
+    restart: 'no'
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
+    shm_size: 256m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 256
+    mem_limit: 2g
+    cpus: 2.0
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://web:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 3s
+
+networks:
+  browser_web:
+    internal: true

@@ -41,6 +41,7 @@ import {
 } from '@omnis/contracts';
 import { ApiRequestError, request } from './api.js';
 import { formatDate } from './manilaTime.js';
+import { CommandCenter } from './command-center/CommandCenter.js';
 import {
   createRunStreamBudget,
   createRunStreamRecovery,
@@ -1165,7 +1166,7 @@ function App() {
     );
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" data-view={page}>
       <a className="skip-link" href="#main-content" onClick={skipToMain}>
         Skip to main content
       </a>
@@ -1214,6 +1215,7 @@ function App() {
               navigate('tasks', setPage);
               window.setTimeout(() => document.getElementById('task-title')?.focus(), 0);
             }}
+            onReviewApproval={(task, trigger) => openApproval(task, trigger)}
           />
         )}
         {page === 'tasks' && (
@@ -1466,167 +1468,6 @@ function ResourceFailure({
       <button className="secondary-button" onClick={onRetry}>
         Retry {resource.toLowerCase()}
       </button>
-    </div>
-  );
-}
-
-function CommandCenter({
-  tasks,
-  runs,
-  tasksLoading,
-  runsLoading,
-  tasksError,
-  runsError,
-  busy,
-  onRetryTasks,
-  onRetryRuns,
-  onNavigate,
-  onSelectRun,
-  onStop,
-  onCreate,
-}: {
-  tasks: Task[];
-  runs: Run[];
-  tasksLoading: boolean;
-  runsLoading: boolean;
-  tasksError: string;
-  runsError: string;
-  busy: boolean;
-  onRetryTasks: () => void;
-  onRetryRuns: () => void;
-  onNavigate: (page: Page) => void;
-  onSelectRun: (run: Run) => void;
-  onStop: (run: Run) => void;
-  onCreate: () => void;
-}) {
-  const recentTasks = [...tasks].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 4);
-  const recentRuns = [...runs].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 5);
-  const activeRun = runs.find((run) => isActive(run.status));
-  const openTaskCount = tasks.filter((task) => task.status === 'open').length;
-  return (
-    <div className="dashboard-grid">
-      <section className="panel operational-summary" aria-label="Operational summary">
-        <div className="summary-run">
-          <span className="eyebrow">CURRENT ACTIVITY</span>
-          {activeRun ? (
-            <>
-              <button className="summary-run-link" onClick={() => onSelectRun(activeRun)}>
-                <StatusPill status={activeRun.status} />
-                <strong>{activeRun.taskTitle}</strong>
-                <ArrowRight size={15} />
-              </button>
-              <button
-                className="stop-button"
-                onClick={() => onStop(activeRun)}
-                disabled={busy || activeRun.status === 'stopping'}
-              >
-                <CircleStop size={15} />
-                {activeRun.status === 'stopping' ? 'Stop requested' : 'Request stop'}
-              </button>
-            </>
-          ) : runsLoading ? (
-            <p role="status">Checking current runs…</p>
-          ) : runsError ? (
-            <ResourceFailure resource="Runs" message={runsError} onRetry={onRetryRuns} />
-          ) : (
-            <p>No active run</p>
-          )}
-        </div>
-        <div className="summary-task">
-          <span className="eyebrow">OPEN TASKS</span>
-          {tasksLoading ? (
-            <p role="status">Checking tasks…</p>
-          ) : tasksError ? (
-            <ResourceFailure resource="Tasks" message={tasksError} onRetry={onRetryTasks} />
-          ) : (
-            <strong>{openTaskCount}</strong>
-          )}
-          <button className="primary-button" onClick={onCreate}>
-            <Plus size={16} /> New task
-          </button>
-        </div>
-      </section>
-      <section className="panel dashboard-section">
-        <div className="section-heading">
-          <div>
-            <h2>Recent tasks</h2>
-            <p>Latest records in this workspace</p>
-          </div>
-          <button className="text-button" onClick={() => onNavigate('tasks')}>
-            All tasks <ArrowRight size={14} />
-          </button>
-        </div>
-        {tasksLoading ? (
-          <ResourceLoading resource="tasks" />
-        ) : tasksError ? (
-          <ResourceFailure resource="Tasks" message={tasksError} onRetry={onRetryTasks} />
-        ) : recentTasks.length ? (
-          <ul className="compact-list">
-            {recentTasks.map((task) => (
-              <li key={task.id}>
-                <div>
-                  <strong>{task.title}</strong>
-                  <span>{formatDate(task.createdAt)}</span>
-                </div>
-                <StatusPill status={task.status} />
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <EmptyState
-            icon={<FilePlus2 size={18} />}
-            title="No tasks yet"
-            detail="Create a task to start a mock workflow."
-            action={
-              <button className="text-button" onClick={onCreate}>
-                Create a task <ArrowRight size={14} />
-              </button>
-            }
-          />
-        )}
-      </section>
-      <section className="panel dashboard-section">
-        <div className="section-heading">
-          <div>
-            <h2>Recent runs</h2>
-            <p>Current and persisted run history</p>
-          </div>
-          <button className="text-button" onClick={() => onNavigate('runs')}>
-            All runs <ArrowRight size={14} />
-          </button>
-        </div>
-        {runsLoading ? (
-          <ResourceLoading resource="runs" />
-        ) : runsError ? (
-          <ResourceFailure resource="Runs" message={runsError} onRetry={onRetryRuns} />
-        ) : recentRuns.length ? (
-          <ul className="compact-list">
-            {recentRuns.map((run) => (
-              <li key={run.id}>
-                <button className="run-link" onClick={() => onSelectRun(run)}>
-                  <span className="run-link-copy">
-                    <strong>{run.taskTitle}</strong>
-                    <span>{formatDate(run.createdAt)}</span>
-                  </span>
-                  <StatusPill status={run.status} />
-                  <ArrowRight size={15} />
-                </button>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <EmptyState
-            icon={<Activity size={18} />}
-            title="No runs yet"
-            detail="Runs will appear after an owner approves a mock execution."
-            action={
-              <button className="text-button" onClick={() => onNavigate('tasks')}>
-                Review tasks <ArrowRight size={14} />
-              </button>
-            }
-          />
-        )}
-      </section>
     </div>
   );
 }

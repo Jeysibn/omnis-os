@@ -1,0 +1,345 @@
+/*
+ * OMNIS NEXUS V2, Stage 1: Command Center layout. Colour, type, spacing, controls and status
+ * indicators come from the NEXUS design system (../design/design.css); these rules only arrange
+ * them. Everything is scoped to `.ccx-*` or to the Command Center route (`data-view`), so no other
+ * screen changes. Nothing here animates; the design system disables motion for
+ * prefers-reduced-motion in any case.
+ */
+
+/* Route environment: the page around the surface becomes the near-black NEXUS environment. */
+.app-shell[data-view='command-center'] {
+  background: var(--nx-surface-page);
+  color: var(--nx-text);
+}
+body:has(.app-shell[data-view='command-center']) {
+  background: #060c0e;
+}
+.app-shell[data-view='command-center'] .page-heading h1 {
+  color: var(--nx-text);
+  font-family: var(--nx-font-display);
+}
+.app-shell[data-view='command-center'] .page-heading p,
+.app-shell[data-view='command-center'] .page-foot {
+  color: var(--nx-text-muted);
+}
+.app-shell[data-view='command-center'] .page-foot svg {
+  color: var(--nx-text-quiet);
+}
+.app-shell[data-view='command-center'] .local-status {
+  color: var(--nx-text-muted);
+  border-color: var(--nx-border-control);
+  background: var(--nx-surface-panel);
+}
+.app-shell[data-view='command-center'] .status-divider {
+  background: var(--nx-border-control);
+}
+/* The V2 composition targets 1920px: let this route use the width instead of the shared 1320px cap.
+   Other routes keep the shared width. */
+.app-shell[data-view='command-center'] .main-content {
+  width: min(1760px, calc(100% - 2 * clamp(18px, 4vw, 72px)));
+}
+.app-shell[data-view='command-center'] .main-content:focus-visible {
+  outline-color: var(--nx-focus);
+}
+
+/* The theme wrapper must not impose its own page height or background inside the shell. */
+.nx-theme:has(> .ccx-root) {
+  min-height: 0;
+  background: transparent;
+}
+.ccx-root {
+  display: grid;
+  gap: var(--nx-space-4);
+  min-width: 0;
+}
+.ccx-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Environment and connection strip */
+.ccx-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--nx-space-2) var(--nx-space-5);
+  padding: var(--nx-space-3) var(--nx-space-4);
+  border: 1px solid var(--nx-border);
+  border-radius: var(--nx-radius);
+  background: var(--nx-surface-panel);
+}
+.ccx-strip li {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--nx-space-2);
+}
+.ccx-strip li[data-problem='true'] {
+  color: var(--nx-status-danger);
+}
+.ccx-strip-clock {
+  margin-inline-start: auto;
+}
+.ccx-clock {
+  font-family: var(--nx-font-mono);
+  white-space: nowrap;
+}
+.ccx-clock abbr {
+  text-decoration: none;
+  color: var(--nx-text-muted);
+}
+.ccx-notices {
+  display: grid;
+  gap: var(--nx-space-3);
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+}
+
+/* Layout. The grid areas decide where each panel is drawn; they never change reading or focus order.
+   CommandCenter.tsx places the single vitals panel in the document to match, so the DOM order is
+   always the visual order:
+     wide (>= 1200px)  vitals | stage | attention
+     tablet            stage, then attention | vitals
+     mobile            stage, attention, vitals
+   The width must match WIDE_LAYOUT_QUERY in CommandCenter.tsx. */
+.ccx-grid {
+  display: grid;
+  gap: var(--nx-space-4);
+  align-items: start;
+  grid-template-columns: minmax(220px, 260px) minmax(0, 1fr) minmax(280px, 340px);
+  grid-template-areas: 'vitals stage attention';
+}
+.ccx-stage {
+  grid-area: stage;
+  align-self: stretch;
+}
+.ccx-attention {
+  grid-area: attention;
+}
+.ccx-vitals {
+  grid-area: vitals;
+}
+@media not all and (min-width: 1200px) {
+  .ccx-grid {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-areas:
+      'stage stage'
+      'attention vitals';
+  }
+}
+@media (max-width: 719px) {
+  .ccx-grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: 'stage' 'attention' 'vitals';
+  }
+}
+.ccx-vitals,
+.ccx-attention {
+  display: grid;
+  gap: var(--nx-space-4);
+  min-width: 0;
+}
+
+/* Stage: the system state readout and command deck (the reactor slot of a later stage). It fills
+   the row so the side columns never leave an unexplained gap. */
+.ccx-stage {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nx-space-4);
+  min-width: 0;
+}
+.ccx-state {
+  flex: 1 1 auto;
+  align-content: center;
+  min-height: 280px;
+  display: grid;
+  justify-items: center;
+  gap: var(--nx-space-3);
+  padding: var(--nx-space-6) var(--nx-space-4);
+  text-align: center;
+  border: 1px solid var(--nx-border);
+  border-radius: var(--nx-radius);
+  background:
+    radial-gradient(ellipse at 50% 0%, rgb(145 242 205 / 0.1), transparent 70%),
+    var(--nx-surface-panel);
+}
+.ccx-mark {
+  width: clamp(110px, 20vw, 200px);
+  height: auto;
+  color: var(--nx-status-ok);
+}
+.ccx-state[data-state='loading'] .ccx-mark,
+.ccx-state[data-state='unavailable'] .ccx-mark,
+.ccx-state[data-state='unknown'] .ccx-mark,
+.ccx-state[data-state='cancelled'] .ccx-mark {
+  color: var(--nx-status-neutral);
+}
+.ccx-state[data-state='queued'] .ccx-mark {
+  color: var(--nx-status-info);
+}
+.ccx-state[data-state='interrupted'] .ccx-mark {
+  color: var(--nx-status-attention);
+}
+.ccx-state[data-state='failed'] .ccx-mark {
+  color: var(--nx-status-danger);
+}
+.ccx-state-label .nx-status {
+  padding: var(--nx-space-1) var(--nx-space-4);
+  font-size: 15px;
+}
+.ccx-state-detail {
+  max-width: 46ch;
+}
+.ccx-deck {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--nx-space-3);
+}
+
+/* Lists, rows and vitals */
+.ccx-block {
+  display: grid;
+  gap: var(--nx-space-2);
+  padding-top: var(--nx-space-3);
+  border-top: 1px solid var(--nx-border);
+}
+.ccx-block:first-of-type {
+  padding-top: 0;
+  border-top: 0;
+}
+.ccx-block h3 {
+  font-size: 14px;
+  font-weight: 600;
+}
+.ccx-count {
+  display: inline-block;
+  min-width: 22px;
+  padding: 0 var(--nx-space-2);
+  border: 1px solid var(--nx-border-control);
+  border-radius: 999px;
+  font-family: var(--nx-font-mono);
+  font-size: 12px;
+  text-align: center;
+}
+.ccx-list {
+  display: grid;
+  gap: var(--nx-space-1);
+}
+.ccx-list > li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--nx-space-2);
+  padding: var(--nx-space-2) 0;
+  border-top: 1px solid var(--nx-border);
+}
+.ccx-list > li:first-child {
+  border-top: 0;
+}
+.ccx-item-title {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+.ccx-row {
+  display: flex;
+  flex: 1 1 200px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--nx-space-2) var(--nx-space-3);
+  min-width: 0;
+  padding: var(--nx-space-1) 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.ccx-row:hover .ccx-item-title {
+  text-decoration: underline;
+}
+.ccx-row-stack {
+  display: grid;
+  gap: var(--nx-space-1);
+  align-items: start;
+  min-width: 0;
+}
+.ccx-row-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--nx-space-2);
+}
+.ccx-fine {
+  font-size: 12px;
+}
+.ccx-vital-list {
+  display: grid;
+  gap: var(--nx-space-1);
+}
+.ccx-vital {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--nx-space-3);
+  padding: var(--nx-space-2) 0;
+  border-top: 1px solid var(--nx-border);
+}
+.ccx-vital:first-child {
+  border-top: 0;
+}
+.ccx-vital dd {
+  margin: 0;
+}
+.ccx-vital-button {
+  /* Room for the 2px focus ring + 2px offset when focus is restored by scrolling to the nearest edge. */
+  scroll-margin: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--nx-space-2);
+  padding: var(--nx-space-1) var(--nx-space-2);
+  border: 1px solid transparent;
+  border-radius: var(--nx-radius-sm);
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+.ccx-vital-button:hover {
+  border-color: var(--nx-border-control);
+}
+.ccx-vital-value {
+  font-family: var(--nx-font-display);
+  font-size: 20px;
+  font-weight: 600;
+}
+.ccx-vital[data-state='loading'] .ccx-vital-value,
+.ccx-vital[data-state='error'] .ccx-vital-value {
+  font-size: 14px;
+  color: var(--nx-text-muted);
+}
+
+/* Recent records */
+.ccx-records {
+  display: grid;
+  align-items: start;
+  gap: var(--nx-space-4);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+@media (max-width: 719px) {
+  .ccx-records {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 719px) {
+  .ccx-strip-clock {
+    margin-inline-start: 0;
+  }
+}

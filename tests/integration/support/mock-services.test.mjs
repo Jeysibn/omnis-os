@@ -116,6 +116,40 @@ test('validates all restricted roles share the same loopback test database', () 
   assert.deepEqual(Object.keys(config.urls).sort(), Object.keys(goodUrls).sort());
 });
 
+test('allows a Unix socket only for the explicitly supplied disposable test directory', () => {
+  const socketDirectory = '/tmp/omnis-os-test/postgres-socket';
+  const socketUrls = Object.fromEntries(
+    Object.entries(goodUrls).map(([name, value]) => {
+      const url = new URL(value);
+      url.hostname = 'localhost';
+      url.searchParams.set('host', socketDirectory);
+      return [name, url.toString()];
+    }),
+  );
+  const config = validateTestDatabaseConfiguration(socketUrls, {
+    requireAdmin: true,
+    unixSocketDirectory: socketDirectory,
+  });
+  assert.equal(config.host, socketDirectory);
+  assert.equal(config.port, 5432);
+  assert.throws(
+    () => validateTestDatabaseConfiguration(socketUrls),
+    /loopback PostgreSQL endpoint/,
+  );
+
+  const wrongSocket = {
+    ...socketUrls,
+    OMNIS_TEST_DATABASE_URL: socketUrls.OMNIS_TEST_DATABASE_URL.replace(
+      encodeURIComponent(socketDirectory),
+      encodeURIComponent('/tmp/other/postgres-socket'),
+    ),
+  };
+  assert.throws(
+    () => validateTestDatabaseConfiguration(wrongSocket, { unixSocketDirectory: socketDirectory }),
+    /loopback PostgreSQL endpoint/,
+  );
+});
+
 test('rejects each configured service URL when it points at another database', () => {
   for (const name of Object.keys(goodUrls)) {
     const environment = {

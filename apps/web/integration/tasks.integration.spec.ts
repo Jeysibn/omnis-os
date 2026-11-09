@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { readFile, writeFile } from 'node:fs/promises';
 import { expect, test } from '@playwright/test';
 
 const ownerPassword = process.env.OMNIS_TEST_OWNER_PASSWORD;
@@ -7,6 +8,8 @@ const taskDetail = 'Verify that a synthetic task persists through the owner Task
 const syntheticProjectId = process.env.OMNIS_TEST_SYNTHETIC_PROJECT_ID;
 const lostAckRequestId = process.env.OMNIS_TEST_SYNTHETIC_LOST_ACK_REQUEST_ID;
 const cancellationRequestId = process.env.OMNIS_TEST_SYNTHETIC_CANCELLATION_REQUEST_ID;
+const composeJourneyResultPath = process.env.OMNIS_COMPOSE_JOURNEY_RESULT_PATH;
+const composeRecovery = process.env.OMNIS_COMPOSE_RECOVERY === '1';
 
 if (!frontendOrigin) throw new Error('The integration frontend Origin is not configured.');
 if (!ownerPassword) throw new Error('The disposable owner password is not configured.');
@@ -102,6 +105,216 @@ test('owner creates an unassigned task that persists after reload', async ({ pag
   expect(taskListRequests).toBeGreaterThan(taskListRequestsBeforeReload);
   expect(taskCreateRequests).toBe(1);
   expect(forbiddenMutationPaths).toEqual([]);
+});
+
+test('Compose owner creates an authorized mock Run through the web gateway', async ({ page }) => {
+  test.skip(
+    !composeJourneyResultPath || composeRecovery,
+    'Only runs in the disposable Compose smoke.',
+  );
+  test.setTimeout(120_000);
+  const taskTitle = `Compose browser mock journey ${randomUUID()}`;
+  await signIn(page);
+  const csrfDenial = await page.evaluate(async () => {
+    const response = await fetch('/api/v1/tasks', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json', 'x-omnis-csrf': 'invalid-compose-token' },
+      body: JSON.stringify({ title: 'Denied Compose mutation', detail: 'CSRF remains enforced.' }),
+    });
+    return response.status;
+  });
+  expect(csrfDenial).toBe(403);
+  await page
+    .getByRole('navigation', { name: 'Primary navigation' })
+    .getByRole('link', { name: 'Tasks', exact: true })
+    .click();
+  await page.getByLabel('Task title', { exact: true }).fill(taskTitle);
+  await page
+    .getByLabel('Task detail', { exact: true })
+    .fill('Disposable authorized mock execution.');
+  const taskResponsePromise = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return url.pathname === '/api/v1/tasks' && response.request().method() === 'POST';
+  });
+  await page.getByRole('button', { name: 'Create task', exact: true }).click();
+  const taskResponse = await taskResponsePromise;
+  expect(taskResponse.status()).toBe(201);
+  const task = await taskResponse.json();
+
+  const agent = await ownerRequest(page, '/api/v1/agents', {
+    method: 'POST',
+    idempotencyKey: randomUUID(),
+    body: {
+      name: 'Compose browser mock agent',
+      slug: `compose-${randomUUID().slice(0, 8)}`,
+      departmentId: null,
+    },
+  });
+  expect(agent.status).toBe(201);
+  const profile = {
+    profession: 'Synthetic integration assistant',
+    seniority: null,
+    specialties: ['CI validation'],
+    personality: { traits: ['careful'], tone: 'plain', principles: ['report only fixture data'] },
+    behavior: { autonomy: 'No external actions.', escalation: null },
+    instructions: 'Return the deterministic mock result.',
+  };
+  const draft = await ownerRequest(page, `/api/v1/agents/${agent.body.agentId}/draft-profile`, {
+    method: 'PUT',
+    idempotencyKey: randomUUID(),
+    body: { expectedDraftRevision: 0, baseVersionNo: null, profile },
+  });
+  expect(draft.status).toBe(200);
+  const published = await ownerRequest(page, `/api/v1/agents/${agent.body.agentId}/publish`, {
+    method: 'POST',
+    idempotencyKey: randomUUID(),
+    body: { expectedVersionNo: null, expectedDraftRevision: 1 },
+  });
+  expect(published.status).toBe(201);
+
+  await page.reload();
+  await expect(page.getByLabel('Agent profile')).toBeVisible();
+  await page.getByLabel('Agent profile').selectOption(agent.body.agentId);
+  await expect(page.getByLabel('Runtime')).toHaveValue('mock');
+  const browserCryptoContext = await page.evaluate(() => ({
+    origin: window.location.origin,
+    secureContext: window.isSecureContext,
+    randomUUIDAvailable: typeof globalThis.crypto?.randomUUID === 'function',
+  }));
+  expect(browserCryptoContext).toEqual({
+    origin: 'http://web:8080',
+    secureContext: true,
+    randomUUIDAvailable: true,
+  });
+  const assignmentResponsePromise = page
+    .waitForResponse(
+      (response) => {
+        const url = new URL(response.url());
+        return (
+          url.origin === new URL(frontendOrigin).origin &&
+          url.pathname === `/api/v1/tasks/${encodeURIComponent(task.id)}/execution-assignment` &&
+          response.request().method() === 'PUT'
+        );
+      },
+      { timeout: 10_000 },
+    )
+    .catch(() => null);
+  await page.getByRole('button', { name: 'Save assignment', exact: true }).click();
+  const assignmentResponse = await assignmentResponsePromise;
+  if (!assignmentResponse) {
+    const assignmentErrorVisible = (await page.getByRole('alert').count()) > 0;
+    throw new Error(
+      `Execution assignment request was not sent through the web gateway; UI error visible: ${assignmentErrorVisible}; secure context: ${browserCryptoContext.secureContext}; crypto.randomUUID available: ${browserCryptoContext.randomUUIDAvailable}`,
+    );
+  }
+  expect(assignmentResponse.status()).toBe(200);
+  await expect(page.getByText('Synthetic mock assignment saved.')).toBeVisible();
+
+  const authorization = await ownerRequest(page, '/api/v1/authorizations', {
+    method: 'POST',
+    idempotencyKey: randomUUID(),
+    body: { taskId: task.id },
+  });
+  expect(authorization.status).toBe(201);
+  expect(authorization.body.status).toBe('pending');
+  const approval = await ownerRequest(
+    page,
+    `/api/v1/authorizations/${authorization.body.id}/decision`,
+    {
+      method: 'POST',
+      body: { decision: 'approve' },
+    },
+  );
+  expect(approval.status).toBe(200);
+
+  const idempotencyKey = randomUUID();
+  const runRequest = { taskId: task.id, authorizationId: authorization.body.id };
+  const admitted = await ownerRequest(page, '/api/v1/runs', {
+    method: 'POST',
+    idempotencyKey,
+    body: runRequest,
+  });
+  expect(admitted.status).toBe(201);
+  const replay = await ownerRequest(page, '/api/v1/runs', {
+    method: 'POST',
+    idempotencyKey,
+    body: runRequest,
+  });
+  expect([200, 201]).toContain(replay.status);
+  expect(replay.body.id).toBe(admitted.body.id);
+
+  await expect
+    .poll(async () => (await ownerRequest(page, `/api/v1/runs/${admitted.body.id}`)).body.status, {
+      timeout: 45_000,
+    })
+    .toBe('completed');
+  const run = (await ownerRequest(page, `/api/v1/runs/${admitted.body.id}`)).body;
+  expect(run.runtimeKind).toBe('mock');
+  expect(run.synthetic).toBe(true);
+  const events = await readRunEvents(page, admitted.body.id);
+  expect(events.some((event) => event.type === 'run.completed')).toBe(true);
+  expect(events.every((event) => event.synthetic === true && event.source === 'mock')).toBe(true);
+  expect(events.map((event) => event.sequence)).toEqual(events.map((_, index) => index + 1));
+
+  await page.goto(`/#runs/${admitted.body.id}`);
+  await page.reload();
+  await expect(page.getByRole('region', { name: `Event history for ${taskTitle}` })).toContainText(
+    'completed',
+  );
+  const taskList = await ownerRequest(page, '/api/v1/tasks');
+  expect(taskList.status).toBe(200);
+  const persistedTask = taskList.body.find((item) => item.id === task.id);
+  expect(persistedTask).toMatchObject({
+    agentId: agent.body.agentId,
+    profileVersion: 1,
+    runtimeId: 'mock',
+  });
+  await writeFile(
+    composeJourneyResultPath,
+    JSON.stringify({
+      taskId: task.id,
+      taskTitle,
+      agentId: agent.body.agentId,
+      profileVersion: persistedTask.profileVersion,
+      runtimeId: persistedTask.runtimeId,
+      runId: admitted.body.id,
+      events: eventIdentities(events),
+    }),
+    { mode: 0o600 },
+  );
+});
+
+test('Compose recovery preserves the committed Task, Run and event identities', async ({
+  page,
+}) => {
+  test.skip(
+    !composeJourneyResultPath || !composeRecovery,
+    'Only runs during Compose restart checks.',
+  );
+  test.setTimeout(45_000);
+  const expected = JSON.parse(await readFile(composeJourneyResultPath!, 'utf8'));
+  await signIn(page);
+  const tasks = await ownerRequest(page, '/api/v1/tasks');
+  expect(tasks.status).toBe(200);
+  const persistedTask = tasks.body.find((task) => task.id === expected.taskId);
+  expect(persistedTask).toMatchObject({
+    agentId: expected.agentId,
+    profileVersion: expected.profileVersion,
+    runtimeId: expected.runtimeId,
+  });
+  const run = await ownerRequest(page, `/api/v1/runs/${expected.runId}`);
+  expect(run.status).toBe(200);
+  expect(run.body.status).toBe('completed');
+  expect(run.body.runtimeKind).toBe('mock');
+  expect(run.body.synthetic).toBe(true);
+  const events = await readRunEvents(page, expected.runId);
+  expect(eventIdentities(events)).toEqual(expected.events);
+  await page.goto(`/#runs/${expected.runId}`);
+  await page.reload();
+  await expect(
+    page.getByRole('region', { name: `Event history for ${expected.taskTitle}` }),
+  ).toContainText('completed');
 });
 
 test('owner sees an authorized synthetic broker Run, ordered events, result and usage provenance', async ({
@@ -685,4 +898,49 @@ async function ownerRequest(page, path, options = {}) {
       csrfToken,
     },
   );
+}
+
+async function readRunEvents(page, runId) {
+  return page.evaluate(async (id) => {
+    const controller = new AbortController();
+    const response = await fetch(`/api/v1/runs/${id}/events`, {
+      credentials: 'same-origin',
+      signal: controller.signal,
+    });
+    if (response.status !== 200 || !response.body) {
+      throw new Error(`Run event stream returned HTTP ${response.status}.`);
+    }
+    const reader = response.body.getReader();
+    const events = [];
+    let buffer = '';
+    const deadline = Date.now() + 10_000;
+    try {
+      while (Date.now() < deadline && !events.some((event) => event.type === 'run.completed')) {
+        const item = await Promise.race([
+          reader.read(),
+          new Promise((resolve) => setTimeout(() => resolve({ timeout: true }), 1_000)),
+        ]);
+        if ('timeout' in item || item.done) break;
+        buffer += new TextDecoder().decode(item.value, { stream: true });
+        const lines = buffer.split(/\r?\n/);
+        buffer = lines.pop() ?? '';
+        for (const line of lines) {
+          if (line.startsWith('data: ')) events.push(JSON.parse(line.slice(6)));
+        }
+      }
+    } finally {
+      controller.abort();
+      await reader.cancel().catch(() => undefined);
+    }
+    return events;
+  }, runId);
+}
+
+function eventIdentities(events) {
+  return events.map(({ sequence, type, synthetic, source }) => ({
+    sequence,
+    type,
+    synthetic,
+    source,
+  }));
 }

@@ -68,8 +68,12 @@ try {
     assert.equal(service.privileged ?? false, false);
     assert.ok(service.cap_drop?.includes('ALL'));
     assert.ok(service.security_opt?.includes('no-new-privileges:true'));
+    assert.equal(service.init, true);
+    assert.equal(service.restart, 'unless-stopped');
     assert.ok(service.pids_limit > 0);
     assert.ok(service.mem_limit);
+    assert.ok(service.cpus > 0);
+    assert.ok(service.healthcheck?.test?.length > 0);
   }
   assert.equal(api.user, '10001:10001');
   assert.equal(worker.user, '10001:10001');
