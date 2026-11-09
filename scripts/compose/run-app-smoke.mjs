@@ -458,8 +458,9 @@ try {
     maxBuffer: 4 * 1024 * 1024,
   });
   if (browser.error || browser.status !== 0) {
+    const browserOutput = `${browser.stdout ?? ''}\n${browser.stderr ?? ''}`.trim();
     throw new Error(
-      `Compose browser journey failed: ${redact(browser.stderr || browser.stdout || 'unknown error')}`,
+      `Compose browser journey failed: ${redact(browserOutput || browser.error?.message || 'unknown error')}`,
     );
   }
 
