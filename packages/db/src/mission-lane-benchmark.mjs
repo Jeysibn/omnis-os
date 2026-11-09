@@ -76,24 +76,66 @@ const authorizationStore = PostgresAuthorizationStore
   ? new PostgresAuthorizationStore(writerPool, authorizerPool)
   : undefined;
 const mutationQueryTimings = [];
+const readQueryTimings = [];
+const poolCheckoutTimings = [];
+const instrumentedClients = new WeakSet();
 let collectMutationTimings = false;
-const originalPoolQuery = writerPool.query.bind(writerPool);
-writerPool.query = (...args) => {
-  const sql = typeof args[0] === 'string' ? args[0] : (args[0]?.text ?? '');
-  const isMutation =
-    collectMutationTimings && /SELECT\s+omnis\.(create_task|set_task_project)\(/i.test(sql);
-  if (!isMutation) return originalPoolQuery(...args);
+const originalPoolConnect = writerPool.connect.bind(writerPool);
+const instrumentClient = (client) => {
+  if (instrumentedClients.has(client)) return;
+  instrumentedClients.add(client);
+  const originalClientQuery = client.query.bind(client);
+  client.query = (...args) => {
+    const sql = typeof args[0] === 'string' ? args[0] : (args[0]?.text ?? '');
+    const isMutation =
+      collectMutationTimings && /SELECT\s+omnis\.(create_task|set_task_project)\(/i.test(sql);
+    const isRead = collectMutationTimings && /SELECT\s+.*FROM\s+omnis\.tasks\b/i.test(sql);
+    if (!isMutation && !isRead) return originalClientQuery(...args);
+    const started = process.hrtime.bigint();
+    const callbackIndex = args.findIndex((argument) => typeof argument === 'function');
+    const record = () => {
+      const elapsed = Number(process.hrtime.bigint() - started) / 1e6;
+      if (isMutation) mutationQueryTimings.push(elapsed);
+      if (isRead) readQueryTimings.push(elapsed);
+    };
+    if (callbackIndex >= 0) {
+      const wrappedArgs = [...args];
+      const callback = wrappedArgs[callbackIndex];
+      wrappedArgs[callbackIndex] = (...callbackArgs) => {
+        record();
+        callback(...callbackArgs);
+      };
+      return originalClientQuery(...wrappedArgs);
+    }
+    return originalClientQuery(...args).then(
+      (result) => {
+        record();
+        return result;
+      },
+      (error) => {
+        record();
+        throw error;
+      },
+    );
+  };
+};
+writerPool.connect = (...args) => {
   const started = process.hrtime.bigint();
-  return originalPoolQuery(...args).then(
-    (result) => {
-      mutationQueryTimings.push(Number(process.hrtime.bigint() - started) / 1e6);
-      return result;
-    },
-    (error) => {
-      mutationQueryTimings.push(Number(process.hrtime.bigint() - started) / 1e6);
-      throw error;
-    },
-  );
+  const callback = args[0];
+  if (typeof callback === 'function') {
+    return originalPoolConnect((error, client) => {
+      if (!error && client) instrumentClient(client);
+      if (collectMutationTimings)
+        poolCheckoutTimings.push(Number(process.hrtime.bigint() - started) / 1e6);
+      callback(error, client);
+    });
+  }
+  return originalPoolConnect(...args).then((client) => {
+    if (collectMutationTimings)
+      poolCheckoutTimings.push(Number(process.hrtime.bigint() - started) / 1e6);
+    instrumentClient(client);
+    return client;
+  });
 };
 const projectA = 'prj_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const projectB = 'prj_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
@@ -114,7 +156,7 @@ const sourceDirty = execFileSync('git', ['-C', repoRoot, 'status', '--porcelain'
 const expectedSourceSha = {
   baseline: 'be9e734f134e5a9442bc1eaed989473efd1ac7a6',
   unbounded: '8e8d6a57c330e4d35b804ad2abc8cc789933c594',
-  candidate: '8e8d6a57c330e4d35b804ad2abc8cc789933c594',
+  candidate: process.env.OMNIS_BENCHMARK_EXPECTED_SOURCE_SHA,
 }[version];
 const expectedMigration = {
   baseline: '0028_synthetic_broker_fencing',
@@ -170,12 +212,12 @@ try {
   assert.equal(
     sourceSha,
     expectedSourceSha,
-    'Source tree must match the expected comparison revision.',
+    'Set OMNIS_BENCHMARK_EXPECTED_SOURCE_SHA to the exact candidate source revision.',
   );
   assert.equal(
     sourceDirty,
-    version === 'candidate',
-    'Only the in-progress admission candidate may contain uncommitted source changes.',
+    false,
+    'Benchmark source tree must be clean for every comparison revision.',
   );
   const migrations = await adminPool.query(
     'SELECT max(id) AS latest, count(*)::integer AS count FROM omnis.schema_migrations',
@@ -212,7 +254,13 @@ try {
   if (samplesPath) {
     await writeFile(
       samplesPath,
-      `${JSON.stringify({ requestMs: timings, mutationQueryMs: mutationQueryTimings })}\n`,
+      `${JSON.stringify({
+        requestMs: timings,
+        mutationQueryMs: mutationQueryTimings,
+        readQueryMs: readQueryTimings,
+        poolCheckoutMs: poolCheckoutTimings,
+        runOutcomeMs: runOutcomeTimings,
+      })}\n`,
       { flag: 'wx' },
     );
   }
@@ -240,6 +288,11 @@ try {
     databaseMutationQueryP95Ms: percentile(mutationQueryTimings, 0.95),
     databaseMutationQueryP99Ms: percentile(mutationQueryTimings, 0.99),
     databaseMutationQueryMaxMs: mutationQueryTimings.at(-1),
+    databaseReadQueryP50Ms: readQueryTimings.length ? percentile(readQueryTimings, 0.5) : null,
+    databaseReadQueryP95Ms: readQueryTimings.length ? percentile(readQueryTimings, 0.95) : null,
+    poolCheckoutP50Ms: poolCheckoutTimings.length ? percentile(poolCheckoutTimings, 0.5) : null,
+    poolCheckoutP95Ms: poolCheckoutTimings.length ? percentile(poolCheckoutTimings, 0.95) : null,
+    poolCheckoutMaxMs: poolCheckoutTimings.length ? Math.max(...poolCheckoutTimings) : null,
     throughputOpsPerSecond: Math.round((timings.length / (elapsedMs / 1000)) * 100) / 100,
     measuredWallMs: Math.round(elapsedMs),
     projectedEvents: hasProjection,
