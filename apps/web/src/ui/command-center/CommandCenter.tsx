@@ -48,10 +48,19 @@ function connection(tasks: LoadState, runs: LoadState) {
 }
 
 /**
- * OMNIS NEXUS V2, Stage 1: the Command Center shell with vitals, attention panel and PHT clock.
- * It draws only on the task and run lists the application already loads and on the existing
- * stop, create and approval actions. The reactor and a global Mission Lane are later stages and
- * are intentionally absent; nothing here is fabricated, simulated or animated.
+ * OMNIS NEXUS V2 Command Center: the shell (environment strip, PHT clock, vitals, attention panel,
+ * recent records) around the Reactor, the cinematic centrepiece of the stage.
+ *
+ * Everything shown comes from the task and run lists the application already loads and from the
+ * existing stop, create and approval actions; nothing is fabricated or simulated, and a failed
+ * load shows "Unavailable", never a zero. The Reactor (`./reactor`) is decorative and
+ * `aria-hidden`: it is drawn from the same system state and run list and only animates the states
+ * that are genuinely alive (idle, queued, active); every other state is drawn once and stays still.
+ * It lives in a lazy chunk with a static SVG fallback, which is also the whole presentation under
+ * `prefers-reduced-motion`, so this component never depends on the renderer being available.
+ *
+ * Not here: a global Mission Lane or any event stream. That needs the approved backend contract and
+ * is a later stage.
  */
 export function CommandCenter(props: CommandCenterProps) {
   const tasksState = loadState(props.tasksLoading, props.tasksError);

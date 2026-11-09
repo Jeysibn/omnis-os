@@ -28,6 +28,15 @@ const QUALITY = {
 
 /** Frames per second are capped per state (VISUALS[state].frameMs); this is the cap while easing between states. */
 const TRANSITION_FRAME_MS = 33;
+/**
+ * Between drawn frames the page sleeps on one timer instead of taking an animation callback on every
+ * display refresh just to skip it. The timer fires when the next draw is due and a single animation
+ * callback then draws. A display that vsyncs runs that callback on the first vsync at or after the
+ * due time, and an on-demand compositor (headless Chromium) runs it at once, so it never draws
+ * faster than the budget. At 20 fps that is one timer and one callback per draw, not three callbacks.
+ */
+/** A frame woken this much before its due time (timer rounding) is drawn rather than re-scheduled. */
+const EARLY_TOLERANCE_MS = 2;
 /** Measured draw time (ms, rolling average) above which quality drops, then the Reactor gives up. */
 const LITE_AT_MS = 10;
 const GIVE_UP_AT_MS = 22;
@@ -69,6 +78,7 @@ export function createReactorRenderer(
 
   let destroyed = false;
   let raf = 0;
+  let timer = 0; // the sleep before the next frame; never pending together with `raf`
   let lastTick = 0;
   let clock = 0; // animation seconds; advances only while frames are drawn
   let yaw = 0.6;
@@ -100,18 +110,33 @@ export function createReactorRenderer(
     canvas.dataset.reactorLoop = running ? 'running' : 'idle';
   }
 
-  /** The only place a frame is scheduled; the handle guard makes a second loop impossible. */
-  function request() {
-    if (raf !== 0 || !wantsFrames()) return;
-    raf = requestAnimationFrame(tick);
+  /**
+   * The only place a frame is scheduled. At most one of `timer` and `raf` is ever pending, so a
+   * second loop is impossible; `delay` sleeps first, then hands over to one animation callback.
+   */
+  function request(delay = 0) {
+    if (raf !== 0 || timer !== 0 || !wantsFrames()) return;
     setLoopState(true);
+    if (delay < 1) {
+      raf = requestAnimationFrame(tick);
+      return;
+    }
+    timer = window.setTimeout(() => {
+      timer = 0;
+      if (wantsFrames()) raf = requestAnimationFrame(tick);
+      else setLoopState(false);
+    }, delay);
   }
   function cancel() {
+    if (timer !== 0) window.clearTimeout(timer);
     if (raf !== 0) cancelAnimationFrame(raf);
+    timer = 0;
     raf = 0;
     lastTick = 0;
     setLoopState(false);
   }
+  const frameInterval = () =>
+    intro < 1 || transitioning() ? TRANSITION_FRAME_MS : VISUALS[scene.state].frameMs;
 
   function resize() {
     if (!parent) return;
@@ -316,16 +341,20 @@ export function createReactorRenderer(
     }
   }
 
-  function tick(now: number) {
+  function tick() {
     raf = 0;
+    // Real time, not the callback's frame timestamp: that can be up to a display frame older than
+    // the moment the callback runs, which would make a draw look early after sleeping its whole
+    // interval and send it back to sleep.
+    const now = performance.now();
     if (!wantsFrames()) {
       setLoopState(false);
       return;
     }
-    const interval =
-      intro < 1 || transitioning() ? TRANSITION_FRAME_MS : VISUALS[scene.state].frameMs;
-    if (lastTick !== 0 && now - lastTick < interval - 2) {
-      request();
+    const interval = frameInterval();
+    if (lastTick !== 0 && now - lastTick < interval - EARLY_TOLERANCE_MS) {
+      // Woken early (a resize, a state change): wait out the rest of the interval.
+      request(interval - (now - lastTick));
       return;
     }
     const dt = lastTick === 0 ? 0 : Math.min((now - lastTick) / 1000, 0.1);
@@ -363,7 +392,7 @@ export function createReactorRenderer(
       }
       if (average > LITE_AT_MS && quality === 'full') setQuality('lite');
     }
-    if (needsMotion()) request();
+    if (needsMotion()) request(frameInterval() - (performance.now() - now));
     else {
       lastTick = 0;
       setLoopState(false);
