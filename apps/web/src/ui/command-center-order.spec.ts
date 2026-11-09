@@ -236,3 +236,182 @@ test.describe('crossing the breakpoint', () => {
     }
   });
 });
+
+/**
+ * Focus must survive the layout swap. The vitals panel is rendered at a different position in the
+ * document on either side of 1200px, so React unmounts and remounts it; a naive implementation
+ * drops focus to <body>. Everything below uses real keyboard focus and document.activeElement.
+ */
+type Active = {
+  label: string;
+  panel: string;
+  tag: string;
+  scrollY: number;
+  outline: { style: string; width: number };
+  inViewportX: boolean;
+};
+
+const active = (page: Page): Promise<Active> =>
+  page.evaluate(() => {
+    const el = document.activeElement as HTMLElement;
+    const style = getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    const panel = el.closest('.ccx-stage')
+      ? 'System state'
+      : el.closest('.ccx-vitals')
+        ? 'System vitals'
+        : el.closest('.ccx-attention')
+          ? 'Requires attention'
+          : el.closest('header, nav')
+            ? 'Shell'
+            : 'none';
+    return {
+      label: (el.getAttribute('aria-label') ?? el.innerText ?? '').replace(/\s+/g, ' ').trim(),
+      panel,
+      tag: el.tagName,
+      scrollY: window.scrollY,
+      outline: { style: style.outlineStyle, width: parseFloat(style.outlineWidth) },
+      inViewportX: rect.left >= 0 && rect.right <= window.innerWidth,
+    };
+  });
+
+const vitalsPanels = (page: Page) => page.locator('section[aria-label="System vitals"]');
+const orderOf = (page: Page) =>
+  page.locator('.ccx-root').getByRole('heading', { level: 2 }).allTextContents();
+
+async function resizeTo(page: Page, width: number) {
+  await page.setViewportSize({ width, height: 900 });
+  await expect
+    .poll(() => orderOf(page), { message: `layout at ${width}px` })
+    .toEqual(width >= 1200 ? WIDE : NARROW);
+}
+
+test.describe('focus inside Vitals across the breakpoint', () => {
+  test.beforeEach(async ({ page }) => {
+    mockApi(page, { tasks, runs: mixedRuns });
+  });
+
+  test('desktop to narrow (1440 to 1199): focus stays on the same Vitals control and Tab continues', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await open(page);
+    await page.getByRole('button', { name: /^Running: / }).focus();
+    expect((await active(page)).label).toMatch(/^Running: /);
+
+    await resizeTo(page, 1199);
+    const after = await active(page);
+    expect(after.tag, 'focus must not fall to <body>').toBe('BUTTON');
+    expect(after.panel).toBe('System vitals');
+    expect(after.label).toMatch(/^Running: /); // the same logical control
+    expect(after.outline.style).not.toBe('none');
+    expect(after.outline.width).toBeGreaterThanOrEqual(2);
+    expect(after.scrollY, 'restoring focus must not scroll the page').toBe(0);
+    await expect(vitalsPanels(page)).toHaveCount(1);
+
+    // Natural order continues from there: next is Queued, and Shift+Tab goes back to Running.
+    await page.keyboard.press('Tab');
+    expect((await active(page)).label).toMatch(/^Queued: /);
+    await page.keyboard.press('Shift+Tab');
+    expect((await active(page)).label).toMatch(/^Running: /);
+    // In the narrow order the control before Vitals is the last Attention control, not the stage.
+    await page.keyboard.press('Shift+Tab');
+    const before = await active(page);
+    expect(before.panel).toBe('Requires attention');
+    expect(before.label).toMatch(/^Outcome unknown Lost acknowledgement/);
+  });
+
+  test('narrow to desktop (390 to 1200): focus stays on the same Vitals control and Tab continues', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await open(page);
+    await page.getByRole('button', { name: /^Open tasks: / }).focus();
+    expect((await active(page)).label).toMatch(/^Open tasks: /);
+
+    await resizeTo(page, 1200);
+    const after = await active(page);
+    expect(after.tag, 'focus must not fall to <body>').toBe('BUTTON');
+    expect(after.panel).toBe('System vitals');
+    expect(after.label).toMatch(/^Open tasks: /);
+    expect(after.outline.style).not.toBe('none');
+    expect(after.outline.width).toBeGreaterThanOrEqual(2);
+    expect(after.inViewportX).toBe(true);
+    await expect(vitalsPanels(page)).toHaveCount(1);
+
+    await page.keyboard.press('Tab');
+    expect((await active(page)).label).toMatch(/^Failed or interrupted: /);
+    await page.keyboard.press('Shift+Tab');
+    await page.keyboard.press('Shift+Tab');
+    expect((await active(page)).label).toMatch(/^Queued: /);
+  });
+
+  test('crossing the breakpoint repeatedly keeps focus on the same control, one panel, no drift', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await open(page);
+    await page.getByRole('button', { name: /^Failed or interrupted: / }).focus();
+    for (const width of [1199, 1200, 1199, 1200, 1100, 1300, 1199, 1920, 390, 1200]) {
+      await resizeTo(page, width);
+      const now = await active(page);
+      expect(now.label, `focus at ${width}px`).toMatch(/^Failed or interrupted: /);
+      expect(now.panel).toBe('System vitals');
+      await expect(vitalsPanels(page)).toHaveCount(1);
+      await expect(page.getByRole('button', { name: /^Failed or interrupted: / })).toHaveCount(1);
+    }
+    // Rapid back-to-back changes with no waiting in between settle on the final layout, focused.
+    for (const width of [1199, 1200, 1199, 1200, 1199, 1200])
+      await page.setViewportSize({ width, height: 900 });
+    await expect.poll(() => orderOf(page)).toEqual(WIDE);
+    expect((await active(page)).label).toMatch(/^Failed or interrupted: /);
+  });
+
+  test('focus elsewhere is never stolen by the swap', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await open(page);
+    const checks = [
+      { target: page.getByRole('button', { name: 'Create task' }), panel: 'System state' },
+      {
+        target: page.getByRole('button', { name: 'Review approval to start Prepare rollout' }),
+        panel: 'Requires attention',
+      },
+      { target: page.getByRole('link', { name: 'Runs' }), panel: 'Shell' },
+    ];
+    for (const { target, panel } of checks) {
+      await target.focus();
+      const label = (await active(page)).label;
+      for (const width of [1199, 1200]) {
+        await resizeTo(page, width);
+        const now = await active(page);
+        expect(now.panel, `${panel} focus at ${width}px`).toBe(panel);
+        expect(now.label).toBe(label);
+      }
+    }
+    // Nothing focused at all: the swap must not invent focus inside Vitals.
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    await resizeTo(page, 1199);
+    expect((await active(page)).tag).toBe('BODY');
+  });
+
+  test('leaving the Command Center does not leave a stale focus restoration behind', async ({
+    page,
+  }) => {
+    const errors: string[] = [];
+    page.on('pageerror', (error) => errors.push(error.message));
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await open(page);
+    await page.getByRole('button', { name: /^Queued: / }).focus();
+    await page.getByRole('link', { name: 'Tasks' }).click(); // unmounts the Command Center with focus in Vitals
+    await expect(page.getByRole('heading', { level: 1, name: 'Tasks' })).toBeVisible();
+    await page.setViewportSize({ width: 1199, height: 900 });
+    await page.getByRole('link', { name: 'Command Center' }).click();
+    await expect(page.getByRole('heading', { level: 1, name: 'Command Center' })).toBeVisible();
+    expect((await active(page)).panel, 'a returning visit must not restore old focus').not.toBe(
+      'System vitals',
+    );
+    await resizeTo(page, 1440);
+    expect((await active(page)).panel).not.toBe('System vitals');
+    expect(errors).toEqual([]);
+  });
+});

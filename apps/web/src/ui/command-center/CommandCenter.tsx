@@ -5,7 +5,7 @@ import { ErrorState, LoadingState, NxButton, NxTheme, StatusBadge } from '../des
 import { AttentionPanel } from './AttentionPanel.js';
 import { PhtClock } from './PhtClock.js';
 import { RecentRecords } from './RecentRecords.js';
-import { SystemContext, VitalsPanel } from './VitalsPanel.js';
+import { SystemContext, VitalsPanel, type VitalsFocusHandoff } from './VitalsPanel.js';
 import { deriveSystemState } from './systemState.js';
 import { useMediaQuery } from './useMediaQuery.js';
 import { computeVitals, type LoadState } from './vitals.js';
@@ -75,7 +75,11 @@ export function CommandCenter(props: CommandCenterProps) {
     approvalsHeading.current?.focus();
   };
 
-  const vitalsPanel = <VitalsPanel vitals={vitals} onNavigate={props.onNavigate} />;
+  // Owned here (not by either vitals instance) so it survives the swap and dies with this component.
+  const vitalsFocus = useRef<VitalsFocusHandoff['current']>(null);
+  const vitalsPanel = (
+    <VitalsPanel vitals={vitals} onNavigate={props.onNavigate} focusHandoff={vitalsFocus} />
+  );
 
   return (
     <NxTheme>

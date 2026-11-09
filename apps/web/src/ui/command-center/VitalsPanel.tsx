@@ -1,29 +1,80 @@
+import { useLayoutEffect, useRef } from 'react';
 import { ArrowRight } from 'lucide-react';
 import { InfoGroup, Panel } from '../design/index.js';
 import { metricText, type Metric, type Vitals } from './vitals.js';
 import { formatManilaStamp } from './time.js';
 
-type Row = { label: string; metric: Metric; target: 'runs' | 'tasks'; source: string };
+type Row = {
+  /** Stable identity of the control, so the same one can be found again after a remount. */
+  id: string;
+  label: string;
+  metric: Metric;
+  target: 'runs' | 'tasks';
+  source: string;
+};
+
+/**
+ * Carries keyboard focus from one vitals panel instance to the next. CommandCenter renders the
+ * panel at a different place in the document on either side of the wide breakpoint, so React
+ * unmounts one instance and mounts another in the same commit. The id of the focused control is
+ * held here between the two and consumed immediately; `null` means nothing was focused.
+ */
+export type VitalsFocusHandoff = { current: string | null };
 
 /** Counts come only from the loaded task and run lists. Unconfirmed values are never shown as 0. */
 export function VitalsPanel({
   vitals,
   onNavigate,
+  focusHandoff,
 }: {
   vitals: Vitals;
   onNavigate: (page: 'runs' | 'tasks') => void;
+  focusHandoff: VitalsFocusHandoff;
 }) {
+  const root = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const panel = root.current;
+    // Mount: take over focus from the instance this one replaces. Same commit, so the user cannot
+    // have moved focus in between; preventScroll avoids a jump when the panel moved on screen.
+    const id = focusHandoff.current;
+    focusHandoff.current = null;
+    if (id)
+      panel?.querySelector<HTMLElement>(`[data-vital="${id}"]`)?.focus({ preventScroll: true });
+    return () => {
+      // Unmount: React runs this before the DOM is removed, so the focused control is still
+      // attached and still the active element. Record it only if focus really is inside Vitals.
+      const focused = document.activeElement;
+      focusHandoff.current =
+        focused instanceof HTMLElement && panel?.contains(focused)
+          ? (focused.dataset.vital ?? null)
+          : null;
+    };
+  }, [focusHandoff]);
   const rows: Row[] = [
-    { label: 'Running', metric: vitals.running, target: 'runs', source: 'Open Runs' },
-    { label: 'Queued', metric: vitals.queued, target: 'runs', source: 'Open Runs' },
-    { label: 'Open tasks', metric: vitals.openTasks, target: 'tasks', source: 'Open Tasks' },
     {
+      id: 'running',
+      label: 'Running',
+      metric: vitals.running,
+      target: 'runs',
+      source: 'Open Runs',
+    },
+    { id: 'queued', label: 'Queued', metric: vitals.queued, target: 'runs', source: 'Open Runs' },
+    {
+      id: 'open-tasks',
+      label: 'Open tasks',
+      metric: vitals.openTasks,
+      target: 'tasks',
+      source: 'Open Tasks',
+    },
+    {
+      id: 'failed-or-interrupted',
       label: 'Failed or interrupted',
       metric: vitals.failedOrInterrupted,
       target: 'runs',
       source: 'Open Runs',
     },
     {
+      id: 'outcome-unknown',
       label: 'Outcome unknown',
       metric: vitals.unknownOutcome,
       target: 'runs',
@@ -31,7 +82,7 @@ export function VitalsPanel({
     },
   ];
   return (
-    <div className="ccx-vitals">
+    <div className="ccx-vitals" ref={root}>
       <Panel title="System vitals" label="Telemetry">
         <dl className="ccx-vital-list">
           {rows.map((row) => (
@@ -41,6 +92,7 @@ export function VitalsPanel({
                 <button
                   type="button"
                   className="ccx-vital-button"
+                  data-vital={row.id}
                   aria-label={`${row.label}: ${metricText(row.metric)}. ${row.source}`}
                   onClick={() => onNavigate(row.target)}
                 >
