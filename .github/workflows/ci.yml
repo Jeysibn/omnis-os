@@ -149,13 +149,6 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 12
-    env:
-      OMNIS_TEST_ADMIN_DATABASE_URL: postgresql://omnis:omnis_test_password@127.0.0.1:5432/omnis_test
-      OMNIS_TEST_MIGRATION_DATABASE_URL: postgresql://omnis_migrator:omnis_migration_test_password_2026@127.0.0.1:5432/omnis_test
-      OMNIS_TEST_DATABASE_URL: postgresql://omnis_runtime:omnis_runtime_test_password_2026@127.0.0.1:5432/omnis_test
-      OMNIS_TEST_AUTHORIZER_DATABASE_URL: postgresql://omnis_authorizer:omnis_authorizer_test_password_2026@127.0.0.1:5432/omnis_test
-      OMNIS_TEST_LAUNCHER_DATABASE_URL: postgresql://omnis_launcher:omnis_launcher_test_password_2026@127.0.0.1:5432/omnis_test
-      OMNIS_SANDBOX_INTEGRATION: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -168,6 +161,8 @@ jobs:
         with:
           node-version: 24.22.1
           cache: pnpm
+      - name: Register masks for disposable database credentials
+        run: node scripts/ci/mask-test-credentials.mjs
       - run: docker pull node@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85
       - run: pnpm install --frozen-lockfile
       - name: Verify disposable Linux service identity boundaries
@@ -187,9 +182,14 @@ jobs:
           CI: 'true'
           OMNIS_HOST_ISOLATION_TEST: 'true'
           OMNIS_SYSTEMD_VERIFICATION_REQUIRED: 'true'
+          OMNIS_SANDBOX_INTEGRATION: '1'
           OMNIS_RUNTIME_DB_PASSWORD: omnis_runtime_test_password_2026
           OMNIS_AUTHORIZER_DB_PASSWORD: omnis_authorizer_test_password_2026
           OMNIS_LAUNCHER_DB_PASSWORD: omnis_launcher_test_password_2026
+          OMNIS_TEST_MIGRATION_DATABASE_URL: postgresql://omnis_migrator:omnis_migration_test_password_2026@127.0.0.1:5432/omnis_test
+          OMNIS_TEST_DATABASE_URL: postgresql://omnis_runtime:omnis_runtime_test_password_2026@127.0.0.1:5432/omnis_test
+          OMNIS_TEST_AUTHORIZER_DATABASE_URL: postgresql://omnis_authorizer:omnis_authorizer_test_password_2026@127.0.0.1:5432/omnis_test
+          OMNIS_TEST_LAUNCHER_DATABASE_URL: postgresql://omnis_launcher:omnis_launcher_test_password_2026@127.0.0.1:5432/omnis_test
         run: OMNIS_TEST_NODE_EXECUTABLE="$(command -v node)" sudo --preserve-env=CI,GITHUB_ACTIONS,RUNNER_OS,RUNNER_ENVIRONMENT,OMNIS_HOST_ISOLATION_TEST,OMNIS_SYSTEMD_VERIFICATION_REQUIRED,OMNIS_TEST_NODE_EXECUTABLE,OMNIS_RUNTIME_DB_PASSWORD,OMNIS_AUTHORIZER_DB_PASSWORD,OMNIS_LAUNCHER_DB_PASSWORD,OMNIS_TEST_MIGRATION_DATABASE_URL,OMNIS_TEST_DATABASE_URL,OMNIS_TEST_AUTHORIZER_DATABASE_URL,OMNIS_TEST_LAUNCHER_DATABASE_URL bash scripts/host-security/verify-disposable-systemd-deployment.sh
 
   database-integration:
@@ -215,12 +215,6 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 12
-    env:
-      OMNIS_TEST_ADMIN_DATABASE_URL: postgresql://omnis:omnis_test_password@127.0.0.1:5432/omnis_test
-      OMNIS_TEST_MIGRATION_DATABASE_URL: postgresql://omnis_migrator:omnis_migration_test_password_2026@127.0.0.1:5432/omnis_test
-      OMNIS_TEST_DATABASE_URL: postgresql://omnis_runtime:omnis_runtime_test_password_2026@127.0.0.1:5432/omnis_test
-      OMNIS_TEST_AUTHORIZER_DATABASE_URL: postgresql://omnis_authorizer:omnis_authorizer_test_password_2026@127.0.0.1:5432/omnis_test
-      OMNIS_TEST_LAUNCHER_DATABASE_URL: postgresql://omnis_launcher:omnis_launcher_test_password_2026@127.0.0.1:5432/omnis_test
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -233,6 +227,8 @@ jobs:
         with:
           node-version: 24.22.1
           cache: pnpm
+      - name: Register masks for disposable database credentials
+        run: node scripts/ci/mask-test-credentials.mjs
       - run: docker pull node@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85
       - run: pnpm install --frozen-lockfile
       - name: Provision restricted PostgreSQL roles
@@ -245,6 +241,12 @@ jobs:
           OMNIS_LAUNCHER_DB_PASSWORD: omnis_launcher_test_password_2026
       - name: Run ${{ matrix.suite }} integration test
         run: pnpm integration:${{ matrix.suite }}
+        env:
+          OMNIS_TEST_ADMIN_DATABASE_URL: postgresql://omnis:omnis_test_password@127.0.0.1:5432/omnis_test
+          OMNIS_TEST_MIGRATION_DATABASE_URL: postgresql://omnis_migrator:omnis_migration_test_password_2026@127.0.0.1:5432/omnis_test
+          OMNIS_TEST_DATABASE_URL: postgresql://omnis_runtime:omnis_runtime_test_password_2026@127.0.0.1:5432/omnis_test
+          OMNIS_TEST_AUTHORIZER_DATABASE_URL: postgresql://omnis_authorizer:omnis_authorizer_test_password_2026@127.0.0.1:5432/omnis_test
+          OMNIS_TEST_LAUNCHER_DATABASE_URL: postgresql://omnis_launcher:omnis_launcher_test_password_2026@127.0.0.1:5432/omnis_test
 
   full-stack-browser-integration:
     needs: validation_mode
@@ -265,12 +267,6 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 12
-    env:
-      OMNIS_TEST_ADMIN_DATABASE_URL: postgresql://omnis:omnis_test_password@127.0.0.1:5432/omnis_test
-      OMNIS_TEST_MIGRATION_DATABASE_URL: postgresql://omnis_migrator:omnis_migration_test_password_2026@127.0.0.1:5432/omnis_test
-      OMNIS_TEST_DATABASE_URL: postgresql://omnis_runtime:omnis_runtime_test_password_2026@127.0.0.1:5432/omnis_test
-      OMNIS_TEST_AUTHORIZER_DATABASE_URL: postgresql://omnis_authorizer:omnis_authorizer_test_password_2026@127.0.0.1:5432/omnis_test
-      OMNIS_TEST_LAUNCHER_DATABASE_URL: postgresql://omnis_launcher:omnis_launcher_test_password_2026@127.0.0.1:5432/omnis_test
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -282,6 +278,8 @@ jobs:
         with:
           node-version: 24.22.1
           cache: pnpm
+      - name: Register masks for disposable database credentials
+        run: node scripts/ci/mask-test-credentials.mjs
       - run: pnpm install --frozen-lockfile
       - name: Provision restricted PostgreSQL roles
         run: node --experimental-strip-types packages/db/src/provision.ts
@@ -296,6 +294,11 @@ jobs:
       - name: Run real browser to PostgreSQL smoke test
         run: pnpm integration:browser-smoke
         env:
+          OMNIS_TEST_ADMIN_DATABASE_URL: postgresql://omnis:omnis_test_password@127.0.0.1:5432/omnis_test
+          OMNIS_TEST_MIGRATION_DATABASE_URL: postgresql://omnis_migrator:omnis_migration_test_password_2026@127.0.0.1:5432/omnis_test
+          OMNIS_TEST_DATABASE_URL: postgresql://omnis_runtime:omnis_runtime_test_password_2026@127.0.0.1:5432/omnis_test
+          OMNIS_TEST_AUTHORIZER_DATABASE_URL: postgresql://omnis_authorizer:omnis_authorizer_test_password_2026@127.0.0.1:5432/omnis_test
+          OMNIS_TEST_LAUNCHER_DATABASE_URL: postgresql://omnis_launcher:omnis_launcher_test_password_2026@127.0.0.1:5432/omnis_test
           OMNIS_TEST_DIAGNOSTICS_PATH: ${{ runner.temp }}/omnis-full-stack-smoke.txt
       - name: Upload sanitized full-stack smoke diagnostics
         if: failure()
