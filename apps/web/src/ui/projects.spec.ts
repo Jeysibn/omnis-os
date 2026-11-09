@@ -27,9 +27,23 @@ const gamma = proj(3, { name: 'Gamma archive', status: 'archived', revision: 4 }
 const projectTaskReads = (api: ReturnType<typeof createApi>) =>
   api.of('GET', /^\/api\/v1\/projects\/prj_[0-9a-f]{32}\/tasks$/);
 
-async function open(page: Page, hash = '#projects') {
+/**
+ * Opens a route and waits for the state the test explicitly expects. `workspace` means the signed-in
+ * shell; `sign-in` means the owner sign-in screen (for example after a 401), which never shows the
+ * workspace shell. Waiting for `#main-content` in that case would depend on a transient render.
+ */
+async function open(
+  page: Page,
+  hash = '#projects',
+  expected: 'workspace' | 'sign-in' = 'workspace',
+) {
   await page.goto(`/${hash}`);
-  await expect(page.locator('#main-content')).toBeVisible();
+  if (expected === 'workspace') {
+    await expect(page.locator('#main-content')).toBeVisible();
+    return;
+  }
+  await expect(page.getByRole('button', { name: 'Sign in' })).toBeVisible();
+  await expect(page.locator('#main-content')).toHaveCount(0);
 }
 const nav = (page: Page) => page.getByRole('navigation', { name: 'Primary navigation' });
 const table = (page: Page, name: string) => page.getByRole('table', { name });
@@ -204,7 +218,7 @@ test.describe('directory', () => {
   test('an expired session returns to sign-in', async ({ page, api }) => {
     api.configure({ projects: [alpha] });
     api.persist('list', { status: 401, code: 'unauthorized', message: 'Sign in to continue.' });
-    await open(page);
+    await open(page, '#projects', 'sign-in');
     await expect(
       page.getByText('Your owner session expired. Sign in again to continue.'),
     ).toBeVisible();
