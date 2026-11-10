@@ -131,3 +131,155 @@
 .pw-title {
   overflow-wrap: break-word;
 }
+
+/*
+ * Project planning (epics, milestones, task assignment). Planning sits first in the DOM and on the
+ * left, the task table on the right, so keyboard order matches reading order at every width. Below
+ * 1200px the two stack in the same order.
+ */
+.pw-columns {
+  display: grid;
+  gap: var(--nx-space-5);
+  min-width: 0;
+}
+@media (min-width: 1200px) {
+  .pw-columns {
+    grid-template-columns: minmax(320px, 0.8fr) minmax(0, 1.4fr);
+    grid-template-areas:
+      'status status'
+      'epics milestones'
+      'epics tasks';
+    align-items: start;
+  }
+  .pw-area-status {
+    grid-area: status;
+  }
+  .pw-area-epics {
+    grid-area: epics;
+  }
+  .pw-area-milestones {
+    grid-area: milestones;
+  }
+  .pw-area-tasks {
+    grid-area: tasks;
+  }
+}
+.pw-planning-status:empty {
+  display: none;
+}
+.pw-planning-status:focus-visible {
+  outline: 2px solid var(--nx-focus);
+  outline-offset: 2px;
+}
+.pw-area-epics,
+.pw-area-milestones,
+.pw-area-tasks {
+  min-width: 0;
+}
+/* The project header: facts on the left, the objective beside them on a wide screen. */
+@media (min-width: 1200px) {
+  .pw-project-body {
+    display: grid;
+    grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr);
+    gap: var(--nx-space-5);
+    align-items: start;
+  }
+  .pw-project-body .pw-subhead {
+    margin-top: var(--nx-space-2);
+  }
+}
+.pw-records,
+.pw-task-list {
+  display: grid;
+  gap: var(--nx-space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.pw-record {
+  display: grid;
+  gap: var(--nx-space-2);
+  min-width: 0;
+  padding: var(--nx-space-3);
+  border: 1px solid var(--nx-border);
+  border-radius: var(--nx-radius);
+  background: var(--nx-surface-raised);
+}
+.pw-record[data-status='archived'] {
+  opacity: 0.85;
+}
+.pw-record-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--nx-space-2) var(--nx-space-3);
+  align-items: center;
+  justify-content: space-between;
+}
+.pw-record-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.pw-record-text {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--nx-text-muted);
+}
+.pw-record-meta,
+.pw-summary,
+.pw-revision {
+  margin: 0;
+  font-size: 12px;
+}
+.pw-record-details {
+  display: grid;
+  gap: var(--nx-space-2);
+  padding-top: var(--nx-space-2);
+  border-top: 1px solid var(--nx-border);
+}
+.pw-record-details .pw-subhead {
+  margin-top: 0;
+}
+.pw-archived {
+  display: grid;
+  gap: var(--nx-space-3);
+  margin-top: var(--nx-space-3);
+}
+.pw-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--nx-space-2) var(--nx-space-4);
+  margin: 0;
+}
+.pw-count {
+  display: inline-flex;
+  gap: var(--nx-space-2);
+  align-items: center;
+}
+.pw-task-list li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--nx-space-2) var(--nx-space-3);
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  padding: var(--nx-space-2) 0;
+  border-top: 1px solid var(--nx-border);
+}
+.pw-task-main {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--nx-space-2) var(--nx-space-3);
+  align-items: center;
+  min-width: 0;
+}
+.pw-dialog {
+  inset: 0;
+  width: min(560px, calc(100vw - 32px));
+  margin: auto; /* the page reset removes the browser's centring */
+}
+.pw-dialog-form {
+  max-width: none;
+}

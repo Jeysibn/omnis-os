@@ -248,7 +248,9 @@ function App() {
   const [tasksError, setTasksError] = useState('');
   const [runsError, setRunsError] = useState('');
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
-  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(
+    () => readRoute().taskId ?? null,
+  );
   const [events, setEvents] = useState<RunEvent[]>([]);
   const [streamState, setStreamState] = useState<StreamState>('connecting');
   const [streamEpoch, setStreamEpoch] = useState(0);
@@ -512,6 +514,7 @@ function App() {
       const route = readRoute();
       setPage(route.page);
       if (route.page === 'runs') setSelectedRunId(route.runId ?? null);
+      if (route.page === 'tasks' && route.taskId) setSelectedTaskId(route.taskId);
     };
     window.addEventListener('hashchange', onHashChange);
     return () => window.removeEventListener('hashchange', onHashChange);
@@ -1388,13 +1391,21 @@ function skipToMain(event: MouseEvent<HTMLAnchorElement>) {
   window.scrollTo({ top: Math.max(top, 0), behavior: 'instant' });
 }
 
-function readRoute(): { page: Page; runId?: string } {
+function readRoute(): { page: Page; runId?: string; taskId?: string } {
   const [head = '', encodedRunId] = window.location.hash.slice(1).split('/', 2);
   const destination = head.split('?', 1)[0];
   if (destination === 'agents') return { page: 'agents' };
   if (destination === 'departments') return { page: 'departments' };
   if (destination === 'projects') return { page: 'projects' };
-  if (destination === 'tasks') return { page: 'tasks' };
+  if (destination === 'tasks') {
+    // `#tasks/<id>` opens the Tasks screen with that task selected.
+    if (!encodedRunId) return { page: 'tasks' };
+    try {
+      return { page: 'tasks', taskId: decodeURIComponent(encodedRunId) };
+    } catch {
+      return { page: 'tasks' };
+    }
+  }
   if (destination === 'runs') {
     if (!encodedRunId) return { page: 'runs' };
     try {

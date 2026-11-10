@@ -12,7 +12,8 @@ import {
   type Column,
 } from '../design/index.js';
 import { ApiRequestError } from '../api.js';
-import { archiveProject, classifyMutationFailure, fetchProject, type ReadFailure } from './data.js';
+import { archiveProject, classifyMutationFailure, fetchProject } from './data.js';
+import { readFailureView } from './readFailure.js';
 import { useProject, useProjectTasks, type TaskListState } from './hooks.js';
 import { IdempotentIntent } from './intent.js';
 import type { Msg } from './messages.js';
@@ -34,6 +35,10 @@ import {
   type RecoveryAction,
 } from './recovery.js';
 import { editProjectHash, projectsHash } from './route.js';
+import { PlanningRegion } from './planning/PlanningRegion.js';
+import { TaskEpicDialog } from './planning/TaskEpicDialog.js';
+import { taskHash, type EpicTaskRef } from './planning/EpicTasks.js';
+import { useFocusReturn } from './planning/records.js';
 
 type Props = {
   projectId: string;
@@ -44,36 +49,7 @@ type Props = {
   arrivedByNavigation: boolean;
 };
 
-export function readFailureView(error: ReadFailure, noun: string) {
-  switch (error.kind) {
-    case 'notFound':
-      return {
-        title: `This ${noun} was not found.`,
-        description: 'It may have been removed, or the link is wrong.',
-        retry: false,
-      };
-    case 'forbidden':
-      return {
-        title: `You don't have access to this ${noun}.`,
-        description: undefined,
-        retry: false,
-      };
-    case 'unexpected':
-      return {
-        title: `Omnis OS received an unexpected ${noun} response.`,
-        description: 'Do not repeat any action. Reload the page.',
-        retry: true,
-      };
-    case 'limit':
-      return {
-        title: `The ${noun} is too large to show reliably.`,
-        description: undefined,
-        retry: false,
-      };
-    default:
-      return { title: `The ${noun} could not be loaded.`, description: error.message, retry: true };
-  }
-}
+export { readFailureView };
 
 type ArchiveRecovery = { conclusion: Conclusion; expectedRevision: number };
 
@@ -97,6 +73,11 @@ export function ProjectDetail({
   );
   const [recovery, setRecovery] = useState<ArchiveRecovery | null>(null);
   const statusRef = useRef<HTMLDivElement | null>(null);
+  const planningStatusRef = useRef<HTMLDivElement | null>(null);
+  const [planningMessage, setPlanningMessage] = useState<string | null>(null);
+  const [epicTask, setEpicTask] = useState<EpicTaskRef | null>(null);
+  const [planningVersion, setPlanningVersion] = useState(0);
+  const epicFocus = useFocusReturn();
   const intent = useRef(new IdempotentIntent());
   const inflight = useRef(false);
   const mounted = useRef(true);
@@ -320,25 +301,79 @@ export function ProjectDetail({
             This project is archived and read-only. There is no restore action.
           </Notice>
         )}
-        <InfoGroup
-          items={[
-            { label: 'Status', value: <ProjectStatusBadge status={current.status} /> },
-            { label: 'Priority', value: <PriorityBadge priority={current.priority} /> },
-            { label: 'Revision', value: current.revision },
-            { label: 'Created', value: formatManila(current.createdAt) },
-            { label: 'Updated', value: formatManila(current.updatedAt) },
-            { label: 'Project ID', value: <span className="nx-mono nx-break">{current.id}</span> },
-          ]}
-        />
-        <h3 className="pw-subhead">Objective</h3>
-        <p className="pw-prose">{current.objective}</p>
+        <div className="pw-project-body">
+          <InfoGroup
+            items={[
+              { label: 'Status', value: <ProjectStatusBadge status={current.status} /> },
+              { label: 'Priority', value: <PriorityBadge priority={current.priority} /> },
+              { label: 'Revision', value: current.revision },
+              { label: 'Created', value: formatManila(current.createdAt) },
+              { label: 'Updated', value: formatManila(current.updatedAt) },
+              {
+                label: 'Project ID',
+                value: <span className="nx-mono nx-break">{current.id}</span>,
+              },
+            ]}
+          />
+          <div>
+            <h3 className="pw-subhead">Objective</h3>
+            <p className="pw-prose">{current.objective}</p>
+          </div>
+        </div>
       </Panel>
 
-      <TaskPanel
-        projectName={current.name}
-        tasks={tasks.state}
-        reload={tasks.reload}
-        loadMore={tasks.loadMore}
+      <div className="pw-columns">
+        <PlanningRegion
+          projectId={projectId}
+          readOnly={archived}
+          csrfToken={csrfToken}
+          refreshCsrf={refreshCsrf}
+          onUnauthorized={onUnauthorized}
+          version={planningVersion}
+          onChangeEpic={(task) => {
+            epicFocus.capture();
+            setEpicTask(task);
+          }}
+          message={planningMessage}
+          statusRef={planningStatusRef}
+          announce={setPlanningMessage}
+        />
+        <TaskPanel
+          projectName={current.name}
+          tasks={tasks.state}
+          reload={tasks.reload}
+          loadMore={tasks.loadMore}
+          onChangeEpic={
+            archived
+              ? null
+              : (task) => {
+                  epicFocus.capture();
+                  setEpicTask(task);
+                }
+          }
+        />
+      </div>
+
+      <TaskEpicDialog
+        task={epicTask}
+        projectId={projectId}
+        csrfToken={csrfToken}
+        refreshCsrf={refreshCsrf}
+        onUnauthorized={onUnauthorized}
+        onSaved={(task, epic) => {
+          setEpicTask(null);
+          setPlanningVersion((value) => value + 1);
+          setPlanningMessage(
+            epic
+              ? `“${task.title}” is now in the epic “${epic.title}”.`
+              : `“${task.title}” is no longer in an epic.`,
+          );
+          epicFocus.restore(planningStatusRef.current);
+        }}
+        onClose={() => {
+          setEpicTask(null);
+          epicFocus.restore(planningStatusRef.current);
+        }}
       />
 
       <ConfirmDialog
@@ -365,54 +400,78 @@ function BackLink() {
   );
 }
 
-const columns: readonly Column<ProjectWorkspaceTaskSummary>[] = [
-  {
-    key: 'task',
-    header: 'Task',
-    render: (task) => (
-      <>
-        <span className="pw-title">{task.title}</span>
-        <br />
-        <span className="nx-mono nx-muted nx-break">{task.id}</span>
-      </>
-    ),
-  },
-  {
-    key: 'status',
-    header: 'Task status',
-    render: (task) => <TaskStatusBadge status={task.status} />,
-  },
-  {
-    key: 'run',
-    header: 'Latest run',
-    render: (task) =>
-      task.latestRun ? (
+function makeColumns(
+  onChangeEpic: ((task: EpicTaskRef) => void) | null,
+): readonly Column<ProjectWorkspaceTaskSummary>[] {
+  return [
+    {
+      key: 'task',
+      header: 'Task',
+      render: (task) => (
         <>
-          <RunStatusBadge status={task.latestRun.status} />
-          <br />
-          <a href={`#runs/${encodeURIComponent(task.latestRun.id)}`} className="nx-mono nx-break">
-            {task.latestRun.id}
+          <a href={taskHash(task.id)} className="pw-title">
+            {task.title}
           </a>
           <br />
-          <span className="nx-muted">Updated {formatManila(task.latestRun.updatedAt)}</span>
+          <span className="nx-mono nx-muted nx-break">{task.id}</span>
         </>
-      ) : (
-        <span className="nx-muted">No runs yet</span>
       ),
-  },
-  { key: 'created', header: 'Created', render: (task) => formatManila(task.createdAt) },
-];
+    },
+    {
+      key: 'status',
+      header: 'Task status',
+      render: (task) => <TaskStatusBadge status={task.status} />,
+    },
+    {
+      key: 'run',
+      header: 'Latest run',
+      render: (task) =>
+        task.latestRun ? (
+          <>
+            <RunStatusBadge status={task.latestRun.status} />
+            <br />
+            <a href={`#runs/${encodeURIComponent(task.latestRun.id)}`} className="nx-mono nx-break">
+              {task.latestRun.id}
+            </a>
+            <br />
+            <span className="nx-muted">Updated {formatManila(task.latestRun.updatedAt)}</span>
+          </>
+        ) : (
+          <span className="nx-muted">No runs yet</span>
+        ),
+    },
+    { key: 'created', header: 'Created', render: (task) => formatManila(task.createdAt) },
+    ...(onChangeEpic
+      ? [
+          {
+            key: 'epic',
+            header: 'Epic',
+            render: (task: ProjectWorkspaceTaskSummary) => (
+              <NxButton
+                aria-label={`Set epic for ${task.title}`}
+                onClick={() => onChangeEpic(task)}
+              >
+                Set epic
+              </NxButton>
+            ),
+          },
+        ]
+      : []),
+  ];
+}
 
 function TaskPanel({
   projectName,
   tasks,
   reload,
   loadMore,
+  onChangeEpic,
 }: {
   projectName: string;
   tasks: TaskListState;
   reload: () => void;
   loadMore: () => void;
+  onChangeEpic: ((task: EpicTaskRef) => void) | null;
 }) {
   const { first, page } = tasks;
   let body;
@@ -448,7 +507,7 @@ function TaskPanel({
         </p>
         <DataTable
           caption={`Tasks in ${projectName}`}
-          columns={columns}
+          columns={makeColumns(onChangeEpic)}
           rows={tasks.tasks}
           rowKey={(task) => task.id}
           empty={{ title: 'No tasks' }}
@@ -486,8 +545,10 @@ function TaskPanel({
     );
   }
   return (
-    <Panel title="Tasks" label="Project-scoped summaries" level={2}>
-      {body}
-    </Panel>
+    <div className="pw-area-tasks">
+      <Panel title="Tasks" label="Project-scoped summaries" level={2}>
+        {body}
+      </Panel>
+    </div>
   );
 }

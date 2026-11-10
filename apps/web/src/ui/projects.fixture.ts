@@ -3,6 +3,8 @@ import {
   AgentDirectoryResponseSchema,
   ArchiveProjectSchema,
   CreateProjectSchema,
+  EpicListResponseSchema,
+  MilestoneListResponseSchema,
   ProjectListResponseSchema,
   ProjectSchema,
   ProjectSummarySchema,
@@ -269,6 +271,19 @@ export function createApi(page: Page) {
           page: { total: 0, complete: true, nextCursor: null },
         }),
       });
+
+    // Planning (epics and milestones) is covered by planning.spec.ts. The Project Workspace
+    // specs only need the project screen to load, so its planning lists are always empty here.
+    const planningList = /^\/api\/v1\/projects\/prj_[0-9a-f]{32}\/(epics|milestones)$/.exec(path);
+    if (planningList && method === 'GET') {
+      const page = { observedTotal: 0, complete: true, nextCursor: null };
+      return route.fulfill({
+        json:
+          planningList[1] === 'epics'
+            ? EpicListResponseSchema.parse({ epics: [], page })
+            : MilestoneListResponseSchema.parse({ milestones: [], page }),
+      });
+    }
 
     const detail = /^\/api\/v1\/projects\/(prj_[0-9a-f]{32})$/.exec(path);
     const archive = /^\/api\/v1\/projects\/(prj_[0-9a-f]{32})\/archive$/.exec(path);
