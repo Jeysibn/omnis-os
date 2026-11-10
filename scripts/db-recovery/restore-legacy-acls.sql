@@ -339,6 +339,10 @@ BEGIN
     EXECUTE 'REVOKE ALL ON FUNCTION omnis.set_task_epic(text,integer,text,uuid,bytea) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
     EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.set_task_epic(text,integer,text,uuid,bytea) TO omnis_authorizer';
   END IF;
+  IF pg_catalog.to_regprocedure('omnis.set_task_epic(text,integer,text,uuid,bytea,integer)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.set_task_epic(text,integer,text,uuid,bytea,integer) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.set_task_epic(text,integer,text,uuid,bytea,integer) TO omnis_authorizer';
+  END IF;
   IF pg_catalog.to_regprocedure('omnis.create_task_mission_lane_admission_impl(text,text,text,uuid,bytea)') IS NOT NULL THEN
     EXECUTE 'REVOKE ALL ON FUNCTION omnis.create_task_mission_lane_admission_impl(text,text,text,uuid,bytea) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
   END IF;
@@ -372,9 +376,17 @@ BEGIN
     EXECUTE 'REVOKE ALL ON FUNCTION omnis.create_task(text, text, text, uuid, bytea) FROM PUBLIC, omnis_authorizer, omnis_launcher';
     EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.create_task(text, text, text, uuid, bytea) TO omnis_runtime';
   END IF;
+  IF pg_catalog.to_regprocedure('omnis.create_task(text,text,text,uuid,bytea,integer)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.create_task(text, text, text, uuid, bytea, integer) FROM PUBLIC, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.create_task(text, text, text, uuid, bytea, integer) TO omnis_runtime';
+  END IF;
   IF pg_catalog.to_regprocedure('omnis.set_task_project(text,integer,text,uuid,bytea)') IS NOT NULL THEN
     EXECUTE 'REVOKE ALL ON FUNCTION omnis.set_task_project(text, integer, text, uuid, bytea) FROM PUBLIC, omnis_authorizer, omnis_launcher';
     EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.set_task_project(text, integer, text, uuid, bytea) TO omnis_runtime';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.set_task_project(text,integer,text,uuid,bytea,integer)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.set_task_project(text, integer, text, uuid, bytea, integer) FROM PUBLIC, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.set_task_project(text, integer, text, uuid, bytea, integer) TO omnis_runtime';
   END IF;
   IF pg_catalog.to_regprocedure('omnis.enforce_task_project_run_admission()') IS NOT NULL THEN
     EXECUTE 'REVOKE ALL ON FUNCTION omnis.enforce_task_project_run_admission() FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
@@ -407,6 +419,10 @@ BEGIN
   IF pg_catalog.to_regprocedure('omnis.acquire_mission_lane_admission(boolean)') IS NOT NULL THEN
     EXECUTE 'REVOKE ALL ON FUNCTION omnis.acquire_mission_lane_admission(boolean) FROM PUBLIC, omnis_authorizer, omnis_launcher';
     EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.acquire_mission_lane_admission(boolean) TO omnis_runtime';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.acquire_mission_lane_admission(boolean,integer)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.acquire_mission_lane_admission(boolean,integer) FROM PUBLIC, omnis_authorizer, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.acquire_mission_lane_admission(boolean,integer) TO omnis_runtime';
   END IF;
 END
 $mission_lane_admission_acl$;

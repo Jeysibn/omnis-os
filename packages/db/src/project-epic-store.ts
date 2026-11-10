@@ -21,7 +21,10 @@ import {
   type TaskEpicResponse,
 } from '@omnis/contracts';
 import type { Pool } from 'pg';
-import { withLocalMissionLaneAdmission } from './mission-lane-admission.ts';
+import {
+  requireMissionLaneRemainingMs,
+  withLocalMissionLaneAdmission,
+} from './mission-lane-admission.ts';
 import { AgentProfileStoreError, assertNoCredentialMaterial } from './agent-profile-store.ts';
 import { createHash } from 'node:crypto';
 
@@ -328,17 +331,27 @@ export class PostgresProjectEpicStore {
       .update(JSON.stringify({ taskId: taskId.data, input: input.data }))
       .digest();
     try {
-      const result = await withLocalMissionLaneAdmission(this.writerPool, 'normal', () =>
-        this.writerPool.query<{ result: unknown }>(
-          'SELECT omnis.set_task_epic($1,$2,$3,$4,$5) AS result',
-          [
-            taskId.data,
-            input.data.expectedAssociationRevision,
-            input.data.epicId,
-            requestId,
-            fingerprint,
-          ],
-        ),
+      const result = await withLocalMissionLaneAdmission(
+        this.writerPool,
+        'normal',
+        async (deadline) => {
+          const client = await this.writerPool.connect();
+          try {
+            return await client.query<{ result: unknown }>(
+              'SELECT omnis.set_task_epic($1,$2,$3,$4,$5,$6) AS result',
+              [
+                taskId.data,
+                input.data.expectedAssociationRevision,
+                input.data.epicId,
+                requestId,
+                fingerprint,
+                requireMissionLaneRemainingMs(deadline),
+              ],
+            );
+          } finally {
+            client.release();
+          }
+        },
       );
       return TaskEpicAssociationSchema.parse(result.rows[0]?.result);
     } catch (error) {

@@ -223,3 +223,160 @@ writers and project assignment at one writer. The full raw samples and original
 PostgreSQL lock log lines are not packaged; per-run summaries and the parsed
 historical cursor-wait CSV are included, while raw arrays remain local to the
 benchmark host.
+
+## 2026-11-10 remediation investigation addendum
+
+**Status:** Performance acceptance remains **FAIL**. PR #90 remains Draft.
+This addendum supersedes earlier statements that the reserved critical queue
+slot provides sufficient critical-operation protection. It does not.
+
+### Candidate and benchmark provenance
+
+The reported four-writer Task-creation result (p95 `31.58 ms`, throughput
+`162.56 ops/s`) was produced with migration head
+`0030_mission_lane_admission`, not with migration 0029 alone. The database
+schema-migration ledger was checked by the runner before each run. Thus it
+exercised the full candidate, including global admission and D5 projection.
+However, the checked-in benchmark runner at PR head `b0a3be0` had a candidate
+source-SHA expectation inconsistent with the recorded source SHA; the archived
+output could not be reproduced unchanged with that runner. The runner now
+requires an explicit exact candidate SHA, rejects dirty source trees, and
+verifies the database migration head. It records request, mutation query, read
+query, pool checkout, and Run-outcome samples separately. This fixes benchmark
+identity checking; it does not change database behavior.
+
+The remediation comparison used clean `b0a3be0` source with migration 0030 for
+the original side and the same migration plus a temporary wrapper shortcut for
+the experimental side. The shortcut made the outer admission wrapper call the
+private mutation core directly instead of nesting through the renamed 0029
+wrapper (which attempted to reacquire the same transaction advisory lock). It
+was reverted and is not part of this PR. The remediation run used five
+repetitions of 10,000 measured operations per cell (50,000 samples pooled),
+whereas the earlier exact-candidate matrix used five repetitions of 2,000
+operations (10,000 samples pooled). The fixture reset cadence also differed.
+The run is therefore diagnostic and is not a strict reproduction of the
+earlier exact-candidate result. The raw per-operation arrays and run summaries
+are packaged under
+[`evidence/pr90/remediation`](evidence/pr90/remediation/).
+
+| Operation        | Writers | Original 0030 p95 | Shortcut p95 | Shortcut p99 | Throughput median, original → shortcut (minimum shortcut) |
+| ---------------- | ------: | ----------------: | -----------: | -----------: | --------------------------------------------------------: |
+| Task create      |       1 |           6.85 ms |      6.52 ms |      9.96 ms |                            224.30 → 235.82 (208.79) ops/s |
+| Task create      |       4 |          21.19 ms |     26.13 ms |     32.83 ms |                            248.68 → 248.86 (182.44) ops/s |
+| Project assign   |       1 |           8.14 ms |      7.95 ms |     11.29 ms |                            185.43 → 189.97 (176.04) ops/s |
+| Project assign   |       4 |          30.80 ms |     36.47 ms |     56.85 ms |                            207.91 → 209.08 (125.01) ops/s |
+| Project reassign |       1 |           9.02 ms |      8.79 ms |     13.84 ms |                            163.40 → 173.48 (144.01) ops/s |
+| Project reassign |       4 |          25.42 ms |     26.47 ms |     37.26 ms |                            193.79 → 190.96 (183.69) ops/s |
+
+The wrapper change did not reliably reduce p95 latency or improve throughput.
+In this diagnostic matrix, original 0030 four-writer Task creation passed the
+absolute limits (p95 `21.19 ms`, p99 `25.78 ms`, median throughput
+`248.68 ops/s`), while the earlier exact-candidate measurement failed (p95
+`31.58 ms`, throughput `162.56 ops/s`). This is a material conflict, not a
+pass. The original four-writer project-assignment p95 failed at `30.80 ms`;
+single-writer reassignment throughput was `163.40 ops/s`, below target. The
+temporary shortcut arm failed four-writer create and assignment p95 and did
+not represent PR code. Several repeated runs varied substantially, including
+paired assignment runs with p95 values of `39.58 ms` and `54.36 ms`. The
+container lifetime recorded CPU throttling, but those
+counters covered setup, tests, and benchmarks together and cannot be attributed
+to these cells. Consequently this comparison is diagnostic, not a clean
+acceptance rerun; host CPU utilization and benchmark-only cgroup deltas were
+not captured.
+
+The archived interleaved request/mutation arrays do not include pool-checkout
+or read-query arrays. The earlier summary recorded those values, but its
+percentile helper was applied to unsorted checkout/read arrays. Those summary
+percentiles are not valid and must not be used as evidence. The benchmark
+runner now sorts all recorded timing arrays before calculating quantiles and
+includes the checkout/read/Run arrays in new raw output. No new full matrix has
+yet been run with that correction.
+
+### Lock, transaction, and pool profile
+
+Separate profiling-only runs used temporary database wrappers that emitted
+`RAISE LOG` timings. They are diagnostic and were not used for acceptance
+latency because per-operation logging can add overhead. For 2,000 four-writer
+Task creates, the original wrapper showed pool-checkout p95 `0.014 ms`,
+admission wait p95 `0.128 ms`, D5 cursor acquisition wait p95 `15.161 ms`,
+mutation-function p95 `0.850 ms`, and cursor hold through commit p95
+`4.334 ms`. The shortcut profile showed create cursor acquisition p95
+`19.363 ms` and hold-through-commit p95 `6.17 ms`; assignment showed
+`18.017 ms` and `7.89 ms`. These directional samples show pool checkout and
+the nested function call are not the dominant observed contributors. Time
+waiting for the globally serialized D5 cursor and waiting behind a preceding
+transaction dominate the tail; the wrapper shortcut did not reduce that wait.
+
+The cursor profile has a time-correlation limitation: it used client-side
+timestamps aligned to server logs, and the separate runs were not simultaneous.
+It supports the conclusion that the D5 wait is a material latency contributor,
+but does not provide final exact-head acceptance values for cursor wait or lock
+hold. Those two gates remain **BLOCKED / unmeasured** on the final unmodified
+candidate.
+
+### Sustained overload and critical progress
+
+A 30-second uninstrumented disposable load used four independent writer
+processes with eight writer loops each (32 attempted writers), a critical
+admission probe every 250 ms, and a 50 ms PostgreSQL lock-table sampler. It
+observed 195 committed Task operations, 13,590 retryable overload rejections,
+zero unexpected operation errors, maximum four active permits, maximum four
+pending slots, and `Pool.waitingCount` maximum zero. Before the final probe,
+Task rows, ledger events, and clock sequence all equaled 195; a post-load write
+succeeded and advanced all three to 196. The uninstrumented successful-request
+latency was p50 `889.76 ms`, p95 `3,095.75 ms`, max `3,682.75 ms`. These
+measurements include waiting and execution and are not the normal-load latency
+acceptance profile.
+
+All 13 uninstrumented critical admission probes completed, with wait p50
+`2,010.22 ms`, p95/max `3,042.29 ms`; this exceeds the owner-selected
+three-second total deadline. A previous instrumented run had four of nine
+critical probes time out and five successes with p50 `4.151 s`, p95/max
+`4.948 s`; its successful workload request p50/p95/max was `2.178/5.987/6.701
+s`, admission wait reached `4.70 s`, and cursor wait reached p95 `2.80 s`, max
+`2.97 s`. SQL logging may have affected those timeouts, so the uninstrumented
+run is the latency evidence. The two runs together show that the current
+mechanism does not enforce a three-second total deadline. PostgreSQL's existing
+three-second `lock_timeout` is per lock wait; multiple waits can accumulate.
+
+The reserved fourth pending slot reserves a slot; it does not prioritize
+critical work when normal callers are ahead at admission or when permits are
+handed out. The 13 successful uninstrumented probes do not prove starvation
+freedom or a latency bound. The independent read-only reviewer returned
+**REQUEST CHANGES** for the current scheduler semantics. It proposed a
+priority-aware scheduler and single deadline while retaining the same 4/4
+caps and D5. After the owner selected a three-second total admission-to-D5
+deadline, the reviewer marked that proposed design **BLOCKED pending
+reassessment and PostgreSQL race/cleanup tests**. A strict completion bound
+would also require bounded transaction execution time. No scheduler correction
+has been implemented; the existing mechanism must not be described as
+starvation-free.
+
+Required follow-up evidence before performance acceptance:
+
+- Independent approval of the revised scheduler design and the owner-selected
+  three-second admission-to-D5 deadline, including critical overload/timeout
+  retry semantics.
+- An uninstrumented sustained-overload run with latency, throughput, rejection
+  counts, queue duration, starvation, pool waiters, and observed maximum active
+  and pending counts.
+- A separate instrumented run for admission, pool checkout, D5 acquisition,
+  cursor hold, mutation, and commit timing, with benchmark-only CPU/memory
+  deltas.
+- Repeated exact-candidate 1- and 4-writer profiles against matched migration
+  0028 fixtures before claiming any absolute gate passes.
+
+Until then the gate results are: Task-create p95 and throughput at four writers
+**INCONCLUSIVE** because the exact-candidate run and the new non-equivalent
+remediation run conflict; four-writer project-assignment p95 **FAIL** on the
+new original-0030 profile; single-writer project-assignment throughput
+**INCONCLUSIVE** across reported repetitions; single-writer reassignment
+throughput **INCONCLUSIVE** across reported repetitions; exact-head cursor-wait
+and hold limits **BLOCKED / unmeasured**; the three-second admission deadline
+**FAIL** in the uninstrumented overload sample. The independent reviewer
+requires a fresh scheduler review, so scheduler acceptance remains **BLOCKED**.
+The former ≤10% relative-overhead gate remains a documented historical failure
+and is not waived. Do not change D5 from these results alone. Complete a
+matched candidate/0028 rerun and resolve scheduler fairness first; if the
+absolute gates still fail, return to the owner for an explicit architecture
+decision.

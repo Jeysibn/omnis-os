@@ -204,7 +204,12 @@ export class RunCoordinator {
           error.code === 'project_archived' ? 'project_archived' : 'admission_authorization_race',
         );
       }
-      if (error && typeof error === 'object' && 'code' in error && error.code === '55P03') {
+      if (
+        error &&
+        typeof error === 'object' &&
+        'code' in error &&
+        ['PML01', 'PML02', '55P03'].includes(String(error.code))
+      ) {
         throw new CoordinatorError(
           'admission_busy',
           'Run admission is temporarily busy. Retry the request; no run was admitted.',

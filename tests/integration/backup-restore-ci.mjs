@@ -656,9 +656,9 @@ async function verifyLegacyRuntimeAclParity(sourceUrl, restoredUrl) {
     for (const database of [source, restored]) {
       const taskBoundary = await database.query(`
         SELECT has_function_privilege('omnis_runtime',
-                 'omnis.create_task(text,text,text,uuid,bytea)', 'EXECUTE') AS create_task,
+                 'omnis.create_task(text,text,text,uuid,bytea,integer)', 'EXECUTE') AS create_task,
                has_function_privilege('omnis_runtime',
-                 'omnis.set_task_project(text,integer,text,uuid,bytea)', 'EXECUTE') AS set_project,
+                 'omnis.set_task_project(text,integer,text,uuid,bytea,integer)', 'EXECUTE') AS set_project,
                has_function_privilege('omnis_runtime',
                  'omnis.append_runtime_run_event(text,text,text)', 'EXECUTE') AS append_run_event,
                EXISTS (

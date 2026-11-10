@@ -27,7 +27,11 @@ import {
   inTransaction,
   type PgBossTransaction,
 } from './database.ts';
-import { withLocalMissionLaneAdmission } from './mission-lane-admission.ts';
+import {
+  requireMissionLaneRemainingMs,
+  withLocalMissionLaneAdmission,
+  type MissionLaneDeadline,
+} from './mission-lane-admission.ts';
 import { createHmac, createHash, hkdfSync, randomUUID, timingSafeEqual } from 'node:crypto';
 import {
   ConnectorAuthorizationRequestSchema,
@@ -244,17 +248,27 @@ export class PostgresRunStore {
       throw new StoreError('invalid_input', 'Idempotency-Key is invalid.', 400);
     const fingerprint = requestId ? taskFingerprint('task.created', parsed.data) : null;
     try {
-      const result = await withLocalMissionLaneAdmission(this.writerPool, 'normal', () =>
-        this.writerPool.query<{ result: unknown }>(
-          'SELECT omnis.create_task($1,$2,$3,$4,$5) AS result',
-          [
-            parsed.data.title,
-            parsed.data.detail,
-            parsed.data.projectId ?? null,
-            requestId ?? null,
-            fingerprint,
-          ],
-        ),
+      const result = await withLocalMissionLaneAdmission(
+        this.writerPool,
+        'normal',
+        async (deadline) => {
+          const client = await this.writerPool.connect();
+          try {
+            return await client.query<{ result: unknown }>(
+              'SELECT omnis.create_task($1,$2,$3,$4,$5,$6) AS result',
+              [
+                parsed.data.title,
+                parsed.data.detail,
+                parsed.data.projectId ?? null,
+                requestId ?? null,
+                fingerprint,
+                requireMissionLaneRemainingMs(deadline),
+              ],
+            );
+          } finally {
+            client.release();
+          }
+        },
       );
       return TaskSchema.parse(result.rows[0]?.result);
     } catch (error) {
@@ -268,20 +282,30 @@ export class PostgresRunStore {
     if (!parsedTaskId.success || !parsed.success || !isUuid(requestId))
       throw new StoreError('invalid_input', 'Task project input is invalid.', 400);
     try {
-      const result = await withLocalMissionLaneAdmission(this.writerPool, 'normal', () =>
-        this.writerPool.query<{ result: unknown }>(
-          'SELECT omnis.set_task_project($1,$2,$3,$4,$5) AS result',
-          [
-            parsedTaskId.data,
-            parsed.data.expectedAssociationRevision,
-            parsed.data.projectId,
-            requestId,
-            taskFingerprint('task.project_set', {
-              taskId: parsedTaskId.data,
-              input: parsed.data,
-            }),
-          ],
-        ),
+      const result = await withLocalMissionLaneAdmission(
+        this.writerPool,
+        'normal',
+        async (deadline) => {
+          const client = await this.writerPool.connect();
+          try {
+            return await client.query<{ result: unknown }>(
+              'SELECT omnis.set_task_project($1,$2,$3,$4,$5,$6) AS result',
+              [
+                parsedTaskId.data,
+                parsed.data.expectedAssociationRevision,
+                parsed.data.projectId,
+                requestId,
+                taskFingerprint('task.project_set', {
+                  taskId: parsedTaskId.data,
+                  input: parsed.data,
+                }),
+                requireMissionLaneRemainingMs(deadline),
+              ],
+            );
+          } finally {
+            client.release();
+          }
+        },
       );
       const current = await this.getTask(parsedTaskId.data);
       return current ?? TaskSchema.parse(result.rows[0]?.result);
@@ -446,8 +470,8 @@ export class PostgresRunStore {
       throw new StoreError('invalid_input', 'Idempotency-Key is invalid.', 400);
     }
     const fingerprint = JSON.stringify({ taskId, authorizationId });
-    return inMissionLaneTransaction(this.writerPool, async (client) => {
-      await lockMissionLaneWriter(client);
+    return inMissionLaneTransaction(this.writerPool, async (client, deadline) => {
+      await lockMissionLaneWriter(client, deadline);
       // The shared Mission Lane lock is first in the event-writer lock order.
       await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [admissionLock]);
       const previous = await client.query<
@@ -602,8 +626,8 @@ export class PostgresRunStore {
       binding: binding.data,
     });
 
-    return inMissionLaneTransaction(this.writerPool, async (client) => {
-      await lockMissionLaneWriter(client);
+    return inMissionLaneTransaction(this.writerPool, async (client, deadline) => {
+      await lockMissionLaneWriter(client, deadline);
       await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [admissionLock]);
       const previous = await client.query<
         QueryResultRow & { request_fingerprint: string; run_id: string }
@@ -721,8 +745,8 @@ export class PostgresRunStore {
       return [];
     return inMissionLaneTransaction(
       this.writerPool,
-      async (client) => {
-        await lockMissionLaneWriter(client, 'critical');
+      async (client, deadline) => {
+        await lockMissionLaneWriter(client, deadline, 'critical');
         const current = await lockRun(client, link.run.id);
         if (current.status !== 'unknown' || current.execution_generation !== link.generation)
           return [];
@@ -829,8 +853,8 @@ export class PostgresRunStore {
   }> {
     return inMissionLaneTransaction(
       this.writerPool,
-      async (client) => {
-        await lockMissionLaneWriter(client, 'critical');
+      async (client, deadline) => {
+        await lockMissionLaneWriter(client, deadline, 'critical');
         const current = await lockRun(client, runId);
         if (!current.connector_authorization_id) {
           throw new StoreError('invalid_transition', 'The run is not a synthetic broker run.', 409);
@@ -912,8 +936,8 @@ export class PostgresRunStore {
   ): Promise<{ run: Run; events: DurableEvent[] }> {
     return inMissionLaneTransaction(
       this.writerPool,
-      async (client) => {
-        await lockMissionLaneWriter(client, 'critical');
+      async (client, deadline) => {
+        await lockMissionLaneWriter(client, deadline, 'critical');
         const current = await lockRun(client, runId);
         if (current.connector_authorization_id !== authorizationId) {
           throw new StoreError('not_found', 'Synthetic Run was not found.', 404);
@@ -948,8 +972,8 @@ export class PostgresRunStore {
     }
     return inMissionLaneTransaction(
       this.writerPool,
-      async (client) => {
-        await lockMissionLaneWriter(client, 'critical');
+      async (client, deadline) => {
+        await lockMissionLaneWriter(client, deadline, 'critical');
         const current = await lockRun(client, runId);
         if (
           !current.connector_authorization_id ||
@@ -1095,8 +1119,8 @@ export class PostgresRunStore {
   }> {
     return inMissionLaneTransaction(
       this.writerPool,
-      async (client) => {
-        await lockMissionLaneWriter(client, 'critical');
+      async (client, deadline) => {
+        await lockMissionLaneWriter(client, deadline, 'critical');
         const current = await lockRun(client, runId);
         if (current.status === 'stopping') {
           const result = await client.query<RunRow>(
@@ -1258,8 +1282,8 @@ export class PostgresRunStore {
   async requestStop(runId: string): Promise<{ run: Run; events: DurableEvent[] }> {
     return inMissionLaneTransaction(
       this.writerPool,
-      async (client) => {
-        await lockMissionLaneWriter(client, 'critical');
+      async (client, deadline) => {
+        await lockMissionLaneWriter(client, deadline, 'critical');
         const current = await lockRun(client, runId);
         if (current.connector_authorization_id) {
           throw new StoreError(
@@ -1303,8 +1327,8 @@ export class PostgresRunStore {
   ): Promise<{ run: Run; events: DurableEvent[] }> {
     return inMissionLaneTransaction(
       this.writerPool,
-      async (client) => {
-        await lockMissionLaneWriter(client, 'critical');
+      async (client, deadline) => {
+        await lockMissionLaneWriter(client, deadline, 'critical');
         const current = await lockRun(client, runId);
         if (
           current.status === 'stopping' &&
@@ -1403,8 +1427,8 @@ export class PostgresRunStore {
   ): Promise<{ run: Run; events: DurableEvent[] }> {
     return inMissionLaneTransaction(
       this.writerPool,
-      async (client) => {
-        await lockMissionLaneWriter(client, 'critical');
+      async (client, deadline) => {
+        await lockMissionLaneWriter(client, deadline, 'critical');
         const current = await lockRun(client, runId);
         if (current.status !== 'stopping') {
           if (terminalStatuses.has(current.status)) {
@@ -1455,8 +1479,8 @@ export class PostgresRunStore {
   ): Promise<{ run: Run; events: DurableEvent[] }> {
     return inMissionLaneTransaction(
       this.writerPool,
-      async (client) => {
-        await lockMissionLaneWriter(client, 'critical');
+      async (client, deadline) => {
+        await lockMissionLaneWriter(client, deadline, 'critical');
         const current = await lockRun(client, runId);
         if (current.status === 'stopping') {
           if (current.lease_owner !== workerId || current.execution_generation !== generation) {
@@ -1506,8 +1530,8 @@ export class PostgresRunStore {
   ): Promise<{ run: Run; events: DurableEvent[] } | undefined> {
     return inMissionLaneTransaction(
       this.writerPool,
-      async (client) => {
-        await lockMissionLaneWriter(client, 'critical');
+      async (client, deadline) => {
+        await lockMissionLaneWriter(client, deadline, 'critical');
         const current = await lockRun(client, runId);
         if (!['running', 'stopping'].includes(current.status)) return undefined;
         if (current.lease_owner !== workerId || current.execution_generation !== generation)
@@ -1534,8 +1558,8 @@ export class PostgresRunStore {
   async reconcileExpiredRuns(): Promise<DurableEvent[]> {
     return inMissionLaneTransaction(
       this.writerPool,
-      async (client) => {
-        await lockMissionLaneWriter(client, 'critical');
+      async (client, deadline) => {
+        await lockMissionLaneWriter(client, deadline, 'critical');
         const expired = await client.query<RunRow>(
           `
           SELECT ${runColumns}
@@ -1650,8 +1674,8 @@ export class PostgresRunStore {
   ): Promise<{ run: Run; events: DurableEvent[] } | undefined> {
     return inMissionLaneTransaction(
       this.writerPool,
-      async (client) => {
-        await lockMissionLaneWriter(client, 'critical');
+      async (client, deadline) => {
+        await lockMissionLaneWriter(client, deadline, 'critical');
         const current = await lockRun(client, runId);
         if (current.status === 'stopping' && !current.lease_owner) {
           // No worker ever claimed this stop-requested job; the reconciler acknowledges
@@ -1682,8 +1706,8 @@ export class PostgresRunStore {
   ): Promise<{ run: Run; events: DurableEvent[] } | undefined> {
     return inMissionLaneTransaction(
       this.writerPool,
-      async (client) => {
-        await lockMissionLaneWriter(client, 'critical');
+      async (client, deadline) => {
+        await lockMissionLaneWriter(client, deadline, 'critical');
         const current = await lockRun(client, runId);
         if (current.status !== 'stopping') return undefined;
         return this.cancelLocked(client, current);
@@ -1756,13 +1780,15 @@ async function lockRun(client: PoolClient, runId: string): Promise<RunRow> {
 
 async function lockMissionLaneWriter(
   client: PoolClient,
+  deadline: MissionLaneDeadline,
   priority: 'normal' | 'critical' = 'normal',
 ): Promise<void> {
-  // Admission precedes D5; D5 remains ahead of authorization, task, and Run
-  // row locks and is retained through commit.
-  await client.query("SET LOCAL lock_timeout = '3s'");
-  await client.query('SELECT omnis.acquire_mission_lane_admission($1)', [priority === 'critical']);
-  await client.query('SELECT pg_advisory_xact_lock($1::bigint)', ['70463909136525']);
+  // The deadline starts before pool checkout in inMissionLaneTransaction. The
+  // database helper acquires admission and D5 before any domain row lock.
+  await client.query('SELECT omnis.acquire_mission_lane_admission($1,$2)', [
+    priority === 'critical',
+    requireMissionLaneRemainingMs(deadline),
+  ]);
 }
 
 async function appendEvent(

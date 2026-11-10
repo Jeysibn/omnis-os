@@ -106,164 +106,105 @@ const postgresSuite = describe(
       nextKey += 1;
     });
 
-    it('enforces four active and four pending writers across independent pools', async () => {
-      const firstPool = createPool({ connectionString: databaseUrl!, max: 8 });
-      const secondPool = createPool({ connectionString: databaseUrl!, max: 8 });
-      const clients: Array<{ pool: Pool; client: PoolClient }> = [];
-      const connect = async (writerPool: Pool) => {
-        const client = await writerPool.connect();
-        clients.push({ pool: writerPool, client });
-        await client.query('BEGIN');
-        return client;
-      };
-      const activeClients: PoolClient[] = [];
-      const pendingClients: PoolClient[] = [];
-      const pendingAcquires: Promise<number>[] = [];
-      try {
-        for (const writerPool of [firstPool, secondPool, firstPool, secondPool]) {
-          const client = await connect(writerPool);
-          activeClients.push(client);
-          await client.query('SELECT omnis.acquire_mission_lane_admission(false)');
-        }
-        for (const [index, writerPool] of [
-          firstPool,
-          firstPool,
-          secondPool,
-          secondPool,
-        ].entries()) {
-          const client = await connect(writerPool);
-          pendingClients.push(client);
-          pendingAcquires.push(
-            client
-              .query('SELECT omnis.acquire_mission_lane_admission($1)', [index === 3])
-              .then(() => index),
-          );
-        }
-        const waitForFour = async () => {
-          const deadline = Date.now() + 2_000;
-          while (Date.now() < deadline) {
-            const locks = await adminPool!.query<{ active: string; queued: string }>(`
-              SELECT
-                count(DISTINCT ((classid::bigint << 32) | objid::bigint)) FILTER (
-                  WHERE granted AND ((classid::bigint << 32) | objid::bigint)
-                    BETWEEN 70463909136600 AND 70463909136603
-                )::text AS active,
-                count(DISTINCT ((classid::bigint << 32) | objid::bigint)) FILTER (
-                  WHERE granted AND ((classid::bigint << 32) | objid::bigint)
-                    BETWEEN 70463909136610 AND 70463909136613
-                )::text AS queued
-              FROM pg_locks WHERE locktype = 'advisory' AND objsubid = 1
-            `);
-            if (locks.rows[0]?.active === '4' && locks.rows[0]?.queued === '4') return true;
-            await delay(10);
-          }
-          return false;
-        };
-        assert.equal(await waitForFour(), true, 'all four global queue slots should be occupied');
-        const overflow = await connect(firstPool);
-        await assert.rejects(
-          overflow.query('SELECT omnis.acquire_mission_lane_admission(false)'),
-          (error: unknown) => (error as { code?: string }).code === 'PML01',
-        );
-        await overflow.query('ROLLBACK');
-        await Promise.all(activeClients.map((client) => client.query('COMMIT')));
-        const remaining = new Set([0, 1, 2, 3]);
-        while (remaining.size > 0) {
-          const index = await Promise.race(
-            [...remaining].map((pendingIndex) =>
-              pendingAcquires[pendingIndex]!.then((resolvedIndex) => resolvedIndex),
-            ),
-          );
-          await pendingClients[index]!.query('COMMIT');
-          remaining.delete(index);
-        }
-      } finally {
-        await Promise.allSettled(clients.map(({ client }) => client.query('ROLLBACK')));
-        for (const { client } of clients) client.release();
-        await firstPool.end();
-        await secondPool.end();
-      }
-    });
-
-    it('reserves the fourth pending slot for critical writers under normal-load saturation', async () => {
+    it('enforces the global envelope and gives pending critical work priority', async () => {
       const firstPool = createPool({ connectionString: databaseUrl!, max: 8 });
       const secondPool = createPool({ connectionString: databaseUrl!, max: 8 });
       const clients: PoolClient[] = [];
       const activeClients: PoolClient[] = [];
       const normalClients: PoolClient[] = [];
-      const normalAcquires: Promise<unknown>[] = [];
+      let cursorBlocker: PoolClient | undefined;
       let criticalClient: PoolClient | undefined;
       let criticalAcquire: Promise<unknown> | undefined;
-      try {
-        for (const writerPool of [firstPool, secondPool, firstPool, secondPool]) {
-          const client = await writerPool.connect();
-          clients.push(client);
-          activeClients.push(client);
-          await client.query('BEGIN');
-          await client.query('SELECT omnis.acquire_mission_lane_admission(false)');
-        }
-
-        for (const writerPool of [firstPool, secondPool, firstPool]) {
-          const client = await writerPool.connect();
-          clients.push(client);
-          normalClients.push(client);
-          await client.query('BEGIN');
-          normalAcquires.push(client.query('SELECT omnis.acquire_mission_lane_admission(false)'));
-        }
-
-        criticalClient = await firstPool.connect();
-        clients.push(criticalClient);
-        await criticalClient.query('BEGIN');
-        criticalAcquire = criticalClient.query('SELECT omnis.acquire_mission_lane_admission(true)');
-
+      const normalAcquires: Array<Promise<{ code: string | undefined }>> = [];
+      const connect = async (writerPool: Pool) => {
+        const client = await writerPool.connect();
+        clients.push(client);
+        await client.query('BEGIN');
+        return client;
+      };
+      const waitUntil = async (predicate: () => Promise<boolean>) => {
         const deadline = Date.now() + 2_000;
-        let queueKeys = new Set<string>();
-        let reservedCriticalSlotObserved = false;
         while (Date.now() < deadline) {
-          const result = await adminPool!.query<{ username: string; key: string }>(`
-            SELECT activity.usename AS username,
-                   ((lock.classid::bigint << 32) | lock.objid::bigint)::text AS key
-            FROM pg_locks AS lock
-            JOIN pg_stat_activity AS activity ON activity.pid=lock.pid
-            WHERE lock.locktype='advisory' AND lock.objsubid=1 AND lock.granted
-              AND ((lock.classid::bigint << 32) | lock.objid::bigint)
-                BETWEEN 70463909136610 AND 70463909136613
-          `);
-          queueKeys = new Set(result.rows.map((row) => row.key));
-          reservedCriticalSlotObserved = result.rows.some(
-            (row) => row.key === '70463909136613' && row.username === 'omnis_runtime',
-          );
-          if (queueKeys.size === 4 && reservedCriticalSlotObserved) break;
+          if (await predicate()) return true;
           await delay(10);
         }
-        assert.deepEqual([...queueKeys].sort(), [
-          '70463909136610',
-          '70463909136611',
-          '70463909136612',
-          '70463909136613',
-        ]);
-        assert.equal(
-          reservedCriticalSlotObserved,
-          true,
-          'A critical caller must own the reserved global slot.',
+        return false;
+      };
+      try {
+        for (const [index, writerPool] of [
+          firstPool,
+          secondPool,
+          firstPool,
+          secondPool,
+        ].entries()) {
+          const client = await connect(writerPool);
+          activeClients.push(client);
+          await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [70463909136600 + index]);
+        }
+        cursorBlocker = await connect(firstPool);
+        await cursorBlocker.query('SELECT pg_advisory_xact_lock($1::bigint)', ['70463909136525']);
+
+        for (const writerPool of [firstPool, secondPool, firstPool]) {
+          const client = await connect(writerPool);
+          normalClients.push(client);
+          normalAcquires.push(
+            client
+              .query('SELECT omnis.acquire_mission_lane_admission(false, 3000)')
+              .then(() => ({ code: undefined }))
+              .catch((error: { code?: string }) => ({ code: error.code })),
+          );
+        }
+        criticalClient = await connect(secondPool);
+        criticalAcquire = criticalClient.query(
+          'SELECT omnis.acquire_mission_lane_admission(true, 3000)',
         );
 
-        const overflow = await firstPool.connect();
-        clients.push(overflow);
-        await overflow.query('BEGIN');
+        assert.equal(
+          await waitUntil(async () => {
+            const result = await adminPool!.query<{ active: number; pending: number }>(`
+              SELECT
+                count(*) FILTER (WHERE granted AND ((classid::bigint << 32) | objid::bigint)
+                  BETWEEN 70463909136600 AND 70463909136603)::int AS active,
+                count(DISTINCT ((classid::bigint << 32) | objid::bigint)) FILTER (
+                  WHERE granted AND ((classid::bigint << 32) | objid::bigint)
+                    BETWEEN 70463909136610 AND 70463909136613
+                )::int AS pending
+              FROM pg_locks WHERE locktype='advisory' AND objsubid=1
+            `);
+            return result.rows[0]?.active === 4 && result.rows[0]?.pending === 4;
+          }),
+          true,
+          'the global active and pending envelopes should both reach four',
+        );
+
+        const overflow = await connect(firstPool);
         await assert.rejects(
-          overflow.query('SELECT omnis.acquire_mission_lane_admission(false)'),
+          overflow.query('SELECT omnis.acquire_mission_lane_admission(false, 3000)'),
           (error: unknown) => (error as { code?: string }).code === 'PML01',
         );
         await overflow.query('ROLLBACK');
 
         await Promise.all(activeClients.map((client) => client.query('COMMIT')));
-        await Promise.all(normalAcquires);
+        const normalResults = await Promise.all(normalAcquires);
+        assert.deepEqual(
+          normalResults.map((result) => result.code),
+          ['PML02', 'PML02', 'PML02'],
+        );
+        assert.equal(
+          await Promise.race([criticalAcquire.then(() => true), delay(25).then(() => false)]),
+          false,
+        );
+
+        await cursorBlocker.query('COMMIT');
         await criticalAcquire;
-        await Promise.all([
-          ...normalClients.map((client) => client.query('COMMIT')),
-          criticalClient.query('COMMIT'),
-        ]);
+        await criticalClient.query('COMMIT');
+
+        const state = await adminPool!.query<{ tasks: number; events: number; clock: string }>(`
+          SELECT (SELECT count(*)::int FROM omnis.tasks) AS tasks,
+                 (SELECT count(*)::int FROM omnis.mission_lane_events) AS events,
+                 (SELECT last_global_sequence::text FROM omnis.mission_lane_clock WHERE singleton) AS clock
+        `);
+        assert.deepEqual(state.rows[0], { tasks: 0, events: 0, clock: '0' });
       } finally {
         await Promise.allSettled(clients.map((client) => client.query('ROLLBACK')));
         await Promise.allSettled(normalAcquires);
@@ -272,6 +213,160 @@ const postgresSuite = describe(
         await firstPool.end();
         await secondPool.end();
       }
+    });
+
+    it('applies the remaining global deadline through D5 before any source mutation', async () => {
+      const blocker = await pool!.connect();
+      const writer = await pool!.connect();
+      try {
+        await blocker.query('BEGIN');
+        await blocker.query('SELECT pg_advisory_xact_lock($1::bigint)', ['70463909136525']);
+        await writer.query('BEGIN');
+        await assert.rejects(
+          writer.query('SELECT omnis.acquire_mission_lane_admission(false, 75)'),
+          (error: unknown) => ['PML02', '55P03'].includes((error as { code?: string }).code ?? ''),
+        );
+        await writer.query('ROLLBACK');
+        const state = await adminPool!.query<{ tasks: number; events: number; clock: string }>(`
+          SELECT (SELECT count(*)::int FROM omnis.tasks) AS tasks,
+                 (SELECT count(*)::int FROM omnis.mission_lane_events) AS events,
+                 (SELECT last_global_sequence::text FROM omnis.mission_lane_clock WHERE singleton) AS clock
+        `);
+        assert.deepEqual(state.rows[0], { tasks: 0, events: 0, clock: '0' });
+        const heldPermit = await adminPool!.query(`
+          SELECT count(*)::int AS count FROM pg_locks
+           WHERE locktype='advisory' AND granted AND objsubid=1
+             AND ((classid::bigint << 32) | objid::bigint)
+                 BETWEEN 70463909136600 AND 70463909136603
+        `);
+        assert.equal(
+          heldPermit.rows[0]?.count,
+          0,
+          'expired admission must release its xact permit',
+        );
+      } finally {
+        await writer.query('ROLLBACK').catch(() => undefined);
+        await blocker.query('ROLLBACK').catch(() => undefined);
+        writer.release();
+        blocker.release();
+      }
+    });
+
+    it('releases bounded queue and priority locks when a critical waiter is cancelled', async () => {
+      const blocker = await pool!.connect();
+      const cancelled = await pool!.connect();
+      const survivor = await pool!.connect();
+      let cancelledPid: number | undefined;
+      let cancelledAdmission: Promise<unknown> | undefined;
+      let secondAdmission: Promise<unknown> | undefined;
+      const waitUntil = async (predicate: () => Promise<boolean>) => {
+        const deadline = Date.now() + 2_000;
+        while (Date.now() < deadline) {
+          if (await predicate()) return true;
+          await delay(10);
+        }
+        return false;
+      };
+      try {
+        await blocker.query('SELECT pg_advisory_lock($1::bigint)', ['70463909136605']);
+        cancelledPid = (await cancelled.query<{ pid: number }>('SELECT pg_backend_pid() AS pid'))
+          .rows[0]?.pid;
+        assert.ok(cancelledPid);
+
+        cancelledAdmission = cancelled.query(
+          'SELECT omnis.acquire_mission_lane_admission(true, 3000)',
+        );
+        assert.equal(
+          await waitUntil(async () => {
+            const result = await adminPool!.query<{ waiting: boolean }>(
+              `SELECT EXISTS (
+                 SELECT 1 FROM pg_locks
+                 WHERE pid = $1 AND locktype = 'advisory' AND NOT granted
+                   AND ((classid::bigint << 32) | objid::bigint) = 70463909136605
+               ) AS waiting`,
+              [cancelledPid],
+            );
+            return result.rows[0]?.waiting === true;
+          }),
+          true,
+          'the first critical request should wait on the held priority marker',
+        );
+
+        secondAdmission = survivor.query('SELECT omnis.acquire_mission_lane_admission(true, 3000)');
+        assert.equal(
+          await waitUntil(async () => {
+            const result = await adminPool!.query<{ waiting: number }>(
+              `SELECT count(*)::int AS waiting FROM pg_locks
+               WHERE locktype = 'advisory' AND NOT granted AND objsubid = 1
+                 AND ((classid::bigint << 32) | objid::bigint) = 70463909136605`,
+            );
+            return result.rows[0]?.waiting === 2;
+          }),
+          true,
+          'multiple critical requests should remain bounded while waiting',
+        );
+
+        await adminPool!.query('SELECT pg_cancel_backend($1)', [cancelledPid]);
+        await assert.rejects(
+          cancelledAdmission,
+          (error: unknown) => (error as { code?: string }).code === '57014',
+        );
+        await cancelled.query('ROLLBACK').catch(() => undefined);
+
+        const leakedLocks = await adminPool!.query<{ count: number }>(
+          `SELECT count(*)::int AS count FROM pg_locks
+           WHERE pid = $1 AND locktype = 'advisory' AND granted AND objsubid = 1
+             AND (((classid::bigint << 32) | objid::bigint)
+               BETWEEN 70463909136600 AND 70463909136605
+               OR ((classid::bigint << 32) | objid::bigint)
+               BETWEEN 70463909136610 AND 70463909136613)`,
+          [cancelledPid],
+        );
+        assert.equal(leakedLocks.rows[0]?.count, 0, 'cancelled waiters must release session locks');
+
+        await blocker.query('SELECT pg_advisory_unlock($1::bigint)', ['70463909136605']);
+        await secondAdmission;
+        await survivor.query('COMMIT');
+      } finally {
+        await Promise.allSettled([
+          blocker.query('SELECT pg_advisory_unlock($1::bigint)', ['70463909136605']),
+          ...(cancelledAdmission ? [cancelledAdmission] : []),
+          ...(secondAdmission ? [secondAdmission] : []),
+          cancelled.query('ROLLBACK'),
+          survivor.query('ROLLBACK'),
+        ]);
+        blocker.release();
+        cancelled.release();
+        survivor.release();
+      }
+    });
+
+    it('bounds pool checkout and rejects before a Task or ledger mutation', async () => {
+      const checkoutPool = createPool({
+        connectionString: databaseUrl!,
+        max: 1,
+        connectionTimeoutMillis: 75,
+      });
+      const heldClient = await checkoutPool.connect();
+      try {
+        const checkoutStore = new PostgresRunStore(checkoutPool);
+        await assert.rejects(
+          checkoutStore.createTask(
+            { title: 'Pool checkout timeout', detail: 'No source mutation should occur.' },
+            randomUUID(),
+          ),
+          (error: unknown) => error instanceof StoreError && error.code === 'concurrency_limit',
+        );
+      } finally {
+        heldClient.release();
+        await checkoutPool.end();
+      }
+      const state = await adminPool!.query<{ tasks: number; events: number; clock: string }>(`
+        SELECT (SELECT count(*)::int FROM omnis.tasks) AS tasks,
+               (SELECT count(*)::int FROM omnis.mission_lane_events) AS events,
+               (SELECT last_global_sequence::text FROM omnis.mission_lane_clock WHERE singleton) AS clock
+      `);
+      assert.deepEqual(state.rows[0], { tasks: 0, events: 0, clock: '0' });
     });
 
     it('grants admission only to approved event writers and preserves ledger ACL isolation', async () => {
@@ -283,9 +378,9 @@ const postgresSuite = describe(
         runtime_clock_update: boolean;
         authorizer_event_insert: boolean;
       }>(`
-        SELECT has_function_privilege('omnis_runtime', 'omnis.acquire_mission_lane_admission(boolean)', 'EXECUTE') AS runtime_admission,
-               has_function_privilege('omnis_authorizer', 'omnis.acquire_mission_lane_admission(boolean)', 'EXECUTE') AS authorizer_admission,
-               has_function_privilege('omnis_launcher', 'omnis.acquire_mission_lane_admission(boolean)', 'EXECUTE') AS launcher_admission,
+        SELECT has_function_privilege('omnis_runtime', 'omnis.acquire_mission_lane_admission(boolean,integer)', 'EXECUTE') AS runtime_admission,
+               has_function_privilege('omnis_authorizer', 'omnis.acquire_mission_lane_admission(boolean,integer)', 'EXECUTE') AS authorizer_admission,
+               has_function_privilege('omnis_launcher', 'omnis.acquire_mission_lane_admission(boolean,integer)', 'EXECUTE') AS launcher_admission,
                has_table_privilege('omnis_runtime', 'omnis.mission_lane_events', 'INSERT') AS runtime_event_insert,
                has_table_privilege('omnis_runtime', 'omnis.mission_lane_clock', 'UPDATE') AS runtime_clock_update,
                has_table_privilege('omnis_authorizer', 'omnis.mission_lane_events', 'INSERT') AS authorizer_event_insert
@@ -329,12 +424,19 @@ const postgresSuite = describe(
           >
         > = [];
         try {
-          for (const writerPool of [firstPool, firstPool, secondPool, secondPool]) {
+          for (const [index, writerPool] of [
+            firstPool,
+            firstPool,
+            secondPool,
+            secondPool,
+          ].entries()) {
             const client = await writerPool.connect();
             clients.push(client);
             activeClients.push(client);
             await client.query('BEGIN');
-            await client.query('SELECT omnis.acquire_mission_lane_admission(false)');
+            await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [
+              70463909136600 + index,
+            ]);
           }
           const stores = [new PostgresRunStore(firstPool), new PostgresRunStore(secondPool)];
           for (let index = 0; index < attempted; index += 1) {
@@ -2413,8 +2515,8 @@ const postgresSuite = describe(
         SELECT has_table_privilege('omnis_runtime', 'omnis.projects', 'SELECT') AS runtime_project_select,
                has_column_privilege('omnis_runtime', 'omnis.tasks', 'project_id', 'UPDATE') AS runtime_task_project_update,
                has_table_privilege('omnis_runtime', 'omnis.tasks', 'INSERT') AS runtime_task_insert,
-               has_function_privilege('omnis_runtime', 'omnis.create_task(text,text,text,uuid,bytea)', 'EXECUTE') AS runtime_create_task,
-               has_function_privilege('omnis_authorizer', 'omnis.create_task(text,text,text,uuid,bytea)', 'EXECUTE') AS authorizer_create_task
+               has_function_privilege('omnis_runtime', 'omnis.create_task(text,text,text,uuid,bytea,integer)', 'EXECUTE') AS runtime_create_task,
+               has_function_privilege('omnis_authorizer', 'omnis.create_task(text,text,text,uuid,bytea,integer)', 'EXECUTE') AS authorizer_create_task
       `);
       assert.deepEqual(privileges.rows[0], {
         runtime_project_select: false,
@@ -3777,8 +3879,8 @@ const postgresSuite = describe(
                has_table_privilege('omnis_runtime','omnis.task_epic_associations','INSERT') AS runtime_relation_insert,
                has_table_privilege('omnis_authorizer','omnis.task_epic_associations','SELECT') AS authorizer_relation_select,
                has_table_privilege('omnis_authorizer','omnis.task_epic_associations','INSERT') AS authorizer_relation_insert,
-               has_function_privilege('omnis_runtime','omnis.set_task_epic(text,integer,text,uuid,bytea)','EXECUTE') AS runtime_mutation_function,
-               has_function_privilege('omnis_authorizer','omnis.set_task_epic(text,integer,text,uuid,bytea)','EXECUTE') AS authorizer_mutation_function
+               has_function_privilege('omnis_runtime','omnis.set_task_epic(text,integer,text,uuid,bytea,integer)','EXECUTE') AS runtime_mutation_function,
+               has_function_privilege('omnis_authorizer','omnis.set_task_epic(text,integer,text,uuid,bytea,integer)','EXECUTE') AS authorizer_mutation_function
       `);
       assert.deepEqual(permissions.rows[0], {
         runtime_relation_select: false,

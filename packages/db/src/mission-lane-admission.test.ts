@@ -2,7 +2,10 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { Pool } from 'pg';
 import {
+  createMissionLaneDeadline,
   MissionLaneOverloadedError,
+  missionLaneDeadlineMs,
+  requireMissionLaneRemainingMs,
   withLocalMissionLaneAdmission,
 } from './mission-lane-admission.ts';
 
@@ -15,6 +18,17 @@ function deferred() {
 }
 
 describe('Mission Lane local writer bound', () => {
+  it('uses one monotonic deadline and reports expiry without resetting it', () => {
+    let now = 10;
+    const deadline = createMissionLaneDeadline(now, () => now);
+    assert.equal(deadline.remainingMilliseconds(), missionLaneDeadlineMs);
+    now += 1_250;
+    assert.equal(deadline.remainingMilliseconds(), 1_750);
+    now += 1_750;
+    assert.equal(deadline.remainingMilliseconds(), 0);
+    assert.throws(() => requireMissionLaneRemainingMs(deadline), MissionLaneOverloadedError);
+  });
+
   it('rejects overflow before action and releases capacity on every exit', async () => {
     const pool = {} as Pool;
     const releaseActions = deferred();

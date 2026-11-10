@@ -1,6 +1,8 @@
 import type { Pool, PoolClient } from 'pg';
 
 export type MissionLaneAdmissionPriority = 'normal' | 'critical';
+export type MissionLaneDeadline = { remainingMilliseconds(): number };
+export const missionLaneDeadlineMs = 3_000;
 
 type Gate = { inFlight: number; normalInFlight: number };
 
@@ -13,6 +15,22 @@ export class MissionLaneOverloadedError extends Error {
     super('Mission Lane writer capacity is full; retry the request.');
     this.name = 'MissionLaneOverloadedError';
   }
+}
+
+export function createMissionLaneDeadline(
+  startedAt = performance.now(),
+  now: () => number = () => performance.now(),
+): MissionLaneDeadline {
+  const expiresAt = startedAt + missionLaneDeadlineMs;
+  return {
+    remainingMilliseconds: () => Math.max(0, Math.ceil(expiresAt - now())),
+  };
+}
+
+export function requireMissionLaneRemainingMs(deadline: MissionLaneDeadline): number {
+  const remainingMs = deadline.remainingMilliseconds();
+  if (remainingMs < 1) throw new MissionLaneOverloadedError();
+  return remainingMs;
 }
 
 function gateFor(pool: Pool): Gate {
@@ -50,11 +68,17 @@ function acquireLocal(pool: Pool, priority: MissionLaneAdmissionPriority): () =>
 export async function withLocalMissionLaneAdmission<T>(
   pool: Pool,
   priority: MissionLaneAdmissionPriority,
-  action: () => Promise<T>,
+  action: (deadline: MissionLaneDeadline) => Promise<T>,
 ): Promise<T> {
+  const deadline = createMissionLaneDeadline();
   const release = acquireLocal(pool, priority);
   try {
-    return await action();
+    return await action(deadline);
+  } catch (error) {
+    if (error instanceof Error && error.message === 'timeout exceeded when trying to connect') {
+      throw new MissionLaneOverloadedError();
+    }
+    throw error;
   } finally {
     release();
   }
@@ -63,6 +87,10 @@ export async function withLocalMissionLaneAdmission<T>(
 export async function acquireMissionLaneAdmission(
   client: PoolClient,
   priority: MissionLaneAdmissionPriority = 'normal',
+  deadline: MissionLaneDeadline = createMissionLaneDeadline(),
 ): Promise<void> {
-  await client.query('SELECT omnis.acquire_mission_lane_admission($1)', [priority === 'critical']);
+  await client.query('SELECT omnis.acquire_mission_lane_admission($1,$2)', [
+    priority === 'critical',
+    requireMissionLaneRemainingMs(deadline),
+  ]);
 }

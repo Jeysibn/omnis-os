@@ -249,6 +249,8 @@ try {
   timings.sort((a, b) => a - b);
   runOutcomeTimings.sort((a, b) => a - b);
   mutationQueryTimings.sort((a, b) => a - b);
+  readQueryTimings.sort((a, b) => a - b);
+  poolCheckoutTimings.sort((a, b) => a - b);
   const elapsedMs = batchDurations.reduce((sum, value) => sum + value, 0);
   const samplesPath = process.env.OMNIS_BENCHMARK_SAMPLES_PATH;
   if (samplesPath) {

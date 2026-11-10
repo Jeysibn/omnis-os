@@ -191,7 +191,7 @@ const allowed = [
   acl(
     'routine',
     'omnis',
-    'set_task_epic(p_task_id text, p_expected_association_revision integer, p_epic_id text, p_request_id uuid, p_fingerprint bytea)',
+    'set_task_epic(p_task_id text, p_expected_association_revision integer, p_epic_id text, p_request_id uuid, p_fingerprint bytea, p_remaining_ms integer)',
     'EXECUTE',
     null,
     'omnis_authorizer',
@@ -290,7 +290,7 @@ const allowed = [
   acl(
     'routine',
     'omnis',
-    'create_task(p_title text, p_detail text, p_project_id text, p_request_id uuid, p_fingerprint bytea)',
+    'create_task(p_title text, p_detail text, p_project_id text, p_request_id uuid, p_fingerprint bytea, p_remaining_ms integer)',
     'EXECUTE',
     null,
     'omnis_runtime',
@@ -299,7 +299,7 @@ const allowed = [
   acl(
     'routine',
     'omnis',
-    'set_task_project(p_task_id text, p_expected_association_revision integer, p_project_id text, p_request_id uuid, p_fingerprint bytea)',
+    'set_task_project(p_task_id text, p_expected_association_revision integer, p_project_id text, p_request_id uuid, p_fingerprint bytea, p_remaining_ms integer)',
     'EXECUTE',
     null,
     'omnis_runtime',
@@ -467,7 +467,7 @@ describe('post-restore PostgreSQL ACL integrity', () => {
       acl(
         'routine',
         'omnis',
-        'acquire_mission_lane_admission(p_critical boolean)',
+        'acquire_mission_lane_admission(p_critical boolean, p_remaining_ms integer)',
         'EXECUTE',
         null,
         'omnis_runtime',

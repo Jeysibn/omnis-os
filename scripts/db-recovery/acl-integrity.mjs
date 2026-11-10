@@ -150,12 +150,13 @@ const approvedSecurityDefinerRoutineArities = new Map([
   ['append_runtime_run_event', 3],
 ]);
 const approvedTaskProjectRoutines = new Set([
-  'create_task(p_title text, p_detail text, p_project_id text, p_request_id uuid, p_fingerprint bytea)',
-  'set_task_project(p_task_id text, p_expected_association_revision integer, p_project_id text, p_request_id uuid, p_fingerprint bytea)',
+  'create_task(p_title text, p_detail text, p_project_id text, p_request_id uuid, p_fingerprint bytea, p_remaining_ms integer)',
+  'set_task_project(p_task_id text, p_expected_association_revision integer, p_project_id text, p_request_id uuid, p_fingerprint bytea, p_remaining_ms integer)',
+  'set_task_epic(p_task_id text, p_expected_association_revision integer, p_epic_id text, p_request_id uuid, p_fingerprint bytea, p_remaining_ms integer)',
   'set_task_execution_assignment(p_task_id text, p_expected_revision integer, p_agent_id text, p_profile_version_no integer, p_runtime_id text, p_request_id uuid, p_fingerprint bytea)',
 ]);
 const approvedRuntimeAdmissionRoutines = new Set([
-  'acquire_mission_lane_admission(p_critical boolean)',
+  'acquire_mission_lane_admission(p_critical boolean, p_remaining_ms integer)',
 ]);
 
 function isApprovedRuntimeSecurityDefiner(entry) {
@@ -333,7 +334,7 @@ export function assertRuntimeAclPolicy(snapshot) {
           'archive_project_epic(p_project_id text, p_id text, p_expected_revision integer, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
           'get_task_epic(p_task_id text)',
           'list_project_epic_tasks(p_project_id text, p_epic_id text, p_after_created_at timestamp with time zone, p_after_task_id text, p_limit integer)',
-          'set_task_epic(p_task_id text, p_expected_association_revision integer, p_epic_id text, p_request_id uuid, p_fingerprint bytea)',
+          'set_task_epic(p_task_id text, p_expected_association_revision integer, p_epic_id text, p_request_id uuid, p_fingerprint bytea, p_remaining_ms integer)',
         ].includes(entry.object) &&
         entry.privilege === 'EXECUTE' &&
         entry.securityDefiner === true

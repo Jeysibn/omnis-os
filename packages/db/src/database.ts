@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { Pool, type PoolClient, type PoolConfig, type QueryResult, type QueryResultRow } from 'pg';
 import {
   withLocalMissionLaneAdmission,
+  type MissionLaneDeadline,
   type MissionLaneAdmissionPriority,
 } from './mission-lane-admission.ts';
 
@@ -23,7 +24,15 @@ export function createPool(
   config: PoolConfig | string,
   onIdleClientError?: (error: { name: string; code?: string }) => void,
 ): Pool {
-  const pool = new Pool(typeof config === 'string' ? { connectionString: config, max: 8 } : config);
+  const options = typeof config === 'string' ? { connectionString: config, max: 8 } : config;
+  const requestedConnectionTimeout = options.connectionTimeoutMillis;
+  const pool = new Pool({
+    ...options,
+    connectionTimeoutMillis:
+      requestedConnectionTimeout && requestedConnectionTimeout > 0
+        ? Math.min(requestedConnectionTimeout, 3_000)
+        : 3_000,
+  });
   pool.on('error', (error: Error & { code?: string }) => {
     const safeError = {
       name: error.name,
@@ -152,10 +161,12 @@ export async function inTransaction<T>(
  */
 export async function inMissionLaneTransaction<T>(
   pool: Pool,
-  action: (client: PoolClient) => Promise<T>,
+  action: (client: PoolClient, deadline: MissionLaneDeadline) => Promise<T>,
   priority: MissionLaneAdmissionPriority = 'normal',
 ): Promise<T> {
-  return withLocalMissionLaneAdmission(pool, priority, () => inTransaction(pool, action));
+  return withLocalMissionLaneAdmission(pool, priority, (deadline) =>
+    inTransaction(pool, (client) => action(client, deadline)),
+  );
 }
 
 export function asPgBossTransaction(client: PoolClient): PgBossTransaction {
