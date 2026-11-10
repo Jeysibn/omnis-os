@@ -3,6 +3,28 @@ import { isValidStatusStep, nextStatuses } from './projects/planning/lifecycle.j
 import { judgeAssociation, judgeEdit } from './projects/planning/recovery.js';
 import { CLOCK_SKEW_MS, MAX_SCAN_PAGES, scanForCreated } from './projects/planning/unresolved.js';
 import { associationConfirmed } from './projects/planning/verify.js';
+import {
+  ENVELOPE_VERSION,
+  FUTURE_SKEW_MS,
+  MAX_ENVELOPE_CHARS,
+  MAX_KNOWN_IDS,
+  REPLAY_WINDOW_MS,
+  newEnvelope,
+  parseEnvelope,
+  readPending,
+  removePending,
+  replayPolicy,
+  storageKey,
+  storageWritable,
+  transitionAfterSend,
+  viewAfterScan,
+  writePending,
+  type PendingEnvelope,
+  type Scope,
+  type SendOutcome,
+  type StorageLike,
+} from './projects/planning/pendingCreate.js';
+import { describeRecovery } from './projects/planning/recoveryCopy.js';
 import { summariseTasks } from './projects/planning/summary.js';
 
 /** Pure decisions behind the planning screens: no browser, no network. */
@@ -236,5 +258,304 @@ test.describe('scanForCreated', () => {
     const endless = async () => ({ items: [], page: { complete: false, nextCursor: 'more' } });
     expect(await scanForCreated(endless, pending, fits)).toEqual({ kind: 'unknown' });
     expect(MAX_SCAN_PAGES).toBeGreaterThan(1);
+  });
+});
+
+/* ------------------------------ durable unknown-create recovery ------------------------------ */
+
+const scope: Scope = { ownerId: 'owner', projectId: `prj_${'1'.repeat(32)}`, kind: 'epic' };
+const memory = (
+  initial: Record<string, string> = {},
+): StorageLike & { data: Map<string, string> } => {
+  const data = new Map(Object.entries(initial));
+  return {
+    data,
+    getItem: (key) => data.get(key) ?? null,
+    setItem: (key, value) => void data.set(key, value),
+    removeItem: (key) => void data.delete(key),
+  };
+};
+const NOW = Date.UTC(2026, 10, 10, 12, 0, 0);
+const good = (over: Record<string, unknown> = {}) => ({
+  version: 1,
+  ...scope,
+  request: { title: 'Reporting' },
+  idempotencyKey: '11111111-2222-4333-8444-555555555555',
+  attemptedAt: NOW - 1000,
+  ...over,
+});
+const parse = (value: unknown, s: Scope = scope) => parseEnvelope(JSON.stringify(value), s, NOW);
+
+test.describe('pending create envelope', () => {
+  test('a valid envelope for exactly this owner, project and type is accepted and normalised', () => {
+    const result = parse(
+      good({
+        request: { title: 'Reporting', description: 'Weekly.' },
+        knownIds: [`epc_${'a'.repeat(32)}`],
+      }),
+    );
+    expect(result).toMatchObject({
+      status: 'found',
+      envelope: { request: { title: 'Reporting', description: 'Weekly.' } },
+    });
+  });
+  test('a milestone envelope keeps its target date; an epic cannot carry one', () => {
+    const ms: Scope = { ...scope, kind: 'milestone' };
+    expect(
+      parse(good({ kind: 'milestone', request: { title: 'T', targetDate: '2026-12-31' } }), ms),
+    ).toMatchObject({
+      status: 'found',
+      envelope: { request: { title: 'T', targetDate: '2026-12-31' } },
+    });
+    expect(parse(good({ request: { title: 'T', targetDate: '2026-12-31' } }))).toEqual({
+      status: 'blocked',
+      reason: 'corrupt',
+    });
+  });
+  test('corrupt, malformed, incomplete or oversized input fails closed as corrupt', () => {
+    expect(parseEnvelope('{not json', scope, NOW)).toEqual({
+      status: 'blocked',
+      reason: 'corrupt',
+    });
+    expect(parseEnvelope('[]', scope, NOW)).toEqual({ status: 'blocked', reason: 'corrupt' });
+    expect(parseEnvelope('null', scope, NOW)).toEqual({ status: 'blocked', reason: 'corrupt' });
+    expect(parse({ version: 1 })).toEqual({ status: 'blocked', reason: 'corrupt' });
+    expect(parse(good({ extra: 1 }))).toEqual({ status: 'blocked', reason: 'corrupt' });
+    expect(parse(good({ kind: 'story' }))).toEqual({ status: 'blocked', reason: 'corrupt' });
+    expect(parse(good({ idempotencyKey: 'x' }))).toEqual({ status: 'blocked', reason: 'corrupt' });
+    expect(parse(good({ request: { title: '' } }))).toEqual({
+      status: 'blocked',
+      reason: 'corrupt',
+    });
+    expect(
+      parse(
+        good({
+          knownIds: Array.from({ length: MAX_KNOWN_IDS + 1 }, () => `epc_${'a'.repeat(32)}`),
+        }),
+      ),
+    ).toEqual({ status: 'blocked', reason: 'corrupt' });
+    expect(parseEnvelope('x'.repeat(MAX_ENVELOPE_CHARS + 1), scope, NOW)).toEqual({
+      status: 'blocked',
+      reason: 'corrupt',
+    });
+  });
+  test('another version is incompatible, never guessed at', () => {
+    expect(parse(good({ version: 2 }))).toEqual({ status: 'blocked', reason: 'incompatible' });
+    expect(parse(good({ version: '1' }))).toEqual({ status: 'blocked', reason: 'incompatible' });
+  });
+  test('an envelope for another owner, project or record type is foreign', () => {
+    expect(parse(good({ ownerId: 'someone' }))).toEqual({ status: 'blocked', reason: 'foreign' });
+    expect(parse(good({ projectId: `prj_${'2'.repeat(32)}` }))).toEqual({
+      status: 'blocked',
+      reason: 'foreign',
+    });
+    expect(parse(good({ kind: 'milestone', request: { title: 'T' } }))).toEqual({
+      status: 'blocked',
+      reason: 'foreign',
+    });
+  });
+  test('an impossible timestamp is a clock problem; an old one is still valid (age is policy, not validity)', () => {
+    expect(parse(good({ attemptedAt: NOW + FUTURE_SKEW_MS + 1 }))).toEqual({
+      status: 'blocked',
+      reason: 'clock',
+    });
+    expect(parse(good({ attemptedAt: 5 }))).toEqual({ status: 'blocked', reason: 'clock' });
+    expect(parse(good({ attemptedAt: NOW - 30 * 24 * 3_600_000 })).status).toBe('found');
+  });
+  test('the stored key names the owner, project and type, so scopes cannot read each other', () => {
+    const a = storageKey(scope);
+    expect(storageKey({ ...scope, ownerId: 'other' })).not.toBe(a);
+    expect(storageKey({ ...scope, kind: 'milestone' })).not.toBe(a);
+    expect(storageKey({ ...scope, projectId: `prj_${'3'.repeat(32)}` })).not.toBe(a);
+    const store = memory({
+      [storageKey({ ...scope, ownerId: 'other' })]: JSON.stringify(good({ ownerId: 'other' })),
+    });
+    expect(readPending(store, scope, NOW)).toEqual({ status: 'none' });
+  });
+});
+
+test.describe('pending create storage', () => {
+  test('write, read back and remove; an unwritable or unreadable store is reported, not hidden', () => {
+    const store = memory();
+    const envelope = newEnvelope(
+      scope,
+      { title: 'Reporting' },
+      [`epc_${'a'.repeat(32)}`, 'not-an-id'],
+      NOW,
+    );
+    expect(envelope.knownIds).toEqual([`epc_${'a'.repeat(32)}`]);
+    expect(envelope.version).toBe(ENVELOPE_VERSION);
+    expect(writePending(store, envelope)).toBe(true);
+    expect(readPending(store, scope, Date.now())).toMatchObject({
+      status: 'found',
+      envelope: { idempotencyKey: envelope.idempotencyKey },
+    });
+    expect(removePending(store, scope)).toBe(true);
+    expect(readPending(store, scope, NOW)).toEqual({ status: 'none' });
+
+    const denied: StorageLike = {
+      getItem: () => {
+        throw new Error('denied');
+      },
+      setItem: () => {
+        throw new Error('denied');
+      },
+      removeItem: () => {
+        throw new Error('denied');
+      },
+    };
+    expect(writePending(denied, envelope)).toBe(false);
+    expect(writePending(null, envelope)).toBe(false);
+    expect(readPending(denied, scope, NOW)).toEqual({
+      status: 'blocked',
+      reason: 'storage-unavailable',
+    });
+    expect(readPending(null, scope, NOW)).toEqual({
+      status: 'blocked',
+      reason: 'storage-unavailable',
+    });
+    expect(removePending(denied, scope)).toBe(false);
+    expect(storageWritable(denied)).toBe(false);
+    expect(storageWritable(memory())).toBe(true);
+  });
+  test('a write that does not read back is a failure, and an oversized request is refused', () => {
+    const lying: StorageLike = {
+      getItem: () => null,
+      setItem: () => undefined,
+      removeItem: () => undefined,
+    };
+    expect(writePending(lying, newEnvelope(scope, { title: 'x' }, [], NOW))).toBe(false);
+    const huge = {
+      ...newEnvelope(scope, { title: 'x' }, [], NOW),
+      request: { title: 'y'.repeat(MAX_ENVELOPE_CHARS) },
+    };
+    expect(writePending(memory(), huge as PendingEnvelope)).toBe(false);
+  });
+  test('the stored envelope holds only what recovery needs, and no secret', () => {
+    const store = memory();
+    writePending(store, newEnvelope(scope, { title: 'Reporting' }, [], NOW));
+    const raw = [...store.data.values()][0] ?? '';
+    expect(Object.keys(JSON.parse(raw)).sort()).toEqual([
+      'attemptedAt',
+      'idempotencyKey',
+      'kind',
+      'knownIds',
+      'ownerId',
+      'projectId',
+      'request',
+      'version',
+    ]);
+    for (const secret of ['csrf', 'token', 'cookie', 'password', 'session'])
+      expect(raw.toLowerCase()).not.toContain(secret);
+  });
+});
+
+test.describe('replay policy', () => {
+  test('a recent key may be repeated; one older than the window is not, and is never discarded for it', () => {
+    expect(replayPolicy({ attemptedAt: NOW - 1000 }, NOW)).toEqual({ safe: true });
+    expect(replayPolicy({ attemptedAt: NOW - REPLAY_WINDOW_MS }, NOW)).toEqual({ safe: true });
+    expect(replayPolicy({ attemptedAt: NOW - REPLAY_WINDOW_MS - 1 }, NOW)).toEqual({
+      safe: false,
+      reason: 'replay-unverified',
+    });
+    // Old but valid stays readable: policy never changes what is stored.
+    expect(parse(good({ attemptedAt: NOW - 10 * REPLAY_WINDOW_MS })).status).toBe('found');
+  });
+});
+
+test.describe('create recovery state machine', () => {
+  const outcomes: SendOutcome[] = [
+    { kind: 'saved' },
+    { kind: 'unknown' },
+    { kind: 'unauthorized' },
+    ...[403, 404, 409, 422, 503].map((status) => ({ kind: 'rejected', status }) as SendOutcome),
+  ];
+  test('the pending request is cleared ONLY by a confirmed answer or a refusal of the first attempt', () => {
+    for (const retry of [false, true])
+      for (const outcome of outcomes) {
+        const t = transitionAfterSend(retry, outcome);
+        const allowed =
+          outcome.kind === 'saved' ||
+          (!retry && (outcome.kind === 'rejected' || outcome.kind === 'unauthorized'));
+        expect(t.clear, `retry=${retry} ${JSON.stringify(outcome)}`).toBe(allowed);
+        expect(t.basis.length).toBeGreaterThan(10);
+      }
+  });
+  test('a refusal of a retry says nothing about the original; only the secure-session check is merely unknown', () => {
+    expect(transitionAfterSend(true, { kind: 'rejected', status: 422 })).toMatchObject({
+      to: 'unsafe',
+      unsafe: 'refused',
+      clear: false,
+    });
+    expect(transitionAfterSend(true, { kind: 'rejected', status: 409 })).toMatchObject({
+      to: 'unsafe',
+      clear: false,
+    });
+    expect(transitionAfterSend(true, { kind: 'rejected', status: 403 })).toMatchObject({
+      to: 'unknown',
+      clear: false,
+    });
+    expect(transitionAfterSend(false, { kind: 'rejected', status: 422 })).toMatchObject({
+      to: 'rejected',
+      clear: true,
+    });
+    expect(transitionAfterSend(false, { kind: 'saved' })).toMatchObject({
+      to: 'confirmed',
+      clear: true,
+    });
+  });
+  test('a list read is only ever an observation', () => {
+    expect(viewAfterScan({ kind: 'found' })).toEqual({ view: 'candidate' });
+    expect(viewAfterScan({ kind: 'ambiguous', count: 3 })).toEqual({ view: 'ambiguous', count: 3 });
+    expect(viewAfterScan({ kind: 'absent' })).toEqual({ view: 'absent' });
+    expect(viewAfterScan({ kind: 'unknown' })).toEqual({ view: 'unreadable' });
+  });
+});
+
+test.describe('recovery copy', () => {
+  test('every view states what happened, what is known, what is not verified, and why creation is unavailable', () => {
+    const views = [
+      { view: 'unknown' },
+      { view: 'candidate', title: 'T', revision: 1 },
+      { view: 'ambiguous', count: 2 },
+      { view: 'absent' },
+      { view: 'unreadable' },
+      { view: 'refused', status: 409 },
+      { view: 'replay-unverified' },
+      { view: 'blocked', reason: 'corrupt' },
+      { view: 'storage-unavailable' },
+    ] as const;
+    for (const view of views) {
+      const copy = describeRecovery(view, 'epic', true);
+      expect(copy.headline.length, view.view).toBeGreaterThan(5);
+      expect(copy.what.length, view.view).toBeGreaterThan(20);
+      expect(copy.why.length, view.view).toBeGreaterThan(20);
+      expect(copy.actions.length, view.view).toBeGreaterThan(0);
+    }
+  });
+  test('the candidate wording is exact, and no view offers a plain new create', () => {
+    expect(
+      describeRecovery({ view: 'candidate', title: 'T', revision: 1 }, 'epic', true).what,
+    ).toBe(
+      'One matching record was found, but we cannot confirm whether it was created by your original request.',
+    );
+    // The only actions are to repeat THE request, look, discard on purpose, or close: never a new one.
+    const allowed = ['retry', 'checkCreate', 'discard', 'close'];
+    for (const view of [
+      { view: 'unknown' },
+      { view: 'refused', status: 422 },
+      { view: 'replay-unverified' },
+    ] as const)
+      for (const action of describeRecovery(view, 'epic', true).actions)
+        expect(allowed, `${view.view}: ${action}`).toContain(action);
+  });
+  test('a key that cannot be trusted never offers a retry', () => {
+    for (const view of [
+      { view: 'unknown' },
+      { view: 'candidate', title: 'T', revision: 1 },
+      { view: 'absent' },
+    ] as const)
+      expect(describeRecovery(view, 'epic', false).actions).not.toContain('retry');
+    expect(describeRecovery({ view: 'unknown' }, 'epic', true).actions).toContain('retry');
   });
 });

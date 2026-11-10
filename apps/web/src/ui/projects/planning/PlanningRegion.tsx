@@ -18,6 +18,7 @@ import { RecordsPanel } from './RecordsPanel.js';
 
 type Props = {
   projectId: string;
+  ownerId: string;
   readOnly: boolean;
   csrfToken: string;
   refreshCsrf: () => Promise<string>;
@@ -33,6 +34,7 @@ type Props = {
 /** Epics and milestones for one project: the planning half of the project workspace. */
 export function PlanningRegion({
   projectId,
+  ownerId,
   readOnly,
   csrfToken,
   refreshCsrf,
@@ -43,7 +45,7 @@ export function PlanningRegion({
   statusRef,
   announce,
 }: Props) {
-  const shared = { projectId, readOnly, csrfToken, refreshCsrf, onUnauthorized, announce };
+  const shared = { projectId, ownerId, readOnly, csrfToken, refreshCsrf, onUnauthorized, announce };
   const fallbackFocus = () => document.querySelector<HTMLElement>('[data-planning-status]');
   return (
     <>

@@ -301,7 +301,7 @@ test.describe('epics: revision conflicts and unknown outcomes', () => {
     api.next('epics:create', { abort: true });
     await form.getByRole('button', { name: 'Create epic' }).click();
     await expect(form).toContainText('did not get a confirmed result');
-    await expect(form).toContainText('cannot create it twice');
+    await expect(form).toContainText('this form is locked to this exact request');
     await expect(epicsPanel(page).getByRole('heading', { name: 'Reporting' })).toHaveCount(0);
     expect(api.epicCount()).toBe(1);
 
@@ -1270,6 +1270,9 @@ test.describe('visual evidence (only when NEXUS_SHOT_DIR is set)', () => {
       await expect(create).toContainText('this form is locked to this exact request');
       await shoot(page, `planning-unresolved-create-${size.width}x${size.height}`);
       await create.getByRole('button', { name: 'Check the current list' }).click();
+      await expect(create).toContainText('One matching record was found, but we cannot confirm');
+      await shoot(page, `planning-candidate-${size.width}x${size.height}`);
+      await create.getByRole('button', { name: 'Close (the request stays unresolved)' }).click();
       await expect(create).toBeHidden();
       await epicsPanel(page).getByRole('button', { name: 'Edit epic Billing' }).click();
       const edit = dialog(page, 'Edit epic');
@@ -1348,158 +1351,602 @@ const kinds = [
   },
 ];
 
+const OWNER = 'owner';
+const storageKeyFor = (kind: string, owner = OWNER, projectId = project.id) =>
+  `omnis.planning-create.v1:${encodeURIComponent(owner)}:${projectId}:${kind}`;
+const readStored = async (page: Page, kind: string, owner = OWNER) => {
+  const raw = await page.evaluate((key) => sessionStorage.getItem(key), storageKeyFor(kind, owner));
+  return raw === null ? null : (JSON.parse(raw) as Record<string, unknown>);
+};
+const seed = (page: Page, kind: string, value: string, owner = OWNER) =>
+  page.evaluate(
+    ([key, text]) => sessionStorage.setItem(key as string, text as string),
+    [storageKeyFor(kind, owner), value],
+  );
+const envelopeFor = (kind: 'epic' | 'milestone', overrides: Record<string, unknown> = {}) => ({
+  version: 1,
+  ownerId: OWNER,
+  projectId: project.id,
+  kind,
+  request:
+    kind === 'epic' ? { title: 'Reporting' } : { title: 'Reporting', targetDate: '2026-12-31' },
+  idempotencyKey: '11111111-2222-4333-8444-555555555555',
+  attemptedAt: Date.now() - 60_000,
+  knownIds: [],
+  ...overrides,
+});
+const reloadProject = async (page: Page) => {
+  await page.reload();
+  await expect(page.getByRole('heading', { level: 2, name: project.name })).toBeVisible();
+  await expect(epicsPanel(page)).toBeVisible();
+};
+const recovery = (form: ReturnType<typeof dialog>) => form.locator('[data-recovery-view]');
+
 for (const k of kinds)
-  test.describe(`unknown ${k.kind} create: never a second create`, () => {
-    /** Types a title, loses the response after the commit, and returns the open dialog. */
-    async function loseResponse(
-      page: Page,
-      api: ReturnType<typeof createPlanningApi>,
-      commit: boolean,
-      config: Config = {},
-    ) {
+  test.describe(`unresolved ${k.kind} create: durable and never falsely resolved`, () => {
+    type Api = ReturnType<typeof createPlanningApi>;
+    const openCreate = async (page: Page) => {
+      await k.panel(page).getByRole('button', { name: k.openName, exact: true }).click();
+      return dialog(page, k.dialogName);
+    };
+    const resolveButton = (page: Page) =>
+      k.panel(page).getByRole('button', { name: `Resolve pending ${k.kind}` });
+    const openResolve = async (page: Page) => {
+      await resolveButton(page).click();
+      return dialog(page, k.dialogName);
+    };
+    /** Types a title, loses the response (optionally after the commit), returns the open dialog. */
+    async function loseResponse(page: Page, api: Api, commit: boolean, config: Config = {}) {
       await open(page, api, config);
-      await k.panel(page).getByRole('button', { name: k.openName }).click();
-      const form = dialog(page, k.dialogName);
+      const form = await openCreate(page);
       await form.getByLabel('Title').fill('Reporting');
       if (k.kind === 'milestone')
         await form.getByLabel('Target date (optional)').fill('2026-12-31');
       api.next(k.fault, { abort: true, commit });
       await form.getByRole('button', { name: k.submit }).click();
-      await expect(form).toContainText('did not get a confirmed result for this create request');
+      await expect(recovery(form)).toHaveAttribute('data-recovery-view', 'unknown');
       return form;
     }
+    /** The request is still pending, creation is still locked, and nothing was resolved. */
+    async function expectUnresolved(
+      page: Page,
+      api: Api,
+      form: ReturnType<typeof dialog>,
+      writes: number,
+    ) {
+      expect(await readStored(page, k.kind)).not.toBeNull();
+      await expect(form.getByLabel('Title')).toBeDisabled();
+      await expect(form.getByRole('button', { name: k.submit })).toHaveCount(0);
+      await expect(live(page)).toHaveText('');
+      expect(api.writes()).toHaveLength(writes);
+    }
 
-    test('the committed-then-lost create: the form locks, a changed title cannot be sent, a read-only check finds it', async ({
+    test('the request and its key are saved BEFORE it is sent, with nothing secret', async ({
+      page,
+      api,
+    }) => {
+      await open(page, api, {});
+      const form = await openCreate(page);
+      await form.getByLabel('Title').fill('Reporting');
+      if (k.kind === 'milestone')
+        await form.getByLabel('Target date (optional)').fill('2026-12-31');
+      api.next(k.fault, { delayMs: 1500, abort: true, commit: true });
+      await form.getByRole('button', { name: k.submit }).click();
+      await expect.poll(() => api.writes().length).toBe(1);
+      // The server has the request but has not answered; the envelope already exists.
+      const stored = await readStored(page, k.kind);
+      expect(stored).not.toBeNull();
+      expect(stored?.idempotencyKey).toBe(api.writes()[0]?.idempotencyKey);
+      expect(Object.keys(stored ?? {}).sort()).toEqual(
+        [
+          'attemptedAt',
+          'idempotencyKey',
+          'kind',
+          'knownIds',
+          'ownerId',
+          'projectId',
+          'request',
+          'version',
+        ].sort(),
+      );
+      expect(stored).toMatchObject({
+        version: 1,
+        ownerId: OWNER,
+        projectId: project.id,
+        kind: k.kind,
+      });
+      const raw = JSON.stringify(stored);
+      for (const secret of ['csrf', 'token', 'cookie', 'password'])
+        expect(raw.toLowerCase()).not.toContain(secret);
+      await expect(recovery(form)).toHaveAttribute('data-recovery-view', 'unknown');
+    });
+
+    test('A. commit, lost response, reload: the same pending request is restored and locked', async ({
       page,
       api,
     }) => {
       const form = await loseResponse(page, api, true);
-      expect(k.count(api)).toBe(1); // it was applied
-      await expect(form).toContainText('this form is locked to this exact request');
-      // No false success and no false failure.
-      await expect(live(page)).toHaveText('');
-      await expect(k.panel(page).getByRole('heading', { name: 'Reporting' })).toHaveCount(0);
-      await expect(form).not.toContainText('could not be created');
-
-      // The owner tries to change the title and submit again: it cannot be done.
-      await expect(form.getByLabel('Title')).toBeDisabled();
-      await expect(form.getByRole('button', { name: k.submit })).toHaveCount(0);
-      const outcome = await form
-        .getByLabel('Title')
-        .fill('Reporting v2', { timeout: 800 })
-        .then(
-          () => 'edited',
-          () => 'blocked',
-        );
-      expect(outcome).toBe('blocked');
-      await page.keyboard.press('Enter');
-      expect(api.writes()).toHaveLength(1);
+      const before = await readStored(page, k.kind);
       expect(k.count(api)).toBe(1);
+      await form.getByRole('button', { name: 'Close (the request stays unresolved)' }).click();
 
-      // A read-only reconciliation shows what the server has, without claiming a save.
-      await form.getByRole('button', { name: 'Check the current list' }).click();
-      await expect(form).toBeHidden();
-      await expect(live(page)).toContainText('exists on the server with these values');
-      await expect(live(page)).toContainText('cannot prove that');
-      await expect(live(page)).not.toContainText('created at revision');
-      await expect(row(k.panel(page), 'Reporting')).toBeVisible();
-      expect(api.writes()).toHaveLength(1); // checking is only reads
+      await reloadProject(page);
+      // The ordinary "New" action is gone; only resolving the pending request is offered.
+      await expect(
+        k.panel(page).getByRole('button', { name: k.openName, exact: true }),
+      ).toHaveCount(0);
+      const restored = await openResolve(page);
+      await expect(recovery(restored)).toHaveAttribute('data-recovery-view', 'unknown');
+      await expect(restored.getByLabel('Title')).toHaveValue('Reporting');
+      if (k.kind === 'milestone')
+        await expect(restored.getByLabel('Target date (optional)')).toHaveValue('2026-12-31');
+      await expectUnresolved(page, api, restored, 1);
+      // Original request and key preserved; nothing was sent after the reload.
+      expect(await readStored(page, k.kind)).toEqual(before);
       expect(k.count(api)).toBe(1);
-      // Resolved: an ordinary create is available again.
-      await expect(k.panel(page).getByRole('button', { name: k.openName })).toBeVisible();
+      await expect(restored).toContainText('this form is locked to this exact request');
+      await expect(restored).toContainText('What is not verified');
     });
 
-    test('closing the dialog does not forget the request: the panel offers to resolve it, locked, and the same request settles it', async ({
+    test('B. same-key recovery after a reload: identical request, no duplicate, cleared only once confirmed', async ({
       page,
       api,
     }) => {
       const form = await loseResponse(page, api, true);
       await form.getByRole('button', { name: 'Close (the request stays unresolved)' }).click();
-      await expect(form).toBeHidden();
-      // There is no plain "New" button to start a different create from.
+      await reloadProject(page);
+      const restored = await openResolve(page);
+      const first = api.writes()[0];
+      await restored.getByRole('button', { name: 'Send the same request again' }).click();
+      await expect(restored).toBeHidden();
+      const [, second] = api.writes();
+      expect(api.writes()).toHaveLength(2);
+      expect(second?.idempotencyKey).toBe(first?.idempotencyKey);
+      expect(second?.body).toEqual(first?.body);
+      expect(k.count(api)).toBe(1); // replayed, not duplicated
+      await expect(live(page)).toContainText('created at revision 1');
+      expect(await readStored(page, k.kind)).toBeNull(); // cleared only after confirmation
+      await expect(
+        k.panel(page).getByRole('button', { name: k.openName, exact: true }),
+      ).toBeVisible();
+    });
+
+    test('a retry whose answer is lost again stays unresolved with the same key', async ({
+      page,
+      api,
+    }) => {
+      const form = await loseResponse(page, api, false);
+      const key = (await readStored(page, k.kind))?.idempotencyKey;
+      api.next(k.fault, { abort: true });
+      await form.getByRole('button', { name: 'Send the same request again' }).click();
+      await expect(recovery(form)).toHaveAttribute('data-recovery-view', 'unknown');
+      expect((await readStored(page, k.kind))?.idempotencyKey).toBe(key);
+      await expectUnresolved(page, api, form, 2);
+      expect(api.writes()[1]?.idempotencyKey).toBe(key);
+    });
+
+    test('C. one matching record is only a candidate: still unresolved, locked, and it survives a reload', async ({
+      page,
+      api,
+    }) => {
+      const form = await loseResponse(page, api, true);
+      await form.getByRole('button', { name: 'Check the current list' }).click();
+      await expect(recovery(form)).toHaveAttribute('data-recovery-view', 'candidate');
+      await expect(recovery(form)).toContainText(
+        'One matching record was found, but we cannot confirm whether it was created by your original request.',
+      );
+      await expect(recovery(form)).toContainText('Reporting');
+      await expect(recovery(form)).toContainText('only an observation');
+      await expectUnresolved(page, api, form, 1);
+      expect(k.count(api)).toBe(1);
+      await expect(form).not.toContainText('created at revision');
+
+      await form.getByRole('button', { name: 'Close (the request stays unresolved)' }).click();
       await expect(
         k.panel(page).getByRole('button', { name: k.openName, exact: true }),
       ).toHaveCount(0);
-      await k
-        .panel(page)
-        .getByRole('button', { name: `Resolve pending ${k.kind}` })
-        .click();
-      const reopened = dialog(page, k.dialogName);
-      await expect(reopened.getByLabel('Title')).toHaveValue('Reporting');
-      await expect(reopened.getByLabel('Title')).toBeDisabled();
-      await expect(reopened.getByRole('button', { name: k.submit })).toHaveCount(0);
-
-      await reopened.getByRole('button', { name: 'Send the same request again' }).click();
-      await expect(reopened).toBeHidden();
-      const [first, second] = api.writes();
-      expect(second?.idempotencyKey).toBe(first?.idempotencyKey);
+      await reloadProject(page);
+      const restored = await openResolve(page);
+      await expectUnresolved(page, api, restored, 1);
+      // Only the same request, with the same key, settles it.
+      await restored.getByRole('button', { name: 'Send the same request again' }).click();
+      await expect(restored).toBeHidden();
       expect(k.count(api)).toBe(1);
-      await expect(row(k.panel(page), 'Reporting')).toBeVisible();
-      await expect(live(page)).toContainText('created at revision 1');
-      await expect(k.panel(page).getByRole('button', { name: k.openName })).toBeVisible();
+      expect(await readStored(page, k.kind)).toBeNull();
     });
 
-    test('a request that was not applied: the whole list is read, the form stays locked, and the retry creates exactly one', async ({
+    test('D. reconciliation is never authoritative: zero, two, unreadable, failed and incomplete reads', async ({
       page,
       api,
     }) => {
+      // Zero matches, over a list that spans several pages: every page is read before "none".
       const form = await loseResponse(page, api, false, k.config(60));
-      expect(k.count(api)).toBe(60);
       await form.getByRole('button', { name: 'Check the current list' }).click();
-      await expect(form).toContainText('The complete list was read and no new');
-      await expect(form).toContainText('That is an observation, not proof');
-      // Absence from the first page is never taken as absence: every page was read.
+      await expect(recovery(form)).toHaveAttribute('data-recovery-view', 'absent');
+      await expect(recovery(form)).toContainText('The complete list was read and no new');
+      await expect(recovery(form)).toContainText('That is an observation, not proof');
       expect(
         api.of(k.list).filter((entry) => entry.search.includes('cursor=')).length,
       ).toBeGreaterThan(0);
-      await expect(form.getByLabel('Title')).toBeDisabled();
-      await expect(form.getByRole('button', { name: k.submit })).toHaveCount(0);
-      expect(api.writes()).toHaveLength(1);
+      await expectUnresolved(page, api, form, 1);
 
-      await form.getByRole('button', { name: 'Send the same request again' }).click();
-      await expect(form).toBeHidden();
-      expect(k.count(api)).toBe(61);
-      const [first, second] = api.writes();
-      expect(second?.idempotencyKey).toBe(first?.idempotencyKey);
+      // A page that cannot be read (an incomplete read) concludes nothing.
+      api.invalidateCursors();
+      await form.getByRole('button', { name: 'Check the current list' }).click();
+      await expect(recovery(form)).toHaveAttribute('data-recovery-view', 'unreadable');
+      await expect(recovery(form)).toContainText('The list could not be read completely');
+      await expectUnresolved(page, api, form, 1);
+
+      // The list request itself failing concludes nothing either.
+      api.persist(k.list, { status: 500, code: 'internal_error', message: 'Down.' });
+      await form.getByRole('button', { name: 'Check the current list' }).click();
+      await expect(recovery(form)).toHaveAttribute('data-recovery-view', 'unreadable');
+      api.persist(k.list, null);
+      await expectUnresolved(page, api, form, 1);
     });
 
-    test('a list that cannot be read completely concludes nothing and stays locked', async ({
+    test('D. two fitting records are never guessed between', async ({ page, api }) => {
+      const form = await loseResponse(page, api, true);
+      k.outside(api, 'Reporting');
+      await form.getByRole('button', { name: 'Check the current list' }).click();
+      await expect(recovery(form)).toHaveAttribute('data-recovery-view', 'ambiguous');
+      await expect(recovery(form)).toContainText('2 records in the list fit this request');
+      await expectUnresolved(page, api, form, 1);
+    });
+
+    test('a refused first attempt is authoritative: it clears the request and frees the form', async ({
       page,
       api,
     }) => {
-      const form = await loseResponse(page, api, true, k.config(60));
-      api.invalidateCursors();
-      await form.getByRole('button', { name: 'Check the current list' }).click();
-      await expect(form).toContainText('The list could not be read completely');
-      await expect(form.getByLabel('Title')).toBeDisabled();
-      expect(api.writes()).toHaveLength(1);
-      expect(k.count(api)).toBe(61);
-    });
-
-    test('two records that fit are never guessed between', async ({ page, api }) => {
-      const form = await loseResponse(page, api, true);
-      k.outside(api, 'Reporting'); // another session made an identical record
-      await form.getByRole('button', { name: 'Check the current list' }).click();
-      await expect(form).toContainText('2 records in the list fit this request');
-      await expect(form.getByLabel('Title')).toBeDisabled();
-      expect(api.writes()).toHaveLength(1);
-    });
-
-    test('only a definitive answer to the same request frees the form', async ({ page, api }) => {
-      const form = await loseResponse(page, api, false);
+      await open(page, api, {});
+      const form = await openCreate(page);
+      await form.getByLabel('Title').fill('Rejected');
+      if (k.kind === 'milestone')
+        await form.getByLabel('Target date (optional)').fill('2026-12-31');
       api.next(k.fault, { status: 422, code: 'invalid_input', message: 'Bad.' });
-      await form.getByRole('button', { name: 'Send the same request again' }).click();
-      await expect(form).toContainText('The server rejected these values.');
-      await expect(form.getByLabel('Title')).toBeEnabled();
-      await expect(form.getByRole('button', { name: k.submit })).toBeVisible();
-      // Now a changed request is a new, honest request with a new key.
-      await form.getByLabel('Title').fill('Reporting v2');
       await form.getByRole('button', { name: k.submit }).click();
+      await expect(form).toContainText('The server rejected these values.');
+      expect(await readStored(page, k.kind)).toBeNull();
+      await expect(form.getByLabel('Title')).toBeEnabled();
+      await expect(recovery(form)).toHaveCount(0);
+    });
+
+    for (const [status, code] of [
+      [422, 'invalid_input'],
+      [409, 'conflict'],
+      [409, 'invalid_transition'],
+      [404, 'not_found'],
+      [503, 'limit'],
+    ] as const)
+      test(`a ${status} ${code} refusal of a RETRY does not show the original was not applied: it stays unresolved`, async ({
+        page,
+        api,
+      }) => {
+        const form = await loseResponse(page, api, true);
+        const key = (await readStored(page, k.kind))?.idempotencyKey;
+        api.next(k.fault, { status, code, message: 'Refused.' });
+        await form.getByRole('button', { name: 'Send the same request again' }).click();
+        await expect(recovery(form)).toHaveAttribute('data-recovery-view', 'refused');
+        await expect(recovery(form)).toContainText(
+          'does not show that the original request was not applied',
+        );
+        expect((await readStored(page, k.kind))?.idempotencyKey).toBe(key);
+        await expect(form.getByRole('button', { name: 'Send the same request again' })).toHaveCount(
+          0,
+        );
+        await expect(form.getByRole('button', { name: 'Check the current list' })).toBeVisible();
+        await expect(form.getByLabel('Title')).toBeDisabled();
+        await expect(live(page)).toHaveText('');
+        // It survives a reload and is never auto-discarded.
+        await form.getByRole('button', { name: 'Close (the request stays unresolved)' }).click();
+        await reloadProject(page);
+        await expect(resolveButton(page)).toBeVisible();
+        expect((await readStored(page, k.kind))?.idempotencyKey).toBe(key);
+      });
+
+    test('a retry that fails the secure-session check is only unknown, and can be sent again', async ({
+      page,
+      api,
+    }) => {
+      const form = await loseResponse(page, api, true);
+      api.next(k.fault, { status: 403, code: 'csrf_rejected', message: 'Refresh.' });
+      await form.getByRole('button', { name: 'Send the same request again' }).click();
+      await expect(form).toContainText('this repeat was not processed');
+      await expect(recovery(form)).toHaveAttribute('data-recovery-view', 'unknown');
+      await form.getByRole('button', { name: 'Send the same request again' }).click();
       await expect(form).toBeHidden();
-      const writes = api.writes();
-      expect(writes).toHaveLength(3);
-      expect(writes[2]?.idempotencyKey).not.toBe(writes[0]?.idempotencyKey);
       expect(k.count(api)).toBe(1);
+      const keys = new Set(api.writes().map((entry) => entry.idempotencyKey));
+      expect(keys.size).toBe(1);
+    });
+
+    const cases: Array<{ name: string; value: string; view: string; reveals?: string }> = [
+      { name: 'corrupt JSON', value: '{not json', view: 'blocked' },
+      {
+        name: 'invalid schema (extra field)',
+        value: JSON.stringify(envelopeFor(k.kind, { extra: true })),
+        view: 'blocked',
+      },
+      {
+        name: 'missing fields',
+        value: JSON.stringify({ version: 1, kind: k.kind }),
+        view: 'blocked',
+      },
+      {
+        name: 'invalid record type',
+        value: JSON.stringify(envelopeFor(k.kind, { kind: 'story' })),
+        view: 'blocked',
+      },
+      {
+        name: 'invalid key',
+        value: JSON.stringify(envelopeFor(k.kind, { idempotencyKey: 'not-a-uuid' })),
+        view: 'blocked',
+      },
+      {
+        name: 'invalid request',
+        value: JSON.stringify(envelopeFor(k.kind, { request: { title: '' } })),
+        view: 'blocked',
+      },
+      {
+        name: 'wrong owner',
+        value: JSON.stringify(
+          envelopeFor(k.kind, { ownerId: 'someone-else', request: { title: 'Secret payload' } }),
+        ),
+        view: 'blocked',
+        reveals: 'Secret payload',
+      },
+      {
+        name: 'wrong project',
+        value: JSON.stringify(
+          envelopeFor(k.kind, {
+            projectId: `prj_${'9'.repeat(32)}`,
+            request: { title: 'Secret payload' },
+          }),
+        ),
+        view: 'blocked',
+        reveals: 'Secret payload',
+      },
+      {
+        name: 'wrong record type',
+        value: JSON.stringify(
+          envelopeFor(k.kind === 'epic' ? 'milestone' : 'epic', {
+            request: { title: 'Secret payload' },
+          }),
+        ),
+        view: 'blocked',
+        reveals: 'Secret payload',
+      },
+      {
+        name: 'unsupported version',
+        value: JSON.stringify(
+          envelopeFor(k.kind, { version: 2, request: { title: 'Secret payload' } }),
+        ),
+        view: 'blocked',
+        reveals: 'Secret payload',
+      },
+      {
+        name: 'impossible timestamp',
+        value: JSON.stringify(envelopeFor(k.kind, { attemptedAt: Date.now() + 3_600_000 })),
+        view: 'blocked',
+      },
+      {
+        name: 'oversized',
+        value: JSON.stringify(envelopeFor(k.kind, { request: { title: 'x'.repeat(20_000) } })),
+        view: 'blocked',
+      },
+      {
+        name: 'stale attempt',
+        value: JSON.stringify(envelopeFor(k.kind, { attemptedAt: Date.now() - 20 * 60_000 })),
+        view: 'replay-unverified',
+      },
+      { name: 'valid', value: JSON.stringify(envelopeFor(k.kind)), view: 'unknown' },
+    ];
+    for (const item of cases)
+      test(`E. stored envelope - ${item.name}: ${item.view === 'unknown' ? 'restored and repeated with its key' : 'fails closed with an explicit recovery state'}`, async ({
+        page,
+        api,
+      }) => {
+        await open(page, api, {});
+        const stored = () =>
+          page.evaluate((key) => sessionStorage.getItem(key), storageKeyFor(k.kind));
+        await seed(page, k.kind, item.value);
+        await reloadProject(page);
+        await expect(
+          k.panel(page).getByRole('button', { name: k.openName, exact: true }),
+        ).toHaveCount(0);
+        const form = await openResolve(page);
+        await expect(recovery(form)).toHaveAttribute('data-recovery-view', item.view);
+        await expect(form.getByLabel('Title')).toBeDisabled();
+        await expect(form.getByRole('button', { name: k.submit })).toHaveCount(0);
+        if (item.reveals) await expect(page.locator('body')).not.toContainText(item.reveals);
+        if (item.view !== 'unknown')
+          await expect(
+            form.getByRole('button', { name: 'Send the same request again' }),
+          ).toHaveCount(0);
+        if (item.view === 'replay-unverified')
+          await expect(form).toContainText('too old to repeat safely');
+        // Whatever the state, nothing was sent and nothing was thrown away.
+        expect(api.writes()).toHaveLength(0);
+        expect(await stored()).not.toBeNull();
+        if (item.view === 'unknown') {
+          // The valid one is repeated with its original key and exactly its original request.
+          await form.getByRole('button', { name: 'Send the same request again' }).click();
+          await expect(form).toBeHidden();
+          expect(api.writes()[0]?.idempotencyKey).toBe('11111111-2222-4333-8444-555555555555');
+          expect(api.writes()[0]?.body).toEqual(envelopeFor(k.kind).request);
+          expect(await stored()).toBeNull();
+          return;
+        }
+        // The only way out is explicit: Keep leaves it as it was; Discard removes it.
+        await form.getByRole('button', { name: 'Discard this unresolved request…' }).click();
+        await expect(recovery(form)).toHaveAttribute('data-recovery-view', 'discard-confirm');
+        await form.getByRole('button', { name: 'Keep the request' }).click();
+        await expect(recovery(form)).toHaveAttribute('data-recovery-view', item.view);
+        expect(await stored()).not.toBeNull();
+        await form.getByRole('button', { name: 'Discard this unresolved request…' }).click();
+        await form.getByRole('button', { name: 'Discard the request' }).click();
+        await expect(form.getByLabel('Title')).toBeEnabled();
+        expect(await stored()).toBeNull();
+        expect(api.writes()).toHaveLength(0); // discarding sends nothing
+      });
+
+    test('E. storage unavailable: no create is sent whose recovery could not be kept', async ({
+      page,
+      api,
+    }) => {
+      await page.addInitScript(() => {
+        const denied = () => {
+          throw new DOMException('denied', 'SecurityError');
+        };
+        Storage.prototype.getItem = denied;
+        Storage.prototype.setItem = denied;
+        Storage.prototype.removeItem = denied;
+      });
+      await open(page, api, {});
+      const form = await openCreate(page);
+      await expect(recovery(form)).toHaveAttribute('data-recovery-view', 'storage-unavailable');
+      await expect(form).toContainText('This tab cannot save recovery information.');
+      await expect(form.getByLabel('Title')).toBeDisabled();
+      await expect(form.getByRole('button', { name: k.submit })).toHaveCount(0);
+      await form.getByRole('button', { name: 'Check storage again' }).click();
+      await expect(recovery(form)).toHaveAttribute('data-recovery-view', 'storage-unavailable');
+      expect(api.writes()).toHaveLength(0);
+    });
+
+    test('E. a write that fails at send time stops the create before it is sent', async ({
+      page,
+      api,
+    }) => {
+      await page.addInitScript(() => {
+        const real = Storage.prototype.setItem;
+        Storage.prototype.setItem = function (key: string, value: string) {
+          if (
+            (window as unknown as { __failWrites?: boolean }).__failWrites &&
+            !key.endsWith(':probe')
+          )
+            throw new DOMException('quota', 'QuotaExceededError');
+          return real.call(this, key, value);
+        };
+      });
+      await open(page, api, {});
+      const form = await openCreate(page);
+      await form.getByLabel('Title').fill('Reporting');
+      if (k.kind === 'milestone')
+        await form.getByLabel('Target date (optional)').fill('2026-12-31');
+      await page.evaluate(
+        () => ((window as unknown as { __failWrites?: boolean }).__failWrites = true),
+      );
+      await form.getByRole('button', { name: k.submit }).click();
+      await expect(recovery(form)).toHaveAttribute('data-recovery-view', 'storage-unavailable');
+      expect(api.writes()).toHaveLength(0);
+      expect(k.count(api)).toBe(0);
+    });
+
+    test('E. another owner never sees or replays this owner’s pending request', async ({
+      page,
+      api,
+    }) => {
+      const form = await loseResponse(page, api, true);
+      const ownerKey = (await readStored(page, k.kind))?.idempotencyKey;
+      await form.getByRole('button', { name: 'Close (the request stays unresolved)' }).click();
+
+      // Owner A signs out and owner B signs in on the same tab.
+      await page.getByRole('button', { name: 'Sign out' }).click();
+      await expect(page.getByRole('button', { name: 'Sign in' })).toBeVisible();
+      api.setOwner('owner-b');
+      await page.getByLabel('Owner password').fill('fixture-owner-password');
+      await page.getByRole('button', { name: 'Sign in' }).click();
+      await expect(k.panel(page)).toBeVisible();
+      await expect(page.locator('body')).not.toContainText('Resolve pending');
+      await expect(
+        k.panel(page).getByRole('button', { name: k.openName, exact: true }),
+      ).toBeVisible();
+      expect(await readStored(page, k.kind, 'owner-b')).toBeNull();
+
+      // B's own create is independent: its own key, nothing of A's.
+      const mine = await openCreate(page);
+      await mine.getByLabel('Title').fill('Bee work');
+      if (k.kind === 'milestone')
+        await mine.getByLabel('Target date (optional)').fill('2027-01-01');
+      await mine.getByRole('button', { name: k.submit }).click();
+      await expect(mine).toBeHidden();
+      const bWrite = api.writes().at(-1);
+      expect(bWrite?.idempotencyKey).not.toBe(ownerKey);
+      expect(JSON.stringify(bWrite?.body)).not.toContain('Reporting');
+
+      // A signs back in: their pending request is still theirs, untouched.
+      await page.getByRole('button', { name: 'Sign out' }).click();
+      api.setOwner(OWNER);
+      await page.getByLabel('Owner password').fill('fixture-owner-password');
+      await page.getByRole('button', { name: 'Sign in' }).click();
+      await expect(resolveButton(page)).toBeVisible();
+      expect((await readStored(page, k.kind, OWNER))?.idempotencyKey).toBe(ownerKey);
+    });
+
+    test('a changed session on reload is a different owner: the stored request is not used', async ({
+      page,
+      api,
+    }) => {
+      const form = await loseResponse(page, api, true);
+      await form.getByRole('button', { name: 'Close (the request stays unresolved)' }).click();
+      api.setOwner('owner-b');
+      await reloadProject(page);
+      await expect(
+        k.panel(page).getByRole('button', { name: k.openName, exact: true }),
+      ).toBeVisible();
+      await expect(page.locator('body')).not.toContainText('Resolve pending');
+      expect(api.writes()).toHaveLength(1);
+    });
+
+    test('F. a key too old to trust is neither repeated nor discarded', async ({ page, api }) => {
+      await open(page, api, {});
+      await seed(
+        page,
+        k.kind,
+        JSON.stringify(envelopeFor(k.kind, { attemptedAt: Date.now() - 20 * 60_000 })),
+      );
+      await reloadProject(page);
+      const form = await openResolve(page);
+      await expect(recovery(form)).toHaveAttribute('data-recovery-view', 'replay-unverified');
+      await expect(form).toContainText(
+        'cannot verify that the server still remembers its idempotency key',
+      );
+      await expect(form).toContainText('it has not been discarded');
+      await expect(form.getByRole('button', { name: 'Send the same request again' })).toHaveCount(
+        0,
+      );
+      // Reading is still allowed, and still concludes nothing.
+      await form.getByRole('button', { name: 'Check the current list' }).click();
+      await expect(recovery(form)).not.toHaveAttribute('data-recovery-view', 'replay-unverified');
+      await expect(form.getByRole('button', { name: 'Send the same request again' })).toHaveCount(
+        0,
+      );
+      expect(api.writes()).toHaveLength(0);
+      expect(
+        await page.evaluate((key) => sessionStorage.getItem(key), storageKeyFor(k.kind)),
+      ).not.toBeNull();
+      await page.keyboard.press('Escape');
+      await reloadProject(page);
+      await expect(resolveButton(page)).toBeVisible(); // age alone never discards it
+    });
+
+    test('keyboard and focus: the recovery actions are reachable, announced, and focus returns to the opener', async ({
+      page,
+      api,
+    }) => {
+      const form = await loseResponse(page, api, true);
+      await expect(recovery(form)).toHaveAttribute('role', 'alert');
+      await form.getByRole('button', { name: 'Close (the request stays unresolved)' }).focus();
+      await page.keyboard.press('Enter');
+      await expect(form).toBeHidden();
+      await expect(resolveButton(page)).toBeFocused();
+      await page.keyboard.press('Enter');
+      const reopened = dialog(page, k.dialogName);
+      await page.keyboard.press('Tab');
+      expect(await reopened.evaluate((node) => node.contains(document.activeElement))).toBe(true);
+      await page.keyboard.press('Escape');
+      await expect(reopened).toBeHidden();
+      await expect(resolveButton(page)).toBeFocused();
     });
   });
 

@@ -1312,6 +1312,7 @@ function App() {
         )}
         {page === 'projects' && (
           <ProjectsWorkspace
+            ownerId={owner.id}
             onUnauthorized={expireSessionIfNeeded}
             csrfToken={csrfToken}
             refreshCsrf={refreshCsrf}

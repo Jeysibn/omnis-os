@@ -42,6 +42,7 @@ import { useFocusReturn } from './planning/records.js';
 
 type Props = {
   projectId: string;
+  ownerId: string;
   csrfToken: string;
   refreshCsrf: () => Promise<string>;
   onUnauthorized: (cause: unknown) => void;
@@ -55,6 +56,7 @@ type ArchiveRecovery = { conclusion: Conclusion; expectedRevision: number };
 
 export function ProjectDetail({
   projectId,
+  ownerId,
   csrfToken,
   refreshCsrf,
   onUnauthorized,
@@ -325,6 +327,7 @@ export function ProjectDetail({
       <div className="pw-columns">
         <PlanningRegion
           projectId={projectId}
+          ownerId={ownerId}
           readOnly={archived}
           csrfToken={csrfToken}
           refreshCsrf={refreshCsrf}

@@ -5,7 +5,8 @@ import { formatManila } from '../parts.js';
 import { readFailureView } from '../readFailure.js';
 import { ArchiveDialog } from './ArchiveDialog.js';
 import { RecordEditor, type Changes } from './RecordEditor.js';
-import { scanForCreated, type PendingCreate } from './unresolved.js';
+import { scanForCreated } from './unresolved.js';
+import { usePendingCreate } from './usePendingCreate.js';
 import { formatTargetDate, ListFooter, RecordStatusBadge, useFocusReturn } from './records.js';
 import { usePagedList, type Page } from './usePagedList.js';
 
@@ -15,6 +16,8 @@ export type RecordsPanelProps<T extends Rec> = {
   kind: 'epic' | 'milestone';
   title: string;
   projectId: string;
+  /** The signed-in owner, from the authenticated session. A pending create is bound to it. */
+  ownerId: string;
   /** The project is archived: everything is read-only. */
   readOnly: boolean;
   csrfToken: string;
@@ -43,6 +46,7 @@ export function RecordsPanel<T extends Rec>(props: RecordsPanelProps<T>) {
     kind,
     title,
     projectId,
+    ownerId,
     readOnly,
     csrfToken,
     refreshCsrf,
@@ -56,9 +60,9 @@ export function RecordsPanel<T extends Rec>(props: RecordsPanelProps<T>) {
     record: null,
   });
   const [archiving, setArchiving] = useState<T | null>(null);
-  // A create whose outcome is unknown. It lives here, not in the dialog, so closing the dialog
-  // cannot turn the next attempt into a second, different request.
-  const [pending, setPending] = useState<PendingCreate<Changes> | null>(null);
+  // A create whose outcome is unknown lives in sessionStorage, bound to this owner, project and
+  // record type, so neither closing the dialog nor reloading the tab forgets it.
+  const recovery = usePendingCreate({ ownerId, projectId, kind });
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const [showArchived, setShowArchived] = useState(false);
   const focus = useFocusReturn();
@@ -215,7 +219,7 @@ export function RecordsPanel<T extends Rec>(props: RecordsPanelProps<T>) {
       actions={
         readOnly ? undefined : (
           <NxButton variant="primary" onClick={() => openEditor(null)}>
-            {pending ? `Resolve pending ${kind}` : `New ${kind}`}
+            {recovery.state.status !== 'none' ? `Resolve pending ${kind}` : `New ${kind}`}
           </NxButton>
         )
       }
@@ -231,27 +235,24 @@ export function RecordsPanel<T extends Rec>(props: RecordsPanelProps<T>) {
         create={props.create}
         update={props.update}
         read={props.read}
-        pending={pending}
-        onPending={setPending}
+        recovery={recovery}
+        scope={{ ownerId, projectId, kind }}
         knownIds={() => state.items.map((item) => item.id)}
-        scan={(request) =>
+        scan={(envelope) =>
           scanForCreated<T, Changes>(
             (cursor) => props.fetchPage(cursor, new AbortController().signal),
-            request,
+            {
+              changes: envelope.request,
+              startedAt: envelope.attemptedAt,
+              knownIds: envelope.knownIds ?? [],
+            },
             (candidate) =>
-              candidate.title === request.changes.title &&
-              candidate.description === (request.changes.description ?? null) &&
+              candidate.title === envelope.request.title &&
+              candidate.description === (envelope.request.description ?? null) &&
               (!('targetDate' in candidate) ||
-                candidate.targetDate === (request.changes.targetDate ?? null)),
+                candidate.targetDate === (envelope.request.targetDate ?? null)),
           )
         }
-        onObserved={(record) => {
-          list.prependItem(record);
-          announce(
-            `${kind === 'epic' ? 'Epic' : 'Milestone'} “${record.title}” exists on the server with these values and was not in the list before. It was probably created by the request whose result was lost; Omnis OS cannot prove that, so it is shown as an existing record, not as a confirmed save.`,
-          );
-          closeEditor(false);
-        }}
         onSaved={(record, mode) => {
           if (mode === 'created') list.prependItem(record);
           else list.replaceItem(record);

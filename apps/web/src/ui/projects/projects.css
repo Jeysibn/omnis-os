@@ -283,3 +283,39 @@
 .pw-dialog-form {
   max-width: none;
 }
+
+/* The unresolved-create notice. */
+.pw-recovery {
+  gap: var(--nx-space-2);
+}
+.pw-recovery[data-tone='error'] {
+  border-color: var(--nx-status-danger);
+}
+.pw-recovery-head {
+  margin: 0;
+  font-weight: 600;
+}
+.pw-recovery p {
+  margin: 0;
+}
+.pw-recovery-facts {
+  display: grid;
+  gap: var(--nx-space-1) var(--nx-space-3);
+  margin: 0;
+}
+.pw-recovery-facts dt {
+  font-family: var(--nx-font-mono);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--nx-text-quiet);
+}
+.pw-recovery-facts dd {
+  margin: 0 0 var(--nx-space-2);
+  overflow-wrap: anywhere;
+}
+.pw-recovery-facts ul {
+  list-style: disc;
+  margin: 0;
+  padding-left: var(--nx-space-4);
+}

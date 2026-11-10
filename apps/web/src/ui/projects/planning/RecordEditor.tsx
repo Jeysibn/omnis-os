@@ -12,7 +12,21 @@ import { Field, NxButton, NxInput, NxSelect, NxTextarea } from '../../design/ind
 import { Notice } from '../parts.js';
 import { isValidStatusStep, nextStatuses, statusLabel, type EditableStatus } from './lifecycle.js';
 import { judgeEdit, type Observation } from './recovery.js';
-import type { PendingCreate, ScanResult } from './unresolved.js';
+import {
+  browserStorage,
+  newEnvelope,
+  replayPolicy,
+  storageWritable,
+  transitionAfterSend,
+  viewAfterScan,
+  type PendingEnvelope,
+  type Scope,
+  type SendOutcome,
+} from './pendingCreate.js';
+import { describeRecovery, type RecoveryAction, type RecoveryView } from './recoveryCopy.js';
+import { RecoveryNotice } from './RecoveryNotice.js';
+import type { PendingCreateApi } from './usePendingCreate.js';
+import type { ScanResult } from './unresolved.js';
 import { useWriter } from './write.js';
 import { PlanningDialog } from './PlanningDialog.js';
 
@@ -44,8 +58,7 @@ const fromChanges = (changes: Changes): Values => ({
   targetDate: changes.targetDate ?? '',
 });
 
-type Action =
-  'retry' | 'check' | 'checkCreate' | 'loadLatest' | 'keepEdits' | 'closeAndReload' | 'close';
+type Action = 'retry' | 'check' | 'loadLatest' | 'keepEdits' | 'closeAndReload' | 'close';
 type Problem = {
   tone: 'error' | 'warning';
   text: string;
@@ -65,16 +78,14 @@ type Props<T extends Record_> = {
   create: (input: Changes, key: string, csrfToken: string) => Promise<T>;
   update: (record: T, changes: Changes, key: string, csrfToken: string) => Promise<T>;
   read: (id: string) => Promise<T>;
-  /** A create whose outcome is unknown, owned by the list so it survives closing this dialog. */
-  pending: PendingCreate<Changes> | null;
-  onPending: (pending: PendingCreate<Changes> | null) => void;
+  /** The pending create for this owner, project and record type, kept in sessionStorage. */
+  recovery: PendingCreateApi;
+  scope: Scope;
   /** Ids already known, recorded with a create so a later list read can tell what is new. */
   knownIds: () => string[];
   /** Reads every page of the list looking for the record an unknown create may have made. */
-  scan: (pending: PendingCreate<Changes>) => Promise<ScanResult<T>>;
+  scan: (envelope: PendingEnvelope) => Promise<ScanResult<T>>;
   onSaved: (record: T, mode: 'created' | 'updated') => void;
-  /** The server shows a record that fits an unknown create: reported as observed, not as saved. */
-  onObserved: (record: T) => void;
   /** `reload` asks the list to be read again. */
   onClose: (reload: boolean) => void;
 };
@@ -105,44 +116,63 @@ export function RecordEditor<T extends Record_>({
   create,
   update,
   read,
-  pending,
-  onPending,
+  recovery,
+  scope,
   knownIds,
   scan,
   onSaved,
-  onObserved,
   onClose,
 }: Props<T>) {
   const creating = record === null;
-  const locked = creating && pending !== null;
+  const stored = recovery.state;
+  // Creation is locked while anything is pending or blocked, or while recovery information cannot
+  // be kept: a create that could not be recovered must not be sent.
+  const locked = creating && (stored.status !== 'none' || recovery.storage === 'unavailable');
   const [baseline, setBaseline] = useState<T | null>(record);
   const [values, setValues] = useState<Values>(record ? fromRecord(record) : empty);
   const [errors, setErrors] = useState<FieldErrors>({});
   const [problem, setProblem] = useState<Problem | null>(null);
+  const [recoveryView, setRecoveryView] = useState<RecoveryView | null>(null);
+  const [beforeDiscard, setBeforeDiscard] = useState<RecoveryView | null>(null);
   const [checking, setChecking] = useState(false);
   const writer = useWriter({ csrfToken, refreshCsrf, onUnauthorized });
   const lastRequest = useRef<Changes | null>(null);
 
-  const unresolved: Problem = {
-    tone: 'warning',
-    text: `Omnis OS did not get a confirmed result for this create request, so the ${noun(kind)} is not shown as created and may or may not exist. To avoid creating a duplicate, this form is locked to this exact request. Send the same request again (it cannot create it twice), or check the current list.`,
-    actions: ['retry', 'checkCreate', 'close'],
-  };
+  /** The view that matches what is stored for this create right now. */
+  function viewFromStore(): RecoveryView | null {
+    if (stored.status === 'blocked')
+      return {
+        view: 'blocked',
+        reason: stored.reason === 'storage-unavailable' ? 'corrupt' : stored.reason,
+      };
+    if (recovery.storage === 'unavailable') return { view: 'storage-unavailable' };
+    if (stored.status === 'pending')
+      return replayPolicy(stored.envelope, Date.now()).safe
+        ? { view: 'unknown' }
+        : { view: 'replay-unverified' };
+    return null;
+  }
 
   // A fresh form each time the dialog opens, except that an unresolved create reopens locked to
-  // the request that was sent.
+  // the request that was sent (restored from storage after a reload).
   useEffect(() => {
     if (!open) return;
     setBaseline(record);
     setErrors({});
-    if (creating && pending) {
-      setValues(fromChanges(pending.changes));
-      lastRequest.current = pending.changes;
-      setProblem(unresolved);
+    setProblem(null);
+    if (creating) {
+      setRecoveryView(viewFromStore());
+      if (stored.status === 'pending') {
+        setValues(fromChanges(stored.envelope.request));
+        lastRequest.current = stored.envelope.request;
+      } else {
+        setValues(empty);
+        lastRequest.current = null;
+      }
     } else {
+      setRecoveryView(null);
       setValues(record ? fromRecord(record) : empty);
       lastRequest.current = null;
-      setProblem(null);
     }
     // Only opening resets the form; a re-render with the same record must not discard typing.
   }, [open]);
@@ -198,43 +228,107 @@ export function RecordEditor<T extends Record_>({
     return null;
   }
 
+  /** Edits are conditional on a revision, so a changed or repeated request cannot apply twice. */
   async function send(changes: Changes) {
     lastRequest.current = changes;
     setProblem(null);
-    // A create is remembered BEFORE it is sent, so that closing the dialog or losing the response
-    // cannot make the next attempt look like a different request.
-    if (creating && !pending) onPending({ changes, startedAt: Date.now(), knownIds: knownIds() });
     const signature = JSON.stringify({
       id: baseline?.id ?? null,
       rev: baseline?.revision,
       changes,
     });
     const outcome = await writer.run(signature, (key, csrf) =>
-      creating ? create(changes, key, csrf) : update(baseline as T, changes, key, csrf),
+      update(baseline as T, changes, key, csrf),
     );
     switch (outcome.kind) {
       case 'saved':
-        if (creating) onPending(null);
-        onSaved(outcome.value, creating ? 'created' : 'updated');
+        onSaved(outcome.value, 'updated');
         return;
       case 'busy':
-        return;
       case 'unauthorized':
-        if (creating) onPending(null);
         return;
       case 'unknown':
-        if (creating) setProblem(unresolved);
-        else
-          setProblem({
-            tone: 'warning',
-            text: `Omnis OS did not get a confirmed result, so this ${noun(kind)} is not shown as saved and the change may or may not have been applied. Check the current state, or send the same request again, which cannot apply it twice.`,
-            actions: ['retry', 'check', 'close'],
-          });
+        setProblem({
+          tone: 'warning',
+          text: `Omnis OS did not get a confirmed result, so this ${noun(kind)} is not shown as saved and the change may or may not have been applied. Check the current state, or send the same request again, which cannot apply it twice.`,
+          actions: ['retry', 'check', 'close'],
+        });
         return;
       case 'rejected':
-        // A definitive answer: the request was not applied, so the form is free again.
-        if (creating) onPending(null);
         await explainRejection(outcome.status, outcome.code, outcome.message);
+    }
+  }
+
+  /**
+   * A create is written to storage BEFORE it is sent, with its idempotency key, and is never
+   * replaced: an existing pending request is repeated exactly as it was, with the same key.
+   * What each answer means is decided by `transitionAfterSend`.
+   */
+  async function sendCreate(changes: Changes) {
+    setProblem(null);
+    const existing = stored.status === 'pending' ? stored.envelope : null;
+    let envelope: PendingEnvelope;
+    if (existing) {
+      // A key this old cannot be trusted to be remembered: it is neither repeated nor discarded.
+      if (!replayPolicy(existing, Date.now()).safe) {
+        setRecoveryView({ view: 'replay-unverified' });
+        return;
+      }
+      envelope = existing;
+    } else {
+      envelope = newEnvelope(
+        scope,
+        {
+          title: changes.title ?? '',
+          ...(changes.description ? { description: changes.description } : {}),
+          ...(changes.targetDate ? { targetDate: changes.targetDate } : {}),
+        },
+        knownIds(),
+        Date.now(),
+      );
+      if (!recovery.begin(envelope)) {
+        // It could not be kept, so it is not sent.
+        setRecoveryView({ view: 'storage-unavailable' });
+        return;
+      }
+    }
+    lastRequest.current = envelope.request;
+    const retry = existing !== null;
+    const outcome = await writer.run(
+      JSON.stringify({ create: envelope.idempotencyKey }),
+      (key, csrf) => create(envelope.request, key, csrf),
+      { key: envelope.idempotencyKey },
+    );
+    if (outcome.kind === 'busy') return;
+    const summary: SendOutcome =
+      outcome.kind === 'saved'
+        ? { kind: 'saved' }
+        : outcome.kind === 'rejected'
+          ? { kind: 'rejected', status: outcome.status }
+          : outcome.kind === 'unauthorized'
+            ? { kind: 'unauthorized' }
+            : { kind: 'unknown' };
+    const next = transitionAfterSend(retry, summary);
+    if (next.to === 'confirmed' && outcome.kind === 'saved') {
+      recovery.clear();
+      setRecoveryView(null);
+      onSaved(outcome.value, 'created');
+    } else if (next.to === 'rejected') {
+      recovery.clear();
+      setRecoveryView(null);
+      if (outcome.kind === 'rejected')
+        await explainRejection(outcome.status, outcome.code, outcome.message);
+    } else if (next.to === 'unsafe' && outcome.kind === 'rejected') {
+      recovery.markRefused();
+      setRecoveryView({ view: 'refused', status: outcome.status });
+    } else {
+      setRecoveryView({ view: 'unknown' });
+      if (outcome.kind === 'rejected')
+        setProblem({
+          tone: 'error',
+          text: 'Your secure session needed refreshing, so this repeat was not processed. Send the same request again.',
+          actions: [],
+        });
     }
   }
 
@@ -386,31 +480,66 @@ export function RecordEditor<T extends Record_>({
     await inspect(true);
   }
 
-  /** Read every page of the list for the record an unknown create may have made. */
+  /**
+   * Read every page of the list for the record an unknown create may have made. Whatever it
+   * finds is an observation: it never clears the pending request or unlocks creation.
+   */
   async function checkCreate() {
-    if (!pending) return;
+    if (stored.status !== 'pending') return;
     setChecking(true);
-    const result = await scan(pending);
+    const result = await scan(stored.envelope);
     setChecking(false);
-    if (result.kind === 'found') {
-      onPending(null);
-      onObserved(result.record);
-      return;
-    }
-    const text =
-      result.kind === 'ambiguous'
-        ? `${result.count} records in the list fit this request, so Omnis OS cannot tell which one, if any, it created. Nothing was assumed. This form stays locked to the request.`
-        : result.kind === 'absent'
-          ? `The complete list was read and no new ${noun(kind)} with these values was found. That is an observation, not proof: the request may still be in progress. To avoid a duplicate, this form stays locked to this request. Send the same request again to settle it.`
-          : `The list could not be read completely, so nothing can be concluded about whether the ${noun(kind)} exists. This form stays locked to the request. Check again, or send the same request again.`;
-    setProblem({ tone: 'warning', text, actions: ['retry', 'checkCreate', 'close'] });
+    const seen = viewAfterScan(result);
+    if (result.kind === 'found')
+      setRecoveryView({
+        view: 'candidate',
+        title: result.record.title,
+        revision: result.record.revision,
+      });
+    else if (seen.view === 'ambiguous') setRecoveryView({ view: 'ambiguous', count: seen.count });
+    else setRecoveryView({ view: seen.view === 'absent' ? 'absent' : 'unreadable' });
+  }
+
+  function actRecovery(action: RecoveryAction) {
+    if (action === 'retry') {
+      if (stored.status === 'pending') void sendCreate(stored.envelope.request);
+    } else if (action === 'checkCreate') void checkCreate();
+    else if (action === 'discard') {
+      setBeforeDiscard(recoveryView);
+      setRecoveryView({ view: 'discard-confirm' });
+    } else if (action === 'discardCancel') setRecoveryView(beforeDiscard ?? viewFromStore());
+    else if (action === 'discardConfirm') {
+      // The owner's explicit decision, after being told a duplicate is possible.
+      if (recovery.discard()) {
+        setRecoveryView(null);
+        setValues(empty);
+        lastRequest.current = null;
+        setProblem({
+          tone: 'warning',
+          text: `The saved request was discarded. You can create a ${noun(kind)} now; if the earlier request already created one, this would make a duplicate.`,
+          actions: [],
+        });
+      } else {
+        setRecoveryView(beforeDiscard ?? viewFromStore());
+        setProblem({
+          tone: 'error',
+          text: 'The saved request could not be removed from this tab, so it was kept.',
+          actions: [],
+        });
+      }
+    } else if (action === 'recheckStorage') {
+      if (storageWritable(browserStorage())) {
+        recovery.recheck();
+        setRecoveryView(null);
+      } else setRecoveryView({ view: 'storage-unavailable' });
+    } else onClose(false);
   }
 
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (locked || writer.busy || checking) return;
     const changes = validate(changesFrom());
-    if (changes) await send(changes);
+    if (changes) await (creating ? sendCreate(changes) : send(changes));
   }
 
   function applyLatest(keepEdits: boolean) {
@@ -449,10 +578,8 @@ export function RecordEditor<T extends Record_>({
 
   const act = (action: Action) => {
     if (action === 'retry') {
-      const request = creating ? (pending?.changes ?? lastRequest.current) : lastRequest.current;
-      if (request) void send(request);
+      if (lastRequest.current) void send(lastRequest.current);
     } else if (action === 'check') void inspect(false);
-    else if (action === 'checkCreate') void checkCreate();
     else if (action === 'loadLatest') applyLatest(false);
     else if (action === 'keepEdits') applyLatest(true);
     else if (action === 'closeAndReload') onClose(true);
@@ -461,7 +588,6 @@ export function RecordEditor<T extends Record_>({
   const label: Record<Action, string> = {
     retry: 'Send the same request again',
     check: 'Check current state',
-    checkCreate: 'Check the current list',
     loadLatest: 'Load latest version',
     keepEdits: 'Keep my edits',
     closeAndReload: 'Close and refresh the list',
@@ -553,6 +679,18 @@ export function RecordEditor<T extends Record_>({
             <Notice tone="progress">{checking ? 'Checking the latest state…' : 'Saving…'}</Notice>
           )}
         </div>
+        {creating && recoveryView && (
+          <RecoveryNotice
+            copy={describeRecovery(
+              recoveryView,
+              noun(kind),
+              stored.status === 'pending' && replayPolicy(stored.envelope, Date.now()).safe,
+            )}
+            view={recoveryView.view}
+            busy={busy}
+            onAction={actRecovery}
+          />
+        )}
         {problem && (
           <Notice
             tone={problem.tone}

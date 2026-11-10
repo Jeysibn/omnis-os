@@ -9,6 +9,8 @@ import type { Msg } from './messages.js';
 import { projectHash, parseProjectsHash, projectsHash, type ProjectsRoute } from './route.js';
 
 type Props = {
+  /** The signed-in owner's id, from the authenticated session. */
+  ownerId: string;
   onUnauthorized: (cause: unknown) => void;
   csrfToken: string;
   refreshCsrf: () => Promise<string>;
@@ -20,6 +22,7 @@ const malformed: ProjectsRoute = { kind: 'malformed' };
 const currentRoute = () => parseProjectsHash(window.location.hash) ?? malformed;
 
 export function ProjectsWorkspace({
+  ownerId,
   onUnauthorized,
   csrfToken,
   refreshCsrf,
@@ -70,8 +73,9 @@ export function ProjectsWorkspace({
   else if (route.kind === 'detail')
     content = (
       <ProjectDetail
-        key={route.projectId}
+        key={`${ownerId}:${route.projectId}`}
         projectId={route.projectId}
+        ownerId={ownerId}
         csrfToken={csrfToken}
         refreshCsrf={refreshCsrf}
         onUnauthorized={onUnauthorized}

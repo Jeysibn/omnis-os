@@ -51,27 +51,36 @@ export function useWriter({ csrfToken, refreshCsrf, onUnauthorized }: Input) {
     async <T>(
       signature: string,
       send: (key: string, csrfToken: string) => Promise<T>,
+      /**
+       * A key owned by the caller, used as is. A create keeps its key in storage so that it
+       * survives a reload; this writer must then neither generate nor retire it.
+       */
+      options: { key?: string } = {},
     ): Promise<WriteOutcome<T>> => {
       if (inflight.current) return { kind: 'busy' };
       inflight.current = true;
       setBusy(true);
-      const key = intent.current.keyFor(signature);
+      const owned = options.key !== undefined;
+      const key = options.key ?? intent.current.keyFor(signature);
+      const settle = () => {
+        if (!owned) intent.current.settle();
+      };
       try {
         const value = await send(key, csrf.current);
-        intent.current.settle();
+        settle();
         return { kind: 'saved', value };
       } catch (cause) {
         const failure = classifyMutationFailure(cause);
         if (failure.evidence === 'unauthorized') {
-          intent.current.settle();
+          settle();
           unauthorized.current(cause);
           return { kind: 'unauthorized' };
         }
         if (failure.evidence === 'unknown') {
-          intent.current.markUncertain();
+          if (!owned) intent.current.markUncertain();
           return { kind: 'unknown' };
         }
-        intent.current.settle();
+        settle();
         if (failure.status === 403) {
           try {
             csrf.current = await refresh.current();

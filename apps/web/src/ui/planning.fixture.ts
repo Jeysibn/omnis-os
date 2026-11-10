@@ -157,6 +157,8 @@ export function createPlanningApi(page: Page) {
   let tasks: ProjectWorkspaceTaskSummary[] = [];
   const assoc = new Map<string, Assoc>();
   let token = 'csrf-fixture';
+  let ownerId = 'owner';
+  let signedOut = false;
   let counter = 500;
   let invalidateCursors = false;
   const queues = new Map<Op, Step[]>();
@@ -351,8 +353,18 @@ export function createPlanningApi(page: Page) {
     });
 
     if (path === '/api/v1/auth/csrf') return route.fulfill({ json: { csrfToken: token } });
+    if (path === '/api/v1/auth/logout' && method === 'POST') {
+      signedOut = true;
+      return route.fulfill({ status: 204, body: '' });
+    }
+    if (path === '/api/v1/auth/login' && method === 'POST') {
+      signedOut = false;
+      return route.fulfill({ json: { ok: true } });
+    }
     if (path === '/api/v1/me')
-      return route.fulfill({ json: { id: 'owner', displayName: 'Director' } });
+      return signedOut
+        ? error(route, 401, 'unauthorized', 'Sign in to continue.')
+        : route.fulfill({ json: { id: ownerId, displayName: 'Director' } });
     if (path === '/api/v1/tasks' && method === 'GET')
       return route.fulfill({
         json: tasks.map((item) =>
@@ -582,6 +594,10 @@ export function createPlanningApi(page: Page) {
     assignOutside(taskId: string, epicId: string | null) {
       const current = assoc.get(taskId);
       if (current) assoc.set(taskId, { epicId, revision: current.revision + 1 });
+    },
+    /** The signed-in owner changes, as another person signing in on this tab would. */
+    setOwner(id: string) {
+      ownerId = id;
     },
     rotateCsrf() {
       token = 'csrf-rotated';
