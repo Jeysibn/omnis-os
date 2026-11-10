@@ -4,6 +4,14 @@ on:
   push:
     branches: [main, security/post-audit-remediation]
   pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft, edited]
+  workflow_dispatch:
+    inputs:
+      full_validation:
+        description: Run the complete integration and security acceptance suite
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -13,7 +21,41 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  validation_mode:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      full: ${{ steps.plan.outputs.full }}
+      security_sensitive: ${{ steps.plan.outputs.securitySensitive }}
+      container_sensitive: ${{ steps.plan.outputs.containerSensitive }}
+      database_sensitive: ${{ steps.plan.outputs.databaseSensitive }}
+      full_stack_sensitive: ${{ steps.plan.outputs.fullStackSensitive }}
+      full_frontend_sensitive: ${{ steps.plan.outputs.fullFrontendSensitive }}
+      browser_specs: ${{ steps.plan.outputs.browserSpecs }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.22.1
+      - name: Resolve validation mode and changed-file suites
+        id: plan
+        run: |
+          set -euo pipefail
+          changed_files=''
+          if [[ "$GITHUB_EVENT_NAME" == 'pull_request' ]]; then
+            base_sha="$(node -e "const e=require(process.env.GITHUB_EVENT_PATH); process.stdout.write(e.pull_request.base.sha)")"
+            changed_files="$(git diff --name-only "$base_sha...$GITHUB_SHA")"
+          fi
+          OMNIS_CHANGED_FILES="$changed_files" node scripts/ci/validation-plan.mjs
+
   frontend-browser:
+    needs: validation_mode
+    outputs:
+      full_suite: ${{ steps.select_suite.outputs.full_suite }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -30,8 +72,31 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Install Playwright Chromium and system dependencies
         run: pnpm --filter @omnis/web exec playwright install --with-deps chromium
-      - name: Run frontend browser tests
+      - name: Select full or targeted browser suite
+        id: select_suite
+        env:
+          FULL_VALIDATION: ${{ needs.validation_mode.outputs.full }}
+          FULL_FRONTEND_SENSITIVE: ${{ needs.validation_mode.outputs.full_frontend_sensitive }}
+        run: |
+          if [[ "$FULL_VALIDATION" == 'true' || "$FULL_FRONTEND_SENSITIVE" == 'true' ]]; then
+            echo 'full_suite=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'full_suite=false' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Run full frontend browser tests
+        if: needs.validation_mode.outputs.full == 'true' || needs.validation_mode.outputs.full_frontend_sensitive == 'true'
         run: pnpm --filter @omnis/web test:e2e
+      - name: Run changed-area browser tests plus shell smoke
+        if: needs.validation_mode.outputs.full != 'true' && needs.validation_mode.outputs.full_frontend_sensitive != 'true'
+        env:
+          BROWSER_SPECS: ${{ needs.validation_mode.outputs.browser_specs }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { spawnSync } from 'node:child_process';
+          const specs = JSON.parse(process.env.BROWSER_SPECS);
+          const result = spawnSync('pnpm', ['--filter', '@omnis/web', 'exec', 'playwright', 'test', ...specs], { stdio: 'inherit' });
+          process.exit(result.status ?? 1);
+          NODE
       - name: Upload Playwright failure diagnostics
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -42,29 +107,34 @@ jobs:
           retention-days: 7
 
   checks-core:
+    needs: validation_mode
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 12.16.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.22.1
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Run formatting, lint, typecheck, unit, and fast security checks
+        run: |
+          set -euo pipefail
+          pnpm check
+          pnpm --filter @omnis/web build
+          pnpm compose:config:test
+          node --test scripts/host-security/*.test.mjs
+
+  platform-security:
+    needs: validation_mode
+    if: needs.validation_mode.outputs.full == 'true' || needs.validation_mode.outputs.security_sensitive == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    services:
-      postgres:
-        image: postgres:17.6-alpine@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94
-        env:
-          POSTGRES_USER: omnis
-          POSTGRES_PASSWORD: omnis_test_password
-          POSTGRES_DB: omnis_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U omnis -d omnis_test"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 12
-    env:
-      OMNIS_TEST_ADMIN_DATABASE_URL: postgresql://omnis:omnis_test_password@127.0.0.1:5432/omnis_test
-      OMNIS_TEST_MIGRATION_DATABASE_URL: postgresql://omnis_migrator:omnis_migration_test_password_2026@127.0.0.1:5432/omnis_test
-      OMNIS_TEST_DATABASE_URL: postgresql://omnis_runtime:omnis_runtime_test_password_2026@127.0.0.1:5432/omnis_test
-      OMNIS_TEST_AUTHORIZER_DATABASE_URL: postgresql://omnis_authorizer:omnis_authorizer_test_password_2026@127.0.0.1:5432/omnis_test
-      OMNIS_TEST_LAUNCHER_DATABASE_URL: postgresql://omnis_launcher:omnis_launcher_test_password_2026@127.0.0.1:5432/omnis_test
-      OMNIS_SANDBOX_INTEGRATION: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -81,19 +151,14 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Verify disposable Linux service identity boundaries
         run: sudo --preserve-env=CI bash scripts/host-security/test-disposable-identities.sh
+      - name: Generate and mask run-scoped PostgreSQL credentials
+        run: node scripts/ci/create-test-database-environment.mjs
+      - name: Start disposable PostgreSQL on loopback
+        run: bash scripts/ci/start-test-postgres.sh
       - name: Provision restricted PostgreSQL roles
-        run: node --experimental-strip-types packages/db/src/provision.ts
-        env:
-          OMNIS_ADMIN_DATABASE_URL: postgresql://omnis:omnis_test_password@127.0.0.1:5432/omnis_test
-          OMNIS_MIGRATION_DB_PASSWORD: omnis_migration_test_password_2026
-          OMNIS_RUNTIME_DB_PASSWORD: omnis_runtime_test_password_2026
-          OMNIS_AUTHORIZER_DB_PASSWORD: omnis_authorizer_test_password_2026
-          OMNIS_LAUNCHER_DB_PASSWORD: omnis_launcher_test_password_2026
-      - run: pnpm check
-      - name: Build the production frontend bundle
-        run: pnpm --filter @omnis/web build
-      - name: Verify host cleanup, packaging, and required CI checks
-        run: node --test scripts/host-security/*.test.mjs
+        run: |
+          source scripts/ci/export-test-database-environment.sh
+          node --experimental-strip-types packages/db/src/provision.ts
       - name: Verify SO_PEERCRED broker IPC gate
         run: python3 scripts/platform/test-broker-peer-proxy.py
       - name: Verify host isolation in disposable systemd deployment
@@ -101,38 +166,24 @@ jobs:
           CI: 'true'
           OMNIS_HOST_ISOLATION_TEST: 'true'
           OMNIS_SYSTEMD_VERIFICATION_REQUIRED: 'true'
-          OMNIS_RUNTIME_DB_PASSWORD: omnis_runtime_test_password_2026
-          OMNIS_AUTHORIZER_DB_PASSWORD: omnis_authorizer_test_password_2026
-          OMNIS_LAUNCHER_DB_PASSWORD: omnis_launcher_test_password_2026
-        run: OMNIS_TEST_NODE_EXECUTABLE="$(command -v node)" sudo --preserve-env=CI,GITHUB_ACTIONS,RUNNER_OS,RUNNER_ENVIRONMENT,OMNIS_HOST_ISOLATION_TEST,OMNIS_SYSTEMD_VERIFICATION_REQUIRED,OMNIS_TEST_NODE_EXECUTABLE,OMNIS_RUNTIME_DB_PASSWORD,OMNIS_AUTHORIZER_DB_PASSWORD,OMNIS_LAUNCHER_DB_PASSWORD,OMNIS_TEST_MIGRATION_DATABASE_URL,OMNIS_TEST_DATABASE_URL,OMNIS_TEST_AUTHORIZER_DATABASE_URL,OMNIS_TEST_LAUNCHER_DATABASE_URL bash scripts/host-security/verify-disposable-systemd-deployment.sh
+          OMNIS_SANDBOX_INTEGRATION: '1'
+        run: |
+          source scripts/ci/export-test-database-environment.sh
+          export OMNIS_TEST_NODE_EXECUTABLE="$(command -v node)"
+          sudo --preserve-env=CI,GITHUB_ACTIONS,RUNNER_OS,RUNNER_ENVIRONMENT,OMNIS_HOST_ISOLATION_TEST,OMNIS_SYSTEMD_VERIFICATION_REQUIRED,OMNIS_SANDBOX_INTEGRATION,OMNIS_TEST_NODE_EXECUTABLE,OMNIS_RUNTIME_DB_PASSWORD,OMNIS_AUTHORIZER_DB_PASSWORD,OMNIS_LAUNCHER_DB_PASSWORD,OMNIS_TEST_MIGRATION_DATABASE_URL,OMNIS_TEST_DATABASE_URL,OMNIS_TEST_AUTHORIZER_DATABASE_URL,OMNIS_TEST_LAUNCHER_DATABASE_URL bash scripts/host-security/verify-disposable-systemd-deployment.sh
+      - name: Remove disposable PostgreSQL container
+        if: always()
+        run: bash scripts/ci/cleanup-test-postgres.sh
 
   database-integration:
+    needs: validation_mode
+    if: needs.validation_mode.outputs.full == 'true' || needs.validation_mode.outputs.database_sensitive == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         suite: [legacy-upgrade, recovery]
-    services:
-      postgres:
-        image: postgres:17.6-alpine@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94
-        env:
-          POSTGRES_USER: omnis
-          POSTGRES_PASSWORD: omnis_test_password
-          POSTGRES_DB: omnis_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U omnis -d omnis_test"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 12
-    env:
-      OMNIS_TEST_ADMIN_DATABASE_URL: postgresql://omnis:omnis_test_password@127.0.0.1:5432/omnis_test
-      OMNIS_TEST_MIGRATION_DATABASE_URL: postgresql://omnis_migrator:omnis_migration_test_password_2026@127.0.0.1:5432/omnis_test
-      OMNIS_TEST_DATABASE_URL: postgresql://omnis_runtime:omnis_runtime_test_password_2026@127.0.0.1:5432/omnis_test
-      OMNIS_TEST_AUTHORIZER_DATABASE_URL: postgresql://omnis_authorizer:omnis_authorizer_test_password_2026@127.0.0.1:5432/omnis_test
-      OMNIS_TEST_LAUNCHER_DATABASE_URL: postgresql://omnis_launcher:omnis_launcher_test_password_2026@127.0.0.1:5432/omnis_test
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -147,40 +198,27 @@ jobs:
           cache: pnpm
       - run: docker pull node@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85
       - run: pnpm install --frozen-lockfile
+      - name: Generate and mask run-scoped PostgreSQL credentials
+        run: node scripts/ci/create-test-database-environment.mjs
+      - name: Start disposable PostgreSQL on loopback
+        run: bash scripts/ci/start-test-postgres.sh
       - name: Provision restricted PostgreSQL roles
-        run: node --experimental-strip-types packages/db/src/provision.ts
-        env:
-          OMNIS_ADMIN_DATABASE_URL: postgresql://omnis:omnis_test_password@127.0.0.1:5432/omnis_test
-          OMNIS_MIGRATION_DB_PASSWORD: omnis_migration_test_password_2026
-          OMNIS_RUNTIME_DB_PASSWORD: omnis_runtime_test_password_2026
-          OMNIS_AUTHORIZER_DB_PASSWORD: omnis_authorizer_test_password_2026
-          OMNIS_LAUNCHER_DB_PASSWORD: omnis_launcher_test_password_2026
+        run: |
+          source scripts/ci/export-test-database-environment.sh
+          node --experimental-strip-types packages/db/src/provision.ts
       - name: Run ${{ matrix.suite }} integration test
-        run: pnpm integration:${{ matrix.suite }}
+        run: |
+          source scripts/ci/export-test-database-environment.sh
+          pnpm integration:${{ matrix.suite }}
+      - name: Remove disposable PostgreSQL container
+        if: always()
+        run: bash scripts/ci/cleanup-test-postgres.sh
 
   full-stack-browser-integration:
+    needs: validation_mode
+    if: needs.validation_mode.outputs.full == 'true' || needs.validation_mode.outputs.full_stack_sensitive == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    services:
-      postgres:
-        image: postgres:17.6-alpine@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94
-        env:
-          POSTGRES_USER: omnis
-          POSTGRES_PASSWORD: omnis_test_password
-          POSTGRES_DB: omnis_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U omnis -d omnis_test"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 12
-    env:
-      OMNIS_TEST_ADMIN_DATABASE_URL: postgresql://omnis:omnis_test_password@127.0.0.1:5432/omnis_test
-      OMNIS_TEST_MIGRATION_DATABASE_URL: postgresql://omnis_migrator:omnis_migration_test_password_2026@127.0.0.1:5432/omnis_test
-      OMNIS_TEST_DATABASE_URL: postgresql://omnis_runtime:omnis_runtime_test_password_2026@127.0.0.1:5432/omnis_test
-      OMNIS_TEST_AUTHORIZER_DATABASE_URL: postgresql://omnis_authorizer:omnis_authorizer_test_password_2026@127.0.0.1:5432/omnis_test
-      OMNIS_TEST_LAUNCHER_DATABASE_URL: postgresql://omnis_launcher:omnis_launcher_test_password_2026@127.0.0.1:5432/omnis_test
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -193,20 +231,25 @@ jobs:
           node-version: 24.22.1
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Provision restricted PostgreSQL roles
-        run: node --experimental-strip-types packages/db/src/provision.ts
-        env:
-          OMNIS_ADMIN_DATABASE_URL: postgresql://omnis:omnis_test_password@127.0.0.1:5432/omnis_test
-          OMNIS_MIGRATION_DB_PASSWORD: omnis_migration_test_password_2026
-          OMNIS_RUNTIME_DB_PASSWORD: omnis_runtime_test_password_2026
-          OMNIS_AUTHORIZER_DB_PASSWORD: omnis_authorizer_test_password_2026
-          OMNIS_LAUNCHER_DB_PASSWORD: omnis_launcher_test_password_2026
       - name: Install Playwright Chromium and system dependencies
         run: pnpm --filter @omnis/web exec playwright install --with-deps chromium
+      - name: Generate and mask run-scoped PostgreSQL credentials
+        run: node scripts/ci/create-test-database-environment.mjs
+      - name: Start disposable PostgreSQL on loopback
+        run: bash scripts/ci/start-test-postgres.sh
+      - name: Provision restricted PostgreSQL roles
+        run: |
+          source scripts/ci/export-test-database-environment.sh
+          node --experimental-strip-types packages/db/src/provision.ts
       - name: Run real browser to PostgreSQL smoke test
-        run: pnpm integration:browser-smoke
+        run: |
+          source scripts/ci/export-test-database-environment.sh
+          pnpm integration:browser-smoke
         env:
           OMNIS_TEST_DIAGNOSTICS_PATH: ${{ runner.temp }}/omnis-full-stack-smoke.txt
+      - name: Remove disposable PostgreSQL container
+        if: always()
+        run: bash scripts/ci/cleanup-test-postgres.sh
       - name: Upload sanitized full-stack smoke diagnostics
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -217,6 +260,8 @@ jobs:
           retention-days: 7
 
   backup-restore:
+    needs: validation_mode
+    if: needs.validation_mode.outputs.full == 'true' || needs.validation_mode.outputs.database_sensitive == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -235,6 +280,8 @@ jobs:
         run: pnpm integration:backup-restore
 
   container-images:
+    needs: validation_mode
+    if: needs.validation_mode.outputs.full == 'true' || needs.validation_mode.outputs.container_sensitive == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -262,9 +309,7 @@ jobs:
           node scripts/compose/verify-app-config.mjs
           node scripts/container-images/verify-built-images.mjs
       - name: Verify synthetic broker network boundary with positive and negative controls
-        run: |
-          set -euo pipefail
-          node scripts/platform/run-synthetic-egress.mjs
+        run: node scripts/platform/run-synthetic-egress.mjs
       - name: Verify disposable Docker privilege, socket, lifecycle, and network boundaries
         env:
           OMNIS_DOCKER_TEST_RUN_ID: omnis-${{ github.run_id }}-${{ github.run_attempt }}
@@ -283,9 +328,7 @@ jobs:
             exit "$status"
           }
           trap cleanup EXIT
-          sudo --preserve-env=PATH env \
-            OMNIS_DOCKER_TEST_RUN_ID="$OMNIS_DOCKER_TEST_RUN_ID" \
-          node scripts/container-boundary/verify-disposable-boundary.mjs
+          sudo --preserve-env=PATH env OMNIS_DOCKER_TEST_RUN_ID="$OMNIS_DOCKER_TEST_RUN_ID" node scripts/container-boundary/verify-disposable-boundary.mjs
       - name: Pull the pinned mock sandbox runtime image
         run: docker pull node@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85
       - name: Run disposable full-stack Compose integration using the images built above
@@ -304,26 +347,43 @@ jobs:
           retention-days: 7
 
   checks:
-    if: ${{ always() }}
+    if: always()
     needs:
       [
+        validation_mode,
         checks-core,
+        frontend-browser,
+        platform-security,
         database-integration,
         full-stack-browser-integration,
         backup-restore,
         container-images,
       ]
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
-      - name: Require every quality job to pass
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.22.1
+      - name: Fail closed on missing, skipped, cancelled, or failed required validation
         env:
+          MODE_RESULT: ${{ needs.validation_mode.result }}
+          MODE: ${{ needs.validation_mode.outputs.mode }}
+          FULL: ${{ needs.validation_mode.outputs.full }}
+          SECURITY_SENSITIVE: ${{ needs.validation_mode.outputs.security_sensitive }}
+          CONTAINER_SENSITIVE: ${{ needs.validation_mode.outputs.container_sensitive }}
+          DATABASE_SENSITIVE: ${{ needs.validation_mode.outputs.database_sensitive }}
+          FULL_STACK_SENSITIVE: ${{ needs.validation_mode.outputs.full_stack_sensitive }}
+          FULL_FRONTEND_SENSITIVE: ${{ needs.validation_mode.outputs.full_frontend_sensitive }}
           CORE_RESULT: ${{ needs.checks-core.result }}
+          FRONTEND_RESULT: ${{ needs.frontend-browser.result }}
+          FRONTEND_FULL_SUITE: ${{ needs.frontend-browser.outputs.full_suite }}
+          PLATFORM_RESULT: ${{ needs.platform-security.result }}
           DATABASE_RESULT: ${{ needs.database-integration.result }}
           FULL_STACK_RESULT: ${{ needs.full-stack-browser-integration.result }}
-          BACKUP_RESTORE_RESULT: ${{ needs.backup-restore.result }}
-          CONTAINER_IMAGES_RESULT: ${{ needs.container-images.result }}
-        run: |
-          if [[ "$CORE_RESULT" != "success" || "$DATABASE_RESULT" != "success" || "$FULL_STACK_RESULT" != "success" || "$BACKUP_RESTORE_RESULT" != "success" || "$CONTAINER_IMAGES_RESULT" != "success" ]]; then
-            echo "CI quality jobs did not all pass: core=$CORE_RESULT database=$DATABASE_RESULT full_stack=$FULL_STACK_RESULT backup_restore=$BACKUP_RESTORE_RESULT container_images=$CONTAINER_IMAGES_RESULT"
-            exit 1
-          fi
+          BACKUP_RESULT: ${{ needs.backup-restore.result }}
+          CONTAINER_RESULT: ${{ needs.container-images.result }}
+        run: node scripts/ci/verify-validation-gate.mjs

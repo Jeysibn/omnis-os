@@ -7,10 +7,13 @@ consume it, and how existing screens migrate. Visual direction comes from
 
 ## Status and scope
 
-- The foundation is **additive**. No existing screen imports it, so no existing screen changed.
+- The foundation is **additive**: adopting it never restyles another screen. It is consumed by the
+  Project Workspace and the Command Center; the other screens have not migrated.
 - It is demonstrated by a **development-only showcase** at `/design-system.html` (served by the
   Vite dev server, not linked from the app, not part of the production build).
-- The Canvas reactor stays Command Center-specific and is not part of this system.
+- The Canvas Reactor (`ui/command-center/reactor/`) stays Command Center-specific and is not part of
+  this system. It uses the same palette values, repeated in `reactor/visual.ts` because a canvas
+  cannot read CSS variables; keep the two in step.
 - No new dependency, no external font or CDN, no new state or navigation system.
 
 ## Files
@@ -168,15 +171,13 @@ Run against the showcase in Chromium by `ui/design.spec.ts`:
    tables and states with the shared ones. Each PR keeps that screen's existing browser tests
    passing unchanged, and adds a visual check. The shared header migrates last, since it affects
    every screen.
-2. **Command Center (PR #31):** it defines its own `--nx-*` variables on `.nexus` with the same
-   names for the shared palette (`--nx-void`, `--nx-slate`, `--nx-edge`, `--nx-jade`, `--nx-amber`,
-   `--nx-frost`, `--nx-focus`) and a few different names or values (`--nx-quiet`, `--nx-muted`,
-   `--nx-red #ff7a7a`). Scoped `.nexus` definitions win inside the Command Center, so the two
-   do not collide. After #31 merges, delete the duplicated palette from `nexus.css`, point its
-   remaining variables at the shared roles, and settle on one red. Do that in its own PR with the
-   `nexus.spec.ts` suite as the guard.
-3. **Order:** Project Workspace V1 first (new, no migration risk), then Departments, Agents,
-   Tasks, Runs, then the shared header, then the Command Center token cleanup.
+2. **Command Center (done, PRs #92 and #93):** it is built directly on these tokens and components,
+   with no palette of its own. The token block in `design/design.css` also selects
+   `.app-shell[data-view='command-center']`, so the page chrome around the screen reads the same
+   palette, and its layout is scoped to `.ccx-*`. The earlier PR #31 design, which defined its own
+   `.nexus` variables, was superseded and never merged.
+3. **Order:** Project Workspace V1 first (new, no migration risk), then the Command Center (done),
+   then Departments, Agents, Tasks, Runs, and last the shared header.
 
 ## Project Workspace V1
 

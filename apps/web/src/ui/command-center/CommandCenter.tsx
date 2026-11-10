@@ -4,6 +4,8 @@ import type { Run, Task } from '@omnis/contracts';
 import { ErrorState, LoadingState, NxButton, NxTheme, StatusBadge } from '../design/index.js';
 import { AttentionPanel } from './AttentionPanel.js';
 import { PhtClock } from './PhtClock.js';
+import { Reactor } from './reactor/Reactor.js';
+import { markerCounts } from './reactor/visual.js';
 import { RecentRecords } from './RecentRecords.js';
 import { SystemContext, VitalsPanel, type VitalsFocusHandoff } from './VitalsPanel.js';
 import { deriveSystemState } from './systemState.js';
@@ -46,10 +48,19 @@ function connection(tasks: LoadState, runs: LoadState) {
 }
 
 /**
- * OMNIS NEXUS V2, Stage 1: the Command Center shell with vitals, attention panel and PHT clock.
- * It draws only on the task and run lists the application already loads and on the existing
- * stop, create and approval actions. The reactor and a global Mission Lane are later stages and
- * are intentionally absent; nothing here is fabricated, simulated or animated.
+ * OMNIS NEXUS V2 Command Center: the shell (environment strip, PHT clock, vitals, attention panel,
+ * recent records) around the Reactor, the cinematic centrepiece of the stage.
+ *
+ * Everything shown comes from the task and run lists the application already loads and from the
+ * existing stop, create and approval actions; nothing is fabricated or simulated, and a failed
+ * load shows "Unavailable", never a zero. The Reactor (`./reactor`) is decorative and
+ * `aria-hidden`: it is drawn from the same system state and run list and only animates the states
+ * that are genuinely alive (idle, queued, active); every other state is drawn once and stays still.
+ * It lives in a lazy chunk with a static SVG fallback, which is also the whole presentation under
+ * `prefers-reduced-motion`, so this component never depends on the renderer being available.
+ *
+ * Not here: a global Mission Lane or any event stream. That needs the approved backend contract and
+ * is a later stage.
  */
 export function CommandCenter(props: CommandCenterProps) {
   const tasksState = loadState(props.tasksLoading, props.tasksError);
@@ -67,6 +78,11 @@ export function CommandCenter(props: CommandCenterProps) {
   const state = useMemo(
     () => deriveSystemState({ tasksState, runsState, runs }),
     [tasksState, runsState, runs],
+  );
+  // Markers come from the same loaded run list as the vitals; unavailable data draws none.
+  const reactorMarkers = useMemo(
+    () => (runsState === 'ready' ? markerCounts(runs) : null),
+    [runsState, runs],
   );
   const wide = useMediaQuery(WIDE_LAYOUT_QUERY);
   const approvalsHeading = useRef<HTMLHeadingElement>(null);
@@ -134,25 +150,7 @@ export function CommandCenter(props: CommandCenterProps) {
               System state
             </h2>
             <div className="ccx-state" data-state={state.id}>
-              <svg className="ccx-mark" viewBox="0 0 120 120" aria-hidden="true" focusable="false">
-                <circle
-                  cx="60"
-                  cy="60"
-                  r="52"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeOpacity="0.35"
-                />
-                <circle
-                  cx="60"
-                  cy="60"
-                  r="34"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeOpacity="0.55"
-                />
-                <circle cx="60" cy="60" r="10" fill="currentColor" />
-              </svg>
+              <Reactor state={state.id} markers={reactorMarkers} />
               {state.id === 'loading' ? (
                 <LoadingState label={state.label} />
               ) : (
