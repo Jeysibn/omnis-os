@@ -85,8 +85,23 @@ BEGIN
     v_has_critical_marker := true;
   END IF;
 
+  -- A normal caller checks before joining the turnstile and rechecks while
+  -- holding it. The second check closes the race where critical work registers
+  -- after this fast-path check but before permit promotion.
+  IF NOT p_critical AND EXISTS (
+    SELECT 1 FROM pg_catalog.pg_locks AS pg_lock
+     WHERE pg_lock.locktype = 'advisory' AND pg_lock.objsubid = 1
+       AND ((pg_lock.classid::bigint << 32) | pg_lock.objid::bigint) = v_critical_marker_key
+       AND pg_lock.mode = 'ExclusiveLock' AND pg_lock.pid <> pg_catalog.pg_backend_pid()
+  ) THEN
+    RAISE EXCEPTION 'Critical Mission Lane work is pending'
+      USING ERRCODE = 'PML02';
+  END IF;
+
   -- Serialize permit handoff for both fast-path and queued callers. Critical
-  -- work registers first; normal work checks for it while holding the turnstile.
+  -- work registers first. A writer never waits for an active permit while
+  -- holding the turnstile; it releases the turnstile and retries nonblocking
+  -- permit acquisition within the original deadline.
   IF p_critical THEN
     v_remaining_ms := floor(extract(epoch FROM (v_deadline - pg_catalog.clock_timestamp())) * 1000)::integer;
     IF v_remaining_ms < 1 THEN
@@ -121,28 +136,29 @@ BEGIN
     END IF;
   END IF;
 
-  IF NOT p_critical AND EXISTS (
-    SELECT 1 FROM pg_catalog.pg_locks AS pg_lock
-     WHERE pg_lock.locktype = 'advisory' AND pg_lock.objsubid = 1
-       AND ((pg_lock.classid::bigint << 32) | pg_lock.objid::bigint) = v_critical_marker_key
-       AND pg_lock.mode = 'ExclusiveLock' AND pg_lock.pid <> pg_catalog.pg_backend_pid()
-  ) THEN
-    RAISE EXCEPTION 'Critical Mission Lane work is pending'
-      USING ERRCODE = 'PML02';
-  END IF;
-
-  FOREACH v_active_key IN ARRAY ARRAY[
-    70463909136600,70463909136601,70463909136602,70463909136603
-  ]::bigint[] LOOP
-    IF pg_catalog.pg_try_advisory_xact_lock(v_active_key) THEN
-      v_has_active_permit := true;
-      EXIT;
+  LOOP
+    IF NOT p_critical AND EXISTS (
+      SELECT 1 FROM pg_catalog.pg_locks AS pg_lock
+       WHERE pg_lock.locktype = 'advisory' AND pg_lock.objsubid = 1
+         AND ((pg_lock.classid::bigint << 32) | pg_lock.objid::bigint) = v_critical_marker_key
+         AND pg_lock.mode = 'ExclusiveLock' AND pg_lock.pid <> pg_catalog.pg_backend_pid()
+    ) THEN
+      RAISE EXCEPTION 'Critical Mission Lane work is pending'
+        USING ERRCODE = 'PML02';
     END IF;
-  END LOOP;
 
-  IF NOT v_has_active_permit THEN
-    -- A fast-path normal request must not acquire a queue slot while holding the
-    -- turnstile. Release, reserve bounded queue capacity, and rejoin the order.
+    FOREACH v_active_key IN ARRAY ARRAY[
+      70463909136600,70463909136601,70463909136602,70463909136603
+    ]::bigint[] LOOP
+      IF pg_catalog.pg_try_advisory_xact_lock(v_active_key) THEN
+        v_has_active_permit := true;
+        EXIT;
+      END IF;
+    END LOOP;
+    EXIT WHEN v_has_active_permit;
+
+    -- A fast-path normal request must not acquire a queue slot while holding
+    -- the turnstile. Yield it, reserve bounded capacity, and rejoin the order.
     IF NOT v_has_queue_slot THEN
       PERFORM pg_catalog.pg_advisory_unlock(v_turnstile_key);
       v_has_turnstile := false;
@@ -165,36 +181,26 @@ BEGIN
       PERFORM pg_catalog.set_config('lock_timeout', v_remaining_ms::text || 'ms', true);
       PERFORM pg_catalog.pg_advisory_lock(v_turnstile_key);
       v_has_turnstile := true;
-      IF EXISTS (
-        SELECT 1 FROM pg_catalog.pg_locks AS pg_lock
-         WHERE pg_lock.locktype = 'advisory' AND pg_lock.objsubid = 1
-           AND ((pg_lock.classid::bigint << 32) | pg_lock.objid::bigint) = v_critical_marker_key
-           AND pg_lock.mode = 'ExclusiveLock' AND pg_lock.pid <> pg_catalog.pg_backend_pid()
-      ) THEN
-        RAISE EXCEPTION 'Critical Mission Lane work is pending'
-          USING ERRCODE = 'PML02';
-      END IF;
-      FOREACH v_active_key IN ARRAY ARRAY[
-        70463909136600,70463909136601,70463909136602,70463909136603
-      ]::bigint[] LOOP
-        IF pg_catalog.pg_try_advisory_xact_lock(v_active_key) THEN
-          v_has_active_permit := true;
-          EXIT;
-        END IF;
-      END LOOP;
     END IF;
-  END IF;
 
-  IF NOT v_has_active_permit THEN
+    -- Keep the queue slot, but let pending critical work reach the turnstile.
+    PERFORM pg_catalog.pg_advisory_unlock(v_turnstile_key);
+    v_has_turnstile := false;
     v_remaining_ms := floor(extract(epoch FROM (v_deadline - pg_catalog.clock_timestamp())) * 1000)::integer;
     IF v_remaining_ms < 1 THEN
       RAISE EXCEPTION 'Mission Lane writer deadline expired before permit acquisition'
         USING ERRCODE = 'PML02';
     END IF;
+    PERFORM pg_catalog.pg_sleep(LEAST(v_remaining_ms, 10)::double precision / 1000.0);
+    v_remaining_ms := floor(extract(epoch FROM (v_deadline - pg_catalog.clock_timestamp())) * 1000)::integer;
+    IF v_remaining_ms < 1 THEN
+      RAISE EXCEPTION 'Mission Lane writer deadline expired before turnstile retry'
+        USING ERRCODE = 'PML02';
+    END IF;
     PERFORM pg_catalog.set_config('lock_timeout', v_remaining_ms::text || 'ms', true);
-    PERFORM pg_catalog.pg_advisory_xact_lock(70463909136600);
-    v_has_active_permit := true;
-  END IF;
+    PERFORM pg_catalog.pg_advisory_lock(v_turnstile_key);
+    v_has_turnstile := true;
+  END LOOP;
 
   -- Check a second time immediately before waiting for D5. Any normal request
   -- that lost the priority race aborts before a source or event row is touched.

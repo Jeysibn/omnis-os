@@ -307,8 +307,10 @@ export class PostgresRunStore {
           }
         },
       );
-      const current = await this.getTask(parsedTaskId.data);
-      return current ?? TaskSchema.parse(result.rows[0]?.result);
+      // The mutation returns the persisted idempotency receipt. Returning it
+      // keeps retries stable and avoids a second read that could observe later
+      // Task lifecycle state instead of this association operation's result.
+      return TaskSchema.parse(result.rows[0]?.result);
     } catch (error) {
       return mapStoreError(error);
     }

@@ -154,11 +154,6 @@ const postgresSuite = describe(
               .catch((error: { code?: string }) => ({ code: error.code })),
           );
         }
-        criticalClient = await connect(secondPool);
-        criticalAcquire = criticalClient.query(
-          'SELECT omnis.acquire_mission_lane_admission(true, 3000)',
-        );
-
         assert.equal(
           await waitUntil(async () => {
             const result = await adminPool!.query<{ active: number; pending: number }>(`
@@ -171,10 +166,10 @@ const postgresSuite = describe(
                 )::int AS pending
               FROM pg_locks WHERE locktype='advisory' AND objsubid=1
             `);
-            return result.rows[0]?.active === 4 && result.rows[0]?.pending === 4;
+            return result.rows[0]?.active === 4 && result.rows[0]?.pending === 3;
           }),
           true,
-          'the global active and pending envelopes should both reach four',
+          'the four global permits and all three normal pending slots should be occupied',
         );
 
         const overflow = await connect(firstPool);
@@ -184,11 +179,16 @@ const postgresSuite = describe(
         );
         await overflow.query('ROLLBACK');
 
+        criticalClient = await connect(secondPool);
+        criticalAcquire = criticalClient.query(
+          'SELECT omnis.acquire_mission_lane_admission(true, 3000)',
+        );
+
         await Promise.all(activeClients.map((client) => client.query('COMMIT')));
         const normalResults = await Promise.all(normalAcquires);
-        assert.deepEqual(
-          normalResults.map((result) => result.code),
-          ['PML02', 'PML02', 'PML02'],
+        assert.ok(
+          normalResults.every((result) => ['PML02', '55P03'].includes(result.code ?? '')),
+          'normal waiters must stop without mutating once critical work is pending',
         );
         assert.equal(
           await Promise.race([criticalAcquire.then(() => true), delay(25).then(() => false)]),
@@ -210,6 +210,158 @@ const postgresSuite = describe(
         await Promise.allSettled(normalAcquires);
         if (criticalAcquire) await Promise.allSettled([criticalAcquire]);
         for (const client of clients) client.release();
+        await firstPool.end();
+        await secondPool.end();
+      }
+    });
+
+    it('lets a pending critical writer pass a normal waiter that is short of permits', async () => {
+      const firstPool = createPool({ connectionString: databaseUrl!, max: 4 });
+      const secondPool = createPool({ connectionString: databaseUrl!, max: 4 });
+      const activeClients: PoolClient[] = [];
+      let cursorBlocker: PoolClient | undefined;
+      let normalClient: PoolClient | undefined;
+      let criticalClient: PoolClient | undefined;
+      let normalAcquire: Promise<unknown> | undefined;
+      let criticalAcquire: Promise<unknown> | undefined;
+      const waitUntil = async (predicate: () => Promise<boolean>) => {
+        const deadline = Date.now() + 2_000;
+        while (Date.now() < deadline) {
+          if (await predicate()) return true;
+          await delay(10);
+        }
+        return false;
+      };
+      try {
+        for (let index = 0; index < 4; index += 1) {
+          const client = await (index % 2 === 0 ? firstPool : secondPool).connect();
+          activeClients.push(client);
+          await client.query('BEGIN');
+          await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [70463909136600 + index]);
+        }
+
+        cursorBlocker = await firstPool.connect();
+        await cursorBlocker.query('BEGIN');
+        await cursorBlocker.query('SELECT pg_advisory_xact_lock($1::bigint)', ['70463909136525']);
+
+        normalClient = await firstPool.connect();
+        await normalClient.query('BEGIN');
+        const normalPid = (
+          await normalClient.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')
+        ).rows[0]?.pid;
+        assert.ok(normalPid);
+        normalAcquire = normalClient.query(
+          'SELECT omnis.acquire_mission_lane_admission(false, 3000)',
+        );
+        void normalAcquire.catch(() => undefined);
+
+        assert.equal(
+          await waitUntil(async () => {
+            const state = await adminPool!.query<{ sleeping_without_turnstile: boolean }>(
+              `SELECT EXISTS (
+                 SELECT 1 FROM pg_stat_activity activity
+                 JOIN pg_locks queue_lock ON queue_lock.pid=activity.pid
+                   AND queue_lock.locktype='advisory' AND queue_lock.granted
+                   AND queue_lock.objsubid=1
+                   AND ((queue_lock.classid::bigint << 32) | queue_lock.objid::bigint)
+                       BETWEEN 70463909136610 AND 70463909136612
+                 WHERE activity.pid=$1 AND activity.wait_event='PgSleep'
+                   AND NOT EXISTS (
+                     SELECT 1 FROM pg_locks turn_lock
+                     WHERE turn_lock.pid=activity.pid AND turn_lock.locktype='advisory'
+                       AND turn_lock.granted AND turn_lock.objsubid=1
+                       AND ((turn_lock.classid::bigint << 32) | turn_lock.objid::bigint)
+                           =70463909136604
+                   )
+               ) AS sleeping_without_turnstile`,
+              [normalPid],
+            );
+            return state.rows[0]?.sleeping_without_turnstile === true;
+          }),
+          true,
+          'a normal request waiting for an active permit must release the turnstile',
+        );
+
+        criticalClient = await secondPool.connect();
+        await criticalClient.query('BEGIN');
+        const criticalPid = (
+          await criticalClient.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')
+        ).rows[0]?.pid;
+        assert.ok(criticalPid);
+        criticalAcquire = criticalClient.query(
+          'SELECT omnis.acquire_mission_lane_admission(true, 3000)',
+        );
+        void criticalAcquire.catch(() => undefined);
+
+        assert.equal(
+          await waitUntil(async () => {
+            const marker = await adminPool!.query<{ held: boolean }>(
+              `SELECT EXISTS (
+                 SELECT 1 FROM pg_locks WHERE pid=$1 AND locktype='advisory'
+                   AND granted AND objsubid=1
+                   AND ((classid::bigint << 32) | objid::bigint)=70463909136605
+               ) AS held`,
+              [criticalPid],
+            );
+            return marker.rows[0]?.held === true;
+          }),
+          true,
+          'critical work must register its marker before joining permit handoff',
+        );
+
+        await activeClients[0]!.query('COMMIT');
+        activeClients[0]!.release();
+        activeClients.shift();
+
+        assert.equal(
+          await waitUntil(async () => {
+            const state = await adminPool!.query<{ waiting_for_cursor: boolean }>(
+              `SELECT EXISTS (
+                 SELECT 1 FROM pg_locks WHERE pid=$1 AND locktype='advisory'
+                   AND NOT granted AND objsubid=1
+                   AND ((classid::bigint << 32) | objid::bigint)=70463909136525
+               ) AS waiting_for_cursor`,
+              [criticalPid],
+            );
+            return state.rows[0]?.waiting_for_cursor === true;
+          }),
+          true,
+          'critical work should receive the released permit and proceed to D5',
+        );
+
+        await assert.rejects(
+          normalAcquire,
+          (error: unknown) => (error as { code?: string }).code === 'PML02',
+        );
+        await normalClient.query('ROLLBACK');
+        await cursorBlocker.query('COMMIT');
+        await criticalAcquire;
+        await criticalClient.query('COMMIT');
+
+        const activeCount = await adminPool!.query<{ count: number }>(
+          `SELECT count(*)::int AS count FROM pg_locks
+           WHERE locktype='advisory' AND granted AND objsubid=1
+             AND ((classid::bigint << 32) | objid::bigint)
+               BETWEEN 70463909136600 AND 70463909136603`,
+        );
+        assert.equal(
+          activeCount.rows[0]?.count,
+          3,
+          'only the three deliberately held fixture permits should remain after critical D5 acquisition',
+        );
+      } finally {
+        await Promise.allSettled([
+          ...activeClients.map((client) => client.query('ROLLBACK')),
+          ...(cursorBlocker ? [cursorBlocker.query('ROLLBACK')] : []),
+          ...(normalClient ? [normalClient.query('ROLLBACK')] : []),
+          ...(criticalClient ? [criticalClient.query('ROLLBACK')] : []),
+          ...(normalAcquire ? [normalAcquire] : []),
+          ...(criticalAcquire ? [criticalAcquire] : []),
+        ]);
+        for (const client of activeClients) client.release();
+        cursorBlocker?.release();
+        normalClient?.release();
+        criticalClient?.release();
         await firstPool.end();
         await secondPool.end();
       }
@@ -2529,6 +2681,38 @@ const postgresSuite = describe(
         pool!.query('UPDATE omnis.tasks SET project_id = NULL'),
         /permission denied/,
       );
+    });
+
+    it('replays the persisted project-assignment receipt after Task state changes', async () => {
+      const projects = new PostgresProjectManagementStore(authorizerPool!, Buffer.alloc(32, 31));
+      const project = await projects.create(
+        {
+          key: `RECEIPT-${randomUUID().slice(0, 8).toUpperCase()}`,
+          name: 'Project assignment receipt',
+          objective: 'Verify stable idempotency replay semantics.',
+        },
+        randomUUID(),
+      );
+      const task = await store.createTask({
+        title: 'Stable project receipt',
+        detail: 'The same project request returns its original persisted receipt.',
+      });
+      const assignmentRequestId = randomUUID();
+      const assignmentInput = { expectedAssociationRevision: 1, projectId: project.id };
+      const receipt = await store.setTaskProject(task.id, assignmentInput, assignmentRequestId);
+
+      const admitted = await admit(task.id, key('receipt-state-change'), async () => 'job');
+      assert.equal(admitted.created, true);
+      assert.notEqual((await store.getTask(task.id))?.status, receipt.status);
+
+      const replay = await store.setTaskProject(task.id, assignmentInput, assignmentRequestId);
+      assert.deepEqual(replay, receipt);
+      const projected = await adminPool!.query<{ count: number }>(
+        `SELECT count(*)::int AS count FROM omnis.mission_lane_events
+         WHERE task_id=$1 AND event_type='task.project_assigned'`,
+        [task.id],
+      );
+      assert.equal(projected.rows[0]?.count, 1, 'idempotent replay must not duplicate the event');
     });
 
     it('persists owner task execution assignment with idempotency, immutable profiles, and restricted audit', async () => {
