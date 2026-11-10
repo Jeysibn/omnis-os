@@ -18,6 +18,21 @@ test('Draft PR uses fast validation and keeps the full gate for Ready', () => {
   );
 });
 
+test('Draft PRs with security-sensitive changes run the full merge-gate suite', () => {
+  const changePlan = classifyChangedFiles([
+    'packages/db/migrations/0030_mission_lane_admission.sql',
+  ]);
+  assert.equal(changePlan.databaseSensitive, true);
+  assert.equal(
+    getValidationMode({
+      eventName: 'pull_request',
+      event: { pull_request: { draft: true } },
+      fullValidationRequired: Object.values(changePlan).some(Boolean),
+    }),
+    'full',
+  );
+});
+
 test('Draft and Ready transitions plus Ready-head updates select the expected mode', () => {
   const convertedToDraft = {
     action: 'converted_to_draft',
