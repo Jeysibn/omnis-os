@@ -215,6 +215,138 @@ const postgresSuite = describe(
       }
     });
 
+    it('releases a pending queue slot as soon as a writer gets an active permit', async () => {
+      const firstPool = createPool({ connectionString: databaseUrl!, max: 4 });
+      const secondPool = createPool({ connectionString: databaseUrl!, max: 4 });
+      const clients: PoolClient[] = [];
+      let turnstileBlocker: PoolClient | undefined;
+      let cursorBlocker: PoolClient | undefined;
+      let promoted: PoolClient | undefined;
+      let promotedAcquire: Promise<unknown> | undefined;
+      const pendingClients: PoolClient[] = [];
+      const pendingAcquires: Promise<unknown>[] = [];
+      const connect = async (writerPool: Pool) => {
+        const client = await writerPool.connect();
+        clients.push(client);
+        await client.query('BEGIN');
+        return client;
+      };
+      const waitUntil = async (predicate: () => Promise<boolean>) => {
+        const deadline = Date.now() + 2_000;
+        while (Date.now() < deadline) {
+          if (await predicate()) return true;
+          await delay(10);
+        }
+        return false;
+      };
+      try {
+        turnstileBlocker = await connect(firstPool);
+        await turnstileBlocker.query('SELECT pg_advisory_lock($1::bigint)', ['70463909136604']);
+        cursorBlocker = await connect(firstPool);
+        await cursorBlocker.query('SELECT pg_advisory_xact_lock($1::bigint)', ['70463909136525']);
+
+        promoted = await connect(secondPool);
+        const promotedPid = Number(
+          (await promoted.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0]?.pid,
+        );
+        promotedAcquire = promoted.query(
+          'SELECT omnis.acquire_mission_lane_admission(false, 3000)',
+        );
+        assert.equal(
+          await waitUntil(async () => {
+            const result = await adminPool!.query<{ queue_slot: boolean; turnstile_wait: boolean }>(
+              `SELECT
+                 EXISTS (SELECT 1 FROM pg_locks WHERE pid=$1 AND locktype='advisory'
+                   AND objsubid=1 AND granted AND ((classid::bigint << 32) | objid::bigint)
+                     BETWEEN 70463909136610 AND 70463909136612) AS queue_slot,
+                 EXISTS (SELECT 1 FROM pg_locks WHERE pid=$1 AND locktype='advisory'
+                   AND objsubid=1 AND NOT granted
+                   AND ((classid::bigint << 32) | objid::bigint)=70463909136604) AS turnstile_wait`,
+              [promotedPid],
+            );
+            return result.rows[0]?.queue_slot === true && result.rows[0]?.turnstile_wait === true;
+          }),
+          true,
+          'writer should reserve pending capacity while waiting for the turnstile',
+        );
+
+        await turnstileBlocker.query('SELECT pg_advisory_unlock($1::bigint)', ['70463909136604']);
+        assert.equal(
+          await waitUntil(async () => {
+            const result = await adminPool!.query<{ active_permit: boolean; cursor_wait: boolean }>(
+              `SELECT
+                 EXISTS (SELECT 1 FROM pg_locks WHERE pid=$1 AND locktype='advisory'
+                   AND objsubid=1 AND granted
+                   AND ((classid::bigint << 32) | objid::bigint)
+                     BETWEEN 70463909136600 AND 70463909136603) AS active_permit,
+                 EXISTS (SELECT 1 FROM pg_locks WHERE pid=$1 AND locktype='advisory'
+                   AND objsubid=1 AND NOT granted
+                   AND ((classid::bigint << 32) | objid::bigint)=70463909136525) AS cursor_wait`,
+              [promotedPid],
+            );
+            return result.rows[0]?.active_permit === true && result.rows[0]?.cursor_wait === true;
+          }),
+          true,
+          'writer should be promoted to an active permit before it waits for D5',
+        );
+
+        const promotedQueueSlot = await adminPool!.query(
+          `SELECT 1 FROM pg_locks WHERE pid=$1 AND locktype='advisory' AND objsubid=1
+             AND granted AND ((classid::bigint << 32) | objid::bigint)
+               BETWEEN 70463909136610 AND 70463909136612`,
+          [promotedPid],
+        );
+        assert.equal(
+          promotedQueueSlot.rowCount,
+          0,
+          'active writers waiting on D5 must not consume pending queue capacity',
+        );
+
+        for (const writerPool of [firstPool, secondPool, firstPool]) {
+          const client = await connect(writerPool);
+          pendingClients.push(client);
+          pendingAcquires.push(
+            client.query('SELECT omnis.acquire_mission_lane_admission(false, 3000)'),
+          );
+        }
+        assert.equal(
+          await waitUntil(async () => {
+            const result = await adminPool!.query<{ pending: number }>(`
+              SELECT count(DISTINCT ((classid::bigint << 32) | objid::bigint))::int AS pending
+                FROM pg_locks WHERE locktype='advisory' AND objsubid=1 AND granted
+                 AND ((classid::bigint << 32) | objid::bigint)
+                   BETWEEN 70463909136610 AND 70463909136612
+            `);
+            return result.rows[0]?.pending === 3;
+          }),
+          true,
+          'all three normal pending slots should be available after promotion',
+        );
+
+        const overflow = await connect(secondPool);
+        await assert.rejects(
+          overflow.query('SELECT omnis.acquire_mission_lane_admission(false, 3000)'),
+          (error: unknown) => (error as { code?: string }).code === 'PML01',
+        );
+        await overflow.query('ROLLBACK');
+
+        await cursorBlocker.query('COMMIT');
+        await promotedAcquire;
+        await promoted.query('COMMIT');
+        for (const [index, acquire] of pendingAcquires.entries()) {
+          await acquire;
+          await pendingClients[index]!.query('COMMIT');
+        }
+      } finally {
+        await Promise.allSettled(clients.map((client) => client.query('ROLLBACK')));
+        if (promotedAcquire) await Promise.allSettled([promotedAcquire]);
+        await Promise.allSettled(pendingAcquires);
+        for (const client of clients) client.release();
+        await firstPool.end();
+        await secondPool.end();
+      }
+    });
+
     it('lets a pending critical writer pass a normal waiter that is short of permits', async () => {
       const firstPool = createPool({ connectionString: databaseUrl!, max: 4 });
       const secondPool = createPool({ connectionString: databaseUrl!, max: 4 });

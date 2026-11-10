@@ -202,6 +202,14 @@ BEGIN
     v_has_turnstile := true;
   END LOOP;
 
+  -- Queue slots represent callers still pending admission. A writer that now
+  -- holds an active transaction permit is no longer pending, even if it must
+  -- wait for D5; free its queue capacity before entering the cursor wait.
+  IF v_has_queue_slot THEN
+    PERFORM pg_catalog.pg_advisory_unlock(v_queue_key);
+    v_has_queue_slot := false;
+  END IF;
+
   -- Check a second time immediately before waiting for D5. Any normal request
   -- that lost the priority race aborts before a source or event row is touched.
   IF NOT p_critical AND EXISTS (
