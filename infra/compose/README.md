@@ -1,5 +1,7 @@
 # Private Docker Compose application topology
 
+This is the existing **hybrid** topology. It does not satisfy Docker-only WSL2 deployment acceptance. See the [gap assessment, acceptance matrix and read-only evidence preflight](../../docs/06-delivery/DOCKER_ONLY_WSL2_ACCEPTANCE.md). ADR-0012 ingress provenance remains BLOCKED; do not use the startup instructions below as approval for the proposed architecture.
+
 The application overlay runs PostgreSQL, API, worker, and the Omnis OS web gateway with Docker Compose. The existing host systemd authorizer and restricted sandbox launcher remain host-managed because the launcher has tightly constrained access to the Docker daemon. The API and worker receive only their respective read-only Unix socket mounts; neither receives the Docker socket. Docker-group access remains host-root-equivalent and is confined to the launcher.
 
 The `edge` and `data` networks are Docker internal networks. Web is attached only to `edge`; the worker and database are attached only to `data`; API bridges both so the browser gateway can reach the API and the API can reach the worker. API and worker have no published ports. Web and PostgreSQL publish only to host loopback. The web gateway serves the built SPA and proxies `/api/*` requests, including SSE streams, to the internal API while preserving browser origin, cookies, CSRF, and idempotency headers.
