@@ -1,4 +1,6 @@
-# Disposable path observation only; not an HTTPS gateway or enforcement candidate.
+# Research/review reference only. Do not launch without separate owner authorization
+# and implemented/validated independent lifecycle safeguards; none are provided here.
+# restart: 'no' is not a runtime deadline or independent termination authority.
 services:
   probe:
     image: node@sha256:be8204d4bd327363357f532187b752ff62759c31bedf98e9e18fc08c9cbd605c
@@ -18,6 +20,8 @@ services:
     mem_limit: 128m
     cpus: 0.5
     restart: 'no'
+    labels:
+      org.omnis-os.research.role: probe
     logging:
       driver: json-file
       options:
@@ -26,3 +30,5 @@ services:
 networks:
   observation:
     enable_ipv6: true
+    labels:
+      org.omnis-os.research.role: observation
