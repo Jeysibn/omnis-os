@@ -380,3 +380,128 @@ and is not waived. Do not change D5 from these results alone. Complete a
 matched candidate/0028 rerun and resolve scheduler fairness first; if the
 absolute gates still fail, return to the owner for an explicit architecture
 decision.
+
+## 2026-11-10 owner-approved admission implementation and exact-candidate retest
+
+**Status:** The owner-approved four-active/four-pending admission design is
+implemented locally and its correctness checks pass. Performance acceptance is
+**FAIL**. PR #90 remains Draft and its remote head is unchanged while the exact
+code review is pending.
+
+### Baseline and candidate identity
+
+- Latest fetched `main`: `4a27bc3718d4960ad9b132b0f53cdc938da57b54`.
+- Remote PR #90 head: `b0a3be0d19eebae2d9f2c400fe6bcd39e85bb976` (Draft).
+- Local candidate: `0213e8c6c5f06b2a0d0041e036c79c96e121c922`, based on current
+  main, with migration 0030. It has not been pushed.
+- The reviewer approved the priority-aware scheduler design before
+  implementation. Exact-diff code review of this candidate is pending; the
+  prior review of `7713fd1` is not approval of this code.
+
+The owner selected a single three-second admission-to-D5 deadline. The
+implementation passes the remaining deadline through pool checkout, bounded
+queue/turnstile promotion, permit acquisition, and the cursor wait. It retains
+four transaction-scoped permits, four globally reserved pending slots (three
+normal and one reserved for critical work), D5 serialization, and atomic
+source/event/cursor commits. API pool waiters are capped locally before
+checkout, while PostgreSQL advisory locks enforce the global bound across
+processes.
+
+### Candidate benchmark results
+
+Five sequential repetitions of 10,000 measured Task operations were run at
+concurrency one and four on PostgreSQL 17.6 with a 2 CPU / 2 GiB container.
+The tree was clean at the candidate SHA for each cell. Project profiles seeded
+10,000 assigned fixture Tasks per repetition outside the measured mutation
+window. Pooled results below include 50,000 request samples per cell. Raw
+arrays and per-run summaries are in
+[`admission-candidate-0213-results.json`](evidence/pr90/remediation/admission-candidate-0213-results.json)
+and [`admission-candidate-0213-raw-samples.tar.gz`](evidence/pr90/remediation/admission-candidate-0213-raw-samples.tar.gz).
+
+| Operation            | Writers | Request p95 | Request p99 | Throughput, median (minimum) | Gate                                                        |
+| -------------------- | ------: | ----------: | ----------: | ---------------------------: | ----------------------------------------------------------- |
+| Task create          |       1 |     6.98 ms |    10.38 ms |        219.19 (183.71) ops/s | PASS                                                        |
+| Task create          |       4 |    23.59 ms |    29.78 ms |        243.21 (218.78) ops/s | INCONCLUSIVE: conflicts with earlier 2k exact-candidate run |
+| Project assignment   |       1 |     7.84 ms |    11.06 ms |        188.14 (180.55) ops/s | PASS, narrow throughput margin                              |
+| Project assignment   |       4 |    25.23 ms |    32.10 ms |        221.03 (201.23) ops/s | FAIL, p95                                                   |
+| Project reassignment |       1 |     8.42 ms |    11.43 ms |        179.65 (175.88) ops/s | FAIL, throughput                                            |
+| Project reassignment |       4 |    25.36 ms |    34.82 ms |        216.24 (206.33) ops/s | FAIL, p95                                                   |
+
+Two of five individual four-writer project-assignment runs exceeded 25 ms
+at p95; two of five reassignment runs exceeded the same limit. Reassignment
+throughput at one writer had a median below 180 ops/s. The 10% relative
+overhead gate remains a historical failure and was not re-evaluated by this
+candidate-only matrix. This run does not replace a matched migration-0028
+comparison.
+
+The database mutation query accounts for nearly all measured project mutation
+latency: pooled query p95 was 24.39 ms for assignment and 24.55 ms for
+reassignment. The separate task readback p95 was below 1 ms, and pool checkout
+p95 was below 0.02 ms. In a filtered 10,000-operation diagnostic run, 5 ms
+PostgreSQL lock sampling observed admission lock-wait p95 `8.02 ms`, D5 cursor
+wait p95 `4.18 ms` (maximum `29.59 ms`), and sampled cursor-hold p95 about
+`8 ms` (maximum about `30 ms`). Hold times are approximate to the sampling
+interval. These values pass the proposed wait gates in that diagnostic run;
+they do not override the operation p95 failures or constitute a five-run lock
+profile. The old unfiltered sample that included fixture setup is excluded.
+
+The profile points to database mutation and projection work under serialized
+cursor access as the remaining cost. It does not establish that the cursor wait
+alone causes the p95 misses. Removing the post-mutation readback may improve
+throughput slightly, but it can change the current response behavior on
+idempotent replay and was not included in this candidate. No further runtime
+optimization is authorized without an independent review of those semantics.
+
+### Overload, priority, and recovery evidence
+
+An uninstrumented 30-second run used four independent Node processes, eight
+writer loops per process, and a critical admission probe every 250 ms. It
+observed 7,024 successful Task writes, 76,938 retryable overload responses,
+zero unexpected errors, maximum four pending slots, and maximum two active
+permits observed. Four active is a global upper bound; the turnstile scheduler
+usually presents at most one cursor holder and one cursor waiter at a time.
+No pool checkout waiters accumulated. Successful request p95, including
+admission and execution, was 21.93 ms; rejected response p95 was 1.07 ms.
+All 115 critical probes succeeded, with admission p95 `9.60 ms` and maximum
+`200.01 ms`. The ledger contained exactly 7,024 events with contiguous
+sequences `1..7024`; a post-load write advanced Task, event, and clock counts
+to 7,025. Detailed raw evidence is in
+[`admission-candidate-0213-overload-raw.json`](evidence/pr90/remediation/admission-candidate-0213-overload-raw.json).
+
+This shows critical progress for the tested workload, not a proof of fairness
+for all deployments. The overload run is independent of the normal-load
+latency gate. A mixed warmup profile with four Task writers and a simultaneous
+critical Run mutation hit the designed bounded overflow response; the
+benchmark harness did not retry that response with the same request identity,
+so it is not counted as a mixed-workload performance result. The database
+correctness suite separately covers Run completion, cancellation, expiry,
+recovery, and transactional projection under the same migration.
+
+### Validation and decision
+
+The full repository pre-commit check passed before the current-main sync:
+format, lint, all workspace typechecks, unit tests, and repository policy
+tests. Focused PostgreSQL tests against disposable PostgreSQL 17.6 passed
+137/137, including admission bounds, cancellation cleanup, timeout rollback,
+ACL isolation, recovery, and event-sequence integrity. Worker coordinator
+tests passed 37/37. The current-main merge and this candidate have not been
+submitted to GitHub Actions; no exact-head CI result is claimed for `0213e8c`.
+
+The proposed absolute gates therefore remain **FAIL** for four-writer project
+assignment p95, one-writer project reassignment throughput, and four-writer
+project reassignment p95. Four-writer Task creation is **INCONCLUSIVE** across
+the historical 2k and current 10k candidate-only runs. The independent
+read-only review of the complete `0213e8c` diff returned **REQUEST CHANGES** for
+a medium-severity priority race: a normal queued writer can hold the turnstile
+while waiting for an active permit, allowing a critical request that registers
+after the normal marker check to wait behind it. The reviewer also flagged the
+runtime role's direct execution grant on the lock-only helper as an availability
+risk if runtime SQL access is outside the trusted-process boundary. No
+benchmark evidence authorizes deployment or real-provider execution.
+
+The same reviewer found a candidate micro-optimization in project association:
+the store performs a post-mutation `getTask` despite the SQL mutator returning
+the idempotency receipt. Returning that receipt could remove one query, but it
+changes replay responses from current Task state to the original operation
+snapshot. Do not apply it until the receipt contract is tested and documented,
+and benchmark the change independently. Do not modify D5 or relax the gates.
