@@ -4,17 +4,12 @@ import { EmptyState, ErrorState, LoadingState, NxButton, Panel } from '../../des
 import { formatManila } from '../parts.js';
 import { readFailureView } from '../readFailure.js';
 import { ArchiveDialog } from './ArchiveDialog.js';
-import { RecordEditor } from './RecordEditor.js';
+import { RecordEditor, type Changes } from './RecordEditor.js';
+import { scanForCreated, type PendingCreate } from './unresolved.js';
 import { formatTargetDate, ListFooter, RecordStatusBadge, useFocusReturn } from './records.js';
 import { usePagedList, type Page } from './usePagedList.js';
 
 type Rec = Epic | Milestone;
-type Changes = {
-  title?: string;
-  description?: string | null;
-  status?: 'planned' | 'in_progress' | 'completed';
-  targetDate?: string | null;
-};
 
 export type RecordsPanelProps<T extends Rec> = {
   kind: 'epic' | 'milestone';
@@ -61,6 +56,9 @@ export function RecordsPanel<T extends Rec>(props: RecordsPanelProps<T>) {
     record: null,
   });
   const [archiving, setArchiving] = useState<T | null>(null);
+  // A create whose outcome is unknown. It lives here, not in the dialog, so closing the dialog
+  // cannot turn the next attempt into a second, different request.
+  const [pending, setPending] = useState<PendingCreate<Changes> | null>(null);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const [showArchived, setShowArchived] = useState(false);
   const focus = useFocusReturn();
@@ -217,7 +215,7 @@ export function RecordsPanel<T extends Rec>(props: RecordsPanelProps<T>) {
       actions={
         readOnly ? undefined : (
           <NxButton variant="primary" onClick={() => openEditor(null)}>
-            New {kind}
+            {pending ? `Resolve pending ${kind}` : `New ${kind}`}
           </NxButton>
         )
       }
@@ -233,6 +231,27 @@ export function RecordsPanel<T extends Rec>(props: RecordsPanelProps<T>) {
         create={props.create}
         update={props.update}
         read={props.read}
+        pending={pending}
+        onPending={setPending}
+        knownIds={() => state.items.map((item) => item.id)}
+        scan={(request) =>
+          scanForCreated<T, Changes>(
+            (cursor) => props.fetchPage(cursor, new AbortController().signal),
+            request,
+            (candidate) =>
+              candidate.title === request.changes.title &&
+              candidate.description === (request.changes.description ?? null) &&
+              (!('targetDate' in candidate) ||
+                candidate.targetDate === (request.changes.targetDate ?? null)),
+          )
+        }
+        onObserved={(record) => {
+          list.prependItem(record);
+          announce(
+            `${kind === 'epic' ? 'Epic' : 'Milestone'} “${record.title}” exists on the server with these values and was not in the list before. It was probably created by the request whose result was lost; Omnis OS cannot prove that, so it is shown as an existing record, not as a confirmed save.`,
+          );
+          closeEditor(false);
+        }}
         onSaved={(record, mode) => {
           if (mode === 'created') list.prependItem(record);
           else list.replaceItem(record);

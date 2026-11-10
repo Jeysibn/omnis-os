@@ -337,24 +337,6 @@ test.describe('epics: revision conflicts and unknown outcomes', () => {
     await expect(row(epicsPanel(page), 'Reporting')).toBeVisible();
   });
 
-  test('changing the values after an unknown outcome is a new request with a new key', async ({
-    page,
-    api,
-  }) => {
-    await open(page, api, { epics: [] });
-    await epicsPanel(page).getByRole('button', { name: 'New epic' }).click();
-    const form = dialog(page, 'New epic');
-    await form.getByLabel('Title').fill('First');
-    api.next('epics:create', { abort: true });
-    await form.getByRole('button', { name: 'Create epic' }).click();
-    await expect(form).toContainText('did not get a confirmed result');
-    await form.getByLabel('Title').fill('Second');
-    await form.getByRole('button', { name: 'Create epic' }).click();
-    await expect(form).toBeHidden();
-    const [first, second] = api.writes();
-    expect(second?.idempotencyKey).not.toBe(first?.idempotencyKey);
-  });
-
   test('Check current state after an applied edit shows what the server has, without claiming more', async ({
     page,
     api,
@@ -784,7 +766,11 @@ test.describe('task to epic', () => {
     await form.getByLabel('Epic').selectOption({ label: 'Billing' });
     api.next('task-epic:set', { status: 409, code: 'invalid_transition', message: 'Archived.' });
     await form.getByRole('button', { name: 'Save epic' }).click();
-    await expect(form).toContainText('still at the revision you opened');
+    await expect(form).toContainText(
+      'The server does not allow this change: an archived epic or project cannot receive task assignments. Nothing was changed.',
+    );
+    // A definitive refusal offers no retry of the same request.
+    await expect(form.getByRole('button', { name: 'Send the same request again' })).toHaveCount(0);
   });
 
   test('a rotated CSRF token is refreshed and the change can be sent again', async ({
@@ -979,7 +965,7 @@ test.describe('an archived project is read-only', () => {
     await form.getByLabel('Title').fill('Too late');
     await form.getByRole('button', { name: 'Create epic' }).click();
     await expect(form).toContainText(
-      'The server reported a conflict, so the epic was not created.',
+      "The server does not allow creating a epic in this project's current state (for example, it is archived), so nothing was created.",
     );
     expect(api.epicCount()).toBe(0);
   });
@@ -1267,6 +1253,33 @@ test.describe('visual evidence (only when NEXUS_SHOT_DIR is set)', () => {
       await shoot(page, `planning-${size.width}x${size.height}`);
     });
 
+  for (const size of [
+    { width: 1920, height: 1080 },
+    { width: 1280, height: 720 },
+  ])
+    test(`unresolved create and a refused status step at ${size.width}x${size.height}`, async ({
+      page,
+      api,
+    }) => {
+      await open(page, api, config, size);
+      await epicsPanel(page).getByRole('button', { name: 'New epic' }).click();
+      const create = dialog(page, 'New epic');
+      await create.getByLabel('Title').fill('Reporting');
+      api.next('epics:create', { abort: true, commit: true });
+      await create.getByRole('button', { name: 'Create epic' }).click();
+      await expect(create).toContainText('this form is locked to this exact request');
+      await shoot(page, `planning-unresolved-create-${size.width}x${size.height}`);
+      await create.getByRole('button', { name: 'Check the current list' }).click();
+      await expect(create).toBeHidden();
+      await epicsPanel(page).getByRole('button', { name: 'Edit epic Billing' }).click();
+      const edit = dialog(page, 'Edit epic');
+      await edit.getByLabel('Status').selectOption('completed');
+      api.next('epic:update', { status: 409, code: 'invalid_transition', message: 'Not allowed.' });
+      await edit.getByRole('button', { name: 'Save changes' }).click();
+      await expect(edit).toContainText('The server does not allow this change.');
+      await shoot(page, `planning-invalid-transition-${size.width}x${size.height}`);
+    });
+
   test('expanded tasks, dialogs and a conflict at 1440x900', async ({ page, api }) => {
     await open(page, api, config);
     await epicsPanel(page).getByRole('button', { name: 'Show tasks for Onboarding flow' }).click();
@@ -1286,5 +1299,439 @@ test.describe('visual evidence (only when NEXUS_SHOT_DIR is set)', () => {
     await page.getByRole('button', { name: 'Set epic for Task number 3' }).click();
     await expect(dialog(page, 'Set the epic for a task').getByLabel('Epic')).toBeVisible();
     await shoot(page, 'planning-task-epic-1440x900');
+  });
+});
+
+/* ------------------------------------------------------------------------------------------ *
+ * Remediation: an unknown create must never lead to a second create.
+ * ------------------------------------------------------------------------------------------ */
+const kinds = [
+  {
+    kind: 'epic' as const,
+    panel: epicsPanel,
+    openName: 'New epic',
+    dialogName: 'New epic',
+    submit: 'Create epic',
+    fault: 'epics:create' as const,
+    list: 'epics:list' as const,
+    count: (api: ReturnType<typeof createPlanningApi>) => api.epicCount(),
+    outside: (api: ReturnType<typeof createPlanningApi>, title: string) =>
+      api.addEpicOutside({ title }),
+    seed: (n: number) =>
+      Array.from({ length: n }, (_, i) => epic(i + 10, project.id, { title: `Existing ${i + 1}` })),
+    config: (n: number): Config => ({
+      epics: Array.from({ length: n }, (_, i) =>
+        epic(i + 10, project.id, { title: `Existing ${i + 1}` }),
+      ),
+    }),
+  },
+  {
+    kind: 'milestone' as const,
+    panel: milestonesPanel,
+    openName: 'New milestone',
+    dialogName: 'New milestone',
+    submit: 'Create milestone',
+    fault: 'milestones:create' as const,
+    list: 'milestones:list' as const,
+    count: (api: ReturnType<typeof createPlanningApi>) => api.milestoneCount(),
+    outside: (api: ReturnType<typeof createPlanningApi>, title: string) =>
+      api.addMilestoneOutside({ title, targetDate: '2026-12-31' }),
+    seed: (n: number) =>
+      Array.from({ length: n }, (_, i) =>
+        milestone(i + 10, project.id, { title: `Existing ${i + 1}` }),
+      ),
+    config: (n: number): Config => ({
+      milestones: Array.from({ length: n }, (_, i) =>
+        milestone(i + 10, project.id, { title: `Existing ${i + 1}` }),
+      ),
+    }),
+  },
+];
+
+for (const k of kinds)
+  test.describe(`unknown ${k.kind} create: never a second create`, () => {
+    /** Types a title, loses the response after the commit, and returns the open dialog. */
+    async function loseResponse(
+      page: Page,
+      api: ReturnType<typeof createPlanningApi>,
+      commit: boolean,
+      config: Config = {},
+    ) {
+      await open(page, api, config);
+      await k.panel(page).getByRole('button', { name: k.openName }).click();
+      const form = dialog(page, k.dialogName);
+      await form.getByLabel('Title').fill('Reporting');
+      if (k.kind === 'milestone')
+        await form.getByLabel('Target date (optional)').fill('2026-12-31');
+      api.next(k.fault, { abort: true, commit });
+      await form.getByRole('button', { name: k.submit }).click();
+      await expect(form).toContainText('did not get a confirmed result for this create request');
+      return form;
+    }
+
+    test('the committed-then-lost create: the form locks, a changed title cannot be sent, a read-only check finds it', async ({
+      page,
+      api,
+    }) => {
+      const form = await loseResponse(page, api, true);
+      expect(k.count(api)).toBe(1); // it was applied
+      await expect(form).toContainText('this form is locked to this exact request');
+      // No false success and no false failure.
+      await expect(live(page)).toHaveText('');
+      await expect(k.panel(page).getByRole('heading', { name: 'Reporting' })).toHaveCount(0);
+      await expect(form).not.toContainText('could not be created');
+
+      // The owner tries to change the title and submit again: it cannot be done.
+      await expect(form.getByLabel('Title')).toBeDisabled();
+      await expect(form.getByRole('button', { name: k.submit })).toHaveCount(0);
+      const outcome = await form
+        .getByLabel('Title')
+        .fill('Reporting v2', { timeout: 800 })
+        .then(
+          () => 'edited',
+          () => 'blocked',
+        );
+      expect(outcome).toBe('blocked');
+      await page.keyboard.press('Enter');
+      expect(api.writes()).toHaveLength(1);
+      expect(k.count(api)).toBe(1);
+
+      // A read-only reconciliation shows what the server has, without claiming a save.
+      await form.getByRole('button', { name: 'Check the current list' }).click();
+      await expect(form).toBeHidden();
+      await expect(live(page)).toContainText('exists on the server with these values');
+      await expect(live(page)).toContainText('cannot prove that');
+      await expect(live(page)).not.toContainText('created at revision');
+      await expect(row(k.panel(page), 'Reporting')).toBeVisible();
+      expect(api.writes()).toHaveLength(1); // checking is only reads
+      expect(k.count(api)).toBe(1);
+      // Resolved: an ordinary create is available again.
+      await expect(k.panel(page).getByRole('button', { name: k.openName })).toBeVisible();
+    });
+
+    test('closing the dialog does not forget the request: the panel offers to resolve it, locked, and the same request settles it', async ({
+      page,
+      api,
+    }) => {
+      const form = await loseResponse(page, api, true);
+      await form.getByRole('button', { name: 'Close (the request stays unresolved)' }).click();
+      await expect(form).toBeHidden();
+      // There is no plain "New" button to start a different create from.
+      await expect(
+        k.panel(page).getByRole('button', { name: k.openName, exact: true }),
+      ).toHaveCount(0);
+      await k
+        .panel(page)
+        .getByRole('button', { name: `Resolve pending ${k.kind}` })
+        .click();
+      const reopened = dialog(page, k.dialogName);
+      await expect(reopened.getByLabel('Title')).toHaveValue('Reporting');
+      await expect(reopened.getByLabel('Title')).toBeDisabled();
+      await expect(reopened.getByRole('button', { name: k.submit })).toHaveCount(0);
+
+      await reopened.getByRole('button', { name: 'Send the same request again' }).click();
+      await expect(reopened).toBeHidden();
+      const [first, second] = api.writes();
+      expect(second?.idempotencyKey).toBe(first?.idempotencyKey);
+      expect(k.count(api)).toBe(1);
+      await expect(row(k.panel(page), 'Reporting')).toBeVisible();
+      await expect(live(page)).toContainText('created at revision 1');
+      await expect(k.panel(page).getByRole('button', { name: k.openName })).toBeVisible();
+    });
+
+    test('a request that was not applied: the whole list is read, the form stays locked, and the retry creates exactly one', async ({
+      page,
+      api,
+    }) => {
+      const form = await loseResponse(page, api, false, k.config(60));
+      expect(k.count(api)).toBe(60);
+      await form.getByRole('button', { name: 'Check the current list' }).click();
+      await expect(form).toContainText('The complete list was read and no new');
+      await expect(form).toContainText('That is an observation, not proof');
+      // Absence from the first page is never taken as absence: every page was read.
+      expect(
+        api.of(k.list).filter((entry) => entry.search.includes('cursor=')).length,
+      ).toBeGreaterThan(0);
+      await expect(form.getByLabel('Title')).toBeDisabled();
+      await expect(form.getByRole('button', { name: k.submit })).toHaveCount(0);
+      expect(api.writes()).toHaveLength(1);
+
+      await form.getByRole('button', { name: 'Send the same request again' }).click();
+      await expect(form).toBeHidden();
+      expect(k.count(api)).toBe(61);
+      const [first, second] = api.writes();
+      expect(second?.idempotencyKey).toBe(first?.idempotencyKey);
+    });
+
+    test('a list that cannot be read completely concludes nothing and stays locked', async ({
+      page,
+      api,
+    }) => {
+      const form = await loseResponse(page, api, true, k.config(60));
+      api.invalidateCursors();
+      await form.getByRole('button', { name: 'Check the current list' }).click();
+      await expect(form).toContainText('The list could not be read completely');
+      await expect(form.getByLabel('Title')).toBeDisabled();
+      expect(api.writes()).toHaveLength(1);
+      expect(k.count(api)).toBe(61);
+    });
+
+    test('two records that fit are never guessed between', async ({ page, api }) => {
+      const form = await loseResponse(page, api, true);
+      k.outside(api, 'Reporting'); // another session made an identical record
+      await form.getByRole('button', { name: 'Check the current list' }).click();
+      await expect(form).toContainText('2 records in the list fit this request');
+      await expect(form.getByLabel('Title')).toBeDisabled();
+      expect(api.writes()).toHaveLength(1);
+    });
+
+    test('only a definitive answer to the same request frees the form', async ({ page, api }) => {
+      const form = await loseResponse(page, api, false);
+      api.next(k.fault, { status: 422, code: 'invalid_input', message: 'Bad.' });
+      await form.getByRole('button', { name: 'Send the same request again' }).click();
+      await expect(form).toContainText('The server rejected these values.');
+      await expect(form.getByLabel('Title')).toBeEnabled();
+      await expect(form.getByRole('button', { name: k.submit })).toBeVisible();
+      // Now a changed request is a new, honest request with a new key.
+      await form.getByLabel('Title').fill('Reporting v2');
+      await form.getByRole('button', { name: k.submit }).click();
+      await expect(form).toBeHidden();
+      const writes = api.writes();
+      expect(writes).toHaveLength(3);
+      expect(writes[2]?.idempotencyKey).not.toBe(writes[0]?.idempotencyKey);
+      expect(k.count(api)).toBe(1);
+    });
+  });
+
+/* ------------------------------------------------------------------------------------------ *
+ * Remediation: status lifecycle (planned -> in_progress -> completed, forward only).
+ * ------------------------------------------------------------------------------------------ */
+const planned = epic(21, project.id, { title: 'Planned epic' });
+const progressing = epic(22, project.id, { title: 'Progressing epic', status: 'in_progress' });
+const finished = epic(23, project.id, { title: 'Finished epic', status: 'completed' });
+const optionsOf = (form: ReturnType<typeof dialog>) =>
+  form.getByLabel('Status').locator('option').allInnerTexts();
+
+test.describe('status lifecycle', () => {
+  test('only valid next statuses are offered, for epics and milestones', async ({ page, api }) => {
+    await open(page, api, {
+      epics: [planned, progressing, finished],
+      milestones: [
+        milestone(31, project.id, { title: 'M planned' }),
+        milestone(32, project.id, { title: 'M progressing', status: 'in_progress' }),
+        milestone(33, project.id, { title: 'M finished', status: 'completed' }),
+      ],
+    });
+    const expected: Array<[string, string[]]> = [
+      ['Planned epic', ['Planned', 'In progress', 'Completed']],
+      ['Progressing epic', ['In progress', 'Completed']],
+      ['Finished epic', ['Completed']],
+    ];
+    for (const [title, options] of expected) {
+      await epicsPanel(page)
+        .getByRole('button', { name: `Edit epic ${title}` })
+        .click();
+      const form = dialog(page, 'Edit epic');
+      expect(await optionsOf(form), title).toEqual(options);
+      await page.keyboard.press('Escape');
+      await expect(form).toBeHidden();
+    }
+    const milestoneExpected: Array<[string, string[]]> = [
+      ['M planned', ['Planned', 'In progress', 'Completed']],
+      ['M progressing', ['In progress', 'Completed']],
+      ['M finished', ['Completed']],
+    ];
+    for (const [title, options] of milestoneExpected) {
+      await milestonesPanel(page)
+        .getByRole('button', { name: `Edit milestone ${title}` })
+        .click();
+      const form = dialog(page, 'Edit milestone');
+      expect(await optionsOf(form), title).toEqual(options);
+      await page.keyboard.press('Escape');
+      await expect(form).toBeHidden();
+    }
+  });
+
+  test('every permitted forward step saves', async ({ page, api }) => {
+    await open(page, api, {
+      epics: [planned, epic(24, project.id, { title: 'Second planned' }), progressing],
+    });
+    const steps: Array<[string, string, string]> = [
+      ['Planned epic', 'in_progress', 'In progress'],
+      ['Second planned', 'completed', 'Completed'],
+      ['Progressing epic', 'completed', 'Completed'],
+    ];
+    for (const [title, value, shown] of steps) {
+      await epicsPanel(page)
+        .getByRole('button', { name: `Edit epic ${title}` })
+        .click();
+      const form = dialog(page, 'Edit epic');
+      await form.getByLabel('Status').selectOption(value);
+      await form.getByRole('button', { name: 'Save changes' }).click();
+      await expect(form).toBeHidden();
+      await expect(row(epicsPanel(page), title)).toContainText(shown);
+    }
+  });
+
+  test('the fixture refuses every backward step with invalid_transition, like the backend', async ({
+    page,
+    api,
+  }) => {
+    await open(page, api, { epics: [planned, progressing, finished] });
+    const probe = (id: string, revision: number, status: string) =>
+      page.evaluate(
+        async ({ projectId, epicId, expectedRevision, next }) => {
+          const response = await fetch(`/api/v1/projects/${projectId}/epics/${epicId}`, {
+            method: 'PATCH',
+            headers: {
+              'content-type': 'application/json',
+              'x-omnis-csrf': 'csrf-fixture',
+              'idempotency-key': crypto.randomUUID(),
+            },
+            body: JSON.stringify({ expectedRevision, status: next }),
+          });
+          const body = (await response.json()) as { error?: { code: string } };
+          return `${response.status} ${body.error?.code ?? 'ok'}`;
+        },
+        { projectId: project.id, epicId: id, expectedRevision: revision, next: status },
+      );
+    expect(await probe(finished.id, 1, 'in_progress')).toBe('409 invalid_transition');
+    expect(await probe(finished.id, 1, 'planned')).toBe('409 invalid_transition');
+    expect(await probe(progressing.id, 1, 'planned')).toBe('409 invalid_transition');
+    expect(await probe(progressing.id, 1, 'in_progress')).toBe('200 ok'); // the same status is a no-op
+    expect(await probe(planned.id, 1, 'completed')).toBe('200 ok');
+  });
+
+  test('invalid_transition is a definitive refusal: no retry, no stale-revision wording, no Keep my edits', async ({
+    page,
+    api,
+  }) => {
+    await open(page, api, { epics: [planned] });
+    await epicsPanel(page).getByRole('button', { name: 'Edit epic Planned epic' }).click();
+    const form = dialog(page, 'Edit epic');
+    await form.getByLabel('Status').selectOption('in_progress');
+    api.next('epic:update', { status: 409, code: 'invalid_transition', message: 'Not allowed.' });
+    await form.getByRole('button', { name: 'Save changes' }).click();
+    await expect(form).toContainText('The server does not allow this change.');
+    await expect(form).toContainText('only moves forward');
+    await expect(form).not.toContainText('changed elsewhere');
+    await expect(form).not.toContainText('revision you opened');
+    for (const name of ['Send the same request again', 'Keep my edits', 'Check current state'])
+      await expect(form.getByRole('button', { name })).toHaveCount(0);
+    expect(api.epicStored(planned.id)?.status).toBe('planned');
+    // The form is still editable: a different choice is a new request.
+    await form.getByLabel('Status').selectOption('completed');
+    await form.getByRole('button', { name: 'Save changes' }).click();
+    await expect(form).toBeHidden();
+    expect(api.writes()).toHaveLength(2);
+    expect(api.writes()[1]?.idempotencyKey).not.toBe(api.writes()[0]?.idempotencyKey);
+  });
+
+  test('a refusal that also finds the record changed elsewhere says so and offers only Load latest', async ({
+    page,
+    api,
+  }) => {
+    await open(page, api, { epics: [planned] });
+    await epicsPanel(page).getByRole('button', { name: 'Edit epic Planned epic' }).click();
+    const form = dialog(page, 'Edit epic');
+    await form.getByLabel('Status').selectOption('in_progress');
+    api.next('epic:update', {
+      status: 409,
+      code: 'invalid_transition',
+      message: 'Not allowed.',
+      before: () => api.editEpicOutside(planned.id, { status: 'completed' }),
+    });
+    await form.getByRole('button', { name: 'Save changes' }).click();
+    await expect(form).toContainText(
+      'It was also changed elsewhere: it is now completed at revision 2.',
+    );
+    await expect(form.getByRole('button', { name: 'Send the same request again' })).toHaveCount(0);
+    await expect(form.getByRole('button', { name: 'Keep my edits' })).toHaveCount(0);
+    await form.getByRole('button', { name: 'Load latest version' }).click();
+    expect(await optionsOf(form)).toEqual(['Completed']);
+  });
+
+  test('a concurrent update that makes the chosen step invalid is a revision conflict; the step is dropped, other edits kept', async ({
+    page,
+    api,
+  }) => {
+    await open(page, api, { epics: [planned] });
+    await epicsPanel(page).getByRole('button', { name: 'Edit epic Planned epic' }).click();
+    const form = dialog(page, 'Edit epic');
+    await form.getByLabel('Title').fill('Renamed');
+    await form.getByLabel('Status').selectOption('in_progress');
+    api.next('epic:update', {
+      before: () => api.editEpicOutside(planned.id, { status: 'completed' }),
+    });
+    await form.getByRole('button', { name: 'Save changes' }).click();
+    await expect(form).toContainText('was changed elsewhere (it is now at revision 2)');
+    await form.getByRole('button', { name: 'Keep my edits' }).click();
+    await expect(form).toContainText('Your status change was not kept: this epic is now completed');
+    await expect(form.getByLabel('Title')).toHaveValue('Renamed');
+    expect(await optionsOf(form)).toEqual(['Completed']);
+    await form.getByRole('button', { name: 'Save changes' }).click();
+    await expect(form).toBeHidden();
+    const last = api.writes().at(-1)?.body as Record<string, unknown>;
+    expect(last).toEqual({ expectedRevision: 2, title: 'Renamed' }); // no status in the request
+    expect(api.epicStored(planned.id)).toMatchObject({
+      title: 'Renamed',
+      status: 'completed',
+      revision: 3,
+    });
+  });
+});
+
+/* ------------------------------------------------------------------------------------------ *
+ * Remediation: a task-to-epic response proves the change only when the revision advances by one.
+ * ------------------------------------------------------------------------------------------ */
+test.describe('association revision is verified exactly', () => {
+  const base = { epics: [e1, e2], tasks: [t(1)] };
+  const cases: Array<[string, (json: unknown) => unknown]> = [
+    ['an unchanged revision', (json) => ({ ...(json as object), associationRevision: 1 })],
+    [
+      'a revision that jumped',
+      (json) => ({ ...(json as { associationRevision: number }), associationRevision: 5 }),
+    ],
+    ['the wrong epic', (json) => ({ ...(json as object), epicId: e2.id })],
+  ];
+  for (const [name, tamper] of cases)
+    test(`${name} is an unverified outcome, never a success`, async ({ page, api }) => {
+      await open(page, api, base);
+      await tasksPanel(page).getByRole('button', { name: 'Set epic for Task number 1' }).click();
+      const form = dialog(page, 'Set the epic for a task');
+      await form.getByLabel('Epic').selectOption({ label: 'Onboarding flow' });
+      api.next('task-epic:set', { tamper });
+      await form.getByRole('button', { name: 'Save epic' }).click();
+      await expect(form).toContainText('did not get a confirmed result');
+      await expect(live(page)).toHaveText(''); // no success announcement
+      // The server did apply it. Retrying with the same key replays the real receipt: verified.
+      expect(api.assignment('task-0001')).toEqual({ epicId: e1.id, revision: 2 });
+      await form.getByRole('button', { name: 'Send the same request again' }).click();
+      await expect(form).toBeHidden();
+      await expect(live(page)).toContainText(
+        '“Task number 1” is now in the epic “Onboarding flow”.',
+      );
+      const [first, second] = api.writes();
+      expect(second?.idempotencyKey).toBe(first?.idempotencyKey);
+      expect(api.assignment('task-0001')).toEqual({ epicId: e1.id, revision: 2 });
+    });
+
+  test('a correct increment is confirmed for set, move and clear', async ({ page, api }) => {
+    await open(page, api, base);
+    const button = tasksPanel(page).getByRole('button', { name: 'Set epic for Task number 1' });
+    const steps: Array<[string, string, number]> = [
+      ['Onboarding flow', 'is now in the epic “Onboarding flow”', 2], // set
+      ['Billing', 'is now in the epic “Billing”', 3], // move
+      ['No epic', 'is no longer in an epic', 4], // clear
+    ];
+    for (const [choice, said, revision] of steps) {
+      await button.click();
+      const form = dialog(page, 'Set the epic for a task');
+      await form.getByLabel('Epic').selectOption({ label: choice });
+      await form.getByRole('button', { name: 'Save epic' }).click();
+      await expect(form).toBeHidden();
+      await expect(live(page)).toContainText(said);
+      expect(api.assignment('task-0001')?.revision).toBe(revision);
+    }
   });
 });

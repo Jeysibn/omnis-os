@@ -83,6 +83,11 @@ export type Step = {
   abort?: boolean;
   /** Apply the change, then still fail: a response lost after the commit. */
   commit?: boolean;
+  /**
+   * Rewrites a successful response body (a stored receipt is unaffected), to model a response
+   * that looks like a success but does not prove the change.
+   */
+  tamper?: (json: unknown) => unknown;
   /** Runs before the request is handled: another session changing something. */
   before?: () => void;
   delayMs?: number;
@@ -108,6 +113,14 @@ export type Op =
 type Outcome =
   { status: number; json: unknown } | { status: number; code: string; message: string };
 type Assoc = { epicId: string | null; revision: number };
+
+/** The backend lifecycle (migrations 0018/0019): forward only; the same status is a no-op. */
+const allowedStep = (from: string, to: string | undefined) =>
+  to === undefined ||
+  to === from ||
+  (from === 'planned' && (to === 'in_progress' || to === 'completed')) ||
+  (from === 'in_progress' && to === 'completed');
+const INVALID_STEP = 'The status transition is invalid.';
 
 const P = String.raw`/api/v1/projects/(prj_[0-9a-f]{32})`;
 const routes: Array<[Op, string, RegExp]> = [
@@ -199,6 +212,8 @@ export function createPlanningApi(page: Page) {
         const created = epic(counter, project.id, {
           title: input.title,
           description: input.description ?? null,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
         });
         epics = [created, ...epics];
         return { status: 201, json: created };
@@ -208,6 +223,8 @@ export function createPlanningApi(page: Page) {
         title: input.title,
         description: input.description ?? null,
         targetDate: input.targetDate ?? null,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
       });
       milestones = [created, ...milestones];
       return { status: 201, json: created };
@@ -246,6 +263,8 @@ export function createPlanningApi(page: Page) {
         const input = UpdateEpicSchema.parse(body);
         if (input.expectedRevision !== current.revision)
           return { status: 409, code: 'conflict', message: CONFLICT };
+        if (!allowedStep(current.status, input.status))
+          return { status: 409, code: 'invalid_transition', message: INVALID_STEP };
         next = EpicSchema.parse({
           ...current,
           ...(input.title === undefined ? {} : { title: input.title }),
@@ -278,6 +297,8 @@ export function createPlanningApi(page: Page) {
       const input = UpdateMilestoneSchema.parse(body);
       if (input.expectedRevision !== current.revision)
         return { status: 409, code: 'conflict', message: CONFLICT };
+      if (!allowedStep(current.status, input.status))
+        return { status: 409, code: 'invalid_transition', message: INVALID_STEP };
       next = MilestoneSchema.parse({
         ...current,
         ...(input.title === undefined ? {} : { title: input.title }),
@@ -413,7 +434,11 @@ export function createPlanningApi(page: Page) {
         if (outcome.status < 300) receipts.set(idem, { signature, outcome });
       }
       if (failing) return fail();
-      if ('json' in outcome) return route.fulfill({ status: outcome.status, json: outcome.json });
+      if ('json' in outcome)
+        return route.fulfill({
+          status: outcome.status,
+          json: step.tamper ? step.tamper(outcome.json) : outcome.json,
+        });
       return error(route, outcome.status, outcome.code, outcome.message);
     }
 
@@ -529,6 +554,29 @@ export function createPlanningApi(page: Page) {
             })
           : item,
       );
+    },
+    /** Another session creates a record: it appears first in the list, as a real create would. */
+    addEpicOutside(overrides: Partial<Epic> = {}) {
+      counter += 1;
+      epics = [
+        epic(counter, project.id, {
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          ...overrides,
+        }),
+        ...epics,
+      ];
+    },
+    addMilestoneOutside(overrides: Partial<Milestone> = {}) {
+      counter += 1;
+      milestones = [
+        milestone(counter, project.id, {
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          ...overrides,
+        }),
+        ...milestones,
+      ];
     },
     /** Another session moves a task: its association revision advances. */
     assignOutside(taskId: string, epicId: string | null) {

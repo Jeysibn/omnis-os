@@ -166,7 +166,7 @@ export function TaskEpicDialog({
     target.current = epicId;
     setProblem(null);
     const outcome = await writer.run(JSON.stringify({ task: task.id, rev, epicId }), (key, csrf) =>
-      setTaskEpic(task.id, rev, epicId, key, csrf),
+      setTaskEpic(task.id, rev, epicId, currentEpic?.id ?? null, key, csrf),
     );
     if (outcome.kind === 'saved')
       return onSaved(task, epicId === null ? null : (epicTitle(epicId) ?? null), outcome.value);
@@ -176,6 +176,14 @@ export function TaskEpicDialog({
         tone: 'warning',
         text: 'Omnis OS did not get a confirmed result, so the assignment is not shown as changed and may or may not have been applied. Check the current state, or send the same request again, which cannot apply it twice.',
         actions: ['retry', 'check', 'close'],
+      });
+    if (outcome.status === 409 && outcome.code === 'invalid_transition')
+      // A definitive refusal of this change (an archived epic or project): reading again and
+      // offering the same request would only repeat it.
+      return setProblem({
+        tone: 'error',
+        text: 'The server does not allow this change: an archived epic or project cannot receive task assignments. Nothing was changed. Choose a different epic.',
+        actions: [],
       });
     if (outcome.status === 409) return inspect(true);
     setProblem({

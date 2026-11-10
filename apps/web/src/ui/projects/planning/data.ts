@@ -17,6 +17,7 @@ import {
   type UpdateMilestoneInput,
 } from '@omnis/contracts';
 import { request } from '../../api.js';
+import { associationConfirmed } from './verify.js';
 
 /**
  * Epics, milestones and the task-to-epic association, over the merged owner API. Every response is
@@ -266,10 +267,16 @@ export const fetchTaskEpic = (taskId: string, signal?: AbortSignal): Promise<Tas
     return response;
   });
 
+/**
+ * `currentEpicId` is the epic the task was in when `expectedAssociationRevision` was read. A real
+ * change must advance the revision by exactly one; the documented no-op (the same epic again)
+ * must leave it unchanged. Anything else is an unverified response, never a success.
+ */
 export const setTaskEpic = (
   taskId: string,
   expectedAssociationRevision: number,
   epicId: string | null,
+  currentEpicId: string | null,
   key: string,
   csrfToken: string,
 ): Promise<TaskEpicAssociation> =>
@@ -283,9 +290,12 @@ export const setTaskEpic = (
     (value) => {
       const association = TaskEpicAssociationSchema.parse(value);
       mustMatch(
-        association.taskId === taskId &&
-          association.epicId === epicId &&
-          association.associationRevision >= expectedAssociationRevision,
+        associationConfirmed(association, {
+          taskId,
+          epicId,
+          expectedAssociationRevision,
+          currentEpicId,
+        }),
       );
       return association;
     },
