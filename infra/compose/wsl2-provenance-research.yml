@@ -1,0 +1,28 @@
+# Disposable path observation only; not an HTTPS gateway or enforcement candidate.
+services:
+  probe:
+    image: node@sha256:be8204d4bd327363357f532187b752ff62759c31bedf98e9e18fc08c9cbd605c
+    user: '11001:11001'
+    entrypoint: ['/usr/bin/env', '-i', 'HOME=/tmp', '/usr/local/bin/node']
+    command: ['/fixture/wsl2-provenance-probe.mjs']
+    volumes:
+      - ../../scripts/compose/wsl2-provenance-probe.mjs:/fixture/wsl2-provenance-probe.mjs:ro
+    ports:
+      - '127.0.0.1:18443:18080'
+      - '[::1]:18443:18080'
+    networks: [observation]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 32
+    mem_limit: 128m
+    cpus: 0.5
+    restart: 'no'
+    logging:
+      driver: json-file
+      options:
+        max-size: '1m'
+        max-file: '1'
+networks:
+  observation:
+    enable_ipv6: true
