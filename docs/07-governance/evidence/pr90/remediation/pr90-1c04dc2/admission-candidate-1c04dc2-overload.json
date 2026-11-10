@@ -1,0 +1,29 @@
+{
+  "durationMs": 30000,
+  "elapsedMs": 30184,
+  "workers": 32,
+  "processPools": 2,
+  "localPoolMax": 8,
+  "successfulRequests": 6117,
+  "retryableRejections": 73117,
+  "failures": 1,
+  "admissionDeadlineTimeouts": 1,
+  "successLatencyMs": { "p50": 25.587, "p95": 823.186, "p99": 1447.304, "max": 2600.4736009999997 },
+  "rejectionLatencyMs": { "p50": 277.331, "p95": 1170.681, "max": 3002.419793 },
+  "successfulOpsPerSecond": 202.66,
+  "maxActiveObserved": 2,
+  "maxPendingSlotsObserved": 3,
+  "maxPoolWaiting": 0,
+  "polls": 2658,
+  "integrity": {
+    "tasks": 6117,
+    "events": 6117,
+    "task_created_events": 6117,
+    "has_first": 1,
+    "clock": "6117",
+    "distinct_seq": 6117,
+    "min_seq": 1,
+    "max_seq": 6117
+  },
+  "contiguousLedger": true
+}

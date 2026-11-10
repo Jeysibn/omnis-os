@@ -505,3 +505,126 @@ the idempotency receipt. Returning that receipt could remove one query, but it
 changes replay responses from current Task state to the original operation
 snapshot. Do not apply it until the receipt contract is tested and documented,
 and benchmark the change independently. Do not modify D5 or relax the gates.
+
+## 2026-11-11 queue-slot accounting correction and exact-candidate gates
+
+**Status:** The PML01 queue-accounting defect is corrected and independently
+approved. The four-writer reassignment p95 gate remains **FAIL** and the D5
+maximum-wait gate remains **INCONCLUSIVE**. PR #90 remains Draft; no production
+or provider execution is authorized.
+
+### Candidate and correction
+
+- Main at verification: `4a27bc3718d4960ad9b132b0f53cdc938da57b54`.
+- PR #90 remote head before this correction was pushed:
+  `b0a3be0d19eebae2d9f2c400fe6bcd39e85bb976` (Open, Draft).
+- Exact implementation candidate: `1c04dc2f142f4aca79c98891cbbad7a791bbf9d8`.
+- Migration: `0030_mission_lane_admission` on a clean candidate database.
+
+A sanitized four-worker assignment failure showed an admitted writer holding an
+active permit and waiting for D5 while still holding a normal pending-queue slot.
+That pending slot reduced capacity available to callers that had not yet been
+promoted and was consistent with the observed `PML01` queue-full response. The
+regression test reproduces this state with a held turnstile and cursor: before
+the fix the promoted writer retained its queue slot; after the fix it releases
+the slot, all three normal pending slots can be filled, and the next caller is
+rejected before mutation.
+
+Migration 0030 now releases the session queue slot immediately after active
+permit acquisition. It retains the turnstile through D5, keeps the critical
+marker through D5, and holds the transaction-scoped active permit and cursor
+lock through commit. D5 order, source/event/cursor atomicity, and the four-active
+cap are unchanged. The independent exact-diff reviewer returned **APPROVE** for
+this narrow correction. That verdict is not a PR-wide performance or merge
+approval.
+
+### Five-repetition performance matrix
+
+The uninstrumented matrix used five repetitions of 10,000 measured operations
+per operation/concurrency cell, 200 warmups, 1,000-operation fixture batches,
+matched resets, and alternating c1/c4 order. PostgreSQL 17.6 ran in the pinned
+2 CPU / 2 GiB container. The candidate SHA, clean source tree, writer/admin
+roles, database name, and migration head were verified for every run. The
+pooled percentiles below use 50,000 raw request samples per cell. Every one of
+the 30 runs passed source/event/sequence integrity, and no PML01/PML02 response
+occurred in the normal c1/c4 matrix.
+
+| Operation            | Writers | Pooled p50 | Pooled p95 | Pooled p99 | Throughput median (minimum) | Gate                    |
+| -------------------- | ------: | ---------: | ---------: | ---------: | --------------------------: | ----------------------- |
+| Task create          |       1 |    4.11 ms |    6.66 ms |   10.06 ms |       226.38 (208.91) ops/s | PASS                    |
+| Task create          |       4 |   15.75 ms |   24.87 ms |   31.74 ms |       236.33 (212.80) ops/s | PASS, narrow p95 margin |
+| Project assignment   |       1 |    4.52 ms |    7.56 ms |   10.99 ms |       200.15 (190.36) ops/s | PASS                    |
+| Project assignment   |       4 |   17.00 ms |   23.34 ms |   29.13 ms |       219.28 (218.15) ops/s | PASS                    |
+| Project reassignment |       1 |    4.62 ms |    7.17 ms |   10.66 ms |       200.79 (193.59) ops/s | PASS                    |
+| Project reassignment |       4 |   17.89 ms |   27.30 ms |   34.47 ms |       201.41 (194.10) ops/s | FAIL, p95               |
+
+All six pooled p99 cells meet the 50 ms proposal; all six throughput minima
+meet 180 ops/s. Four-writer Task creation has a narrow pooled p95 margin: two
+of five individual repetition p95s exceeded 25 ms (28.74 and 26.34 ms). Four-
+writer project reassignment exceeded the p95 limit in four of five repetitions
+(26.15, 26.98, 29.05, and 28.76 ms). Pooled values and every repetition are
+retained in the evidence file. The former ≤10% relative-overhead gate remains a
+historical failure and was not retested.
+
+The server-side mutation query accounts for nearly all request latency in the
+four-writer reassignment cell; pooled database-query p95 was 27.14 ms and pool
+checkout p95 remained below 0.04 ms. The evidence does not isolate which
+source-trigger or projection statement dominates that SQL call. D5 wait p95 is
+not the sole demonstrated cause of the reassignment p95 miss.
+
+### D5, overload, and mixed Run profiles
+
+For an exact-candidate D5 profile, `log_lock_waits` with a 1 ms deadlock
+threshold recorded 20,378 cursor waits across 10,000 fixture Task creations
+and 10,000 measured reassignments. Logged-wait p95 was 6.29 ms and maximum was
+214.24 ms. A separate 1 ms `pg_locks` observer recorded D5 p95 5.40 ms and
+sampled hold p95 5.74 ms, but its largest sampling gaps produced apparent
+391–401 ms maxima. The PostgreSQL log profile adds substantial synchronous log
+volume and the observer has scheduling gaps. The D5 p95 ≤15 ms gate is **PASS**
+for these profiles; the ≤100 ms maximum-wait gate is **INCONCLUSIVE**, not a
+pass. There were no additional CPU throttling periods during the lock-log
+profile; CPU I/O timing and transaction-phase timings were not collected.
+
+A 30-second overload test used 32 writer loops across two independent pools.
+It committed 6,117 Tasks and 6,117 ledger events at 202.66 successful ops/s,
+with contiguous event sequences `1..6117`, no pool checkout waiters, and no
+source/event/cursor divergence. It returned 73,117 retryable overload
+responses. One logical request reached the selected three-second admission
+deadline and did not mutate; this is expected bounded overload, not a committed
+write failure. Successful request p95 including retry/backoff was 823 ms;
+retry/rejection response p95 was 1,171 ms. The observer sampled at most two
+active permits and three normal pending slots in that run. Separate deterministic
+PostgreSQL tests fill all four active permits, all three normal pending slots,
+and the reserved critical slot, and confirm overflow and critical priority.
+The overload measurements are outside the supported 1–4 writer latency gate.
+
+Mixed completion, cancellation, and expiry profiles each processed 10,000 Task
+mutations plus ten Run outcomes with exact ledger integrity. The harness retried
+normal Task `PML02` responses while a critical Run marker was active, retaining
+the same idempotency key and using a 10 ms backoff with a bounded retry count.
+Run outcome p95s were based on ten observations and are descriptive only; no
+separate acceptance target was approved for this mixed workload. The first
+no-retry harness attempts are excluded because they stopped on the designed
+retryable critical-priority response.
+
+Raw matrix arrays, lock samples, mixed results, and overload evidence are in
+[`pr90-1c04dc2 evidence`](evidence/pr90/remediation/pr90-1c04dc2/README.md),
+with SHA256 checksums. The local pre-commit hook passed formatting, lint,
+workspace typechecks, tests, and policy checks. Focused PostgreSQL admission
+coverage passed 6/6, and the complete DB package suite passed 140/140 on the
+fresh disposable candidate database. The current remote eight-check run
+`42693564126` is for the pre-correction PR head `b0a3be0`; it is not evidence
+for candidate `1c04dc2`.
+
+### Acceptance decision
+
+The queue-slot correction addresses a reproduced accounting defect without
+changing D5. The normal supported-load throughput and p99 proposals pass, as do
+pooled p95 for Task creation and project assignment. Four-writer project
+reassignment p95 fails, and the D5 maximum-wait gate is inconclusive. Therefore
+PR #90 is **not ready for owner merge consideration**. A narrow database
+profiling pass should next attribute project-reassignment time among source
+mutation, triggers, event insert/index work, and commit. Any further optimization
+must keep D5 ordering and receive independent review. If these limits still
+cannot be met without changing the approved architecture, return to the owner
+for a measured decision; do not relax the gates or enable a real provider.
