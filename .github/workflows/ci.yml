@@ -206,6 +206,11 @@ jobs:
         run: |
           source scripts/ci/export-test-database-environment.sh
           node --experimental-strip-types packages/db/src/provision.ts
+      - name: Run PostgreSQL DB package integration suite
+        if: matrix.suite == 'legacy-upgrade'
+        run: |
+          source scripts/ci/export-test-database-environment.sh
+          pnpm --filter @omnis/db test
       - name: Run ${{ matrix.suite }} integration test
         run: |
           source scripts/ci/export-test-database-environment.sh
