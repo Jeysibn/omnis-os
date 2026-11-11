@@ -19,6 +19,13 @@ ALTER DEFAULT PRIVILEGES FOR ROLE omnis_migrator IN SCHEMA pgboss
 
 GRANT SELECT ON omnis.tasks, omnis.runs, omnis.run_events, omnis.run_idempotency
   TO omnis_runtime;
+DO $owner_acceptance_acl$
+BEGIN
+  IF pg_catalog.to_regclass('omnis.task_result_acceptances') IS NOT NULL THEN
+    EXECUTE 'GRANT SELECT ON omnis.task_result_acceptances TO omnis_runtime';
+  END IF;
+END
+$owner_acceptance_acl$;
 GRANT UPDATE (status) ON omnis.tasks TO omnis_runtime;
 GRANT INSERT (id, task_id, task_title) ON omnis.runs TO omnis_runtime;
 GRANT UPDATE (
