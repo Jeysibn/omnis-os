@@ -8069,6 +8069,7 @@ const postgresSuite = describe(
         await adminPool!.query(`
         TRUNCATE omnis.test_queue_outbox, omnis.connector_authorization_audit,
           omnis.connector_execution_attempts, omnis.connector_authorizations,
+          omnis.task_result_acceptances,
           omnis.task_execution_assignment_idempotency,
           omnis.task_execution_assignment_audit,
           omnis.task_project_management_idempotency,
