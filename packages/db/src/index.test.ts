@@ -7759,15 +7759,6 @@ const postgresSuite = describe(
         adminPool!.query("UPDATE omnis.tasks SET status='completed' WHERE id=$1", [legacyTask.id]),
         /eligible owner acceptance/,
       );
-      const historical = await adminPool!.query<{ id: string }>(
-        `INSERT INTO omnis.tasks(id, title, detail, status)
-         VALUES ('task-legacy-completion', 'Historical completion',
-           'Existing row remains compatible.', 'completed')
-         RETURNING id`,
-      );
-      const preserved = await store.getTask(historical.rows[0]!.id);
-      assert.equal(preserved?.status, 'completed');
-      assert.equal(preserved?.resultAcceptance, null);
     });
 
     it('preserves completed-task reruns and keeps each accepted Run receipt immutable', async () => {

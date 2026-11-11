@@ -107,6 +107,24 @@ try {
     title: 'Legacy upgrade fixture',
     detail: 'Created by the implementation at the audited R1 revision.',
   });
+  const completedLegacyTask = await legacyStore.createTask({
+    title: 'Legacy completed task',
+    detail: 'Completed before migration 0031 introduced owner acceptance.',
+  });
+  const completedLegacyClient = await legacyPool.connect();
+  try {
+    await completedLegacyClient.query('BEGIN');
+    await completedLegacyClient.query('SELECT omnis.acquire_mission_lane_admission(false, 3000)');
+    await completedLegacyClient.query("UPDATE omnis.tasks SET status='completed' WHERE id=$1", [
+      completedLegacyTask.id,
+    ]);
+    await completedLegacyClient.query('COMMIT');
+  } catch (error) {
+    await completedLegacyClient.query('ROLLBACK').catch(() => undefined);
+    throw error;
+  } finally {
+    completedLegacyClient.release();
+  }
   const legacyAdmission = await legacyStore.admitRun(
     legacyTask.id,
     `legacy-upgrade-${suffix}`,
@@ -157,7 +175,7 @@ try {
   ).rows[0].json_build_object;
   const beforeRunCoreFingerprint = await runCoreFingerprint(databaseAdminPool);
   const beforeTaskCoreFingerprint = await taskCoreFingerprint(databaseAdminPool);
-  assert.equal(beforeUpgrade.tasks, 3);
+  assert.equal(beforeUpgrade.tasks, 4);
   assert.equal(beforeUpgrade.runs, 3);
   assert.equal(beforeUpgrade.events, 3);
   assert.equal(beforeUpgrade.idempotencyRecords, 1);
@@ -173,6 +191,11 @@ try {
     launcher: launcherPassword,
   });
   await runCurrentMigration();
+  const migratedLegacyTask = await new PostgresRunStore(runtimePool).getTask(
+    completedLegacyTask.id,
+  );
+  assert.equal(migratedLegacyTask?.status, 'completed');
+  assert.equal(migratedLegacyTask?.resultAcceptance, null);
   const cutover = await databaseAdminPool.query(`
     SELECT c.feed_epoch, c.last_global_sequence, c.history_started_at,
       c.history_start_sequence,
