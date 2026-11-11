@@ -69,6 +69,9 @@ BEGIN
   IF pg_catalog.to_regprocedure('omnis.reject_mission_lane_mutation()') IS NOT NULL THEN
     EXECUTE 'REVOKE ALL ON FUNCTION omnis.reject_mission_lane_mutation() FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
   END IF;
+  IF pg_catalog.to_regprocedure('omnis.require_authorizer_task_completion()') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.require_authorizer_task_completion() FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
   IF pg_catalog.to_regprocedure('omnis.create_task_mission_lane_impl(text,text,text,uuid,bytea)') IS NOT NULL THEN
     EXECUTE 'REVOKE ALL ON FUNCTION omnis.create_task_mission_lane_impl(text, text, text, uuid, bytea) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
   END IF;
@@ -436,6 +439,9 @@ BEGIN
   IF pg_catalog.to_regprocedure('omnis.accept_task_result(text,text,uuid)') IS NOT NULL THEN
     EXECUTE 'REVOKE ALL ON FUNCTION omnis.accept_task_result(text, text, uuid) FROM PUBLIC, omnis_runtime, omnis_launcher';
     EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.accept_task_result(text, text, uuid) TO omnis_authorizer';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.require_authorizer_task_completion()') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.require_authorizer_task_completion() FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
   END IF;
 END
 $mission_lane_admission_acl$;

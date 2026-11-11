@@ -209,6 +209,9 @@ try {
         EXECUTE 'REVOKE ALL ON FUNCTION omnis.accept_task_result(text,text,uuid) FROM PUBLIC, omnis_runtime, omnis_launcher';
         EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.accept_task_result(text,text,uuid) TO omnis_authorizer';
       END IF;
+      IF pg_catalog.to_regprocedure('omnis.require_authorizer_task_completion()') IS NOT NULL THEN
+        EXECUTE 'REVOKE ALL ON FUNCTION omnis.require_authorizer_task_completion() FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+      END IF;
     END $restore_acl$;`,
   ]);
 

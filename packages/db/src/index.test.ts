@@ -7628,7 +7628,7 @@ const postgresSuite = describe(
       );
       await assert.rejects(
         pool!.query("UPDATE omnis.tasks SET status='completed' WHERE id=$1", [task.id]),
-        /requires an owner acceptance/,
+        /requires the owner authorizer/,
       );
       const [firstAttempt, secondAttempt] = await Promise.all([
         acceptanceStore.acceptTaskResult(task.id, { runId: admitted.run.id }, requestId),
@@ -7702,6 +7702,34 @@ const postgresSuite = describe(
         BigInt(acceptanceEvent.global_sequence) > BigInt(runCompleted.rows[0]!.global_sequence),
       );
       assert.equal(events.rows.filter((event) => event.actor === 'owner').length, 1);
+
+      const reopen = await pool!.connect();
+      try {
+        await reopen.query('BEGIN');
+        await reopen.query('SELECT omnis.acquire_mission_lane_admission(false, 3000)');
+        await reopen.query("UPDATE omnis.tasks SET status='in_review' WHERE id=$1", [task.id]);
+        await reopen.query('COMMIT');
+      } finally {
+        reopen.release();
+      }
+      const recommit = await pool!.connect();
+      try {
+        await recommit.query('BEGIN');
+        await recommit.query('SELECT omnis.acquire_mission_lane_admission(false, 3000)');
+        await assert.rejects(
+          recommit.query("UPDATE omnis.tasks SET status='completed' WHERE id=$1", [task.id]),
+          /requires the owner authorizer/,
+        );
+        await recommit.query('ROLLBACK');
+      } finally {
+        recommit.release();
+      }
+      const ownerCompletionCount = await adminPool!.query<{ count: string }>(
+        `SELECT count(*)::text FROM omnis.mission_lane_events
+          WHERE task_id=$1 AND event_type='task.status_changed' AND actor='owner'`,
+        [task.id],
+      );
+      assert.equal(ownerCompletionCount.rows[0]?.count, '1');
     });
 
     it('rejects stale, failed, and cancelled results while preserving legacy completed rows', async () => {
