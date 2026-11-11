@@ -3,12 +3,17 @@ import { appendFileSync, readFileSync } from 'node:fs';
 const prefix = (path, value) => path.startsWith(value);
 const any = (paths, predicate) => paths.some(predicate);
 
-export function getValidationMode({ eventName, event = {}, ref = '' }) {
+export function getValidationMode({
+  eventName,
+  event = {},
+  ref = '',
+  fullValidationRequired = false,
+}) {
   if (eventName === 'pull_request') {
     if (typeof event.pull_request?.draft !== 'boolean') {
       throw new Error('pull_request event is missing a boolean pull_request.draft value');
     }
-    return event.pull_request.draft ? 'fast' : 'full';
+    return event.pull_request.draft && !fullValidationRequired ? 'fast' : 'full';
   }
 
   if (eventName === 'workflow_dispatch') {
@@ -231,12 +236,13 @@ function main() {
     .split('\n')
     .map((path) => path.trim())
     .filter(Boolean);
+  const changePlan = classifyChangedFiles(paths);
   const mode = getValidationMode({
     eventName: process.env.GITHUB_EVENT_NAME,
     event,
     ref: process.env.GITHUB_REF,
+    fullValidationRequired: Object.values(changePlan).some(Boolean),
   });
-  const changePlan = classifyChangedFiles(paths);
   const browserSpecs = selectDraftBrowserSpecs(paths);
   const output = {
     mode,

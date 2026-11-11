@@ -42,12 +42,16 @@ function fakePool(
   handler: (query: string, values?: unknown[]) => unknown,
   calls: Array<{ query: string; values?: unknown[] }> = [],
 ): Pool {
+  const query = async (text: string, values?: unknown[]) => {
+    calls.push({ query: text, ...(values === undefined ? {} : { values }) });
+    const response = handler(text, values);
+    if (response instanceof Error) throw response;
+    return { rows: [{ result: response }] };
+  };
   return {
-    async query(query: string, values?: unknown[]) {
-      calls.push({ query, ...(values === undefined ? {} : { values }) });
-      const response = handler(query, values);
-      if (response instanceof Error) throw response;
-      return { rows: [{ result: response }] };
+    query,
+    async connect() {
+      return { query, release() {} };
     },
   } as unknown as Pool;
 }

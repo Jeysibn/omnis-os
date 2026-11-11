@@ -101,6 +101,8 @@ const applicationReadTables = new Set([
   'runs',
   'run_events',
   'run_idempotency',
+  'mission_lane_clock',
+  'mission_lane_events',
   'runtime_authorizations',
   'departments',
   'agents',
@@ -133,14 +135,6 @@ const applicationColumnPrivileges = new Map([
     ]),
   ],
   [
-    'run_events',
-    new Set(
-      ['id', 'run_id', 'sequence', 'event_type', 'at', 'message'].map(
-        (column) => `INSERT:${column}`,
-      ),
-    ),
-  ],
-  [
     'run_idempotency',
     new Set(
       ['idempotency_key', 'request_fingerprint', 'run_id'].map((column) => `INSERT:${column}`),
@@ -153,16 +147,22 @@ const approvedSecurityDefinerRoutineArities = new Map([
   ['lock_run_authorization_for_admission', 2],
   ['append_runtime_admission_denial', 3],
   ['append_runtime_authorization_audit', 3],
+  ['append_runtime_run_event', 3],
 ]);
 const approvedTaskProjectRoutines = new Set([
-  'create_task(p_title text, p_detail text, p_project_id text, p_request_id uuid, p_fingerprint bytea)',
-  'set_task_project(p_task_id text, p_expected_association_revision integer, p_project_id text, p_request_id uuid, p_fingerprint bytea)',
+  'create_task(p_title text, p_detail text, p_project_id text, p_request_id uuid, p_fingerprint bytea, p_remaining_ms integer)',
+  'set_task_project(p_task_id text, p_expected_association_revision integer, p_project_id text, p_request_id uuid, p_fingerprint bytea, p_remaining_ms integer)',
+  'set_task_epic(p_task_id text, p_expected_association_revision integer, p_epic_id text, p_request_id uuid, p_fingerprint bytea, p_remaining_ms integer)',
   'set_task_execution_assignment(p_task_id text, p_expected_revision integer, p_agent_id text, p_profile_version_no integer, p_runtime_id text, p_request_id uuid, p_fingerprint bytea)',
+]);
+const approvedRuntimeAdmissionRoutines = new Set([
+  'acquire_mission_lane_admission(p_critical boolean, p_remaining_ms integer)',
 ]);
 
 function isApprovedRuntimeSecurityDefiner(entry) {
   if (entry.objectType !== 'routine' || entry.schema !== 'omnis') return false;
   if (approvedTaskProjectRoutines.has(entry.object)) return true;
+  if (approvedRuntimeAdmissionRoutines.has(entry.object)) return entry.securityDefiner === true;
   const match = /^([a-z_][a-z0-9_]*)\((.*)\)$/.exec(entry.object);
   if (!match) return false;
   const arity = approvedSecurityDefinerRoutineArities.get(match[1]);
@@ -334,7 +334,7 @@ export function assertRuntimeAclPolicy(snapshot) {
           'archive_project_epic(p_project_id text, p_id text, p_expected_revision integer, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
           'get_task_epic(p_task_id text)',
           'list_project_epic_tasks(p_project_id text, p_epic_id text, p_after_created_at timestamp with time zone, p_after_task_id text, p_limit integer)',
-          'set_task_epic(p_task_id text, p_expected_association_revision integer, p_epic_id text, p_request_id uuid, p_fingerprint bytea)',
+          'set_task_epic(p_task_id text, p_expected_association_revision integer, p_epic_id text, p_request_id uuid, p_fingerprint bytea, p_remaining_ms integer)',
         ].includes(entry.object) &&
         entry.privilege === 'EXECUTE' &&
         entry.securityDefiner === true

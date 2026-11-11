@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { createPool } from '../../packages/db/src/index.ts';
+import { createPool, PostgresRunStore } from '../../packages/db/src/index.ts';
 import {
   assertNoExecutableWork,
   startMockServices,
@@ -28,27 +28,39 @@ const adminPool = createPool({
   max: 1,
   application_name: 'omnis-test-queue-guard',
 });
-const suffix = randomUUID().replaceAll('-', '');
-const taskId = `task-queue-guard-${suffix}`;
-const runId = `run-${Date.now()}${Number.parseInt(suffix.slice(0, 4), 16)}`;
-let taskSeeded = false;
+const runtimePool = createPool({
+  connectionString: databaseConfig.urls.OMNIS_TEST_DATABASE_URL,
+  max: 1,
+  application_name: 'omnis-test-queue-guard-writer',
+});
+const taskStore = new PostgresRunStore(runtimePool);
+let taskId;
+const runId = `run-${Date.now()}${Number.parseInt(randomUUID().slice(0, 4), 16)}`;
 let runSeeded = false;
 
 try {
   await assertNoExecutableWork(adminPool);
 
-  await adminPool.query(
-    `INSERT INTO omnis.tasks (id, title, detail, status)
-     VALUES ($1, 'Synthetic queue guard task', 'Must never execute.', 'open')`,
-    [taskId],
-  );
-  taskSeeded = true;
-  await adminPool.query('INSERT INTO omnis.runs (id, task_id, task_title) VALUES ($1, $2, $3)', [
-    runId,
-    taskId,
-    'Synthetic queue guard task',
-  ]);
-  runSeeded = true;
+  const task = await taskStore.createTask({
+    title: 'Synthetic queue guard task',
+    detail: 'Must never execute.',
+  });
+  taskId = task.id;
+
+  await adminPool.query('BEGIN');
+  try {
+    await adminPool.query('INSERT INTO omnis.runs (id, task_id, task_title) VALUES ($1, $2, $3)', [
+      runId,
+      taskId,
+      'Synthetic queue guard task',
+    ]);
+    runSeeded = true;
+    await adminPool.query('COMMIT');
+  } catch (error) {
+    await adminPool.query('ROLLBACK').catch(() => undefined);
+    runSeeded = false;
+    throw error;
+  }
 
   await assert.rejects(
     startMockServices({
@@ -65,10 +77,10 @@ try {
   if (runSeeded) {
     await adminPool.query('DELETE FROM omnis.runs WHERE id = $1', [runId]);
   }
-  if (taskSeeded) {
-    await adminPool.query('DELETE FROM omnis.tasks WHERE id = $1', [taskId]);
-  }
+  // The task.created ledger row is append-only and intentionally remains in
+  // this disposable database after its synthetic queue-guard Run is removed.
   await adminPool.end();
+  await runtimePool.end();
 }
 
 process.stdout.write('Disposable queue startup guard refused pre-existing work.\n');

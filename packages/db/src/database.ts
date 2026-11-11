@@ -3,6 +3,11 @@ import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Pool, type PoolClient, type PoolConfig, type QueryResult, type QueryResultRow } from 'pg';
+import {
+  withLocalMissionLaneAdmission,
+  type MissionLaneDeadline,
+  type MissionLaneAdmissionPriority,
+} from './mission-lane-admission.ts';
 
 const migrationLock = '70463909136523';
 const migrationDirectory = fileURLToPath(new URL('../migrations/', import.meta.url));
@@ -19,7 +24,15 @@ export function createPool(
   config: PoolConfig | string,
   onIdleClientError?: (error: { name: string; code?: string }) => void,
 ): Pool {
-  const pool = new Pool(typeof config === 'string' ? { connectionString: config, max: 8 } : config);
+  const options = typeof config === 'string' ? { connectionString: config, max: 8 } : config;
+  const requestedConnectionTimeout = options.connectionTimeoutMillis;
+  const pool = new Pool({
+    ...options,
+    connectionTimeoutMillis:
+      requestedConnectionTimeout && requestedConnectionTimeout > 0
+        ? Math.min(requestedConnectionTimeout, 3_000)
+        : 3_000,
+  });
   pool.on('error', (error: Error & { code?: string }) => {
     const safeError = {
       name: error.name,
@@ -139,6 +152,21 @@ export async function inTransaction<T>(
     client.off('error', captureConnectionError);
     client.release(connectionError);
   }
+}
+
+/**
+ * Bound event writers before they check out a PostgreSQL connection. The
+ * database admission function remains authoritative across processes; this
+ * per-pool guard only prevents hidden, unbounded node-postgres pool waiters.
+ */
+export async function inMissionLaneTransaction<T>(
+  pool: Pool,
+  action: (client: PoolClient, deadline: MissionLaneDeadline) => Promise<T>,
+  priority: MissionLaneAdmissionPriority = 'normal',
+): Promise<T> {
+  return withLocalMissionLaneAdmission(pool, priority, (deadline) =>
+    inTransaction(pool, (client) => action(client, deadline)),
+  );
 }
 
 export function asPgBossTransaction(client: PoolClient): PgBossTransaction {

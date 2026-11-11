@@ -11,7 +11,16 @@ const safeSnapshot = {
     '0017_task_project_admission',
     '0026_task_execution_assignment',
     '0027_agent_identity_management',
+    '0029_mission_lane_events',
   ],
+  missionLane: {
+    eventCount: '0',
+    lastGlobalSequence: '0',
+    feedEpoch: '016c99e3-9d49-4b35-9730-fd9fa0023210',
+    historyStartedAt: '2026-11-09T12:00:00.000Z',
+    historyStartSequence: 1,
+    sequenceInvariant: true,
+  },
   agentManagementCounts: {
     departments: 0,
     agents: 0,
@@ -20,7 +29,11 @@ const safeSnapshot = {
     managementAudits: 0,
     managementIdempotency: 0,
   },
-  projectManagementCounts: { projects: 0, managementAudits: 0, managementIdempotency: 0 },
+  projectManagementCounts: {
+    projects: 0,
+    managementAudits: 0,
+    managementIdempotency: 0,
+  },
   taskProjectManagementCounts: { audits: 0, idempotency: 0 },
   taskExecutionAssignmentCounts: { audits: 0, idempotency: 0 },
   recordFingerprints: {
@@ -37,6 +50,7 @@ const safeSnapshot = {
     taskProjectManagementIdempotency: 'd41d8cd98f00b204e9800998ecf8427e',
     taskExecutionAssignmentAudit: 'd41d8cd98f00b204e9800998ecf8427e',
     taskExecutionAssignmentIdempotency: 'd41d8cd98f00b204e9800998ecf8427e',
+    missionLane: 'd41d8cd98f00b204e9800998ecf8427e',
   },
   syntheticOnly: true,
   sequenceInvariants: true,
@@ -120,7 +134,10 @@ describe('database backup consistency policy', () => {
     assert.throws(() =>
       assertValidMetrics({
         ...safeSnapshot,
-        recordFingerprints: { ...safeSnapshot.recordFingerprints, agentProfileDrafts: 'bad' },
+        recordFingerprints: {
+          ...safeSnapshot.recordFingerprints,
+          agentProfileDrafts: 'bad',
+        },
       }),
     );
   });

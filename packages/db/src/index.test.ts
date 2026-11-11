@@ -5,11 +5,12 @@ import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
-import type { Pool } from 'pg';
+import type { Pool, PoolClient } from 'pg';
 import {
   ConnectorAuthorizationRequestSchema,
   createRenderedRequestDigest,
 } from '@omnis/contracts/connector-authorization';
+import { MissionEventSchema } from '@omnis/contracts';
 import {
   signConnectorDecisionEnvelope,
   verifyConnectorDecisionEnvelope,
@@ -83,7 +84,7 @@ const postgresSuite = describe(
     }
 
     beforeEach(async () => {
-      assertTestDatabase(databaseUrl!);
+      assertTestDatabase(databaseUrl!, migrationUrl!, adminUrl!, authorizerUrl!, launcherUrl!);
       authorizationByIdempotency.clear();
       await migrate(migrationPool!);
       await adminPool!.query(`
@@ -95,11 +96,1249 @@ const postgresSuite = describe(
         'GRANT SELECT, INSERT, UPDATE, DELETE ON omnis.test_queue_outbox TO omnis_runtime',
       );
       await adminPool!.query(
-        'TRUNCATE omnis.test_queue_outbox, omnis.connector_authorization_audit, omnis.connector_execution_attempts, omnis.connector_authorizations, omnis.task_execution_assignment_idempotency, omnis.task_execution_assignment_audit, omnis.task_project_management_idempotency, omnis.task_epic_management_audit, omnis.task_epic_associations, omnis.task_project_management_audit, omnis.project_epic_management_audit, omnis.project_epics, omnis.project_milestone_management_audit, omnis.project_milestones, omnis.project_management_idempotency, omnis.project_management_audit, omnis.projects, omnis.agent_management_idempotency, omnis.agent_management_audit, omnis.agent_profile_drafts, omnis.department_management_audit, omnis.agent_profile_versions, omnis.agents, omnis.departments, omnis.mock_sandbox_launches, omnis.legacy_unscoped_runs, omnis.authorization_audit, omnis.runtime_authorizations, omnis.run_idempotency, omnis.run_events, omnis.runs, omnis.tasks',
+        'TRUNCATE omnis.test_queue_outbox, omnis.mission_lane_events, omnis.connector_authorization_audit, omnis.connector_execution_attempts, omnis.connector_authorizations, omnis.task_execution_assignment_idempotency, omnis.task_execution_assignment_audit, omnis.task_project_management_idempotency, omnis.task_epic_management_audit, omnis.task_epic_associations, omnis.task_project_management_audit, omnis.project_epic_management_audit, omnis.project_epics, omnis.project_milestone_management_audit, omnis.project_milestones, omnis.project_management_idempotency, omnis.project_management_audit, omnis.projects, omnis.agent_management_idempotency, omnis.agent_management_audit, omnis.agent_profile_drafts, omnis.department_management_audit, omnis.agent_profile_versions, omnis.agents, omnis.departments, omnis.mock_sandbox_launches, omnis.legacy_unscoped_runs, omnis.authorization_audit, omnis.runtime_authorizations, omnis.run_idempotency, omnis.run_events, omnis.runs, omnis.tasks',
+      );
+      await adminPool!.query(
+        'UPDATE omnis.mission_lane_clock SET feed_epoch = gen_random_uuid(), last_global_sequence = 0, history_started_at = clock_timestamp() WHERE singleton',
       );
       await adminPool!.query('ALTER SEQUENCE omnis.task_id_seq RESTART WITH 1');
       await adminPool!.query('ALTER SEQUENCE omnis.run_id_seq RESTART WITH 1');
       nextKey += 1;
+    });
+
+    it('enforces the global envelope and gives pending critical work priority', async () => {
+      const firstPool = createPool({ connectionString: databaseUrl!, max: 8 });
+      const secondPool = createPool({ connectionString: databaseUrl!, max: 8 });
+      const clients: PoolClient[] = [];
+      const activeClients: PoolClient[] = [];
+      const normalClients: PoolClient[] = [];
+      let cursorBlocker: PoolClient | undefined;
+      let criticalClient: PoolClient | undefined;
+      let criticalAcquire: Promise<unknown> | undefined;
+      const normalAcquires: Array<Promise<{ code: string | undefined }>> = [];
+      const connect = async (writerPool: Pool) => {
+        const client = await writerPool.connect();
+        clients.push(client);
+        await client.query('BEGIN');
+        return client;
+      };
+      const waitUntil = async (predicate: () => Promise<boolean>) => {
+        const deadline = Date.now() + 2_000;
+        while (Date.now() < deadline) {
+          if (await predicate()) return true;
+          await delay(10);
+        }
+        return false;
+      };
+      try {
+        for (const [index, writerPool] of [
+          firstPool,
+          secondPool,
+          firstPool,
+          secondPool,
+        ].entries()) {
+          const client = await connect(writerPool);
+          activeClients.push(client);
+          await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [70463909136600 + index]);
+        }
+        cursorBlocker = await connect(firstPool);
+        await cursorBlocker.query('SELECT pg_advisory_xact_lock($1::bigint)', ['70463909136525']);
+
+        for (const writerPool of [firstPool, secondPool, firstPool]) {
+          const client = await connect(writerPool);
+          normalClients.push(client);
+          normalAcquires.push(
+            client
+              .query('SELECT omnis.acquire_mission_lane_admission(false, 3000)')
+              .then(() => ({ code: undefined }))
+              .catch((error: { code?: string }) => ({ code: error.code })),
+          );
+        }
+        assert.equal(
+          await waitUntil(async () => {
+            const result = await adminPool!.query<{ active: number; pending: number }>(`
+              SELECT
+                count(*) FILTER (WHERE granted AND ((classid::bigint << 32) | objid::bigint)
+                  BETWEEN 70463909136600 AND 70463909136603)::int AS active,
+                count(DISTINCT ((classid::bigint << 32) | objid::bigint)) FILTER (
+                  WHERE granted AND ((classid::bigint << 32) | objid::bigint)
+                    BETWEEN 70463909136610 AND 70463909136613
+                )::int AS pending
+              FROM pg_locks WHERE locktype='advisory' AND objsubid=1
+            `);
+            return result.rows[0]?.active === 4 && result.rows[0]?.pending === 3;
+          }),
+          true,
+          'the four global permits and all three normal pending slots should be occupied',
+        );
+
+        const overflow = await connect(firstPool);
+        await assert.rejects(
+          overflow.query('SELECT omnis.acquire_mission_lane_admission(false, 3000)'),
+          (error: unknown) => (error as { code?: string }).code === 'PML01',
+        );
+        await overflow.query('ROLLBACK');
+
+        criticalClient = await connect(secondPool);
+        criticalAcquire = criticalClient.query(
+          'SELECT omnis.acquire_mission_lane_admission(true, 3000)',
+        );
+
+        await Promise.all(activeClients.map((client) => client.query('COMMIT')));
+        const normalResults = await Promise.all(normalAcquires);
+        assert.ok(
+          normalResults.every((result) => ['PML02', '55P03'].includes(result.code ?? '')),
+          'normal waiters must stop without mutating once critical work is pending',
+        );
+        assert.equal(
+          await Promise.race([criticalAcquire.then(() => true), delay(25).then(() => false)]),
+          false,
+        );
+
+        await cursorBlocker.query('COMMIT');
+        await criticalAcquire;
+        await criticalClient.query('COMMIT');
+
+        const state = await adminPool!.query<{ tasks: number; events: number; clock: string }>(`
+          SELECT (SELECT count(*)::int FROM omnis.tasks) AS tasks,
+                 (SELECT count(*)::int FROM omnis.mission_lane_events) AS events,
+                 (SELECT last_global_sequence::text FROM omnis.mission_lane_clock WHERE singleton) AS clock
+        `);
+        assert.deepEqual(state.rows[0], { tasks: 0, events: 0, clock: '0' });
+      } finally {
+        await Promise.allSettled(clients.map((client) => client.query('ROLLBACK')));
+        await Promise.allSettled(normalAcquires);
+        if (criticalAcquire) await Promise.allSettled([criticalAcquire]);
+        for (const client of clients) client.release();
+        await firstPool.end();
+        await secondPool.end();
+      }
+    });
+
+    it('releases a pending queue slot as soon as a writer gets an active permit', async () => {
+      const firstPool = createPool({ connectionString: databaseUrl!, max: 4 });
+      const secondPool = createPool({ connectionString: databaseUrl!, max: 4 });
+      const clients: PoolClient[] = [];
+      const admissionNotices: string[] = [];
+      let turnstileBlocker: PoolClient | undefined;
+      let cursorBlocker: PoolClient | undefined;
+      let promoted: PoolClient | undefined;
+      let promotedAcquire: Promise<unknown> | undefined;
+      const pendingClients: PoolClient[] = [];
+      const pendingAcquires: Promise<unknown>[] = [];
+      const connect = async (writerPool: Pool) => {
+        const client = await writerPool.connect();
+        clients.push(client);
+        await client.query('BEGIN');
+        return client;
+      };
+      const waitUntil = async (predicate: () => Promise<boolean>) => {
+        const deadline = Date.now() + 2_000;
+        while (Date.now() < deadline) {
+          if (await predicate()) return true;
+          await delay(10);
+        }
+        return false;
+      };
+      try {
+        turnstileBlocker = await connect(firstPool);
+        await turnstileBlocker.query('SELECT pg_advisory_lock($1::bigint)', ['70463909136604']);
+        cursorBlocker = await connect(firstPool);
+        await cursorBlocker.query('SELECT pg_advisory_xact_lock($1::bigint)', ['70463909136525']);
+
+        promoted = await connect(secondPool);
+        promoted.on('notice', (notice) => admissionNotices.push(notice.message ?? ''));
+        const promotedPid = Number(
+          (await promoted.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0]?.pid,
+        );
+        promotedAcquire = promoted.query(
+          'SELECT omnis.acquire_mission_lane_admission(false, 3000)',
+        );
+        assert.equal(
+          await waitUntil(async () => {
+            const result = await adminPool!.query<{ queue_slot: boolean; turnstile_wait: boolean }>(
+              `SELECT
+                 EXISTS (SELECT 1 FROM pg_locks WHERE pid=$1 AND locktype='advisory'
+                   AND objsubid=1 AND granted AND ((classid::bigint << 32) | objid::bigint)
+                     BETWEEN 70463909136610 AND 70463909136612) AS queue_slot,
+                 EXISTS (SELECT 1 FROM pg_locks WHERE pid=$1 AND locktype='advisory'
+                   AND objsubid=1 AND NOT granted
+                   AND ((classid::bigint << 32) | objid::bigint)=70463909136604) AS turnstile_wait`,
+              [promotedPid],
+            );
+            return result.rows[0]?.queue_slot === true && result.rows[0]?.turnstile_wait === true;
+          }),
+          true,
+          'writer should reserve pending capacity while waiting for the turnstile',
+        );
+
+        await turnstileBlocker.query('SELECT pg_advisory_unlock($1::bigint)', ['70463909136604']);
+        assert.equal(
+          await waitUntil(async () => {
+            const result = await adminPool!.query<{ active_permit: boolean; cursor_wait: boolean }>(
+              `SELECT
+                 EXISTS (SELECT 1 FROM pg_locks WHERE pid=$1 AND locktype='advisory'
+                   AND objsubid=1 AND granted
+                   AND ((classid::bigint << 32) | objid::bigint)
+                     BETWEEN 70463909136600 AND 70463909136603) AS active_permit,
+                 EXISTS (SELECT 1 FROM pg_locks WHERE pid=$1 AND locktype='advisory'
+                   AND objsubid=1 AND NOT granted
+                   AND ((classid::bigint << 32) | objid::bigint)=70463909136525) AS cursor_wait`,
+              [promotedPid],
+            );
+            return result.rows[0]?.active_permit === true && result.rows[0]?.cursor_wait === true;
+          }),
+          true,
+          'writer should be promoted to an active permit before it waits for D5',
+        );
+
+        const promotedQueueSlot = await adminPool!.query(
+          `SELECT 1 FROM pg_locks WHERE pid=$1 AND locktype='advisory' AND objsubid=1
+             AND granted AND ((classid::bigint << 32) | objid::bigint)
+               BETWEEN 70463909136610 AND 70463909136612`,
+          [promotedPid],
+        );
+        assert.equal(
+          promotedQueueSlot.rowCount,
+          0,
+          'active writers waiting on D5 must not consume pending queue capacity',
+        );
+
+        for (const writerPool of [firstPool, secondPool, firstPool]) {
+          const client = await connect(writerPool);
+          pendingClients.push(client);
+          pendingAcquires.push(
+            client.query('SELECT omnis.acquire_mission_lane_admission(false, 3000)'),
+          );
+        }
+        assert.equal(
+          await waitUntil(async () => {
+            const result = await adminPool!.query<{ pending: number }>(`
+              SELECT count(DISTINCT ((classid::bigint << 32) | objid::bigint))::int AS pending
+                FROM pg_locks WHERE locktype='advisory' AND objsubid=1 AND granted
+                 AND ((classid::bigint << 32) | objid::bigint)
+                   BETWEEN 70463909136610 AND 70463909136612
+            `);
+            return result.rows[0]?.pending === 3;
+          }),
+          true,
+          'all three normal pending slots should be available after promotion',
+        );
+
+        const overflow = await connect(secondPool);
+        await assert.rejects(
+          overflow.query('SELECT omnis.acquire_mission_lane_admission(false, 3000)'),
+          (error: unknown) => (error as { code?: string }).code === 'PML01',
+        );
+        await overflow.query('ROLLBACK');
+        const pendingAfterOverflow = await adminPool!.query<{ count: number }>(`
+          SELECT count(*)::int AS count FROM pg_locks
+           WHERE locktype='advisory' AND objsubid=1 AND granted
+             AND ((classid::bigint << 32) | objid::bigint)
+               BETWEEN 70463909136610 AND 70463909136612
+        `);
+        assert.equal(
+          pendingAfterOverflow.rows[0]?.count,
+          3,
+          "failed slot acquisition must not release another writer's queue reservation",
+        );
+
+        await cursorBlocker.query('COMMIT');
+        await promotedAcquire;
+        const promotedOwnership = await adminPool!.query<{ key: string }>(
+          `SELECT ((classid::bigint << 32) | objid::bigint)::text AS key
+             FROM pg_locks WHERE pid=$1 AND locktype='advisory' AND objsubid=1 AND granted
+               AND (((classid::bigint << 32) | objid::bigint)=70463909136525
+                 OR ((classid::bigint << 32) | objid::bigint) BETWEEN 70463909136600 AND 70463909136613)`,
+          [promotedPid],
+        );
+        const promotedKeys = promotedOwnership.rows.map((row) => BigInt(row.key));
+        assert.equal(promotedKeys.filter((key) => key === 70463909136525n).length, 1);
+        assert.equal(
+          promotedKeys.filter((key) => key >= 70463909136600n && key <= 70463909136603n).length,
+          1,
+          'the admitted transaction must keep exactly one active permit',
+        );
+        assert.equal(promotedKeys.length, 2, 'queue and turnstile session locks must be released');
+        await promoted.query('COMMIT');
+        const afterCommit = await adminPool!.query(
+          `SELECT 1 FROM pg_locks WHERE pid=$1 AND locktype='advisory' AND objsubid=1 AND granted`,
+          [promotedPid],
+        );
+        assert.equal(afterCommit.rowCount, 0, 'commit must release the permit and D5 cursor');
+        for (const [index, acquire] of pendingAcquires.entries()) {
+          await acquire;
+          await pendingClients[index]!.query('COMMIT');
+        }
+        assert.deepEqual(
+          admissionNotices,
+          [],
+          'a queued writer must release its owned queue slot once, without a second unowned unlock',
+        );
+      } finally {
+        await Promise.allSettled(clients.map((client) => client.query('ROLLBACK')));
+        if (promotedAcquire) await Promise.allSettled([promotedAcquire]);
+        await Promise.allSettled(pendingAcquires);
+        for (const client of clients) client.release();
+        await firstPool.end();
+        await secondPool.end();
+      }
+    });
+
+    it('lets a pending critical writer pass a normal waiter that is short of permits', async () => {
+      const firstPool = createPool({ connectionString: databaseUrl!, max: 4 });
+      const secondPool = createPool({ connectionString: databaseUrl!, max: 4 });
+      const activeClients: PoolClient[] = [];
+      let cursorBlocker: PoolClient | undefined;
+      let normalClient: PoolClient | undefined;
+      let criticalClient: PoolClient | undefined;
+      let normalAcquire: Promise<unknown> | undefined;
+      let criticalAcquire: Promise<unknown> | undefined;
+      const waitUntil = async (predicate: () => Promise<boolean>) => {
+        const deadline = Date.now() + 2_000;
+        while (Date.now() < deadline) {
+          if (await predicate()) return true;
+          await delay(10);
+        }
+        return false;
+      };
+      try {
+        for (let index = 0; index < 4; index += 1) {
+          const client = await (index % 2 === 0 ? firstPool : secondPool).connect();
+          activeClients.push(client);
+          await client.query('BEGIN');
+          await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [70463909136600 + index]);
+        }
+
+        cursorBlocker = await firstPool.connect();
+        await cursorBlocker.query('BEGIN');
+        await cursorBlocker.query('SELECT pg_advisory_xact_lock($1::bigint)', ['70463909136525']);
+
+        normalClient = await firstPool.connect();
+        await normalClient.query('BEGIN');
+        const normalPid = (
+          await normalClient.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')
+        ).rows[0]?.pid;
+        assert.ok(normalPid);
+        normalAcquire = normalClient.query(
+          'SELECT omnis.acquire_mission_lane_admission(false, 3000)',
+        );
+        void normalAcquire.catch(() => undefined);
+
+        assert.equal(
+          await waitUntil(async () => {
+            const state = await adminPool!.query<{ sleeping_without_turnstile: boolean }>(
+              `SELECT EXISTS (
+                 SELECT 1 FROM pg_stat_activity activity
+                 JOIN pg_locks queue_lock ON queue_lock.pid=activity.pid
+                   AND queue_lock.locktype='advisory' AND queue_lock.granted
+                   AND queue_lock.objsubid=1
+                   AND ((queue_lock.classid::bigint << 32) | queue_lock.objid::bigint)
+                       BETWEEN 70463909136610 AND 70463909136612
+                 WHERE activity.pid=$1 AND activity.wait_event='PgSleep'
+                   AND NOT EXISTS (
+                     SELECT 1 FROM pg_locks turn_lock
+                     WHERE turn_lock.pid=activity.pid AND turn_lock.locktype='advisory'
+                       AND turn_lock.granted AND turn_lock.objsubid=1
+                       AND ((turn_lock.classid::bigint << 32) | turn_lock.objid::bigint)
+                           =70463909136604
+                   )
+               ) AS sleeping_without_turnstile`,
+              [normalPid],
+            );
+            return state.rows[0]?.sleeping_without_turnstile === true;
+          }),
+          true,
+          'a normal request waiting for an active permit must release the turnstile',
+        );
+
+        criticalClient = await secondPool.connect();
+        await criticalClient.query('BEGIN');
+        const criticalPid = (
+          await criticalClient.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')
+        ).rows[0]?.pid;
+        assert.ok(criticalPid);
+        criticalAcquire = criticalClient.query(
+          'SELECT omnis.acquire_mission_lane_admission(true, 3000)',
+        );
+        void criticalAcquire.catch(() => undefined);
+
+        assert.equal(
+          await waitUntil(async () => {
+            const marker = await adminPool!.query<{ held: boolean }>(
+              `SELECT EXISTS (
+                 SELECT 1 FROM pg_locks WHERE pid=$1 AND locktype='advisory'
+                   AND granted AND objsubid=1
+                   AND ((classid::bigint << 32) | objid::bigint)=70463909136605
+               ) AS held`,
+              [criticalPid],
+            );
+            return marker.rows[0]?.held === true;
+          }),
+          true,
+          'critical work must register its marker before joining permit handoff',
+        );
+
+        await activeClients[0]!.query('COMMIT');
+        activeClients[0]!.release();
+        activeClients.shift();
+
+        assert.equal(
+          await waitUntil(async () => {
+            const state = await adminPool!.query<{ waiting_for_cursor: boolean }>(
+              `SELECT EXISTS (
+                 SELECT 1 FROM pg_locks WHERE pid=$1 AND locktype='advisory'
+                   AND NOT granted AND objsubid=1
+                   AND ((classid::bigint << 32) | objid::bigint)=70463909136525
+               ) AS waiting_for_cursor`,
+              [criticalPid],
+            );
+            return state.rows[0]?.waiting_for_cursor === true;
+          }),
+          true,
+          'critical work should receive the released permit and proceed to D5',
+        );
+
+        await assert.rejects(
+          normalAcquire,
+          (error: unknown) => (error as { code?: string }).code === 'PML02',
+        );
+        await normalClient.query('ROLLBACK');
+        await cursorBlocker.query('COMMIT');
+        await criticalAcquire;
+        await criticalClient.query('COMMIT');
+
+        const activeCount = await adminPool!.query<{ count: number }>(
+          `SELECT count(*)::int AS count FROM pg_locks
+           WHERE locktype='advisory' AND granted AND objsubid=1
+             AND ((classid::bigint << 32) | objid::bigint)
+               BETWEEN 70463909136600 AND 70463909136603`,
+        );
+        assert.equal(
+          activeCount.rows[0]?.count,
+          3,
+          'only the three deliberately held fixture permits should remain after critical D5 acquisition',
+        );
+      } finally {
+        await Promise.allSettled([
+          ...activeClients.map((client) => client.query('ROLLBACK')),
+          ...(cursorBlocker ? [cursorBlocker.query('ROLLBACK')] : []),
+          ...(normalClient ? [normalClient.query('ROLLBACK')] : []),
+          ...(criticalClient ? [criticalClient.query('ROLLBACK')] : []),
+          ...(normalAcquire ? [normalAcquire] : []),
+          ...(criticalAcquire ? [criticalAcquire] : []),
+        ]);
+        for (const client of activeClients) client.release();
+        cursorBlocker?.release();
+        normalClient?.release();
+        criticalClient?.release();
+        await firstPool.end();
+        await secondPool.end();
+      }
+    });
+
+    it('applies the remaining global deadline through D5 before any source mutation', async () => {
+      const blocker = await pool!.connect();
+      const writer = await pool!.connect();
+      try {
+        await blocker.query('BEGIN');
+        await blocker.query('SELECT pg_advisory_xact_lock($1::bigint)', ['70463909136525']);
+        const writerPid = Number(
+          (await writer.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0]?.pid,
+        );
+        await writer.query('BEGIN');
+        await assert.rejects(
+          writer.query('SELECT omnis.acquire_mission_lane_admission(false, 75)'),
+          (error: unknown) => ['PML02', '55P03'].includes((error as { code?: string }).code ?? ''),
+        );
+        await writer.query('ROLLBACK');
+        const state = await adminPool!.query<{ tasks: number; events: number; clock: string }>(`
+          SELECT (SELECT count(*)::int FROM omnis.tasks) AS tasks,
+                 (SELECT count(*)::int FROM omnis.mission_lane_events) AS events,
+                 (SELECT last_global_sequence::text FROM omnis.mission_lane_clock WHERE singleton) AS clock
+        `);
+        assert.deepEqual(state.rows[0], { tasks: 0, events: 0, clock: '0' });
+        const heldPermit = await adminPool!.query(`
+          SELECT count(*)::int AS count FROM pg_locks
+           WHERE locktype='advisory' AND granted AND objsubid=1
+             AND ((classid::bigint << 32) | objid::bigint)
+                 BETWEEN 70463909136600 AND 70463909136603
+        `);
+        assert.equal(
+          heldPermit.rows[0]?.count,
+          0,
+          'expired admission must release its xact permit',
+        );
+        const remainingLocks = await adminPool!.query(
+          `SELECT 1 FROM pg_locks WHERE pid=$1 AND locktype='advisory' AND objsubid=1 AND granted
+            AND (((classid::bigint << 32) | objid::bigint)=70463909136525
+              OR ((classid::bigint << 32) | objid::bigint) BETWEEN 70463909136600 AND 70463909136613)`,
+          [writerPid],
+        );
+        assert.equal(
+          remainingLocks.rowCount,
+          0,
+          'timeout cleanup must release session and xact locks',
+        );
+        await blocker.query('COMMIT');
+        await writer.query('BEGIN');
+        await writer.query('SELECT omnis.acquire_mission_lane_admission(false, 3000)');
+        await writer.query('COMMIT');
+      } finally {
+        await writer.query('ROLLBACK').catch(() => undefined);
+        await blocker.query('ROLLBACK').catch(() => undefined);
+        writer.release();
+        blocker.release();
+      }
+    });
+
+    it('releases bounded queue and priority locks when a critical waiter is cancelled', async () => {
+      const blocker = await pool!.connect();
+      const cancelled = await pool!.connect();
+      const survivor = await pool!.connect();
+      let cancelledPid: number | undefined;
+      let cancelledAdmission: Promise<unknown> | undefined;
+      let secondAdmission: Promise<unknown> | undefined;
+      const waitUntil = async (predicate: () => Promise<boolean>) => {
+        const deadline = Date.now() + 2_000;
+        while (Date.now() < deadline) {
+          if (await predicate()) return true;
+          await delay(10);
+        }
+        return false;
+      };
+      try {
+        await blocker.query('SELECT pg_advisory_lock($1::bigint)', ['70463909136605']);
+        cancelledPid = (await cancelled.query<{ pid: number }>('SELECT pg_backend_pid() AS pid'))
+          .rows[0]?.pid;
+        assert.ok(cancelledPid);
+
+        cancelledAdmission = cancelled.query(
+          'SELECT omnis.acquire_mission_lane_admission(true, 3000)',
+        );
+        assert.equal(
+          await waitUntil(async () => {
+            const result = await adminPool!.query<{ waiting: boolean }>(
+              `SELECT EXISTS (
+                 SELECT 1 FROM pg_locks
+                 WHERE pid = $1 AND locktype = 'advisory' AND NOT granted
+                   AND ((classid::bigint << 32) | objid::bigint) = 70463909136605
+               ) AS waiting`,
+              [cancelledPid],
+            );
+            return result.rows[0]?.waiting === true;
+          }),
+          true,
+          'the first critical request should wait on the held priority marker',
+        );
+
+        secondAdmission = survivor.query('SELECT omnis.acquire_mission_lane_admission(true, 3000)');
+        assert.equal(
+          await waitUntil(async () => {
+            const result = await adminPool!.query<{ waiting: number }>(
+              `SELECT count(*)::int AS waiting FROM pg_locks
+               WHERE locktype = 'advisory' AND NOT granted AND objsubid = 1
+                 AND ((classid::bigint << 32) | objid::bigint) = 70463909136605`,
+            );
+            return result.rows[0]?.waiting === 2;
+          }),
+          true,
+          'multiple critical requests should remain bounded while waiting',
+        );
+
+        await adminPool!.query('SELECT pg_cancel_backend($1)', [cancelledPid]);
+        await assert.rejects(
+          cancelledAdmission,
+          (error: unknown) => (error as { code?: string }).code === '57014',
+        );
+        await cancelled.query('ROLLBACK').catch(() => undefined);
+
+        const leakedLocks = await adminPool!.query<{ count: number }>(
+          `SELECT count(*)::int AS count FROM pg_locks
+           WHERE pid = $1 AND locktype = 'advisory' AND granted AND objsubid = 1
+             AND (((classid::bigint << 32) | objid::bigint)
+               BETWEEN 70463909136600 AND 70463909136605
+               OR ((classid::bigint << 32) | objid::bigint)
+               BETWEEN 70463909136610 AND 70463909136613)`,
+          [cancelledPid],
+        );
+        assert.equal(leakedLocks.rows[0]?.count, 0, 'cancelled waiters must release session locks');
+
+        await blocker.query('SELECT pg_advisory_unlock($1::bigint)', ['70463909136605']);
+        await secondAdmission;
+        await survivor.query('COMMIT');
+      } finally {
+        await Promise.allSettled([
+          blocker.query('SELECT pg_advisory_unlock($1::bigint)', ['70463909136605']),
+          ...(cancelledAdmission ? [cancelledAdmission] : []),
+          ...(secondAdmission ? [secondAdmission] : []),
+          cancelled.query('ROLLBACK'),
+          survivor.query('ROLLBACK'),
+        ]);
+        blocker.release();
+        cancelled.release();
+        survivor.release();
+      }
+    });
+
+    it('bounds pool checkout and rejects before a Task or ledger mutation', async () => {
+      const checkoutPool = createPool({
+        connectionString: databaseUrl!,
+        max: 1,
+        connectionTimeoutMillis: 75,
+      });
+      const heldClient = await checkoutPool.connect();
+      try {
+        const checkoutStore = new PostgresRunStore(checkoutPool);
+        await assert.rejects(
+          checkoutStore.createTask(
+            { title: 'Pool checkout timeout', detail: 'No source mutation should occur.' },
+            randomUUID(),
+          ),
+          (error: unknown) => error instanceof StoreError && error.code === 'concurrency_limit',
+        );
+      } finally {
+        heldClient.release();
+        await checkoutPool.end();
+      }
+      const state = await adminPool!.query<{ tasks: number; events: number; clock: string }>(`
+        SELECT (SELECT count(*)::int FROM omnis.tasks) AS tasks,
+               (SELECT count(*)::int FROM omnis.mission_lane_events) AS events,
+               (SELECT last_global_sequence::text FROM omnis.mission_lane_clock WHERE singleton) AS clock
+      `);
+      assert.deepEqual(state.rows[0], { tasks: 0, events: 0, clock: '0' });
+    });
+
+    it('grants admission only to approved event writers and preserves ledger ACL isolation', async () => {
+      const access = await adminPool!.query<{
+        runtime_admission: boolean;
+        authorizer_admission: boolean;
+        launcher_admission: boolean;
+        runtime_event_insert: boolean;
+        runtime_clock_update: boolean;
+        authorizer_event_insert: boolean;
+      }>(`
+        SELECT has_function_privilege('omnis_runtime', 'omnis.acquire_mission_lane_admission(boolean,integer)', 'EXECUTE') AS runtime_admission,
+               has_function_privilege('omnis_authorizer', 'omnis.acquire_mission_lane_admission(boolean,integer)', 'EXECUTE') AS authorizer_admission,
+               has_function_privilege('omnis_launcher', 'omnis.acquire_mission_lane_admission(boolean,integer)', 'EXECUTE') AS launcher_admission,
+               has_table_privilege('omnis_runtime', 'omnis.mission_lane_events', 'INSERT') AS runtime_event_insert,
+               has_table_privilege('omnis_runtime', 'omnis.mission_lane_clock', 'UPDATE') AS runtime_clock_update,
+               has_table_privilege('omnis_authorizer', 'omnis.mission_lane_events', 'INSERT') AS authorizer_event_insert
+      `);
+      assert.deepEqual(access.rows[0], {
+        runtime_admission: true,
+        authorizer_admission: false,
+        launcher_admission: false,
+        runtime_event_insert: false,
+        runtime_clock_update: false,
+        authorizer_event_insert: false,
+      });
+      await assert.rejects(
+        launcherPool!.query('SELECT omnis.acquire_mission_lane_admission(false)'),
+        /permission denied/,
+      );
+      await assert.rejects(
+        authorizerPool!.query('SELECT omnis.acquire_mission_lane_admission(false)'),
+        /permission denied/,
+      );
+    });
+
+    it('bounds sustained normal Task admission at 5, 8, 16, and 32 concurrent requests', async () => {
+      for (const attempted of [5, 8, 16, 32]) {
+        await adminPool!.query(
+          'TRUNCATE omnis.mission_lane_events, omnis.run_events, omnis.runs, omnis.tasks RESTART IDENTITY CASCADE',
+        );
+        await adminPool!.query(
+          'UPDATE omnis.mission_lane_clock SET last_global_sequence=0 WHERE singleton',
+        );
+        const firstPool = createPool({ connectionString: databaseUrl!, max: 32 });
+        const secondPool = createPool({ connectionString: databaseUrl!, max: 32 });
+        const clients: PoolClient[] = [];
+        const activeClients: PoolClient[] = [];
+        const remaining = new Set(Array.from({ length: attempted }, (_, index) => index));
+        let rejectedCount = 0;
+        const outcomes: Array<
+          Promise<
+            | { index: number; ok: true; taskId: string }
+            | { index: number; ok: false; code: string | undefined }
+          >
+        > = [];
+        try {
+          for (const [index, writerPool] of [
+            firstPool,
+            firstPool,
+            secondPool,
+            secondPool,
+          ].entries()) {
+            const client = await writerPool.connect();
+            clients.push(client);
+            activeClients.push(client);
+            await client.query('BEGIN');
+            await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [
+              70463909136600 + index,
+            ]);
+          }
+          const stores = [new PostgresRunStore(firstPool), new PostgresRunStore(secondPool)];
+          for (let index = 0; index < attempted; index += 1) {
+            const input = {
+              title: `Bounded admission ${attempted}-${index}`,
+              detail: 'A disposable event-producing Task fixture for admission pressure.',
+            };
+            const promise = stores[index % 2]!.createTask(input, randomUUID())
+              .then((task) => ({ index, ok: true as const, taskId: task.id }))
+              .catch((error: unknown) => ({
+                index,
+                ok: false as const,
+                code: (error as { code?: string }).code,
+              }))
+              .then((outcome) => {
+                if (!outcome.ok) rejectedCount += 1;
+                return outcome;
+              });
+            outcomes.push(promise);
+          }
+
+          const expectedQueued = Math.min(attempted, 3);
+          const expectedRejected = Math.max(0, attempted - expectedQueued);
+          const deadline = Date.now() + 2_000;
+          let observedQueued = false;
+          while (Date.now() < deadline) {
+            const queueLocks = await adminPool!.query<{ count: string }>(`
+              SELECT count(DISTINCT ((classid::bigint << 32) | objid::bigint))::text AS count
+              FROM pg_locks
+              WHERE locktype='advisory' AND objsubid=1 AND granted
+                AND ((classid::bigint << 32) | objid::bigint)
+                  BETWEEN 70463909136610 AND 70463909136612
+            `);
+            if (
+              Number(queueLocks.rows[0]?.count) === expectedQueued &&
+              rejectedCount === expectedRejected
+            ) {
+              observedQueued = true;
+              break;
+            }
+            await delay(10);
+          }
+          assert.equal(
+            observedQueued,
+            true,
+            `${attempted} attempts should produce ${expectedQueued} normal waiters and ${expectedRejected} immediate rejections`,
+          );
+
+          await Promise.all(activeClients.map((client) => client.query('COMMIT')));
+          const results: Awaited<(typeof outcomes)[number]>[] = [];
+          while (remaining.size > 0) {
+            const outcome = await Promise.race([...remaining].map((index) => outcomes[index]!));
+            results.push(outcome);
+            remaining.delete(outcome.index);
+            if (!outcome.ok) {
+              assert.equal(outcome.code, 'concurrency_limit');
+            }
+          }
+          assert.equal(results.filter((result) => result.ok).length, expectedQueued);
+          assert.equal(results.filter((result) => !result.ok).length, expectedRejected);
+          const committed = await adminPool!.query<{ task_count: string; event_count: string }>(`
+            SELECT (SELECT count(*)::text FROM omnis.tasks) AS task_count,
+                   (SELECT count(*)::text FROM omnis.mission_lane_events) AS event_count
+          `);
+          assert.equal(Number(committed.rows[0]?.task_count), expectedQueued);
+          assert.equal(Number(committed.rows[0]?.event_count), expectedQueued);
+        } finally {
+          await Promise.allSettled(clients.map((client) => client.query('ROLLBACK')));
+          await Promise.allSettled(outcomes);
+          for (const client of clients) client.release();
+          await firstPool.end();
+          await secondPool.end();
+        }
+      }
+    });
+
+    it('projects trusted Task and Run transitions atomically into the serialized Mission Lane ledger', async (testContext) => {
+      const requestId = randomUUID();
+      const taskInput = {
+        title: 'Mission Lane fixture task',
+        detail: 'A deterministic synthetic fixture for the global event ledger.',
+      };
+      const task = await store.createTask(taskInput, requestId);
+      const replay = await store.createTask(taskInput, requestId);
+      assert.equal(replay.id, task.id);
+
+      const insertedTaskEvent = await adminPool!.query(
+        'SELECT event_type, project_id, payload FROM omnis.mission_lane_events WHERE source_key = $1',
+        [`task:${task.id}:created`],
+      );
+      assert.equal(insertedTaskEvent.rowCount, 1);
+      assert.equal(insertedTaskEvent.rows[0]?.event_type, 'task.created');
+      assert.deepEqual(insertedTaskEvent.rows[0]?.payload, {});
+      const createdIdentity = await adminPool!.query<{
+        source_key: string;
+        source_kind: string;
+        source_record_id: string;
+        event_type: string;
+        actor: string;
+        origin: string;
+        synthetic: boolean;
+        task_id: string;
+        run_id: string | null;
+        project_id: string | null;
+        previous_project_id: string | null;
+        occurred_at: string;
+        payload: unknown;
+      }>(
+        `SELECT source_key, source_kind, source_record_id, event_type, actor, origin,
+                synthetic, task_id, run_id, project_id, previous_project_id, occurred_at::text, payload
+           FROM omnis.mission_lane_events WHERE source_key=$1`,
+        [`task:${task.id}:created`],
+      );
+      const createdSource = createdIdentity.rows[0]!;
+      const beforeDuplicate = await adminPool!.query<{
+        last_global_sequence: string;
+      }>('SELECT last_global_sequence::text FROM omnis.mission_lane_clock WHERE singleton');
+      const sourceValues = [
+        createdSource.source_key,
+        createdSource.source_kind,
+        createdSource.source_record_id,
+        createdSource.event_type,
+        createdSource.actor,
+        createdSource.origin,
+        createdSource.synthetic,
+        createdSource.task_id,
+        createdSource.run_id,
+        createdSource.project_id,
+        createdSource.previous_project_id,
+        createdSource.occurred_at,
+        createdSource.payload,
+      ];
+      const duplicateClient = await adminPool!.connect();
+      try {
+        await duplicateClient.query('BEGIN');
+        await duplicateClient.query('SELECT pg_advisory_xact_lock(70463909136600)');
+        await duplicateClient.query('SELECT pg_advisory_xact_lock(70463909136525)');
+        await duplicateClient.query(
+          'SELECT omnis.append_mission_lane_event($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)',
+          sourceValues,
+        );
+        await duplicateClient.query('COMMIT');
+        assert.equal(
+          (
+            await adminPool!.query<{ last_global_sequence: string }>(
+              'SELECT last_global_sequence::text FROM omnis.mission_lane_clock WHERE singleton',
+            )
+          ).rows[0]?.last_global_sequence,
+          beforeDuplicate.rows[0]?.last_global_sequence,
+        );
+        await duplicateClient.query('BEGIN');
+        await duplicateClient.query('SELECT pg_advisory_xact_lock(70463909136600)');
+        await duplicateClient.query('SELECT pg_advisory_xact_lock(70463909136525)');
+        await assert.rejects(
+          duplicateClient.query(
+            'SELECT omnis.append_mission_lane_event($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)',
+            [
+              ...sourceValues.slice(0, 11),
+              new Date(Date.parse(createdSource.occurred_at) + 1000).toISOString(),
+              ...sourceValues.slice(12),
+            ],
+          ),
+          (error: unknown) =>
+            typeof error === 'object' &&
+            error !== null &&
+            'code' in error &&
+            error.code === '23505',
+        );
+        await duplicateClient.query('ROLLBACK');
+      } finally {
+        duplicateClient.release();
+      }
+      assert.equal(
+        (
+          await adminPool!.query<{ last_global_sequence: string }>(
+            'SELECT last_global_sequence::text FROM omnis.mission_lane_clock WHERE singleton',
+          )
+        ).rows[0]?.last_global_sequence,
+        beforeDuplicate.rows[0]?.last_global_sequence,
+      );
+
+      const projectStore = new PostgresProjectManagementStore(
+        authorizerPool!,
+        Buffer.alloc(32, 51),
+      );
+      const project = await projectStore.create(
+        {
+          key: `ML-${randomUUID().slice(0, 8).toUpperCase()}`,
+          name: 'Mission Lane event project',
+          objective: 'Verify event-time project context for association events.',
+          priority: 'normal',
+        },
+        randomUUID(),
+      );
+      const associationTask = await store.createTask({
+        title: 'Mission Lane association task',
+        detail: 'A scoped task for project and Epic event projection.',
+      });
+      await store.setTaskProject(
+        associationTask.id,
+        { expectedAssociationRevision: 1, projectId: project.id },
+        randomUUID(),
+      );
+      const epicStore = new PostgresProjectEpicStore(authorizerPool!, Buffer.alloc(32, 52));
+      const epic = await epicStore.create(
+        project.id,
+        {
+          title: 'Mission Lane Epic',
+          description: 'Synthetic association fixture.',
+        },
+        randomUUID(),
+      );
+      await epicStore.setTaskEpic(
+        associationTask.id,
+        { expectedAssociationRevision: 2, epicId: epic.id },
+        randomUUID(),
+      );
+      const associationEvents = await adminPool!.query(
+        'SELECT event_type, project_id, previous_project_id, payload FROM omnis.mission_lane_events WHERE task_id=$1 ORDER BY global_sequence',
+        [associationTask.id],
+      );
+      assert.deepEqual(
+        associationEvents.rows.map((row) => row.event_type),
+        ['task.created', 'task.project_assigned', 'task.epic_assigned'],
+      );
+      assert.equal(associationEvents.rows[1]?.project_id, project.id);
+      assert.equal(associationEvents.rows[1]?.previous_project_id, null);
+      assert.deepEqual(associationEvents.rows[2]?.payload, {
+        previousEpicId: null,
+        epicId: epic.id,
+      });
+      const beforeNoOp = await adminPool!.query<{
+        event_count: string;
+        last_global_sequence: string;
+      }>(`SELECT (SELECT count(*)::text FROM omnis.mission_lane_events) AS event_count,
+                 (SELECT last_global_sequence::text FROM omnis.mission_lane_clock WHERE singleton) AS last_global_sequence`);
+      const associationState = await store.getTask(associationTask.id);
+      assert.ok(associationState);
+      await store.setTaskProject(
+        associationTask.id,
+        {
+          expectedAssociationRevision: associationState.associationRevision,
+          projectId: project.id,
+        },
+        randomUUID(),
+      );
+      const noOpStatusClient = await adminPool!.connect();
+      try {
+        await noOpStatusClient.query('BEGIN');
+        await noOpStatusClient.query('SELECT pg_advisory_xact_lock(70463909136600)');
+        await noOpStatusClient.query('SELECT pg_advisory_xact_lock(70463909136525)');
+        await noOpStatusClient.query('UPDATE omnis.tasks SET status=status WHERE id=$1', [task.id]);
+        await noOpStatusClient.query('COMMIT');
+      } catch (error) {
+        await noOpStatusClient.query('ROLLBACK').catch(() => undefined);
+        throw error;
+      } finally {
+        noOpStatusClient.release();
+      }
+      const afterNoOp = await adminPool!.query<{
+        event_count: string;
+        last_global_sequence: string;
+      }>(`SELECT (SELECT count(*)::text FROM omnis.mission_lane_events) AS event_count,
+                 (SELECT last_global_sequence::text FROM omnis.mission_lane_clock WHERE singleton) AS last_global_sequence`);
+      assert.deepEqual(afterNoOp.rows[0], beforeNoOp.rows[0]);
+
+      const beforeRollback = await adminPool!.query(
+        'SELECT last_global_sequence FROM omnis.mission_lane_clock WHERE singleton',
+      );
+      const rollBackClient = await adminPool!.connect();
+      try {
+        await rollBackClient.query('BEGIN');
+        await rollBackClient.query('SELECT pg_advisory_xact_lock(70463909136600)');
+        await rollBackClient.query('SELECT pg_advisory_xact_lock(70463909136525)');
+        await rollBackClient.query(
+          "INSERT INTO omnis.tasks(id,title,detail,status) VALUES ('task-rollback-fixture','Rollback fixture task','This row must never commit to the ledger.','open')",
+        );
+        await rollBackClient.query('ROLLBACK');
+      } finally {
+        rollBackClient.release();
+      }
+      const afterRollback = await adminPool!.query(
+        'SELECT last_global_sequence FROM omnis.mission_lane_clock WHERE singleton',
+      );
+      assert.equal(
+        afterRollback.rows[0]?.last_global_sequence,
+        beforeRollback.rows[0]?.last_global_sequence,
+      );
+      assert.equal(
+        (
+          await adminPool!.query(
+            "SELECT count(*)::int AS count FROM omnis.tasks WHERE id='task-rollback-fixture'",
+          )
+        ).rows[0]?.count,
+        0,
+      );
+
+      const orderClient = await adminPool!.connect();
+      const orderPool = createPool({
+        connectionString: databaseUrl!,
+        max: 1,
+        application_name: 'omnis-mission-lane-cursor-order-contender',
+      });
+      const orderStore = new PostgresRunStore(orderPool);
+      try {
+        await orderClient.query('BEGIN');
+        await orderClient.query('SELECT pg_advisory_xact_lock(70463909136600)');
+        await orderClient.query('SELECT pg_advisory_xact_lock(70463909136525)');
+        await orderClient.query(
+          `INSERT INTO omnis.tasks(id,title,detail,status)
+           VALUES ('task-cursor-order-holder','Cursor order holder','An uncommitted event verifies global visibility.','open')`,
+        );
+        const held = await orderClient.query(
+          "SELECT global_sequence FROM omnis.mission_lane_events WHERE source_key='task:task-cursor-order-holder:created'",
+        );
+        assert.equal(held.rowCount, 1);
+        assert.equal(
+          (
+            await adminPool!.query(
+              "SELECT count(*)::int AS count FROM omnis.mission_lane_events WHERE source_key='task:task-cursor-order-holder:created'",
+            )
+          ).rows[0]?.count,
+          0,
+        );
+        const nextWriter = orderStore.createTask(
+          {
+            title: 'Cursor order contender',
+            detail: 'A second writer must wait before taking its Task row lock.',
+          },
+          randomUUID(),
+        );
+        await waitForLockWait(adminPool!, 'omnis-mission-lane-cursor-order-contender');
+        await orderClient.query('COMMIT');
+        const nextTask = await nextWriter;
+        const committedOrder = await adminPool!.query<{ global_sequence: string }>(
+          `SELECT global_sequence::text
+             FROM omnis.mission_lane_events
+            WHERE source_key = ANY($1::text[])
+            ORDER BY global_sequence::bigint`,
+          [['task:task-cursor-order-holder:created', `task:${nextTask.id}:created`]],
+        );
+        assert.equal(committedOrder.rowCount, 2);
+        assert.ok(
+          BigInt(committedOrder.rows[1]!.global_sequence) >
+            BigInt(committedOrder.rows[0]!.global_sequence),
+        );
+      } catch (error) {
+        await orderClient.query('ROLLBACK').catch(() => undefined);
+        throw error;
+      } finally {
+        orderClient.release();
+        await orderPool.end();
+      }
+
+      const admission = await admit(
+        task.id,
+        `mission-lane-${randomUUID()}`,
+        async () => 'mission-lane-job',
+      );
+      await store.beginExecution(admission.run.id, 'mission-lane-worker', 30);
+      await store.appendOutput(
+        admission.run.id,
+        'mission-lane-worker',
+        1,
+        'PRIVATE_RAW_OUTPUT_MUST_NOT_ENTER_MISSION_LANE',
+      );
+      await store.completeRun(
+        admission.run.id,
+        'mission-lane-worker',
+        1,
+        'PRIVATE_RAW_OUTPUT_MUST_NOT_ENTER_MISSION_LANE',
+      );
+
+      await assert.rejects(
+        pool!.query(
+          `INSERT INTO omnis.mission_lane_events(global_sequence,source_key,source_kind,source_record_id,event_type,actor,origin,synthetic,task_id,occurred_at,payload)
+           VALUES (999999,'untrusted','task','untrusted','task.created','owner','api',false,$1,now(),'{}'::jsonb)`,
+          [task.id],
+        ),
+        /permission denied/,
+      );
+      const ledger = await adminPool!.query<{
+        global_sequence: string;
+        event_type: string;
+        task_id: string;
+        payload: unknown;
+      }>(
+        'SELECT global_sequence::text, event_type, task_id, payload FROM omnis.mission_lane_events ORDER BY global_sequence::bigint',
+      );
+      assert.deepEqual(
+        ledger.rows
+          .filter((row) => row.event_type.startsWith('run.') || row.task_id === task.id)
+          .map((row) => row.event_type),
+        [
+          'task.created',
+          'run.queued',
+          'task.status_changed',
+          'run.started',
+          'task.status_changed',
+          'run.completed',
+        ],
+        JSON.stringify(
+          ledger.rows.map(({ global_sequence, event_type, task_id }) => ({
+            global_sequence,
+            event_type,
+            task_id,
+          })),
+        ),
+      );
+      const statusEvent = await adminPool!.query<{
+        global_sequence: string;
+        event_id: string;
+        source_key: string;
+        source_kind: 'task' | 'run';
+        source_record_id: string;
+        event_type: string;
+        actor: string;
+        origin: string;
+        synthetic: boolean;
+        task_id: string;
+        run_id: string | null;
+        project_id: string | null;
+        previous_project_id: string | null;
+        occurred_at: Date;
+        payload: unknown;
+      }>(
+        `SELECT global_sequence::text, event_id::text, source_key, source_kind,
+                source_record_id, event_type, actor, origin, synthetic, task_id, run_id,
+                project_id, previous_project_id, occurred_at, payload
+           FROM omnis.mission_lane_events
+          WHERE task_id=$1 AND event_type='task.status_changed'
+          ORDER BY global_sequence LIMIT 1`,
+        [task.id],
+      );
+      const statusRow = statusEvent.rows[0];
+      assert.ok(statusRow, JSON.stringify(ledger.rows));
+      assert.equal(
+        MissionEventSchema.parse({
+          globalSequence: statusRow.global_sequence,
+          eventId: statusRow.event_id,
+          sourceKey: statusRow.source_key,
+          sourceKind: statusRow.source_kind,
+          sourceRecordId: statusRow.source_record_id,
+          type: statusRow.event_type,
+          actor: statusRow.actor,
+          origin: statusRow.origin,
+          synthetic: statusRow.synthetic,
+          taskId: statusRow.task_id,
+          runId: statusRow.run_id,
+          projectId: statusRow.project_id,
+          previousProjectId: statusRow.previous_project_id,
+          occurredAt: statusRow.occurred_at.toISOString(),
+          payload: statusRow.payload,
+        }).type,
+        'task.status_changed',
+      );
+      assert.equal(
+        JSON.stringify(ledger.rows).includes('PRIVATE_RAW_OUTPUT_MUST_NOT_ENTER_MISSION_LANE'),
+        false,
+      );
+      const runProvenance = await adminPool!.query<{
+        event_type: string;
+        actor: string;
+        origin: string;
+      }>(
+        'SELECT event_type, actor, origin FROM omnis.mission_lane_events WHERE run_id=$1 ORDER BY global_sequence',
+        [admission.run.id],
+      );
+      assert.deepEqual(runProvenance.rows, [
+        { event_type: 'run.queued', actor: 'service:omnis-worker', origin: 'mock-worker' },
+        { event_type: 'run.started', actor: 'service:omnis-worker', origin: 'mock-worker' },
+        { event_type: 'run.completed', actor: 'service:omnis-worker', origin: 'mock-worker' },
+      ]);
+      assert.equal(new Set(ledger.rows.map((row) => row.global_sequence)).size, ledger.rows.length);
+
+      const loadPool = createPool({ connectionString: databaseUrl!, max: 4 });
+      const loadStore = new PostgresRunStore(loadPool);
+      const mutationLatencies: number[] = [];
+      try {
+        await Promise.all(
+          Array.from({ length: 4 }, async (_, writer) =>
+            loadStore.createTask(
+              {
+                title: `Warmup ${writer}`,
+                detail: 'Warm each independent writer connection before measurement.',
+              },
+              randomUUID(),
+            ),
+          ),
+        );
+        for (let round = 0; round < 10; round += 1) {
+          await Promise.all(
+            Array.from({ length: 4 }, async (_, writer) => {
+              const startedAt = performance.now();
+              await loadStore.createTask(
+                {
+                  title: `Concurrent ${round}-${writer}`,
+                  detail: 'A concurrent event writer for cursor ordering validation.',
+                },
+                randomUUID(),
+              );
+              mutationLatencies.push(performance.now() - startedAt);
+            }),
+          );
+        }
+      } finally {
+        await loadPool.end();
+      }
+      const orderedLatencies = [...mutationLatencies].sort((left, right) => left - right);
+      const p95MutationLatency = orderedLatencies[Math.ceil(orderedLatencies.length * 0.95) - 1];
+      const p50MutationLatency = orderedLatencies[Math.ceil(orderedLatencies.length * 0.5) - 1];
+      const maxMutationLatency = orderedLatencies.at(-1);
+      assert.equal(mutationLatencies.length, 40);
+      testContext.diagnostic(
+        `4 writers x 10 measured rounds after warmup: mutation p50=${p50MutationLatency?.toFixed(2)}ms p95=${p95MutationLatency?.toFixed(2)}ms max=${maxMutationLatency?.toFixed(2)}ms`,
+      );
+      assert.ok(p95MutationLatency !== undefined && p95MutationLatency <= 500);
+      assert.ok(maxMutationLatency !== undefined && maxMutationLatency <= 3000);
+      const countAndClock = await adminPool!.query<{
+        count: string;
+        last_global_sequence: string;
+      }>(
+        `SELECT (SELECT count(*) FROM omnis.mission_lane_events)::text AS count,
+                (SELECT last_global_sequence FROM omnis.mission_lane_clock WHERE singleton)::text AS last_global_sequence`,
+      );
+      assert.equal(countAndClock.rows[0]?.count, countAndClock.rows[0]?.last_global_sequence);
+      const sequences = await adminPool!.query<{ global_sequence: string }>(
+        'SELECT global_sequence::text FROM omnis.mission_lane_events ORDER BY global_sequence::bigint',
+      );
+      assert.deepEqual(
+        sequences.rows.map((row) => row.global_sequence),
+        Array.from({ length: sequences.rowCount ?? 0 }, (_, index) => String(index + 1)),
+      );
+    });
+
+    it('bounds the SQL Task writer cursor wait and rolls back timed-out writes', async () => {
+      const holder = await adminPool!.connect();
+      const taskTitle = `Cursor timeout fixture ${randomUUID()}`;
+      try {
+        await holder.query('BEGIN');
+        await holder.query('SELECT pg_advisory_xact_lock(70463909136600)');
+        await holder.query('SELECT pg_advisory_xact_lock(70463909136525)');
+        await assert.rejects(
+          pool!.query('SELECT omnis.create_task($1, $2, NULL, NULL, NULL)', [
+            taskTitle,
+            'A task writer held behind the cursor must time out.',
+          ]),
+          (error: unknown) =>
+            typeof error === 'object' &&
+            error !== null &&
+            'code' in error &&
+            error.code === '55P03',
+        );
+        assert.equal(
+          (await adminPool!.query('SELECT 1 FROM omnis.tasks WHERE title = $1', [taskTitle]))
+            .rowCount,
+          0,
+        );
+      } finally {
+        await holder.query('ROLLBACK').catch(() => undefined);
+        holder.release();
+      }
     });
 
     it('creates an owner-approved synthetic connector grant and consumes it once', async () => {
@@ -501,7 +1740,11 @@ const postgresSuite = describe(
         {
           eventId: 'late-cancel-ack-1',
           status: 'interrupted',
-          usage: { kind: 'unknown', reason: 'submission_uncertain', billingExposure: 'unknown' },
+          usage: {
+            kind: 'unknown',
+            reason: 'submission_uncertain',
+            billingExposure: 'unknown',
+          },
         },
       );
       assert.equal(request.status, 'interrupted');
@@ -630,7 +1873,10 @@ const postgresSuite = describe(
           'SELECT status, provider_submission_id FROM omnis.connector_execution_attempts WHERE id = $1',
           [admission.attempt.id],
         );
-        assert.deepEqual(state.rows[0], { status: 'submitting', provider_submission_id: null });
+        assert.deepEqual(state.rows[0], {
+          status: 'submitting',
+          provider_submission_id: null,
+        });
       } finally {
         await adminPool!.query(`
           DROP TRIGGER test_reject_submission_audit ON omnis.connector_authorization_audit;
@@ -649,7 +1895,10 @@ const postgresSuite = describe(
       assert.equal(first.id, retry.id);
       await assert.rejects(
         fixture.authorizations.request(
-          { ...fixture.request, promptDigest: createRenderedRequestDigest('changed request') },
+          {
+            ...fixture.request,
+            promptDigest: createRenderedRequestDigest('changed request'),
+          },
           requestId,
         ),
         (error: unknown) =>
@@ -661,10 +1910,19 @@ const postgresSuite = describe(
       const fixture = await connectorFixture();
       const wrongBindings: unknown[] = [
         { ...fixture.request, taskId: 'task-does-not-match' },
-        { ...fixture.request, projectId: 'prj_ffffffffffffffffffffffffffffffff' },
-        { ...fixture.request, projectRevision: fixture.request.projectRevision + 1 },
+        {
+          ...fixture.request,
+          projectId: 'prj_ffffffffffffffffffffffffffffffff',
+        },
+        {
+          ...fixture.request,
+          projectRevision: fixture.request.projectRevision + 1,
+        },
         { ...fixture.request, taskRevision: fixture.request.taskRevision + 1 },
-        { ...fixture.request, profileVersion: fixture.request.profileVersion + 1 },
+        {
+          ...fixture.request,
+          profileVersion: fixture.request.profileVersion + 1,
+        },
         { ...fixture.request, providerId: 'openai' },
         { ...fixture.request, modelId: 'real-model' },
         { ...fixture.request, capabilities: ['shell.execute'] },
@@ -686,7 +1944,10 @@ const postgresSuite = describe(
       await assert.rejects(
         fixture.authorizations.consume(
           approved.id,
-          { ...fixture.request, promptDigest: createRenderedRequestDigest('different') },
+          {
+            ...fixture.request,
+            promptDigest: createRenderedRequestDigest('different'),
+          },
           randomUUID(),
         ),
         (error: unknown) =>
@@ -899,7 +2160,11 @@ const postgresSuite = describe(
             profession: 'Test agent',
             seniority: null,
             specialties: ['synthetic'],
-            personality: { traits: ['careful'], tone: null, principles: ['verify'] },
+            personality: {
+              traits: ['careful'],
+              tone: null,
+              principles: ['verify'],
+            },
             behavior: { autonomy: null, escalation: null },
             instructions: 'Use synthetic fixtures only.',
           },
@@ -1055,7 +2320,10 @@ const postgresSuite = describe(
       assert.notEqual(started.started, duplicateStart.started);
       const lease = started.started
         ? { workerId: 'synthetic-worker', generation: started.generation }
-        : { workerId: 'duplicate-worker', generation: duplicateStart.generation };
+        : {
+            workerId: 'duplicate-worker',
+            generation: duplicateStart.generation,
+          };
       const submission = await store.recordSyntheticBrokerSubmissionRequested(
         runId,
         lease.workerId,
@@ -1093,7 +2361,10 @@ const postgresSuite = describe(
         },
       };
       assert.deepEqual(
-        await store.reconcileSyntheticBrokerRun(pending, { ...authoritative, status: 'unknown' }),
+        await store.reconcileSyntheticBrokerRun(pending, {
+          ...authoritative,
+          status: 'unknown',
+        }),
         [],
       );
       assert.equal((await store.getSyntheticBrokerRun(runId))?.run.status, 'unknown');
@@ -1106,7 +2377,10 @@ const postgresSuite = describe(
         [],
       );
       await assert.rejects(
-        store.reconcileSyntheticBrokerRun(pending, { ...authoritative, attemptId: randomUUID() }),
+        store.reconcileSyntheticBrokerRun(pending, {
+          ...authoritative,
+          attemptId: randomUUID(),
+        }),
         /identity conflicts/,
       );
       assert.deepEqual(
@@ -1147,6 +2421,15 @@ const postgresSuite = describe(
           .message,
         /Do not resubmit/,
       );
+      const missionRunEvents = await adminPool!.query(
+        'SELECT event_type, project_id FROM omnis.mission_lane_events WHERE run_id=$1 ORDER BY global_sequence',
+        [runId],
+      );
+      assert.deepEqual(
+        missionRunEvents.rows.map((event) => event.event_type),
+        ['run.queued', 'run.started', 'run.stop_requested', 'run.outcome_unknown', 'run.cancelled'],
+      );
+      assert.equal(missionRunEvents.rows[0]?.project_id, fixture.project.id);
     });
 
     it('repairs late completed and failed projections without duplicate events or usage', async () => {
@@ -1205,6 +2488,18 @@ const postgresSuite = describe(
         assert.deepEqual(repaired.usage, link.run.usage);
         assert.equal(
           (await store.getEvents(runId)).filter((event) => event.type === `run.${status}`).length,
+          1,
+        );
+        const missionEvents = await adminPool!.query(
+          'SELECT event_type FROM omnis.mission_lane_events WHERE run_id=$1 ORDER BY global_sequence',
+          [runId],
+        );
+        assert.equal(
+          missionEvents.rows.filter((event) => event.event_type === 'run.outcome_unknown').length,
+          1,
+        );
+        assert.equal(
+          missionEvents.rows.filter((event) => event.event_type === `run.${status}`).length,
           1,
         );
       }
@@ -1344,7 +2639,11 @@ const postgresSuite = describe(
 
     it('creates owner-scoped projects atomically, lists completely, and replays uncertain retries', async () => {
       const projects = new PostgresProjectManagementStore(authorizerPool!, Buffer.alloc(32, 23));
-      assert.deepEqual(await projects.list(), { projects: [], total: 0, complete: true });
+      assert.deepEqual(await projects.list(), {
+        projects: [],
+        total: 0,
+        complete: true,
+      });
       const input = {
         key: 'AO-105',
         name: 'Project Management',
@@ -1437,11 +2736,19 @@ const postgresSuite = describe(
     it('associates legacy tasks with active projects using revision checks and freezes history', async () => {
       const projects = new PostgresProjectManagementStore(authorizerPool!, Buffer.alloc(32, 23));
       const active = await projects.create(
-        { key: 'TASK-ACTIVE', name: 'Active', objective: 'Task association integration.' },
+        {
+          key: 'TASK-ACTIVE',
+          name: 'Active',
+          objective: 'Task association integration.',
+        },
         randomUUID(),
       );
       const archived = await projects.create(
-        { key: 'TASK-ARCHIVED', name: 'Archived', objective: 'Reject task association.' },
+        {
+          key: 'TASK-ARCHIVED',
+          name: 'Archived',
+          objective: 'Reject task association.',
+        },
         randomUUID(),
       );
       const archivedProject = await projects.archive(
@@ -1454,7 +2761,10 @@ const postgresSuite = describe(
         detail: 'Existing tasks remain valid without a project.',
       });
       assert.deepEqual(
-        { projectId: legacyTask.projectId, associationRevision: legacyTask.associationRevision },
+        {
+          projectId: legacyTask.projectId,
+          associationRevision: legacyTask.associationRevision,
+        },
         { projectId: null, associationRevision: 1 },
       );
       const assignmentKey = randomUUID();
@@ -1545,8 +2855,8 @@ const postgresSuite = describe(
         SELECT has_table_privilege('omnis_runtime', 'omnis.projects', 'SELECT') AS runtime_project_select,
                has_column_privilege('omnis_runtime', 'omnis.tasks', 'project_id', 'UPDATE') AS runtime_task_project_update,
                has_table_privilege('omnis_runtime', 'omnis.tasks', 'INSERT') AS runtime_task_insert,
-               has_function_privilege('omnis_runtime', 'omnis.create_task(text,text,text,uuid,bytea)', 'EXECUTE') AS runtime_create_task,
-               has_function_privilege('omnis_authorizer', 'omnis.create_task(text,text,text,uuid,bytea)', 'EXECUTE') AS authorizer_create_task
+               has_function_privilege('omnis_runtime', 'omnis.create_task(text,text,text,uuid,bytea,integer)', 'EXECUTE') AS runtime_create_task,
+               has_function_privilege('omnis_authorizer', 'omnis.create_task(text,text,text,uuid,bytea,integer)', 'EXECUTE') AS authorizer_create_task
       `);
       assert.deepEqual(privileges.rows[0], {
         runtime_project_select: false,
@@ -1559,6 +2869,38 @@ const postgresSuite = describe(
         pool!.query('UPDATE omnis.tasks SET project_id = NULL'),
         /permission denied/,
       );
+    });
+
+    it('replays the persisted project-assignment receipt after Task state changes', async () => {
+      const projects = new PostgresProjectManagementStore(authorizerPool!, Buffer.alloc(32, 31));
+      const project = await projects.create(
+        {
+          key: `RECEIPT-${randomUUID().slice(0, 8).toUpperCase()}`,
+          name: 'Project assignment receipt',
+          objective: 'Verify stable idempotency replay semantics.',
+        },
+        randomUUID(),
+      );
+      const task = await store.createTask({
+        title: 'Stable project receipt',
+        detail: 'The same project request returns its original persisted receipt.',
+      });
+      const assignmentRequestId = randomUUID();
+      const assignmentInput = { expectedAssociationRevision: 1, projectId: project.id };
+      const receipt = await store.setTaskProject(task.id, assignmentInput, assignmentRequestId);
+
+      const admitted = await admit(task.id, key('receipt-state-change'), async () => 'job');
+      assert.equal(admitted.created, true);
+      assert.notEqual((await store.getTask(task.id))?.status, receipt.status);
+
+      const replay = await store.setTaskProject(task.id, assignmentInput, assignmentRequestId);
+      assert.deepEqual(replay, receipt);
+      const projected = await adminPool!.query<{ count: number }>(
+        `SELECT count(*)::int AS count FROM omnis.mission_lane_events
+         WHERE task_id=$1 AND event_type='task.project_assigned'`,
+        [task.id],
+      );
+      assert.equal(projected.rows[0]?.count, 1, 'idempotent replay must not duplicate the event');
     });
 
     it('persists owner task execution assignment with idempotency, immutable profiles, and restricted audit', async () => {
@@ -1580,7 +2922,11 @@ const postgresSuite = describe(
             profession: 'Synthetic analyst',
             seniority: null,
             specialties: ['verification'],
-            personality: { traits: ['careful'], tone: null, principles: ['verify'] },
+            personality: {
+              traits: ['careful'],
+              tone: null,
+              principles: ['verify'],
+            },
             behavior: { autonomy: null, escalation: null },
             instructions: 'Use only the deterministic mock runtime.',
           },
@@ -1603,7 +2949,12 @@ const postgresSuite = describe(
           runtimeId: task.runtimeId,
           assignmentRevision: task.assignmentRevision,
         },
-        { agentId: null, profileVersion: null, runtimeId: null, assignmentRevision: 1 },
+        {
+          agentId: null,
+          profileVersion: null,
+          runtimeId: null,
+          assignmentRevision: 1,
+        },
       );
       const input = {
         agentId: agent.agentId,
@@ -1704,11 +3055,19 @@ const postgresSuite = describe(
     it('lists only current project tasks with bounded pages and the latest safe run summary', async () => {
       const projects = new PostgresProjectManagementStore(authorizerPool!, Buffer.alloc(32, 23));
       const project = await projects.create(
-        { key: 'WORKSPACE', name: 'Workspace', objective: 'Read its task and run state.' },
+        {
+          key: 'WORKSPACE',
+          name: 'Workspace',
+          objective: 'Read its task and run state.',
+        },
         randomUUID(),
       );
       const otherProject = await projects.create(
-        { key: 'OTHER-WORKSPACE', name: 'Other workspace', objective: 'Keep task data isolated.' },
+        {
+          key: 'OTHER-WORKSPACE',
+          name: 'Other workspace',
+          objective: 'Keep task data isolated.',
+        },
         randomUUID(),
       );
       const workspaceStore = new PostgresRunStore(
@@ -1784,7 +3143,9 @@ const postgresSuite = describe(
         cancelledRun.run.id,
       ]);
 
-      const first = await workspaceStore.listProjectWorkspaceTasks(project.id, { limit: 2 });
+      const first = await workspaceStore.listProjectWorkspaceTasks(project.id, {
+        limit: 2,
+      });
       assert.equal(first.tasks.length, 2);
       assert.equal(first.page.complete, false);
       assert.equal(first.page.observedTotal, 4);
@@ -1826,7 +3187,11 @@ const postgresSuite = describe(
         [otherTask.id],
       );
       const emptyProject = await projects.create(
-        { key: 'EMPTY', name: 'Empty', objective: 'Return a complete empty page.' },
+        {
+          key: 'EMPTY',
+          name: 'Empty',
+          objective: 'Return a complete empty page.',
+        },
         randomUUID(),
       );
       assert.deepEqual(await workspaceStore.listProjectWorkspaceTasks(emptyProject.id, {}), {
@@ -1935,7 +3300,11 @@ const postgresSuite = describe(
       ]);
 
       const rejectedProject = await projects.create(
-        { key: 'REJECTED', name: 'Rejected', objective: 'No new run admission after archival.' },
+        {
+          key: 'REJECTED',
+          name: 'Rejected',
+          objective: 'No new run admission after archival.',
+        },
         randomUUID(),
       );
       const rejectedTask = await store.createTask(
@@ -1958,12 +3327,18 @@ const postgresSuite = describe(
         }),
         (error: unknown) => error instanceof StoreError && error.code === 'project_archived',
       );
-      const deniedState = await adminPool!.query<{ run_count: number; auth_status: string }>(
+      const deniedState = await adminPool!.query<{
+        run_count: number;
+        auth_status: string;
+      }>(
         `SELECT (SELECT count(*)::int FROM omnis.runs WHERE task_id=$1) AS run_count,
                 (SELECT status FROM omnis.runtime_authorizations WHERE id=$2) AS auth_status`,
         [rejectedTask.id, deniedAuthorizationId],
       );
-      assert.deepEqual(deniedState.rows[0], { run_count: 0, auth_status: 'authorized' });
+      assert.deepEqual(deniedState.rows[0], {
+        run_count: 0,
+        auth_status: 'authorized',
+      });
       await assert.rejects(
         pool!.query(
           "INSERT INTO omnis.runs (id, task_id, task_title) VALUES ('run-direct-archived', $1, $2)",
@@ -2109,11 +3484,17 @@ const postgresSuite = describe(
       assert.equal(secondPage.page.complete, true);
       assert.notEqual(firstPage.milestones[0]?.id, secondPage.milestones[0]?.id);
       const otherProject = await projects.create(
-        { key: 'MILESTONE-OTHER', name: 'Other project', objective: 'Test project scoping.' },
+        {
+          key: 'MILESTONE-OTHER',
+          name: 'Other project',
+          objective: 'Test project scoping.',
+        },
         randomUUID(),
       );
       await assert.rejects(
-        milestones.list(otherProject.id, { cursor: firstPage.page.nextCursor! }),
+        milestones.list(otherProject.id, {
+          cursor: firstPage.page.nextCursor!,
+        }),
         (error: unknown) => error instanceof MilestoneStoreError && error.code === 'invalid_cursor',
       );
       assert.equal((await milestones.get(project.id, first.id))?.id, first.id);
@@ -2346,7 +3727,11 @@ const postgresSuite = describe(
       const projects = new PostgresProjectManagementStore(authorizerPool!, Buffer.alloc(32, 23));
       const epics = new PostgresProjectEpicStore(authorizerPool!, Buffer.alloc(32, 23));
       const project = await projects.create(
-        { key: 'EPIC-V1', name: 'Epic test', objective: 'Exercise Epic lifecycle behavior.' },
+        {
+          key: 'EPIC-V1',
+          name: 'Epic test',
+          objective: 'Exercise Epic lifecycle behavior.',
+        },
         randomUUID(),
       );
       assert.deepEqual(await epics.list(project.id), {
@@ -2354,7 +3739,10 @@ const postgresSuite = describe(
         page: { observedTotal: 0, complete: true, nextCursor: null },
       });
       const requestId = randomUUID();
-      const input = { title: 'First epic', description: 'Synthetic scope only.' };
+      const input = {
+        title: 'First epic',
+        description: 'Synthetic scope only.',
+      };
       const [created, replay] = await Promise.all([
         epics.create(project.id, input, requestId),
         epics.create(project.id, input, requestId),
@@ -2433,7 +3821,10 @@ const postgresSuite = describe(
         ),
         (error: unknown) => error instanceof EpicStoreError && error.code === 'invalid_transition',
       );
-      const audit = await adminPool!.query<{ action: string; record: Record<string, unknown> }>(
+      const audit = await adminPool!.query<{
+        action: string;
+        record: Record<string, unknown>;
+      }>(
         `SELECT action, to_jsonb(audit) AS record FROM omnis.project_epic_management_audit audit WHERE epic_id = $1`,
         [created.id],
       );
@@ -2616,7 +4007,9 @@ const postgresSuite = describe(
         randomUUID(),
       );
 
-      const firstPage = await epics.listTasks(project.id, firstEpic.id, { limit: 1 });
+      const firstPage = await epics.listTasks(project.id, firstEpic.id, {
+        limit: 1,
+      });
       assert.equal(firstPage.tasks.length, 1);
       assert.equal(firstPage.page.observedTotal, 2);
       assert.equal(firstPage.page.complete, false);
@@ -2751,7 +4144,10 @@ const postgresSuite = describe(
       );
       const unlinked = await epics.setTaskEpic(
         movable.id,
-        { expectedAssociationRevision: movableLink.associationRevision, epicId: null },
+        {
+          expectedAssociationRevision: movableLink.associationRevision,
+          epicId: null,
+        },
         randomUUID(),
       );
       assert.equal(unlinked.associationRevision, movableLink.associationRevision + 1);
@@ -2826,7 +4222,10 @@ const postgresSuite = describe(
             epicRace[0].reason.code === 'invalid_transition',
         );
 
-      const audit = await adminPool!.query<{ action: string; record: Record<string, unknown> }>(
+      const audit = await adminPool!.query<{
+        action: string;
+        record: Record<string, unknown>;
+      }>(
         'SELECT audit.action, to_jsonb(audit) AS record FROM omnis.task_epic_management_audit AS audit WHERE audit.task_id = $1',
         [firstTask.id],
       );
@@ -2852,8 +4251,8 @@ const postgresSuite = describe(
                has_table_privilege('omnis_runtime','omnis.task_epic_associations','INSERT') AS runtime_relation_insert,
                has_table_privilege('omnis_authorizer','omnis.task_epic_associations','SELECT') AS authorizer_relation_select,
                has_table_privilege('omnis_authorizer','omnis.task_epic_associations','INSERT') AS authorizer_relation_insert,
-               has_function_privilege('omnis_runtime','omnis.set_task_epic(text,integer,text,uuid,bytea)','EXECUTE') AS runtime_mutation_function,
-               has_function_privilege('omnis_authorizer','omnis.set_task_epic(text,integer,text,uuid,bytea)','EXECUTE') AS authorizer_mutation_function
+               has_function_privilege('omnis_runtime','omnis.set_task_epic(text,integer,text,uuid,bytea,integer)','EXECUTE') AS runtime_mutation_function,
+               has_function_privilege('omnis_authorizer','omnis.set_task_epic(text,integer,text,uuid,bytea,integer)','EXECUTE') AS authorizer_mutation_function
       `);
       assert.deepEqual(permissions.rows[0], {
         runtime_relation_select: false,
@@ -2920,7 +4319,11 @@ const postgresSuite = describe(
     it('serializes concurrent edits, replays exact retries, and archives without hiding history', async () => {
       const projects = new PostgresProjectManagementStore(authorizerPool!, Buffer.alloc(32, 23));
       const created = await projects.create(
-        { key: 'LIFECYCLE', name: 'Lifecycle', objective: 'Exercise project lifecycle.' },
+        {
+          key: 'LIFECYCLE',
+          name: 'Lifecycle',
+          objective: 'Exercise project lifecycle.',
+        },
         randomUUID(),
       );
       assert.equal(created.revision, 1);
@@ -3003,7 +4406,11 @@ const postgresSuite = describe(
     it('rolls back the project revision and idempotency receipt if archive audit insertion fails', async () => {
       const projects = new PostgresProjectManagementStore(authorizerPool!, Buffer.alloc(32, 23));
       const created = await projects.create(
-        { key: 'ROLLBACK', name: 'Rollback', objective: 'Verify atomic archive behavior.' },
+        {
+          key: 'ROLLBACK',
+          name: 'Rollback',
+          objective: 'Verify atomic archive behavior.',
+        },
         randomUUID(),
       );
       const requestId = randomUUID();
@@ -3050,11 +4457,20 @@ const postgresSuite = describe(
     it('serializes an edit racing with archive and leaves unrelated tasks unchanged', async () => {
       const projects = new PostgresProjectManagementStore(authorizerPool!, Buffer.alloc(32, 23));
       const created = await projects.create(
-        { key: 'RACE', name: 'Race', objective: 'Exercise edit/archive concurrency.' },
+        {
+          key: 'RACE',
+          name: 'Race',
+          objective: 'Exercise edit/archive concurrency.',
+        },
         randomUUID(),
       );
       await adminPool!.query(
-        "INSERT INTO omnis.tasks (id, title, detail) VALUES ('task-project-lifecycle', 'Unrelated task', 'Project lifecycle must not change this task.')",
+        `BEGIN;
+         SELECT pg_advisory_xact_lock(70463909136600);
+         SELECT pg_advisory_xact_lock(70463909136525);
+         INSERT INTO omnis.tasks (id, title, detail)
+         VALUES ('task-project-lifecycle', 'Unrelated task', 'Project lifecycle must not change this task.');
+         COMMIT;`,
       );
       const outcomes = await Promise.allSettled([
         projects.update(created.id, { expectedRevision: 1, name: 'Updated in race' }, randomUUID()),
@@ -3168,7 +4584,9 @@ const postgresSuite = describe(
       assert.equal((await profiles.getVersion('agt_atlas', 1))?.version.instructions, 'Snapshot 1');
       assert.equal(await profiles.getVersion('agt_atlas', 99), null);
       assert.equal(await profiles.getVersion('agt_other', 1), null);
-      const fullHistory = await profiles.listVersions('agt_atlas', { limit: 100 });
+      const fullHistory = await profiles.listVersions('agt_atlas', {
+        limit: 100,
+      });
       assert.deepEqual(
         fullHistory?.versions.map((version) => version.versionNo),
         [3, 2, 1],
@@ -3257,7 +4675,10 @@ const postgresSuite = describe(
     });
 
     it('limits the runtime database role to reading profile tables and rejects malformed snapshots', async () => {
-      const privileges = await pool!.query<{ table_name: string; privilege_type: string }>(
+      const privileges = await pool!.query<{
+        table_name: string;
+        privilege_type: string;
+      }>(
         `SELECT table_name, privilege_type FROM information_schema.role_table_grants
           WHERE table_schema = 'omnis' AND grantee = 'omnis_runtime'
             AND table_name IN ('departments', 'agents', 'agent_profile_versions')
@@ -3455,9 +4876,21 @@ const postgresSuite = describe(
         [created.id],
       );
       assert.deepEqual(audit.rows, [
-        { action: 'created', actor_id: 'owner', request_id: 'authorizer-request-1' },
-        { action: 'updated', actor_id: 'owner', request_id: 'authorizer-request-2' },
-        { action: 'archived', actor_id: 'owner', request_id: 'authorizer-request-3' },
+        {
+          action: 'created',
+          actor_id: 'owner',
+          request_id: 'authorizer-request-1',
+        },
+        {
+          action: 'updated',
+          actor_id: 'owner',
+          request_id: 'authorizer-request-2',
+        },
+        {
+          action: 'archived',
+          actor_id: 'owner',
+          request_id: 'authorizer-request-3',
+        },
       ]);
       const createdAuditId = await adminPool!.query<{ id: string }>(
         `SELECT id FROM omnis.department_management_audit
@@ -3578,13 +5011,21 @@ const postgresSuite = describe(
         profession: 'Systems Analyst',
         seniority: null,
         specialties: ['systems'],
-        personality: { traits: ['careful'], tone: null, principles: ['verify'] },
+        personality: {
+          traits: ['careful'],
+          tone: null,
+          principles: ['verify'],
+        },
         behavior: { autonomy: null, escalation: null },
         instructions: 'Use verified evidence.',
       };
       const draft1 = await lifecycle.saveDraft(
         created.agentId,
-        { expectedDraftRevision: 0, baseVersionNo: null, profile: firstProfile },
+        {
+          expectedDraftRevision: 0,
+          baseVersionNo: null,
+          profile: firstProfile,
+        },
         randomUUID(),
       );
       assert.equal(draft1.draftRevision, 1);
@@ -3596,7 +5037,10 @@ const postgresSuite = describe(
       assert.equal(published1.versionNo, 1);
       assert.equal(published1.lifecycle, 'available');
 
-      const secondProfile = { ...firstProfile, instructions: 'Preserve prior snapshots.' };
+      const secondProfile = {
+        ...firstProfile,
+        instructions: 'Preserve prior snapshots.',
+      };
       await lifecycle.saveDraft(
         created.agentId,
         { expectedDraftRevision: 1, baseVersionNo: 1, profile: secondProfile },
@@ -3608,7 +5052,9 @@ const postgresSuite = describe(
         randomUUID(),
       );
       assert.equal(published2.versionNo, 2);
-      const history = await profiles.listVersions(created.agentId, { limit: 10 });
+      const history = await profiles.listVersions(created.agentId, {
+        limit: 10,
+      });
       assert.ok(history);
       assert.deepEqual(
         history.versions.map((version) => version.versionNo),
@@ -3620,7 +5066,10 @@ const postgresSuite = describe(
 
       const archived = await lifecycle.archive(created.agentId, randomUUID());
       assert.equal(archived.lifecycle, 'archived');
-      const audit = await adminPool!.query<{ action: string; actor_id: string }>(
+      const audit = await adminPool!.query<{
+        action: string;
+        actor_id: string;
+      }>(
         `SELECT action, actor_id FROM omnis.agent_management_audit
           WHERE agent_id=$1 ORDER BY occurred_at, id`,
         [created.agentId],
@@ -3633,7 +5082,11 @@ const postgresSuite = describe(
       await assert.rejects(
         lifecycle.saveDraft(
           created.agentId,
-          { expectedDraftRevision: 2, baseVersionNo: 2, profile: secondProfile },
+          {
+            expectedDraftRevision: 2,
+            baseVersionNo: 2,
+            profile: secondProfile,
+          },
           randomUUID(),
         ),
         (error: unknown) =>
@@ -3648,11 +5101,18 @@ const postgresSuite = describe(
       const lifecycle = new PostgresAgentLifecycleStore(authorizerPool!, Buffer.alloc(32, 29));
       const departments = new PostgresDepartmentManagementStore(authorizerPool!);
       const active = await departments.create(
-        { slug: `active-${randomUUID().slice(0, 8)}`, name: 'Active Department' },
+        {
+          slug: `active-${randomUUID().slice(0, 8)}`,
+          name: 'Active Department',
+        },
         randomUUID(),
       );
       const assigned = await lifecycle.createAgent(
-        { name: 'Assigned', slug: `assigned-${randomUUID().slice(0, 8)}`, departmentId: active.id },
+        {
+          name: 'Assigned',
+          slug: `assigned-${randomUUID().slice(0, 8)}`,
+          departmentId: active.id,
+        },
         randomUUID(),
       );
       const listed = await new PostgresAgentProfileStore(
@@ -3665,7 +5125,10 @@ const postgresSuite = describe(
       );
 
       const archivedDepartment = await departments.create(
-        { slug: `archived-${randomUUID().slice(0, 8)}`, name: 'Archived Department' },
+        {
+          slug: `archived-${randomUUID().slice(0, 8)}`,
+          name: 'Archived Department',
+        },
         randomUUID(),
       );
       await departments.archive(archivedDepartment.id, randomUUID());
@@ -3746,10 +5209,11 @@ const postgresSuite = describe(
       }
 
       const secret = 'password: "synthetic-secret-value-123';
-      const auditsBeforeRejectedInput = await adminPool!.query<{ count: string }>(
-        'SELECT count(*)::text AS count FROM omnis.agent_management_audit WHERE agent_id=$1',
-        [created.agentId],
-      );
+      const auditsBeforeRejectedInput = await adminPool!.query<{
+        count: string;
+      }>('SELECT count(*)::text AS count FROM omnis.agent_management_audit WHERE agent_id=$1', [
+        created.agentId,
+      ]);
       await assert.rejects(
         lifecycle.saveDraft(
           created.agentId,
@@ -3767,10 +5231,11 @@ const postgresSuite = describe(
           return true;
         },
       );
-      const auditsAfterRejectedInput = await adminPool!.query<{ count: string }>(
-        'SELECT count(*)::text AS count FROM omnis.agent_management_audit WHERE agent_id=$1',
-        [created.agentId],
-      );
+      const auditsAfterRejectedInput = await adminPool!.query<{
+        count: string;
+      }>('SELECT count(*)::text AS count FROM omnis.agent_management_audit WHERE agent_id=$1', [
+        created.agentId,
+      ]);
       assert.equal(
         auditsAfterRejectedInput.rows[0]?.count,
         auditsBeforeRejectedInput.rows[0]?.count,
@@ -3870,7 +5335,11 @@ const postgresSuite = describe(
                   current_setting('statement_timeout') AS statement,
                   current_setting('idle_in_transaction_session_timeout') AS idle`,
         );
-        assert.deepEqual(runtime.rows[0], { lock: '3s', statement: '20s', idle: '20s' });
+        assert.deepEqual(runtime.rows[0], {
+          lock: '3s',
+          statement: '20s',
+          idle: '20s',
+        });
         const authorizer = await authorizerFreshPool.query<{
           lock: string;
           statement: string;
@@ -3880,7 +5349,11 @@ const postgresSuite = describe(
                   current_setting('statement_timeout') AS statement,
                   current_setting('idle_in_transaction_session_timeout') AS idle`,
         );
-        assert.deepEqual(authorizer.rows[0], { lock: '3s', statement: '15s', idle: '20s' });
+        assert.deepEqual(authorizer.rows[0], {
+          lock: '3s',
+          statement: '15s',
+          idle: '20s',
+        });
         const launcher = await launcherFreshPool.query<{
           lock: string;
           statement: string;
@@ -3890,7 +5363,11 @@ const postgresSuite = describe(
                   current_setting('statement_timeout') AS statement,
                   current_setting('idle_in_transaction_session_timeout') AS idle`,
         );
-        assert.deepEqual(launcher.rows[0], { lock: '3s', statement: '10s', idle: '10s' });
+        assert.deepEqual(launcher.rows[0], {
+          lock: '3s',
+          statement: '10s',
+          idle: '10s',
+        });
 
         await runtimeFreshPool.query("SET lock_timeout = '0'");
         assert.equal(
@@ -4114,7 +5591,10 @@ const postgresSuite = describe(
           throw new Error('Timed out waiting for the idle-pool child to connect.');
         }),
       ]);
-      const ready = JSON.parse(firstLine.value as string) as { ready: boolean; pid: number };
+      const ready = JSON.parse(firstLine.value as string) as {
+        ready: boolean;
+        pid: number;
+      };
       assert.equal(ready.ready, true);
       await adminPool!.query('SELECT pg_terminate_backend($1)', [ready.pid]);
       const secondLine = await Promise.race([
@@ -4186,7 +5666,10 @@ const postgresSuite = describe(
         const pid = (await idleLockClient.query<{ pid: number }>('SELECT pg_backend_pid() AS pid'))
           .rows[0]!.pid;
         await delay(300);
-        const state = await adminPool!.query<{ present: boolean; lock_held: boolean }>(
+        const state = await adminPool!.query<{
+          present: boolean;
+          lock_held: boolean;
+        }>(
           `SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid=$1) AS present,
                   EXISTS (SELECT 1 FROM pg_locks WHERE pid=$1 AND locktype='advisory' AND granted) AS lock_held`,
           [pid],
@@ -4815,30 +6298,48 @@ const postgresSuite = describe(
           detail: 'Synthetic fixture carrying migration-created legacy provenance.',
         });
         const runId = `legacy-${suffix}-${nextKey}`;
-        await adminPool!.query(
-          `INSERT INTO omnis.runs (
-             id, task_id, task_title, status, execution_generation, lease_owner,
-             lease_expires_at, last_event_sequence
-           ) VALUES ($1,$2,$3,$4,$5,$6,$7,1)`,
-          [
-            runId,
-            task.id,
-            task.title,
-            status,
-            status === 'running' ? 3 : 0,
-            status === 'running' ? `legacy-worker-${suffix}` : null,
-            status === 'running' ? new Date(Date.now() + 60_000) : null,
-          ],
-        );
-        await adminPool!.query(
-          `INSERT INTO omnis.run_events (id, run_id, sequence, event_type, message)
-           VALUES ($1,$2,1,'run.queued','Synthetic pre-authorization queued event.')`,
-          [`event-${runId}`, runId],
-        );
-        await adminPool!.query(
-          `INSERT INTO omnis.legacy_unscoped_runs (run_id, task_id) VALUES ($1,$2)`,
-          [runId, task.id],
-        );
+        const client = await adminPool!.connect();
+        try {
+          await client.query('BEGIN');
+          await client.query('SELECT pg_advisory_xact_lock(70463909136600)');
+          await client.query('SELECT pg_advisory_xact_lock(70463909136525)');
+          await client.query(
+            `INSERT INTO omnis.runs (
+               id, task_id, task_title, status, execution_generation, lease_owner,
+               lease_expires_at, last_event_sequence
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,1)`,
+            [
+              runId,
+              task.id,
+              task.title,
+              status,
+              status === 'running' ? 3 : 0,
+              status === 'running' ? `legacy-worker-${suffix}` : null,
+              status === 'running' ? new Date(Date.now() + 60_000) : null,
+            ],
+          );
+          const sourceEventType =
+            status === 'running'
+              ? 'run.started'
+              : status === 'stopping'
+                ? 'run.stop_requested'
+                : 'run.queued';
+          await client.query(
+            `INSERT INTO omnis.run_events (id, run_id, sequence, event_type, message)
+             VALUES ($1,$2,1,$3,'Synthetic pre-authorization lifecycle event.')`,
+            [`event-${runId}`, runId, sourceEventType],
+          );
+          await client.query(
+            `INSERT INTO omnis.legacy_unscoped_runs (run_id, task_id) VALUES ($1,$2)`,
+            [runId, task.id],
+          );
+          await client.query('COMMIT');
+        } catch (error) {
+          await client.query('ROLLBACK').catch(() => undefined);
+          throw error;
+        } finally {
+          client.release();
+        }
         return { task, runId, workerId: `legacy-worker-${suffix}` };
       };
 
@@ -5656,9 +7157,10 @@ const postgresSuite = describe(
     });
 
     it('restricts the authorizer database role to authorization records and audit writes', async () => {
-      const identity = await authorizerPool!.query<{ current_user: string; rolsuper: boolean }>(
-        'SELECT current_user, r.rolsuper FROM pg_roles r WHERE r.rolname=current_user',
-      );
+      const identity = await authorizerPool!.query<{
+        current_user: string;
+        rolsuper: boolean;
+      }>('SELECT current_user, r.rolsuper FROM pg_roles r WHERE r.rolname=current_user');
       assert.equal(identity.rows[0]?.current_user, 'omnis_authorizer');
       assert.equal(identity.rows[0]?.rolsuper, false);
       await assert.rejects(
@@ -5876,7 +7378,10 @@ const postgresSuite = describe(
     });
 
     it('detects deliberately stale task and run sequences against existing identifiers', async () => {
-      const task = await store.createTask({ title: 'Sequence fixture', detail: 'Task ID check.' });
+      const task = await store.createTask({
+        title: 'Sequence fixture',
+        detail: 'Task ID check.',
+      });
       const admitted = await admit(task.id, key('sequence-integrity'), async () => 'job');
 
       await adminPool!.query("SELECT setval('omnis.task_id_seq', 1, false)");
@@ -6051,6 +7556,17 @@ const postgresSuite = describe(
         events.map((event) => event.type),
         ['run.queued', 'run.started', 'run.stop_requested', 'run.cancelled'],
       );
+      const stopProvenance = await adminPool!.query<{
+        event_type: string;
+        actor: string;
+        origin: string;
+      }>(
+        "SELECT event_type, actor, origin FROM omnis.mission_lane_events WHERE run_id=$1 AND event_type='run.stop_requested'",
+        [admitted.run.id],
+      );
+      assert.deepEqual(stopProvenance.rows, [
+        { event_type: 'run.stop_requested', actor: 'service:omnis-worker', origin: 'mock-worker' },
+      ]);
       assert.equal((await store.getEvents(admitted.run.id, 2)).length, 2);
     });
 
@@ -6336,7 +7852,7 @@ const postgresSuite = describe(
 
     after(async () => {
       if (pool && databaseUrl) {
-        assertTestDatabase(databaseUrl);
+        assertTestDatabase(databaseUrl, migrationUrl!, adminUrl!, authorizerUrl!, launcherUrl!);
         await adminPool!.query(`
         TRUNCATE omnis.test_queue_outbox, omnis.connector_authorization_audit,
           omnis.connector_execution_attempts, omnis.connector_authorizations,
@@ -6352,8 +7868,11 @@ const postgresSuite = describe(
           omnis.agent_profile_versions, omnis.agents, omnis.departments,
           omnis.mock_sandbox_launches, omnis.legacy_unscoped_runs, omnis.authorization_audit,
           omnis.runtime_authorizations, omnis.run_idempotency,
-          omnis.run_events, omnis.runs, omnis.tasks
+          omnis.mission_lane_events, omnis.run_events, omnis.runs, omnis.tasks
       `);
+        await adminPool!.query(
+          'UPDATE omnis.mission_lane_clock SET feed_epoch = gen_random_uuid(), last_global_sequence = 0, history_started_at = clock_timestamp(), history_start_sequence = 1 WHERE singleton',
+        );
         await adminPool!.query('ALTER SEQUENCE omnis.task_id_seq RESTART WITH 1');
         await adminPool!.query('ALTER SEQUENCE omnis.run_id_seq RESTART WITH 1');
         await adminPool!.query('DROP TABLE IF EXISTS omnis.test_queue_outbox');
@@ -6462,9 +7981,45 @@ async function waitForLockWaitOrCompletion(
   return isSettled() ? 'completed' : 'timeout';
 }
 
-function assertTestDatabase(connectionString: string): void {
-  const databaseName = new URL(connectionString).pathname.slice(1);
-  if (!/(?:^|[_-])test(?:s)?$/i.test(databaseName)) {
-    throw new Error('OMNIS_TEST_DATABASE_URL must point to a database ending in test or tests.');
+describe('PostgreSQL test database URL guard', () => {
+  it('requires every configured role URL to target the same test database', () => {
+    assert.doesNotThrow(() =>
+      assertTestDatabase(
+        'postgres://runtime:pass@localhost/omnis_test',
+        'postgres://admin:pass@localhost/omnis_test',
+        'postgres://migrator:pass@localhost/omnis_test',
+      ),
+    );
+    assert.throws(
+      () =>
+        assertTestDatabase(
+          'postgres://runtime:pass@localhost/omnis_test',
+          'postgres://admin:pass@localhost/omnis',
+        ),
+      /same database ending in test or tests/i,
+    );
+    assert.throws(
+      () =>
+        assertTestDatabase(
+          'postgres://runtime:pass@localhost/omnis_test',
+          'postgres://admin:pass@localhost/omnis_other_test',
+        ),
+      /same database ending in test or tests/i,
+    );
+  });
+});
+
+function assertTestDatabase(...connectionStrings: string[]): void {
+  const databaseNames = connectionStrings.map((connectionString) =>
+    new URL(connectionString).pathname.slice(1),
+  );
+  if (
+    databaseNames.length === 0 ||
+    databaseNames.some((databaseName) => !/(?:^|[_-])test(?:s)?$/i.test(databaseName)) ||
+    new Set(databaseNames).size !== 1
+  ) {
+    throw new Error(
+      'All OMNIS_TEST_* database URLs must target the same database ending in test or tests.',
+    );
   }
 }

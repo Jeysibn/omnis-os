@@ -7,6 +7,15 @@ export const metricsQuery = `SELECT json_build_object(
     FROM (SELECT status, count(*) AS run_count FROM omnis.runs GROUP BY status) statuses
   ),
   'events', (SELECT count(*) FROM omnis.run_events),
+  'missionLane', json_build_object(
+    'eventCount', (SELECT count(*)::text FROM omnis.mission_lane_events),
+    'lastGlobalSequence', (SELECT last_global_sequence::text FROM omnis.mission_lane_clock WHERE singleton),
+    'feedEpoch', (SELECT feed_epoch FROM omnis.mission_lane_clock WHERE singleton),
+    'historyStartedAt', (SELECT history_started_at FROM omnis.mission_lane_clock WHERE singleton),
+    'historyStartSequence', (SELECT history_start_sequence FROM omnis.mission_lane_clock WHERE singleton),
+    'sequenceInvariant', (SELECT last_global_sequence = (SELECT count(*) FROM omnis.mission_lane_events)
+      FROM omnis.mission_lane_clock WHERE singleton)
+  ),
   'eventTypes', (
     SELECT COALESCE(json_object_agg(event_type, event_count), '{}'::json)
     FROM (SELECT event_type, count(*) AS event_count FROM omnis.run_events GROUP BY event_type) types
@@ -38,6 +47,7 @@ export const metricsQuery = `SELECT json_build_object(
     'tasks', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(t)::text), ':' ORDER BY t.id), '')) FROM omnis.tasks t),
     'runs', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(r)::text), ':' ORDER BY r.id), '')) FROM omnis.runs r),
     'events', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(e)::text), ':' ORDER BY e.run_id, e.sequence), '')) FROM omnis.run_events e),
+    'missionLane', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(e)::text), ':' ORDER BY e.global_sequence), '')) FROM omnis.mission_lane_events e),
     'idempotency', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(i)::text), ':' ORDER BY i.idempotency_key), '')) FROM omnis.run_idempotency i),
     'departments', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(d)::text), ':' ORDER BY d.id), '')) FROM omnis.departments d),
     'agents', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(a)::text), ':' ORDER BY a.id), '')) FROM omnis.agents a),
@@ -120,6 +130,11 @@ export function parseMetrics(output) {
 }
 
 export function assertValidMetrics(report) {
+  if (!validMissionLaneMetrics(report?.missionLane)) {
+    throw new Error(
+      `Database Mission Lane ledger metrics are invalid: ${JSON.stringify(report?.missionLane)}.`,
+    );
+  }
   if (
     !Array.isArray(report.migrations) ||
     !report.migrations.includes('0001_initial') ||
@@ -129,6 +144,7 @@ export function assertValidMetrics(report) {
     !report.migrations.includes('0017_task_project_admission') ||
     !report.migrations.includes('0026_task_execution_assignment') ||
     !report.migrations.includes('0027_agent_identity_management') ||
+    !report.migrations.includes('0029_mission_lane_events') ||
     !validAgentManagementCounts(report.agentManagementCounts) ||
     !validProjectManagementCounts(report.projectManagementCounts) ||
     !validTaskProjectManagementCounts(report.taskProjectManagementCounts) ||
@@ -142,6 +158,24 @@ export function assertValidMetrics(report) {
   ) {
     throw new Error('Database did not satisfy Omnis backup invariants.');
   }
+}
+
+function validMissionLaneMetrics(value) {
+  return (
+    value &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    typeof value.eventCount === 'string' &&
+    /^\d+$/.test(value.eventCount) &&
+    typeof value.lastGlobalSequence === 'string' &&
+    /^\d+$/.test(value.lastGlobalSequence) &&
+    BigInt(value.lastGlobalSequence) === BigInt(value.eventCount) &&
+    typeof value.feedEpoch === 'string' &&
+    /^[0-9a-f-]{36}$/i.test(value.feedEpoch) &&
+    typeof value.historyStartedAt === 'string' &&
+    value.historyStartSequence === 1 &&
+    value.sequenceInvariant === true
+  );
 }
 
 function validProjectManagementCounts(value) {
@@ -214,6 +248,7 @@ export function metricsMatch(source, restored) {
     'projectManagementCounts',
     'taskProjectManagementCounts',
     'taskExecutionAssignmentCounts',
+    'missionLane',
     'recordFingerprints',
   ]) {
     if (JSON.stringify(canonical(source[key])) !== JSON.stringify(canonical(restored[key]))) {
@@ -257,6 +292,7 @@ function validManagementFingerprints(value) {
     'taskProjectManagementIdempotency',
     'taskExecutionAssignmentAudit',
     'taskExecutionAssignmentIdempotency',
+    'missionLane',
   ].every((key) => typeof value[key] === 'string' && /^[a-f0-9]{32}$/.test(value[key]));
 }
 
