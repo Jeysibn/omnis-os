@@ -5,6 +5,8 @@ import {
   SetTaskProjectSchema,
   TaskIdSchema,
   TaskSchema,
+  AcceptTaskResultRequestSchema,
+  TaskResultAcceptanceResponseSchema,
 } from '@omnis/contracts';
 import { requireMutationProtection, requireOwner } from './auth.ts';
 import { parseTaskList, workerRequest } from './worker-client.ts';
@@ -95,6 +97,30 @@ export function registerTaskRoutes(app: FastifyInstance, request: WorkerRequest 
         (value) => TaskSchema.parse(value),
       );
       return reply.send(task);
+    },
+  );
+
+  app.post<{ Params: { taskId: string } }>(
+    '/api/v1/tasks/:taskId/accept-result',
+    { preHandler: [requireOwner, requireMutationProtection] },
+    async (httpRequest, reply) => {
+      const taskId = TaskIdSchema.safeParse(httpRequest.params.taskId);
+      const body = AcceptTaskResultRequestSchema.safeParse(httpRequest.body);
+      const requestId = parseIdempotencyKey(httpRequest.headers['idempotency-key']);
+      if (!taskId.success || !body.success || !requestId) {
+        return reply.code(400).send({
+          error: { code: 'invalid_input', message: 'Task result acceptance input is invalid.' },
+        });
+      }
+      return request(
+        `/internal/v1/tasks/${encodeURIComponent(taskId.data)}/accept-result`,
+        {
+          method: 'POST',
+          headers: { 'idempotency-key': requestId },
+          body: JSON.stringify(body.data),
+        },
+        (value) => TaskResultAcceptanceResponseSchema.parse(value),
+      );
     },
   );
 }

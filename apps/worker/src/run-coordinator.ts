@@ -5,6 +5,7 @@ import type { FindJobsOptions, JobWithMetadata, SendOptions } from 'pg-boss';
 import { StoreError, type DurableEvent, type PostgresRunStore } from '@omnis/db';
 import {
   CreateTaskSchema,
+  AcceptTaskResultRequestSchema,
   RunEventSchema,
   RunSchema,
   ProjectWorkspaceQuerySchema,
@@ -17,6 +18,7 @@ import {
   type Run,
   type RunEvent,
   type Task,
+  type TaskResultAcceptanceResponse,
 } from '@omnis/contracts';
 import { evaluateAllowedUse } from '@omnis/policy';
 import type { RuntimeAuthorizationReader } from '@omnis/db';
@@ -123,6 +125,17 @@ export class RunCoordinator {
     return translateStoreError(() =>
       this.store.setTaskExecutionAssignment(taskId, parsed.data, requestId),
     );
+  }
+
+  async acceptTaskResult(
+    taskId: string,
+    inputValue: unknown,
+    requestId: string,
+  ): Promise<TaskResultAcceptanceResponse> {
+    const parsed = AcceptTaskResultRequestSchema.safeParse(inputValue);
+    if (!parsed.success)
+      throw new CoordinatorError('invalid_input', 'Task result acceptance input is invalid.', 400);
+    return translateStoreError(() => this.store.acceptTaskResult(taskId, parsed.data, requestId));
   }
 
   async listTasks(): Promise<Task[]> {

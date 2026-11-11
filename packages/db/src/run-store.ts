@@ -9,11 +9,14 @@ import {
   SetTaskProjectSchema,
   TaskIdSchema,
   TaskSchema,
+  AcceptTaskResultRequestSchema,
+  TaskResultAcceptanceResponseSchema,
   type CreateTaskInput,
   type Run,
   type RunEvent,
   type RunEventType,
   type Task,
+  type TaskResultAcceptanceResponse,
   type ProjectWorkspaceTaskPage,
 } from '@omnis/contracts';
 import {
@@ -74,6 +77,9 @@ type TaskRow = QueryResultRow & {
   execution_profile_version_no?: number | string | null;
   execution_runtime_id?: 'mock' | null;
   execution_assignment_revision?: number | string;
+  acceptance_run_id?: string | null;
+  acceptance_accepted_at?: Date | string | null;
+  acceptance_request_id?: string | null;
 };
 
 type RunRow = QueryResultRow & {
@@ -349,7 +355,19 @@ export class PostgresRunStore {
 
   async listTasks(): Promise<Task[]> {
     const result = await this.pool.query<TaskRow>(
-      'SELECT id, title, detail, status, created_at, project_id, association_revision, execution_agent_id, execution_profile_version_no, execution_runtime_id, execution_assignment_revision FROM omnis.tasks ORDER BY created_at DESC, id DESC',
+      `SELECT t.id, t.title, t.detail, t.status, t.created_at, t.project_id,
+        t.association_revision, t.execution_agent_id, t.execution_profile_version_no,
+        t.execution_runtime_id, t.execution_assignment_revision,
+        a.run_id AS acceptance_run_id, a.accepted_at AS acceptance_accepted_at,
+        a.request_id AS acceptance_request_id
+       FROM omnis.tasks t LEFT JOIN LATERAL (
+         SELECT run_id, accepted_at, request_id FROM omnis.task_result_acceptances
+          WHERE task_id=t.id AND run_id=(
+            SELECT id FROM omnis.runs WHERE task_id=t.id
+             ORDER BY created_at DESC, id DESC LIMIT 1
+          ) LIMIT 1
+       ) a ON true
+       ORDER BY t.created_at DESC, t.id DESC`,
     );
     return result.rows.map(mapTask);
   }
@@ -452,10 +470,49 @@ export class PostgresRunStore {
 
   async getTask(taskId: string): Promise<Task | undefined> {
     const result = await this.pool.query<TaskRow>(
-      'SELECT id, title, detail, status, created_at, project_id, association_revision, execution_agent_id, execution_profile_version_no, execution_runtime_id, execution_assignment_revision FROM omnis.tasks WHERE id = $1',
+      `SELECT t.id, t.title, t.detail, t.status, t.created_at, t.project_id,
+        t.association_revision, t.execution_agent_id, t.execution_profile_version_no,
+        t.execution_runtime_id, t.execution_assignment_revision,
+        a.run_id AS acceptance_run_id, a.accepted_at AS acceptance_accepted_at,
+        a.request_id AS acceptance_request_id
+       FROM omnis.tasks t LEFT JOIN LATERAL (
+         SELECT run_id, accepted_at, request_id FROM omnis.task_result_acceptances
+          WHERE task_id=t.id AND run_id=(
+            SELECT id FROM omnis.runs WHERE task_id=t.id
+             ORDER BY created_at DESC, id DESC LIMIT 1
+          ) LIMIT 1
+       ) a ON true
+       WHERE t.id = $1`,
       [taskId],
     );
     return result.rows[0] ? mapTask(result.rows[0]) : undefined;
+  }
+
+  async acceptTaskResult(
+    taskIdValue: string,
+    inputValue: unknown,
+    requestId: string,
+  ): Promise<TaskResultAcceptanceResponse> {
+    const taskId = TaskIdSchema.safeParse(taskIdValue);
+    const input = AcceptTaskResultRequestSchema.safeParse(inputValue);
+    if (!taskId.success || !input.success || !isUuid(requestId))
+      throw new StoreError('invalid_input', 'Task result acceptance input is invalid.', 400);
+    try {
+      return await inMissionLaneTransaction(
+        this.writerPool,
+        async (client, deadline) => {
+          await lockMissionLaneWriter(client, deadline, 'critical');
+          const result = await client.query<{ result: unknown }>(
+            'SELECT omnis.accept_task_result($1,$2,$3) AS result',
+            [taskId.data, input.data.runId, requestId],
+          );
+          return TaskResultAcceptanceResponseSchema.parse(result.rows[0]?.result);
+        },
+        'critical',
+      );
+    } catch (error) {
+      return mapStoreError(error);
+    }
   }
 
   async admitRun(
@@ -792,7 +849,7 @@ export class PostgresRunStore {
         );
         await client.query('UPDATE omnis.tasks SET status=$2 WHERE id=$1', [
           current.task_id,
-          status === 'completed' ? 'completed' : 'open',
+          status === 'completed' ? 'in_review' : 'open',
         ]);
         const event = await appendEvent(
           client,
@@ -1014,7 +1071,7 @@ export class PostgresRunStore {
         if (!updated.rows[0])
           throw new StoreError('conflict', 'The worker lost its Run lease.', 409);
         if (nextStatus === 'completed') {
-          await client.query("UPDATE omnis.tasks SET status='completed' WHERE id=$1", [
+          await client.query("UPDATE omnis.tasks SET status='in_review' WHERE id=$1", [
             current.task_id,
           ]);
         } else if (nextStatus !== 'unknown') {
@@ -1411,7 +1468,7 @@ export class PostgresRunStore {
         `,
           [runId, workerId, output, JSON.stringify(evidenceRefs), generation],
         );
-        await client.query("UPDATE omnis.tasks SET status = 'completed' WHERE id = $1", [
+        await client.query("UPDATE omnis.tasks SET status = 'in_review' WHERE id = $1", [
           current.task_id,
         ]);
         const event = await appendEvent(client, runId, 'run.completed', output);
@@ -1848,6 +1905,15 @@ function mapTask(row: TaskRow): Task {
       row.execution_profile_version_no == null ? null : Number(row.execution_profile_version_no),
     runtimeId: row.execution_runtime_id ?? null,
     assignmentRevision: Number(row.execution_assignment_revision ?? 1),
+    resultAcceptance:
+      row.acceptance_run_id && row.acceptance_accepted_at && row.acceptance_request_id
+        ? {
+            runId: row.acceptance_run_id,
+            acceptedBy: 'owner',
+            acceptedAt: asIso(row.acceptance_accepted_at),
+            requestId: row.acceptance_request_id,
+          }
+        : null,
   });
 }
 
@@ -1870,7 +1936,13 @@ function mapStoreError(error: unknown): never {
       'Archived-project task associations cannot be changed or admitted to run.',
       409,
     );
-  if (code === 'P2002' || code === 'P2003' || code === '23505' || code === '40001')
+  if (
+    code === 'P2002' ||
+    code === 'P2003' ||
+    code === 'P2005' ||
+    code === '23505' ||
+    code === '40001'
+  )
     throw new StoreError(
       'conflict',
       'Task association or execution assignment conflicts with current state.',

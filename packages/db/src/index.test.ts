@@ -96,7 +96,7 @@ const postgresSuite = describe(
         'GRANT SELECT, INSERT, UPDATE, DELETE ON omnis.test_queue_outbox TO omnis_runtime',
       );
       await adminPool!.query(
-        'TRUNCATE omnis.test_queue_outbox, omnis.mission_lane_events, omnis.connector_authorization_audit, omnis.connector_execution_attempts, omnis.connector_authorizations, omnis.task_execution_assignment_idempotency, omnis.task_execution_assignment_audit, omnis.task_project_management_idempotency, omnis.task_epic_management_audit, omnis.task_epic_associations, omnis.task_project_management_audit, omnis.project_epic_management_audit, omnis.project_epics, omnis.project_milestone_management_audit, omnis.project_milestones, omnis.project_management_idempotency, omnis.project_management_audit, omnis.projects, omnis.agent_management_idempotency, omnis.agent_management_audit, omnis.agent_profile_drafts, omnis.department_management_audit, omnis.agent_profile_versions, omnis.agents, omnis.departments, omnis.mock_sandbox_launches, omnis.legacy_unscoped_runs, omnis.authorization_audit, omnis.runtime_authorizations, omnis.run_idempotency, omnis.run_events, omnis.runs, omnis.tasks',
+        'TRUNCATE omnis.test_queue_outbox, omnis.mission_lane_events, omnis.connector_authorization_audit, omnis.connector_execution_attempts, omnis.connector_authorizations, omnis.task_result_acceptances, omnis.task_execution_assignment_idempotency, omnis.task_execution_assignment_audit, omnis.task_project_management_idempotency, omnis.task_epic_management_audit, omnis.task_epic_associations, omnis.task_project_management_audit, omnis.project_epic_management_audit, omnis.project_epics, omnis.project_milestone_management_audit, omnis.project_milestones, omnis.project_management_idempotency, omnis.project_management_audit, omnis.projects, omnis.agent_management_idempotency, omnis.agent_management_audit, omnis.agent_profile_drafts, omnis.department_management_audit, omnis.agent_profile_versions, omnis.agents, omnis.departments, omnis.mock_sandbox_launches, omnis.legacy_unscoped_runs, omnis.authorization_audit, omnis.runtime_authorizations, omnis.run_idempotency, omnis.run_events, omnis.runs, omnis.tasks',
       );
       await adminPool!.query(
         'UPDATE omnis.mission_lane_clock SET feed_epoch = gen_random_uuid(), last_global_sequence = 0, history_started_at = clock_timestamp() WHERE singleton',
@@ -7586,6 +7586,8 @@ const postgresSuite = describe(
         [],
       );
       assert.equal(completed.run.status, 'completed');
+      assert.equal((await store.getTask(task.id))?.status, 'in_review');
+      assert.equal((await store.getTask(task.id))?.resultAcceptance, null);
       assert.deepEqual(
         (await store.getEvents(admitted.run.id)).map((event) => event.type),
         ['run.queued', 'run.started', 'run.completed'],
@@ -7600,6 +7602,214 @@ const postgresSuite = describe(
         ),
         (error: unknown) => error instanceof StoreError && error.code === 'invalid_transition',
       );
+    });
+
+    it('accepts only the current successful result once and records owner provenance atomically', async () => {
+      const task = await store.createTask({
+        title: 'Owner result acceptance',
+        detail: 'Completion requires a separate owner action.',
+      });
+      const admitted = await admit(task.id, key('owner-accept-result'), async () => 'job');
+      const claim = await store.beginExecution(admitted.run.id, 'worker-acceptance', 30);
+      await store.completeRun(
+        admitted.run.id,
+        'worker-acceptance',
+        claim.generation,
+        'Synthetic result.',
+      );
+
+      const requestId = randomUUID();
+      const competingRequestId = randomUUID();
+      const [firstAttempt, secondAttempt] = await Promise.all([
+        store.acceptTaskResult(task.id, { runId: admitted.run.id }, requestId),
+        store.acceptTaskResult(task.id, { runId: admitted.run.id }, competingRequestId),
+      ]);
+      const accepted = firstAttempt.created ? firstAttempt : secondAttempt;
+      const duplicate = firstAttempt.created ? secondAttempt : firstAttempt;
+      assert.equal(Number(firstAttempt.created) + Number(secondAttempt.created), 1);
+      assert.equal(accepted.task.status, 'completed');
+      assert.equal(accepted.acceptance.runId, admitted.run.id);
+      assert.equal(accepted.acceptance.acceptedBy, 'owner');
+      assert.ok(
+        accepted.acceptance.requestId === requestId ||
+          accepted.acceptance.requestId === competingRequestId,
+      );
+      const recoveredPool = createPool(databaseUrl!);
+      try {
+        const recoveredTask = await new PostgresRunStore(recoveredPool).getTask(task.id);
+        assert.equal(recoveredTask?.resultAcceptance?.runId, admitted.run.id);
+        assert.deepEqual(recoveredTask?.resultAcceptance, accepted.acceptance);
+      } finally {
+        await recoveredPool.end();
+      }
+      await assert.rejects(
+        pool!.query(
+          `INSERT INTO omnis.task_result_acceptances(task_id, run_id, request_id)
+           VALUES ($1, $2, $3)`,
+          [task.id, admitted.run.id, randomUUID()],
+        ),
+        /permission denied/,
+      );
+
+      assert.equal(duplicate.created, false);
+      assert.deepEqual(duplicate.acceptance, accepted.acceptance);
+      const events = await adminPool!.query<{
+        global_sequence: string;
+        event_type: string;
+        actor: string;
+        origin: string;
+        synthetic: boolean;
+        payload: { from: string; to: string; runId: string };
+      }>(
+        `SELECT global_sequence::text, event_type, actor, origin, synthetic, payload
+           FROM omnis.mission_lane_events WHERE task_id=$1 AND event_type='task.status_changed'
+          ORDER BY global_sequence::bigint`,
+        [task.id],
+      );
+      const acceptanceEvent = events.rows.at(-1)!;
+      assert.deepEqual(
+        {
+          event_type: acceptanceEvent.event_type,
+          actor: acceptanceEvent.actor,
+          origin: acceptanceEvent.origin,
+          synthetic: acceptanceEvent.synthetic,
+          payload: acceptanceEvent.payload,
+        },
+        {
+          event_type: 'task.status_changed',
+          actor: 'owner',
+          origin: 'api',
+          synthetic: false,
+          payload: { from: 'in_review', to: 'completed', runId: admitted.run.id },
+        },
+      );
+      const runCompleted = await adminPool!.query<{ global_sequence: string }>(
+        `SELECT global_sequence::text FROM omnis.mission_lane_events
+          WHERE run_id=$1 AND event_type='run.completed'`,
+        [admitted.run.id],
+      );
+      assert.ok(
+        BigInt(acceptanceEvent.global_sequence) > BigInt(runCompleted.rows[0]!.global_sequence),
+      );
+      assert.equal(events.rows.filter((event) => event.actor === 'owner').length, 1);
+    });
+
+    it('rejects stale, failed, and cancelled results while preserving legacy completed rows', async () => {
+      const staleTask = await store.createTask({ title: 'Superseded result', detail: 'Retry.' });
+      const first = await admit(staleTask.id, key('accept-stale-first'), async () => 'job');
+      const firstClaim = await store.beginExecution(first.run.id, 'worker-stale-first', 30);
+      await store.completeRun(
+        first.run.id,
+        'worker-stale-first',
+        firstClaim.generation,
+        'Old result.',
+      );
+      const second = await admit(staleTask.id, key('accept-stale-second'), async () => 'job');
+      await assert.rejects(
+        store.acceptTaskResult(staleTask.id, { runId: first.run.id }, randomUUID()),
+        (error: unknown) => error instanceof StoreError && error.code === 'conflict',
+      );
+      assert.equal(second.run.status, 'queued');
+
+      const failedTask = await store.createTask({
+        title: 'Failed result',
+        detail: 'Must not accept.',
+      });
+      const failed = await admit(failedTask.id, key('accept-failed'), async () => 'job');
+      const failedClaim = await store.beginExecution(failed.run.id, 'worker-failed', 30);
+      await store.failRun(
+        failed.run.id,
+        'worker-failed',
+        failedClaim.generation,
+        'Synthetic failure.',
+      );
+      await assert.rejects(
+        store.acceptTaskResult(failedTask.id, { runId: failed.run.id }, randomUUID()),
+        (error: unknown) => error instanceof StoreError && error.code === 'conflict',
+      );
+
+      const cancelledTask = await store.createTask({
+        title: 'Cancelled result',
+        detail: 'Must not accept.',
+      });
+      const cancelled = await admit(cancelledTask.id, key('accept-cancelled'), async () => 'job');
+      const cancelledClaim = await store.beginExecution(cancelled.run.id, 'worker-cancelled', 30);
+      await store.requestStop(cancelled.run.id);
+      await store.cancelRun(cancelled.run.id, 'worker-cancelled', cancelledClaim.generation);
+      await assert.rejects(
+        store.acceptTaskResult(cancelledTask.id, { runId: cancelled.run.id }, randomUUID()),
+        (error: unknown) => error instanceof StoreError && error.code === 'conflict',
+      );
+
+      const legacyTask = await store.createTask({
+        title: 'Legacy completion',
+        detail: 'No migration rewrite.',
+      });
+      await assert.rejects(
+        adminPool!.query("UPDATE omnis.tasks SET status='completed' WHERE id=$1", [legacyTask.id]),
+        /eligible owner acceptance/,
+      );
+      const historical = await adminPool!.query<{ id: string }>(
+        `INSERT INTO omnis.tasks(title, detail, status)
+         VALUES ('Historical completion', 'Existing row remains compatible.', 'completed')
+         RETURNING id`,
+      );
+      const preserved = await store.getTask(historical.rows[0]!.id);
+      assert.equal(preserved?.status, 'completed');
+      assert.equal(preserved?.resultAcceptance, null);
+    });
+
+    it('preserves completed-task reruns and keeps each accepted Run receipt immutable', async () => {
+      const task = await store.createTask({
+        title: 'Repeat an accepted task',
+        detail: 'A later Run has its own acceptance receipt.',
+      });
+      const first = await admit(task.id, key('accepted-rerun-first'), async () => 'job');
+      const firstClaim = await store.beginExecution(first.run.id, 'worker-accepted-first', 30);
+      await store.completeRun(
+        first.run.id,
+        'worker-accepted-first',
+        firstClaim.generation,
+        'First result.',
+      );
+      const firstAcceptance = await store.acceptTaskResult(
+        task.id,
+        { runId: first.run.id },
+        randomUUID(),
+      );
+      assert.equal(firstAcceptance.created, true);
+
+      const second = await admit(task.id, key('accepted-rerun-second'), async () => 'job');
+      assert.equal(second.created, true);
+      const secondClaim = await store.beginExecution(second.run.id, 'worker-accepted-second', 30);
+      await store.completeRun(
+        second.run.id,
+        'worker-accepted-second',
+        secondClaim.generation,
+        'Second result.',
+      );
+      const secondAcceptance = await store.acceptTaskResult(
+        task.id,
+        { runId: second.run.id },
+        randomUUID(),
+      );
+      assert.equal(secondAcceptance.created, true);
+      assert.equal(secondAcceptance.acceptance.runId, second.run.id);
+      assert.equal(secondAcceptance.task.resultAcceptance?.runId, second.run.id);
+
+      const receipts = await adminPool!.query<{ count: string }>(
+        'SELECT count(*)::text FROM omnis.task_result_acceptances WHERE task_id=$1',
+        [task.id],
+      );
+      assert.equal(receipts.rows[0]?.count, '2');
+      const replay = await store.acceptTaskResult(
+        task.id,
+        { runId: first.run.id },
+        firstAcceptance.acceptance.requestId,
+      );
+      assert.equal(replay.created, false);
+      assert.equal(replay.acceptance.runId, first.run.id);
+      assert.equal(replay.task.resultAcceptance?.runId, second.run.id);
     });
 
     it('rejects stale completion after a new worker generation owns the execution', async () => {

@@ -12,6 +12,7 @@ const safeSnapshot = {
     '0026_task_execution_assignment',
     '0027_agent_identity_management',
     '0029_mission_lane_events',
+    '0031_owner_verified_task_results',
   ],
   missionLane: {
     eventCount: '0',
@@ -36,6 +37,7 @@ const safeSnapshot = {
   },
   taskProjectManagementCounts: { audits: 0, idempotency: 0 },
   taskExecutionAssignmentCounts: { audits: 0, idempotency: 0 },
+  taskResultAcceptanceCounts: { acceptances: 0 },
   recordFingerprints: {
     departments: 'd41d8cd98f00b204e9800998ecf8427e',
     agents: 'd41d8cd98f00b204e9800998ecf8427e',
@@ -50,6 +52,7 @@ const safeSnapshot = {
     taskProjectManagementIdempotency: 'd41d8cd98f00b204e9800998ecf8427e',
     taskExecutionAssignmentAudit: 'd41d8cd98f00b204e9800998ecf8427e',
     taskExecutionAssignmentIdempotency: 'd41d8cd98f00b204e9800998ecf8427e',
+    taskResultAcceptances: 'd41d8cd98f00b204e9800998ecf8427e',
     missionLane: 'd41d8cd98f00b204e9800998ecf8427e',
   },
   syntheticOnly: true,
@@ -180,6 +183,28 @@ describe('database backup consistency policy', () => {
       metricsMatch(safeSnapshot, {
         ...safeSnapshot,
         taskExecutionAssignmentCounts: { audits: 1, idempotency: 0 },
+      }),
+      false,
+    );
+  });
+
+  it('requires owner acceptance receipts and their fingerprints to survive restore', () => {
+    assert.doesNotThrow(() => assertValidMetrics(safeSnapshot));
+    assert.equal(metricsMatch(safeSnapshot, JSON.parse(JSON.stringify(safeSnapshot))), true);
+    assert.equal(
+      metricsMatch(safeSnapshot, {
+        ...safeSnapshot,
+        taskResultAcceptanceCounts: { acceptances: 1 },
+      }),
+      false,
+    );
+    assert.equal(
+      metricsMatch(safeSnapshot, {
+        ...safeSnapshot,
+        recordFingerprints: {
+          ...safeSnapshot.recordFingerprints,
+          taskResultAcceptances: 'e'.repeat(32),
+        },
       }),
       false,
     );

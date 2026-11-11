@@ -21,6 +21,13 @@ const task = {
 };
 const projectId = `prj_${'1'.repeat(32)}`;
 const idempotencyKey = 'b9d5fd0e-4681-4a41-90c0-50b120843aa5';
+const runId = 'run-0001';
+const acceptance = {
+  runId,
+  acceptedBy: 'owner',
+  acceptedAt: '2026-11-12T00:00:00.000Z',
+  requestId: idempotencyKey,
+};
 
 function createApp(owner: boolean, calls: Array<{ path: string; init?: RequestInit }>) {
   const app = Fastify();
@@ -39,6 +46,12 @@ function createApp(owner: boolean, calls: Array<{ path: string; init?: RequestIn
     async <T>(path: string, init: RequestInit | undefined, parse: (value: unknown) => T) => {
       calls.push({ path, ...(init ? { init } : {}) });
       if (path === '/internal/v1/tasks' && !init?.method) return parse([task]);
+      if (path.endsWith('/accept-result'))
+        return parse({
+          task: { ...task, status: 'completed', resultAcceptance: acceptance },
+          acceptance,
+          created: true,
+        });
       return parse(task);
     },
   );
@@ -72,6 +85,45 @@ describe('owner task routes', () => {
       assert.equal(calls.at(-1)?.init?.headers, undefined);
     } finally {
       await app.close();
+    }
+  });
+
+  it('requires an authenticated owner and idempotency key to accept an exact completed result', async () => {
+    const calls: Array<{ path: string; init?: RequestInit }> = [];
+    const anonymous = createApp(false, calls);
+    const owner = createApp(true, calls);
+    try {
+      const unauthorized = await anonymous.inject({
+        method: 'POST',
+        url: `/api/v1/tasks/${task.id}/accept-result`,
+        headers: protectedHeaders,
+        payload: { runId },
+      });
+      assert.equal(unauthorized.statusCode, 401);
+      const missingKey = await owner.inject({
+        method: 'POST',
+        url: `/api/v1/tasks/${task.id}/accept-result`,
+        headers: {
+          origin: protectedHeaders.origin,
+          'x-omnis-csrf': protectedHeaders['x-omnis-csrf'],
+        },
+        payload: { runId },
+      });
+      assert.equal(missingKey.statusCode, 400);
+      const accepted = await owner.inject({
+        method: 'POST',
+        url: `/api/v1/tasks/${task.id}/accept-result`,
+        headers: protectedHeaders,
+        payload: { runId },
+      });
+      assert.equal(accepted.statusCode, 200);
+      assert.deepEqual(accepted.json().acceptance, acceptance);
+      assert.equal(calls.at(-1)?.path, `/internal/v1/tasks/${task.id}/accept-result`);
+      assert.equal(calls.at(-1)?.init?.method, 'POST');
+      assert.deepEqual(calls.at(-1)?.init?.headers, { 'idempotency-key': idempotencyKey });
+      assert.equal(calls.at(-1)?.init?.body, JSON.stringify({ runId }));
+    } finally {
+      await Promise.all([anonymous.close(), owner.close()]);
     }
   });
 

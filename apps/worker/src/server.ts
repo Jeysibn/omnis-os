@@ -5,6 +5,7 @@ import {
   AgentIdSchema,
   AgentVersionQuerySchema,
   AgentVersionRouteParamSchema,
+  AcceptTaskResultRequestSchema,
   ProjectIdSchema,
   ProjectWorkspaceQuerySchema,
   SetTaskExecutionAssignmentSchema,
@@ -337,6 +338,27 @@ app.post('/internal/v1/tasks', async (request, reply) => {
     throw error;
   }
 });
+app.post<{ Params: { taskId: string } }>(
+  '/internal/v1/tasks/:taskId/accept-result',
+  async (request, reply) => {
+    const taskId = TaskIdSchema.safeParse(request.params.taskId);
+    const body = AcceptTaskResultRequestSchema.safeParse(request.body);
+    const requestId = taskIdempotencyKey(request.headers['idempotency-key']);
+    if (!taskId.success || !body.success || !requestId)
+      return reply.code(400).send({
+        error: { code: 'invalid_input', message: 'Task result acceptance input is invalid.' },
+      });
+    try {
+      return await coordinator.acceptTaskResult(taskId.data, body.data, requestId);
+    } catch (error) {
+      if (error instanceof CoordinatorError)
+        return reply.code(error.statusCode).send({
+          error: { code: error.code, message: error.message },
+        });
+      throw error;
+    }
+  },
+);
 app.put<{ Params: { taskId: string } }>(
   '/internal/v1/tasks/:taskId/project',
   async (request, reply) => {
