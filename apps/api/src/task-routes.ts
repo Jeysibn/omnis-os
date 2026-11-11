@@ -10,10 +10,16 @@ import {
 } from '@omnis/contracts';
 import { requireMutationProtection, requireOwner } from './auth.ts';
 import { parseTaskList, workerRequest } from './worker-client.ts';
+import { authorizerRequest } from './authorizer-client.ts';
 
 type WorkerRequest = typeof workerRequest;
+type AuthorizerRequest = typeof authorizerRequest;
 
-export function registerTaskRoutes(app: FastifyInstance, request: WorkerRequest = workerRequest) {
+export function registerTaskRoutes(
+  app: FastifyInstance,
+  request: WorkerRequest = workerRequest,
+  authorize: AuthorizerRequest = authorizerRequest,
+) {
   app.get('/api/v1/tasks', { preHandler: requireOwner }, async () =>
     request('/internal/v1/tasks', {}, parseTaskList),
   );
@@ -112,7 +118,7 @@ export function registerTaskRoutes(app: FastifyInstance, request: WorkerRequest 
           error: { code: 'invalid_input', message: 'Task result acceptance input is invalid.' },
         });
       }
-      return request(
+      return authorize(
         `/internal/v1/tasks/${encodeURIComponent(taskId.data)}/accept-result`,
         {
           method: 'POST',

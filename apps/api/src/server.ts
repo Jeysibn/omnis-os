@@ -216,7 +216,7 @@ registerProjectMilestoneRoutes(app);
 registerProjectEpicRoutes(app);
 registerProjectWorkspaceRoutes(app);
 registerTaskEpicRoutes(app);
-registerTaskRoutes(app);
+registerTaskRoutes(app, workerRequest, authorizerRequest);
 registerConnectorAuthorizationRoutes(app, { requireOwner, requireMutationProtection });
 registerRuntimeCapabilityRoutes(app, {
   requireOwner,

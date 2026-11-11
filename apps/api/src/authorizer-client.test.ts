@@ -148,6 +148,42 @@ describe('authorizer transport outcome handling', () => {
     }
   });
 
+  it('classifies an invalid owner acceptance response as uncertain', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'omnis-authorizer-client-'));
+    const socketPath = path.join(directory, 'authorizer.sock');
+    const server = createServer((_request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end('{"unexpected":true}');
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(socketPath, resolve);
+      });
+      env.authorizerSocket = socketPath;
+      await assert.rejects(
+        authorizerRequest(
+          '/internal/v1/tasks/task-0001/accept-result',
+          { method: 'POST', body: JSON.stringify({ runId: 'run-0001' }) },
+          (value) => {
+            if (typeof value !== 'object' || value === null || !('task' in value)) {
+              throw new Error('invalid acceptance response');
+            }
+            return value;
+          },
+        ),
+        (error: unknown) => {
+          assert.ok(error instanceof AuthorizerRequestError);
+          assert.equal(error.body.error.code, 'task_acceptance_outcome_unknown');
+          return true;
+        },
+      );
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('classifies an invalid connector authorization response as an unknown outcome', async () => {
     const directory = await mkdtemp(path.join(tmpdir(), 'omnis-authorizer-client-'));
     const socketPath = path.join(directory, 'authorizer.sock');

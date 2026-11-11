@@ -154,7 +154,6 @@ const approvedTaskProjectRoutines = new Set([
   'create_task(p_title text, p_detail text, p_project_id text, p_request_id uuid, p_fingerprint bytea, p_remaining_ms integer)',
   'set_task_project(p_task_id text, p_expected_association_revision integer, p_project_id text, p_request_id uuid, p_fingerprint bytea, p_remaining_ms integer)',
   'set_task_epic(p_task_id text, p_expected_association_revision integer, p_epic_id text, p_request_id uuid, p_fingerprint bytea, p_remaining_ms integer)',
-  'accept_task_result(p_task_id text, p_run_id text, p_request_id uuid)',
   'set_task_execution_assignment(p_task_id text, p_expected_revision integer, p_agent_id text, p_profile_version_no integer, p_runtime_id text, p_request_id uuid, p_fingerprint bytea)',
 ]);
 const approvedRuntimeAdmissionRoutines = new Set([
@@ -312,6 +311,8 @@ export function assertRuntimeAclPolicy(snapshot) {
         entry.schema === 'omnis' &&
         [
           'revoke_run_authorization(p_authorization_id text, p_actor_id text)',
+          'accept_task_result(p_task_id text, p_run_id text, p_request_id uuid)',
+          'acquire_mission_lane_admission(p_critical boolean, p_remaining_ms integer)',
           'archive_department(p_department_id text, p_request_id text)',
           'create_agent(p_id text, p_name text, p_slug text, p_department_id text, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
           'get_agent_profile_draft(p_agent_id text)',

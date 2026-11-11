@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { createServer } from 'node:net';
 import { copyFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -114,7 +114,7 @@ try {
   });
 
   await addFutureMigrationAclFixtures(migrationUrl, randomSuffix);
-  const provenanceRunId = await createSyntheticRecords(runtimeUrl, adminUrl, randomSuffix);
+  const provenance = await createSyntheticRecords(runtimeUrl, adminUrl, randomSuffix);
 
   const staleDump = path.join(directory, 'stale.dump');
   await setSequenceState(adminUrl, true);
@@ -136,8 +136,9 @@ try {
   });
   await verifyRestoredMigrationAcl(
     connectionUrl('omnis_runtime', runtimePassword, port, restoreDatabase),
+    connectionUrl('omnis_authorizer', authorizerPassword, port, restoreDatabase),
     connectionUrl('omnis', adminPassword, port, restoreDatabase),
-    provenanceRunId,
+    provenance,
     randomSuffix,
   );
   await verifyRestoreRejectsUnauthorizedGrant(adminUrl, deniedGrantDatabase);
@@ -281,6 +282,13 @@ async function createSyntheticRecords(runtimeUrl, adminUrl, suffix) {
       'Synthetic backup integration result.',
       [],
     );
+    const acceptance = await new PostgresRunStore(authorizer).acceptTaskResult(
+      task.id,
+      { runId: admitted.run.id },
+      randomUUID(),
+    );
+    assert.equal(acceptance.created, true);
+    assert.equal(acceptance.acceptance.acceptedBy, 'owner');
     await admin.query('INSERT INTO omnis.legacy_unscoped_runs (run_id, task_id) VALUES ($1, $2)', [
       admitted.run.id,
       task.id,
@@ -290,7 +298,11 @@ async function createSyntheticRecords(runtimeUrl, adminUrl, suffix) {
       [admitted.run.id],
     );
     assert.equal(rows[0]?.count, 3);
-    return admitted.run.id;
+    return {
+      runId: admitted.run.id,
+      taskId: task.id,
+      requestId: acceptance.acceptance.requestId,
+    };
   } finally {
     await boss.stop().catch(() => undefined);
     await runtime.end();
@@ -319,20 +331,55 @@ async function addFutureMigrationAclFixtures(migrationUrl, suffix) {
   }
 }
 
-async function verifyRestoredMigrationAcl(runtimeUrl, adminUrl, provenanceRunId, suffix) {
+async function verifyRestoredMigrationAcl(runtimeUrl, authorizerUrl, adminUrl, provenance, suffix) {
   const { createPool } = await import('../../packages/db/src/index.ts');
+  const { PostgresRunStore } = await import('../../packages/db/src/index.ts');
   const runtime = createPool(runtimeUrl);
+  const authorizer = createPool(authorizerUrl);
   const admin = createPool(adminUrl);
   try {
     assert.equal(
       (
         await admin.query('SELECT 1 FROM omnis.legacy_unscoped_runs WHERE run_id=$1', [
-          provenanceRunId,
+          provenance.runId,
         ])
       ).rowCount,
       1,
       'restore must preserve trusted legacy provenance records',
     );
+    const receipt = await admin.query(
+      `SELECT task_id, run_id, request_id, accepted_by
+         FROM omnis.task_result_acceptances WHERE run_id=$1`,
+      [provenance.runId],
+    );
+    assert.deepEqual(
+      receipt.rows,
+      [
+        {
+          task_id: provenance.taskId,
+          run_id: provenance.runId,
+          request_id: provenance.requestId,
+          accepted_by: 'owner',
+        },
+      ],
+      'restore must preserve a populated immutable owner acceptance receipt',
+    );
+    await assert.rejects(
+      runtime.query('SELECT omnis.accept_task_result($1,$2,$3)', [
+        provenance.taskId,
+        provenance.runId,
+        randomUUID(),
+      ]),
+      /permission denied/,
+      'runtime must not execute the privileged owner acceptance function after restore',
+    );
+    const acceptanceReplay = await new PostgresRunStore(authorizer).acceptTaskResult(
+      provenance.taskId,
+      { runId: provenance.runId },
+      provenance.requestId,
+    );
+    assert.equal(acceptanceReplay.created, false);
+    assert.equal(acceptanceReplay.acceptance.requestId, provenance.requestId);
     await assert.rejects(
       runtime.query('SELECT * FROM omnis.legacy_unscoped_runs'),
       /permission denied/,
@@ -356,6 +403,7 @@ async function verifyRestoredMigrationAcl(runtimeUrl, adminUrl, provenanceRunId,
     );
   } finally {
     await runtime.end();
+    await authorizer.end();
     await admin.end();
   }
 }

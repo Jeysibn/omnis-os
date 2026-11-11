@@ -40,7 +40,7 @@ const allowed = [
     'accept_task_result(p_task_id text, p_run_id text, p_request_id uuid)',
     'EXECUTE',
     null,
-    'omnis_runtime',
+    'omnis_authorizer',
     true,
   ),
   acl(
@@ -481,6 +481,15 @@ describe('post-restore PostgreSQL ACL integrity', () => {
         'EXECUTE',
         null,
         'omnis_runtime',
+        true,
+      ),
+      acl(
+        'routine',
+        'omnis',
+        'acquire_mission_lane_admission(p_critical boolean, p_remaining_ms integer)',
+        'EXECUTE',
+        null,
+        'omnis_authorizer',
         true,
       ),
     ];

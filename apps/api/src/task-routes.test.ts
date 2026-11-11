@@ -29,7 +29,11 @@ const acceptance = {
   requestId: idempotencyKey,
 };
 
-function createApp(owner: boolean, calls: Array<{ path: string; init?: RequestInit }>) {
+function createApp(
+  owner: boolean,
+  calls: Array<{ path: string; init?: RequestInit }>,
+  authorizerCalls = calls,
+) {
   const app = Fastify();
   app.decorateRequest('omnisSession', undefined);
   app.addHook('onRequest', async (request) => {
@@ -41,10 +45,10 @@ function createApp(owner: boolean, calls: Array<{ path: string; init?: RequestIn
         expiresAt: Date.now() + 1000,
       };
   });
-  registerTaskRoutes(
-    app,
+  const request =
+    (requests: Array<{ path: string; init?: RequestInit }>) =>
     async <T>(path: string, init: RequestInit | undefined, parse: (value: unknown) => T) => {
-      calls.push({ path, ...(init ? { init } : {}) });
+      requests.push({ path, ...(init ? { init } : {}) });
       if (path === '/internal/v1/tasks' && !init?.method) return parse([task]);
       if (path.endsWith('/accept-result'))
         return parse({
@@ -53,8 +57,8 @@ function createApp(owner: boolean, calls: Array<{ path: string; init?: RequestIn
           created: true,
         });
       return parse(task);
-    },
-  );
+    };
+  registerTaskRoutes(app, request(calls), request(authorizerCalls));
   return app;
 }
 
@@ -90,8 +94,9 @@ describe('owner task routes', () => {
 
   it('requires an authenticated owner and idempotency key to accept an exact completed result', async () => {
     const calls: Array<{ path: string; init?: RequestInit }> = [];
+    const authorizerCalls: Array<{ path: string; init?: RequestInit }> = [];
     const anonymous = createApp(false, calls);
-    const owner = createApp(true, calls);
+    const owner = createApp(true, calls, authorizerCalls);
     try {
       const unauthorized = await anonymous.inject({
         method: 'POST',
@@ -118,10 +123,13 @@ describe('owner task routes', () => {
       });
       assert.equal(accepted.statusCode, 200);
       assert.deepEqual(accepted.json().acceptance, acceptance);
-      assert.equal(calls.at(-1)?.path, `/internal/v1/tasks/${task.id}/accept-result`);
-      assert.equal(calls.at(-1)?.init?.method, 'POST');
-      assert.deepEqual(calls.at(-1)?.init?.headers, { 'idempotency-key': idempotencyKey });
-      assert.equal(calls.at(-1)?.init?.body, JSON.stringify({ runId }));
+      assert.deepEqual(calls, []);
+      assert.equal(authorizerCalls.at(-1)?.path, `/internal/v1/tasks/${task.id}/accept-result`);
+      assert.equal(authorizerCalls.at(-1)?.init?.method, 'POST');
+      assert.deepEqual(authorizerCalls.at(-1)?.init?.headers, {
+        'idempotency-key': idempotencyKey,
+      });
+      assert.equal(authorizerCalls.at(-1)?.init?.body, JSON.stringify({ runId }));
     } finally {
       await Promise.all([anonymous.close(), owner.close()]);
     }

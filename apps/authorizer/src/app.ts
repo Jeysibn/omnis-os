@@ -1,6 +1,7 @@
 import { timingSafeEqual } from 'node:crypto';
 import Fastify, { type FastifyInstance, type FastifyReply } from 'fastify';
 import {
+  AcceptTaskResultRequestSchema,
   AuthorizationDecisionSchema,
   AuthorizationSchema,
   CreateAuthorizationSchema,
@@ -33,6 +34,7 @@ import {
   TaskEpicAssociationSchema,
   TaskEpicResponseSchema,
   TaskIdSchema,
+  TaskResultAcceptanceResponseSchema,
   UpdateProjectSchema,
   ArchiveProjectSchema,
   ArchiveMilestoneSchema,
@@ -147,6 +149,9 @@ export type AuthorizerStore = {
 export function createAuthorizerApp(input: {
   store: AuthorizerStore;
   connectorStore?: ConnectorAuthorizerStore;
+  taskAcceptanceStore?: {
+    acceptTaskResult(taskId: string, input: unknown, requestId: string): Promise<unknown>;
+  };
   serviceToken: string;
   checkDatabase: () => Promise<void>;
 }): FastifyInstance {
@@ -180,6 +185,32 @@ export function createAuthorizerApp(input: {
       });
     }
   });
+
+  app.post<{ Params: { taskId: string } }>(
+    '/internal/v1/tasks/:taskId/accept-result',
+    async (request, reply) => {
+      const id = TaskIdSchema.safeParse(request.params.taskId);
+      const body = AcceptTaskResultRequestSchema.safeParse(request.body);
+      const requestId = request.headers['idempotency-key'];
+      if (!id.success || !body.success || typeof requestId !== 'string' || !isUuid(requestId)) {
+        return reply.code(400).send({
+          error: { code: 'invalid_input', message: 'Task result acceptance input is invalid.' },
+        });
+      }
+      if (!input.taskAcceptanceStore) {
+        return reply.code(503).send({
+          error: { code: 'authorizer_unavailable', message: 'Task acceptance is unavailable.' },
+        });
+      }
+      try {
+        return TaskResultAcceptanceResponseSchema.parse(
+          await input.taskAcceptanceStore.acceptTaskResult(id.data, body.data, requestId),
+        );
+      } catch (error) {
+        return sendStoreError(error, reply);
+      }
+    },
+  );
 
   app.get('/internal/v1/departments', async (request, reply) => {
     const parsed = DepartmentListQuerySchema.safeParse(request.query);

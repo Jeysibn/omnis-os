@@ -64,6 +64,7 @@ const postgresSuite = describe(
   },
   () => {
     const store = new PostgresRunStore(pool!);
+    const acceptanceStore = new PostgresRunStore(authorizerPool!, undefined, authorizerPool!);
     const authorizations = new PostgresAuthorizationStore(pool!, authorizerPool!);
     const authorizationByIdempotency = new Map<string, Promise<string>>();
     async function admit(
@@ -7620,9 +7621,21 @@ const postgresSuite = describe(
 
       const requestId = randomUUID();
       const competingRequestId = randomUUID();
+      await assert.rejects(
+        pool!.query('SELECT omnis.accept_task_result($1,$2,$3)', [
+          task.id,
+          admitted.run.id,
+          randomUUID(),
+        ]),
+        /permission denied/,
+      );
+      await assert.rejects(
+        pool!.query("UPDATE omnis.tasks SET status='completed' WHERE id=$1", [task.id]),
+        /eligible owner acceptance/,
+      );
       const [firstAttempt, secondAttempt] = await Promise.all([
-        store.acceptTaskResult(task.id, { runId: admitted.run.id }, requestId),
-        store.acceptTaskResult(task.id, { runId: admitted.run.id }, competingRequestId),
+        acceptanceStore.acceptTaskResult(task.id, { runId: admitted.run.id }, requestId),
+        acceptanceStore.acceptTaskResult(task.id, { runId: admitted.run.id }, competingRequestId),
       ]);
       const accepted = firstAttempt.created ? firstAttempt : secondAttempt;
       const duplicate = firstAttempt.created ? secondAttempt : firstAttempt;
@@ -7709,7 +7722,7 @@ const postgresSuite = describe(
       );
       const second = await admit(staleTask.id, key('accept-stale-second'), async () => 'job');
       await assert.rejects(
-        store.acceptTaskResult(staleTask.id, { runId: first.run.id }, randomUUID()),
+        acceptanceStore.acceptTaskResult(staleTask.id, { runId: first.run.id }, randomUUID()),
         (error: unknown) => error instanceof StoreError && error.code === 'conflict',
       );
       assert.equal(second.run.status, 'queued');
@@ -7734,7 +7747,7 @@ const postgresSuite = describe(
         'Synthetic failure.',
       );
       await assert.rejects(
-        store.acceptTaskResult(failedTask.id, { runId: failed.run.id }, randomUUID()),
+        acceptanceStore.acceptTaskResult(failedTask.id, { runId: failed.run.id }, randomUUID()),
         (error: unknown) => error instanceof StoreError && error.code === 'conflict',
       );
 
@@ -7747,7 +7760,11 @@ const postgresSuite = describe(
       await store.requestStop(cancelled.run.id);
       await store.cancelRun(cancelled.run.id, 'worker-cancelled', cancelledClaim.generation);
       await assert.rejects(
-        store.acceptTaskResult(cancelledTask.id, { runId: cancelled.run.id }, randomUUID()),
+        acceptanceStore.acceptTaskResult(
+          cancelledTask.id,
+          { runId: cancelled.run.id },
+          randomUUID(),
+        ),
         (error: unknown) => error instanceof StoreError && error.code === 'conflict',
       );
 
@@ -7774,7 +7791,7 @@ const postgresSuite = describe(
         firstClaim.generation,
         'First result.',
       );
-      const firstAcceptance = await store.acceptTaskResult(
+      const firstAcceptance = await acceptanceStore.acceptTaskResult(
         task.id,
         { runId: first.run.id },
         randomUUID(),
@@ -7790,7 +7807,7 @@ const postgresSuite = describe(
         secondClaim.generation,
         'Second result.',
       );
-      const secondAcceptance = await store.acceptTaskResult(
+      const secondAcceptance = await acceptanceStore.acceptTaskResult(
         task.id,
         { runId: second.run.id },
         randomUUID(),
@@ -7804,7 +7821,7 @@ const postgresSuite = describe(
         [task.id],
       );
       assert.equal(receipts.rows[0]?.count, '2');
-      const replay = await store.acceptTaskResult(
+      const replay = await acceptanceStore.acceptTaskResult(
         task.id,
         { runId: first.run.id },
         firstAcceptance.acceptance.requestId,
