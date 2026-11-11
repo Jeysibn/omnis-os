@@ -27,6 +27,9 @@ cleanup_allowlist() { rm -f -- "$allowlist"; }
 trap 'cleanup_allowlist; cleanup' EXIT
 add_allowlisted_path() {
   local path="$1"
+  case "$path" in
+    scripts/mission9d/stage2a-simulated/*) return 0 ;;
+  esac
   name="${path##*/}"
   lower_name="${name,,}"
   case "$lower_name" in
@@ -60,3 +63,7 @@ if [[ ! -s "$allowlist" ]]; then
 fi
 
 tar -C "$source_root" --null --files-from="$allowlist" -cf - | tar -C "$stage" -xf -
+if [[ -e "$stage/scripts/mission9d/stage2a-simulated" ]]; then
+  echo "Deployment contains the prohibited Stage 2A synthetic module tree." >&2
+  exit 1
+fi

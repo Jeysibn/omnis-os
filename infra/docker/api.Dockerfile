@@ -10,7 +10,8 @@ RUN pnpm install --frozen-lockfile \
     && pnpm --filter @omnis/api build \
     && pnpm --filter @omnis/api deploy --prod --legacy /out/api \
     && node scripts/container-images/compile-workspace-runtime.mjs /out/api \
-    && find /out -type f \( -name '*.test.ts' -o -name '*.spec.ts' -o -name 'tsconfig*.json' \) -delete
+    && find /out -type f \( -name '*.test.ts' -o -name '*.spec.ts' -o -name 'tsconfig*.json' \) -delete \
+    && node scripts/ci/verify-stage2a-artifact.mjs /out/api
 
 FROM node:24.22.1-bookworm-slim@sha256:be8204d4bd327363357f532187b752ff62759c31bedf98e9e18fc08c9cbd605c AS runtime
 ENV NODE_ENV=production

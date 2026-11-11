@@ -6,7 +6,7 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "build": "pnpm typecheck",
+    "build": "node ../../scripts/ci/verify-stage2a-exclusion.mjs --project tsconfig.json && pnpm typecheck",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --experimental-strip-types --test src/index.test.ts src/agent-profile-store.test.ts src/agent-lifecycle-store.test.ts src/department-management-store.test.ts src/project-management-store.test.ts src/project-workspace-store.test.ts src/project-milestone-store.test.ts src/project-epic-store.test.ts"
   },
