@@ -91,7 +91,10 @@ try {
     supervise: false,
   });
   await legacyBoss.start({ attempts: 3 });
-  await legacyBoss.createQueue('omnis-mock-run', { retryLimit: 0, retryDelay: 0 });
+  await legacyBoss.createQueue('omnis-mock-run', {
+    retryLimit: 0,
+    retryDelay: 0,
+  });
 
   await legacyPool.query(`
     CREATE TYPE omnis.legacy_marker AS ENUM ('created', 'preserved');
@@ -170,6 +173,21 @@ try {
     launcher: launcherPassword,
   });
   await runCurrentMigration();
+  const cutover = await databaseAdminPool.query(`
+    SELECT c.feed_epoch, c.last_global_sequence, c.history_started_at,
+      c.history_start_sequence,
+      (SELECT count(*) FROM omnis.mission_lane_events) AS event_count
+    FROM omnis.mission_lane_clock c WHERE c.singleton
+  `);
+  assert.equal(cutover.rows[0]?.last_global_sequence, '0');
+  assert.equal(cutover.rows[0]?.history_start_sequence, '1');
+  assert.equal(
+    cutover.rows[0]?.event_count,
+    '0',
+    'pre-cutover Task and Run history is not backfilled',
+  );
+  assert.ok(cutover.rows[0]?.feed_epoch);
+  assert.ok(cutover.rows[0]?.history_started_at);
   await applyRestrictedPgBossMigrations();
   await verifyPost0005ProvenanceUpgrade();
 
@@ -215,14 +233,9 @@ try {
     '0026_task_execution_assignment',
     '0027_agent_identity_management',
     '0028_synthetic_broker_fencing',
+    '0029_mission_lane_events',
+    '0030_mission_lane_admission',
   ];
-  if (afterUpgrade.migrations.includes('0021_mission_lane_events')) {
-    expectedMigrations.splice(
-      expectedMigrations.indexOf('0022_synthetic_connector_authorization'),
-      0,
-      '0021_mission_lane_events',
-    );
-  }
   assert.deepEqual(afterUpgrade.migrations, expectedMigrations);
   assert.equal(afterUpgrade.unsafeRunStates, 3);
   assert.equal(
@@ -257,7 +270,11 @@ try {
           AND p.prokind IN ('f', 'p', 'a', 'w')
           AND p.proowner <> 'omnis_migrator'::regrole) AS routines
   `);
-  assert.deepEqual(ownership.rows[0], { relations: '0', user_types: '0', routines: '0' });
+  assert.deepEqual(ownership.rows[0], {
+    relations: '0',
+    user_types: '0',
+    routines: '0',
+  });
   assert.equal(
     (await databaseAdminPool.query("SELECT 'preserved'::omnis.legacy_marker AS marker")).rows[0]
       .marker,
@@ -285,7 +302,10 @@ try {
     createSchema: false,
   });
   await runtimeBoss.start({ attempts: 3 });
-  await runtimeBoss.createQueue('omnis-mock-run', { retryLimit: 0, retryDelay: 0 });
+  await runtimeBoss.createQueue('omnis-mock-run', {
+    retryLimit: 0,
+    retryDelay: 0,
+  });
 
   await migratedStore.requestStop(legacyRun.id);
   const legacyJobId = (
@@ -364,7 +384,10 @@ try {
       const busyResponse = await socketRequest(
         authorizerService.socketPath,
         `/internal/v1/authorizations/${busyGrant.id}/revoke`,
-        { method: 'POST', headers: { 'x-omnis-authorizer-token': authorizerService.token } },
+        {
+          method: 'POST',
+          headers: { 'x-omnis-authorizer-token': authorizerService.token },
+        },
       );
       assert.equal(busyResponse.status, 503);
       const body = await busyResponse.json();
@@ -397,7 +420,10 @@ try {
   const retryResponse = await socketRequest(
     authorizerService.socketPath,
     `/internal/v1/authorizations/${busyGrant.id}/revoke`,
-    { method: 'POST', headers: { 'x-omnis-authorizer-token': authorizerService.token } },
+    {
+      method: 'POST',
+      headers: { 'x-omnis-authorizer-token': authorizerService.token },
+    },
   );
   assert.equal(retryResponse.status, 200);
   assert.equal((await retryResponse.json()).status, 'revoked');
@@ -427,7 +453,10 @@ try {
         'idempotency-key': admissionIdempotencyKey,
         'content-type': 'application/json',
       },
-      body: JSON.stringify({ taskId: admissionTask.id, authorizationId: admissionGrant.id }),
+      body: JSON.stringify({
+        taskId: admissionTask.id,
+        authorizationId: admissionGrant.id,
+      }),
     });
     assert.equal(response.status, 503);
     const body = await response.json();
@@ -471,7 +500,10 @@ try {
       'idempotency-key': admissionIdempotencyKey,
       'content-type': 'application/json',
     },
-    body: JSON.stringify({ taskId: admissionTask.id, authorizationId: admissionGrant.id }),
+    body: JSON.stringify({
+      taskId: admissionTask.id,
+      authorizationId: admissionGrant.id,
+    }),
   });
   assert.equal(admissionRetry.status, 201);
   const admittedBody = await admissionRetry.json();
@@ -707,7 +739,7 @@ async function verifyPost0005ProvenanceUpgrade() {
       "SELECT id, length(checksum) AS checksum_length FROM omnis.schema_migrations WHERE id LIKE '00%' ORDER BY id",
     );
     assert.deepEqual(migrationRows.rows.at(-1), {
-      id: '0028_synthetic_broker_fencing',
+      id: '0030_mission_lane_admission',
       checksum_length: 64,
     });
   } finally {
@@ -772,7 +804,10 @@ async function removeLegacyWorktree() {
     stdio: 'ignore',
   });
   await rm(legacyWorktree, { recursive: true, force: true });
-  spawnSync('git', ['worktree', 'prune'], { cwd: repositoryRoot, stdio: 'ignore' });
+  spawnSync('git', ['worktree', 'prune'], {
+    cwd: repositoryRoot,
+    stdio: 'ignore',
+  });
 }
 
 async function runCurrentMigration() {
@@ -802,7 +837,10 @@ async function applyRestrictedPgBossMigrations() {
   });
   try {
     await migratorBoss.start({ attempts: 3 });
-    await migratorBoss.createQueue('omnis-mock-run', { retryLimit: 0, retryDelay: 0 });
+    await migratorBoss.createQueue('omnis-mock-run', {
+      retryLimit: 0,
+      retryDelay: 0,
+    });
   } finally {
     await migratorBoss.stop().catch(() => undefined);
   }

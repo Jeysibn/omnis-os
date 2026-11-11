@@ -21,6 +21,10 @@ import {
   type TaskEpicResponse,
 } from '@omnis/contracts';
 import type { Pool } from 'pg';
+import {
+  requireMissionLaneRemainingMs,
+  withLocalMissionLaneAdmission,
+} from './mission-lane-admission.ts';
 import { AgentProfileStoreError, assertNoCredentialMaterial } from './agent-profile-store.ts';
 import { createHash } from 'node:crypto';
 
@@ -37,7 +41,13 @@ type EpicTaskCursor = {
 type DbTaskList = { tasks: unknown[]; observedTotal: number };
 
 export type EpicStoreErrorCode =
-  'not_found' | 'conflict' | 'invalid_input' | 'invalid_transition' | 'limit' | 'invalid_cursor';
+  | 'not_found'
+  | 'conflict'
+  | 'invalid_input'
+  | 'invalid_transition'
+  | 'limit'
+  | 'invalid_cursor'
+  | 'admission_busy';
 
 export class EpicStoreError extends Error {
   readonly code: EpicStoreErrorCode;
@@ -51,6 +61,7 @@ export class EpicStoreError extends Error {
       invalid_transition: 'The project or epic lifecycle does not allow this change.',
       limit: 'The epic directory capacity was reached.',
       invalid_cursor: 'Epic pagination cursor is invalid.',
+      admission_busy: 'Mission Lane writer capacity is full; retry the request shortly.',
     };
     super(messages[code]);
     this.name = 'EpicStoreError';
@@ -66,6 +77,8 @@ function mapDatabaseError(error: unknown): never {
     throw new EpicStoreError('conflict', 409);
   if (code === 'P0001') throw new EpicStoreError('invalid_transition', 409);
   if (code === '54000') throw new EpicStoreError('limit', 503);
+  if (code === 'PML01' || code === 'PML02' || code === '55P03')
+    throw new EpicStoreError('admission_busy', 503);
   if (['22023', '22001', '23502', '23514', '22P02'].includes(code ?? ''))
     throw new EpicStoreError('invalid_input', 422);
   throw error;
@@ -211,11 +224,13 @@ export class PostgresProjectEpicStore {
   private readonly cursorSigningKey: Buffer;
   private readonly epicTaskCursorKey: Buffer;
   private readonly keyVersion: number;
+  private readonly writerPool: Pool;
 
-  constructor(pool: Pool, signingKey: Buffer, keyVersion = 1) {
+  constructor(pool: Pool, signingKey: Buffer, keyVersion = 1, writerPool: Pool = pool) {
     if (signingKey.length !== 32 || !Number.isSafeInteger(keyVersion) || keyVersion < 1)
       throw new Error('Project epic signing key configuration is invalid.');
     this.pool = pool;
+    this.writerPool = writerPool;
     this.signingKey = Buffer.from(signingKey);
     this.cursorSigningKey = deriveCursorSigningKey(signingKey);
     this.epicTaskCursorKey = deriveEpicTaskCursorKey(signingKey);
@@ -316,15 +331,27 @@ export class PostgresProjectEpicStore {
       .update(JSON.stringify({ taskId: taskId.data, input: input.data }))
       .digest();
     try {
-      const result = await this.pool.query<{ result: unknown }>(
-        'SELECT omnis.set_task_epic($1,$2,$3,$4,$5) AS result',
-        [
-          taskId.data,
-          input.data.expectedAssociationRevision,
-          input.data.epicId,
-          requestId,
-          fingerprint,
-        ],
+      const result = await withLocalMissionLaneAdmission(
+        this.writerPool,
+        'normal',
+        async (deadline) => {
+          const client = await this.writerPool.connect();
+          try {
+            return await client.query<{ result: unknown }>(
+              'SELECT omnis.set_task_epic($1,$2,$3,$4,$5,$6) AS result',
+              [
+                taskId.data,
+                input.data.expectedAssociationRevision,
+                input.data.epicId,
+                requestId,
+                fingerprint,
+                requireMissionLaneRemainingMs(deadline),
+              ],
+            );
+          } finally {
+            client.release();
+          }
+        },
       );
       return TaskEpicAssociationSchema.parse(result.rows[0]?.result);
     } catch (error) {

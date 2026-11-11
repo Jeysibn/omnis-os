@@ -1,4 +1,10 @@
-export { asPgBossTransaction, createPool, inTransaction, migrate } from './database.ts';
+export {
+  asPgBossTransaction,
+  createPool,
+  inMissionLaneTransaction,
+  inTransaction,
+  migrate,
+} from './database.ts';
 export { PostgresRunStore, StoreError } from './run-store.ts';
 export {
   AgentProfileStoreError,

@@ -208,24 +208,27 @@ describe('durable mock run coordinator', () => {
     assert.equal(admissions, 0);
   });
 
-  it('surfaces database admission lock timeouts as an explicit retryable 503', async () => {
-    const coordinator = testCoordinator(
-      {
-        admitRun: async () => {
-          throw Object.assign(new Error('lock timeout'), { code: '55P03' });
-        },
-      } as unknown as PostgresRunStore,
-      { send: async () => 'job', findJobs: async () => [] },
-      new MockRuntimeAdapter(),
-    );
-    await assert.rejects(
-      coordinator.startRun('task-0001', 'idempotency-key-0001', authId),
-      (error: unknown) =>
-        error instanceof CoordinatorError &&
-        error.code === 'admission_busy' &&
-        error.statusCode === 503 &&
-        /no run was admitted/.test(error.message),
-    );
+  it('surfaces admission rejection and lock timeouts as retryable 503 responses', async () => {
+    for (const code of ['PML01', 'PML02', '55P03']) {
+      const coordinator = testCoordinator(
+        {
+          admitRun: async () => {
+            throw Object.assign(new Error('writer admission unavailable'), { code });
+          },
+        } as unknown as PostgresRunStore,
+        { send: async () => 'job', findJobs: async () => [] },
+        new MockRuntimeAdapter(),
+      );
+      await assert.rejects(
+        coordinator.startRun('task-0001', 'idempotency-key-0001', authId),
+        (error: unknown) =>
+          error instanceof CoordinatorError &&
+          error.code === 'admission_busy' &&
+          error.statusCode === 503 &&
+          /no run was admitted/.test(error.message),
+        `database error ${code} should be a retryable overload response`,
+      );
+    }
   });
 
   it('rechecks authorization before claiming queued work and interrupts a revoked grant', async () => {

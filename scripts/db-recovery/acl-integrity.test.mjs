@@ -18,6 +18,8 @@ const allowed = [
   acl('table', 'omnis', 'runs', 'SELECT'),
   acl('table', 'omnis', 'run_events', 'SELECT'),
   acl('table', 'omnis', 'run_idempotency', 'SELECT'),
+  acl('table', 'omnis', 'mission_lane_clock', 'SELECT'),
+  acl('table', 'omnis', 'mission_lane_events', 'SELECT'),
   acl('table', 'omnis', 'runtime_authorizations', 'SELECT'),
   acl('table', 'omnis', 'departments', 'SELECT'),
   acl('table', 'omnis', 'agents', 'SELECT'),
@@ -189,7 +191,7 @@ const allowed = [
   acl(
     'routine',
     'omnis',
-    'set_task_epic(p_task_id text, p_expected_association_revision integer, p_epic_id text, p_request_id uuid, p_fingerprint bytea)',
+    'set_task_epic(p_task_id text, p_expected_association_revision integer, p_epic_id text, p_request_id uuid, p_fingerprint bytea, p_remaining_ms integer)',
     'EXECUTE',
     null,
     'omnis_authorizer',
@@ -267,6 +269,15 @@ const allowed = [
     'omnis_runtime',
     true,
   ),
+  acl(
+    'routine',
+    'omnis',
+    'append_runtime_run_event(p_run_id text, p_event_type text, p_message text)',
+    'EXECUTE',
+    null,
+    'omnis_runtime',
+    true,
+  ),
   acl('column', 'omnis', 'tasks', 'UPDATE', 'status'),
   ...[
     'connector_authorization_id',
@@ -279,7 +290,7 @@ const allowed = [
   acl(
     'routine',
     'omnis',
-    'create_task(p_title text, p_detail text, p_project_id text, p_request_id uuid, p_fingerprint bytea)',
+    'create_task(p_title text, p_detail text, p_project_id text, p_request_id uuid, p_fingerprint bytea, p_remaining_ms integer)',
     'EXECUTE',
     null,
     'omnis_runtime',
@@ -288,7 +299,7 @@ const allowed = [
   acl(
     'routine',
     'omnis',
-    'set_task_project(p_task_id text, p_expected_association_revision integer, p_project_id text, p_request_id uuid, p_fingerprint bytea)',
+    'set_task_project(p_task_id text, p_expected_association_revision integer, p_project_id text, p_request_id uuid, p_fingerprint bytea, p_remaining_ms integer)',
     'EXECUTE',
     null,
     'omnis_runtime',
@@ -321,10 +332,22 @@ describe('post-restore PostgreSQL ACL integrity', () => {
     );
   });
 
+  it('allows Mission Lane reads but rejects direct ledger and cursor writes', () => {
+    for (const object of ['mission_lane_clock', 'mission_lane_events']) {
+      for (const privilege of ['INSERT', 'UPDATE', 'DELETE']) {
+        assert.throws(
+          () => assertRuntimeAclPolicy([...allowed, acl('table', 'omnis', object, privilege)]),
+          new RegExp(`${privilege} is prohibited on omnis\\.${object}`),
+        );
+      }
+    }
+  });
+
   it('rejects direct task identity/project writes and task sequence access', () => {
     for (const entry of [
       acl('column', 'omnis', 'tasks', 'INSERT', 'id'),
       acl('column', 'omnis', 'tasks', 'UPDATE', 'project_id'),
+      acl('column', 'omnis', 'run_events', 'INSERT', 'event_type'),
       acl('sequence', 'omnis', 'task_id_seq', 'USAGE'),
     ]) {
       assert.throws(() => assertRuntimeAclPolicy([...allowed, entry]));
@@ -439,6 +462,15 @@ describe('post-restore PostgreSQL ACL integrity', () => {
         'EXECUTE',
         null,
         'omnis_launcher',
+        true,
+      ),
+      acl(
+        'routine',
+        'omnis',
+        'acquire_mission_lane_admission(p_critical boolean, p_remaining_ms integer)',
+        'EXECUTE',
+        null,
+        'omnis_runtime',
         true,
       ),
     ];

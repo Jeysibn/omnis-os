@@ -1,0 +1,473 @@
+{
+  "candidateCommit": "1c04dc2f142f4aca79c98891cbbad7a791bbf9d8",
+  "mainCommit": "4a27bc3718d4960ad9b132b0f53cdc938da57b54",
+  "migration": "0030_mission_lane_admission",
+  "postgres": "17.6 (server_version_num 170006)",
+  "image": "postgres:17.6-alpine@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94",
+  "containerLimits": {
+    "cpus": 2,
+    "memoryBytes": 2147483648
+  },
+  "profile": {
+    "warmupOperations": 200,
+    "measuredOperationsPerRepetition": 10000,
+    "repetitions": 5,
+    "concurrency": [1, 4],
+    "batchSize": 1000,
+    "alternation": "operation profiles interleaved; c1/c4 order alternated by repetition",
+    "fixtures": "project assignment and reassignment seeded 10000 tasks outside measured window; per-batch reset cadence unchanged"
+  },
+  "operations": {
+    "create_writers_1": {
+      "measuredOperationsPerRepetition": 10000,
+      "repetitions": 5,
+      "pooledSamples": 50000,
+      "pooledRequestMs": {
+        "p50": 4.110958,
+        "p95": 6.66396,
+        "p99": 10.062601,
+        "max": 295.295745
+      },
+      "perRepetition": [
+        {
+          "repetitions": 1,
+          "p50Ms": 4.096553,
+          "p95Ms": 6.68948,
+          "p99Ms": 9.941922,
+          "maxMs": 27.589547,
+          "throughputOpsPerSecond": 226.38,
+          "databaseMutationQueryP95Ms": 6.504792,
+          "poolCheckoutP95Ms": 0.027332,
+          "integrity": true
+        },
+        {
+          "repetitions": 2,
+          "p50Ms": 4.185192,
+          "p95Ms": 7.508144,
+          "p99Ms": 10.82031,
+          "maxMs": 232.307163,
+          "throughputOpsPerSecond": 208.91,
+          "databaseMutationQueryP95Ms": 7.378809,
+          "poolCheckoutP95Ms": 0.024251,
+          "integrity": true
+        },
+        {
+          "repetitions": 3,
+          "p50Ms": 4.032361,
+          "p95Ms": 5.457376,
+          "p99Ms": 9.847821,
+          "maxMs": 208.816074,
+          "throughputOpsPerSecond": 231.87,
+          "databaseMutationQueryP95Ms": 5.299796,
+          "poolCheckoutP95Ms": 0.022924,
+          "integrity": true
+        },
+        {
+          "repetitions": 4,
+          "p50Ms": 4.105137,
+          "p95Ms": 5.458547,
+          "p99Ms": 9.948925,
+          "maxMs": 40.654235,
+          "throughputOpsPerSecond": 229.15,
+          "databaseMutationQueryP95Ms": 5.309318,
+          "poolCheckoutP95Ms": 0.021875,
+          "integrity": true
+        },
+        {
+          "repetitions": 5,
+          "p50Ms": 4.168433,
+          "p95Ms": 5.879959,
+          "p99Ms": 10.081792,
+          "maxMs": 295.295745,
+          "throughputOpsPerSecond": 223.28,
+          "databaseMutationQueryP95Ms": 5.688752,
+          "poolCheckoutP95Ms": 0.024483,
+          "integrity": true
+        }
+      ],
+      "throughputOpsPerSecond": {
+        "median": 226.38,
+        "minimum": 208.91
+      },
+      "repetitionsWithP95Above25ms": 0,
+      "integrityAllRepetitions": true
+    },
+    "create_writers_4": {
+      "measuredOperationsPerRepetition": 10000,
+      "repetitions": 5,
+      "pooledSamples": 50000,
+      "pooledRequestMs": {
+        "p50": 15.752889,
+        "p95": 24.865107,
+        "p99": 31.73886,
+        "max": 443.018412
+      },
+      "perRepetition": [
+        {
+          "repetitions": 1,
+          "p50Ms": 15.461623,
+          "p95Ms": 20.868711,
+          "p99Ms": 25.024726,
+          "maxMs": 240.431388,
+          "throughputOpsPerSecond": 246.86,
+          "databaseMutationQueryP95Ms": 20.788736,
+          "poolCheckoutP95Ms": 0.030147,
+          "integrity": true
+        },
+        {
+          "repetitions": 2,
+          "p50Ms": 15.58402,
+          "p95Ms": 22.128172,
+          "p99Ms": 30.953289,
+          "maxMs": 319.470256,
+          "throughputOpsPerSecond": 236.33,
+          "databaseMutationQueryP95Ms": 21.961865,
+          "poolCheckoutP95Ms": 0.035826,
+          "integrity": true
+        },
+        {
+          "repetitions": 3,
+          "p50Ms": 15.674164,
+          "p95Ms": 21.330904,
+          "p99Ms": 26.571212,
+          "maxMs": 442.257571,
+          "throughputOpsPerSecond": 240.58,
+          "databaseMutationQueryP95Ms": 21.238808,
+          "poolCheckoutP95Ms": 0.031059,
+          "integrity": true
+        },
+        {
+          "repetitions": 4,
+          "p50Ms": 15.847666,
+          "p95Ms": 28.73713,
+          "p99Ms": 35.611867,
+          "maxMs": 68.530647,
+          "throughputOpsPerSecond": 212.8,
+          "databaseMutationQueryP95Ms": 28.570412,
+          "poolCheckoutP95Ms": 0.034254,
+          "integrity": true
+        },
+        {
+          "repetitions": 5,
+          "p50Ms": 16.800281,
+          "p95Ms": 26.338666,
+          "p99Ms": 32.431333,
+          "maxMs": 443.018412,
+          "throughputOpsPerSecond": 215.63,
+          "databaseMutationQueryP95Ms": 26.165043,
+          "poolCheckoutP95Ms": 0.041184,
+          "integrity": true
+        }
+      ],
+      "throughputOpsPerSecond": {
+        "median": 236.33,
+        "minimum": 212.8
+      },
+      "repetitionsWithP95Above25ms": 2,
+      "integrityAllRepetitions": true
+    },
+    "assign_writers_1": {
+      "measuredOperationsPerRepetition": 10000,
+      "repetitions": 5,
+      "pooledSamples": 50000,
+      "pooledRequestMs": {
+        "p50": 4.521091,
+        "p95": 7.558438,
+        "p99": 10.989858,
+        "max": 295.660479
+      },
+      "perRepetition": [
+        {
+          "repetitions": 1,
+          "p50Ms": 4.466877,
+          "p95Ms": 7.263792,
+          "p99Ms": 14.314973,
+          "maxMs": 52.078174,
+          "throughputOpsPerSecond": 200.15,
+          "databaseMutationQueryP95Ms": 7.158838,
+          "poolCheckoutP95Ms": 0.02319,
+          "integrity": true
+        },
+        {
+          "repetitions": 2,
+          "p50Ms": 4.459131,
+          "p95Ms": 6.363142,
+          "p99Ms": 10.434535,
+          "maxMs": 66.680949,
+          "throughputOpsPerSecond": 210.12,
+          "databaseMutationQueryP95Ms": 6.151012,
+          "poolCheckoutP95Ms": 0.022561,
+          "integrity": true
+        },
+        {
+          "repetitions": 3,
+          "p50Ms": 4.433806,
+          "p95Ms": 7.525303,
+          "p99Ms": 10.8387,
+          "maxMs": 295.660479,
+          "throughputOpsPerSecond": 201.07,
+          "databaseMutationQueryP95Ms": 7.370733,
+          "poolCheckoutP95Ms": 0.021853,
+          "integrity": true
+        },
+        {
+          "repetitions": 4,
+          "p50Ms": 4.756339,
+          "p95Ms": 8.24284,
+          "p99Ms": 11.195597,
+          "maxMs": 64.438847,
+          "throughputOpsPerSecond": 190.36,
+          "databaseMutationQueryP95Ms": 8.026079,
+          "poolCheckoutP95Ms": 0.030966,
+          "integrity": true
+        },
+        {
+          "repetitions": 5,
+          "p50Ms": 4.552037,
+          "p95Ms": 7.750304,
+          "p99Ms": 10.700398,
+          "maxMs": 239.073848,
+          "throughputOpsPerSecond": 199.2,
+          "databaseMutationQueryP95Ms": 7.517664,
+          "poolCheckoutP95Ms": 0.029267,
+          "integrity": true
+        }
+      ],
+      "throughputOpsPerSecond": {
+        "median": 200.15,
+        "minimum": 190.36
+      },
+      "repetitionsWithP95Above25ms": 0,
+      "integrityAllRepetitions": true
+    },
+    "assign_writers_4": {
+      "measuredOperationsPerRepetition": 10000,
+      "repetitions": 5,
+      "pooledSamples": 50000,
+      "pooledRequestMs": {
+        "p50": 17.000998,
+        "p95": 23.338786,
+        "p99": 29.133698,
+        "max": 459.028316
+      },
+      "perRepetition": [
+        {
+          "repetitions": 1,
+          "p50Ms": 17.139355,
+          "p95Ms": 23.722842,
+          "p99Ms": 29.217618,
+          "maxMs": 237.368782,
+          "throughputOpsPerSecond": 218.15,
+          "databaseMutationQueryP95Ms": 23.581345,
+          "poolCheckoutP95Ms": 0.034952,
+          "integrity": true
+        },
+        {
+          "repetitions": 2,
+          "p50Ms": 16.8879,
+          "p95Ms": 23.154131,
+          "p99Ms": 29.14065,
+          "maxMs": 357.781328,
+          "throughputOpsPerSecond": 221.6,
+          "databaseMutationQueryP95Ms": 23.035964,
+          "poolCheckoutP95Ms": 0.02857,
+          "integrity": true
+        },
+        {
+          "repetitions": 3,
+          "p50Ms": 17.095702,
+          "p95Ms": 24.044672,
+          "p99Ms": 29.88686,
+          "maxMs": 230.256363,
+          "throughputOpsPerSecond": 219.28,
+          "databaseMutationQueryP95Ms": 23.860196,
+          "poolCheckoutP95Ms": 0.033195,
+          "integrity": true
+        },
+        {
+          "repetitions": 4,
+          "p50Ms": 17.008362,
+          "p95Ms": 23.173517,
+          "p99Ms": 30.018634,
+          "maxMs": 459.028316,
+          "throughputOpsPerSecond": 218.79,
+          "databaseMutationQueryP95Ms": 23.077818,
+          "poolCheckoutP95Ms": 0.030537,
+          "integrity": true
+        },
+        {
+          "repetitions": 5,
+          "p50Ms": 16.914841,
+          "p95Ms": 22.572439,
+          "p99Ms": 27.307511,
+          "maxMs": 278.412282,
+          "throughputOpsPerSecond": 224.5,
+          "databaseMutationQueryP95Ms": 22.473168,
+          "poolCheckoutP95Ms": 0.024795,
+          "integrity": true
+        }
+      ],
+      "throughputOpsPerSecond": {
+        "median": 219.28,
+        "minimum": 218.15
+      },
+      "repetitionsWithP95Above25ms": 0,
+      "integrityAllRepetitions": true
+    },
+    "reassign_writers_1": {
+      "measuredOperationsPerRepetition": 10000,
+      "repetitions": 5,
+      "pooledSamples": 50000,
+      "pooledRequestMs": {
+        "p50": 4.620483,
+        "p95": 7.165714,
+        "p99": 10.654595,
+        "max": 259.262492
+      },
+      "perRepetition": [
+        {
+          "repetitions": 1,
+          "p50Ms": 4.563497,
+          "p95Ms": 8.091954,
+          "p99Ms": 11.193887,
+          "maxMs": 34.706564,
+          "throughputOpsPerSecond": 195,
+          "databaseMutationQueryP95Ms": 7.998479,
+          "poolCheckoutP95Ms": 0.018807,
+          "integrity": true
+        },
+        {
+          "repetitions": 2,
+          "p50Ms": 4.588547,
+          "p95Ms": 6.505758,
+          "p99Ms": 10.467741,
+          "maxMs": 229.785197,
+          "throughputOpsPerSecond": 202.27,
+          "databaseMutationQueryP95Ms": 6.348208,
+          "poolCheckoutP95Ms": 0.021479,
+          "integrity": true
+        },
+        {
+          "repetitions": 3,
+          "p50Ms": 4.754867,
+          "p95Ms": 7.317215,
+          "p99Ms": 10.826499,
+          "maxMs": 259.262492,
+          "throughputOpsPerSecond": 193.59,
+          "databaseMutationQueryP95Ms": 7.127474,
+          "poolCheckoutP95Ms": 0.025261,
+          "integrity": true
+        },
+        {
+          "repetitions": 4,
+          "p50Ms": 4.685933,
+          "p95Ms": 6.49277,
+          "p99Ms": 10.379532,
+          "maxMs": 60.334356,
+          "throughputOpsPerSecond": 200.79,
+          "databaseMutationQueryP95Ms": 6.299507,
+          "poolCheckoutP95Ms": 0.024681,
+          "integrity": true
+        },
+        {
+          "repetitions": 5,
+          "p50Ms": 4.527365,
+          "p95Ms": 7.072796,
+          "p99Ms": 10.509849,
+          "maxMs": 239.763021,
+          "throughputOpsPerSecond": 202.37,
+          "databaseMutationQueryP95Ms": 6.961898,
+          "poolCheckoutP95Ms": 0.024028,
+          "integrity": true
+        }
+      ],
+      "throughputOpsPerSecond": {
+        "median": 200.79,
+        "minimum": 193.59
+      },
+      "repetitionsWithP95Above25ms": 0,
+      "integrityAllRepetitions": true
+    },
+    "reassign_writers_4": {
+      "measuredOperationsPerRepetition": 10000,
+      "repetitions": 5,
+      "pooledSamples": 50000,
+      "pooledRequestMs": {
+        "p50": 17.886675,
+        "p95": 27.299242,
+        "p99": 34.469089,
+        "max": 432.176418
+      },
+      "perRepetition": [
+        {
+          "repetitions": 1,
+          "p50Ms": 18.39031,
+          "p95Ms": 26.148305,
+          "p99Ms": 34.457696,
+          "maxMs": 302.019452,
+          "throughputOpsPerSecond": 202.67,
+          "databaseMutationQueryP95Ms": 25.95395,
+          "poolCheckoutP95Ms": 0.037902,
+          "integrity": true
+        },
+        {
+          "repetitions": 2,
+          "p50Ms": 17.844684,
+          "p95Ms": 26.983106,
+          "p99Ms": 33.337071,
+          "maxMs": 432.176418,
+          "throughputOpsPerSecond": 199.85,
+          "databaseMutationQueryP95Ms": 26.871697,
+          "poolCheckoutP95Ms": 0.031393,
+          "integrity": true
+        },
+        {
+          "repetitions": 3,
+          "p50Ms": 17.408395,
+          "p95Ms": 24.005719,
+          "p99Ms": 31.020799,
+          "maxMs": 352.10603,
+          "throughputOpsPerSecond": 214.08,
+          "databaseMutationQueryP95Ms": 23.84628,
+          "poolCheckoutP95Ms": 0.032469,
+          "integrity": true
+        },
+        {
+          "repetitions": 4,
+          "p50Ms": 18.478459,
+          "p95Ms": 29.048612,
+          "p99Ms": 34.839409,
+          "maxMs": 227.478933,
+          "throughputOpsPerSecond": 194.1,
+          "databaseMutationQueryP95Ms": 28.888159,
+          "poolCheckoutP95Ms": 0.035146,
+          "integrity": true
+        },
+        {
+          "repetitions": 5,
+          "p50Ms": 17.694424,
+          "p95Ms": 28.757604,
+          "p99Ms": 35.340015,
+          "maxMs": 248.737463,
+          "throughputOpsPerSecond": 201.41,
+          "databaseMutationQueryP95Ms": 28.627317,
+          "poolCheckoutP95Ms": 0.033211,
+          "integrity": true
+        }
+      ],
+      "throughputOpsPerSecond": {
+        "median": 201.41,
+        "minimum": 194.1
+      },
+      "repetitionsWithP95Above25ms": 4,
+      "integrityAllRepetitions": true
+    }
+  },
+  "gates": {
+    "taskAndProjectMutationP95MsMax": 25,
+    "p99MsMax": 50,
+    "minimumSustainedThroughputOpsPerSecond": 180,
+    "relativeOverheadGate": "historical failure; not retested"
+  },
+  "matrixIntegrity": "All 30 measured runs passed per-batch source/event/sequence integrity. No admission errors or retries occurred in the normal c1/c4 matrix."
+}
