@@ -111,20 +111,9 @@ try {
     title: 'Legacy completed task',
     detail: 'Completed before migration 0031 introduced owner acceptance.',
   });
-  const completedLegacyClient = await legacyPool.connect();
-  try {
-    await completedLegacyClient.query('BEGIN');
-    await completedLegacyClient.query('SELECT omnis.acquire_mission_lane_admission(false, 3000)');
-    await completedLegacyClient.query("UPDATE omnis.tasks SET status='completed' WHERE id=$1", [
-      completedLegacyTask.id,
-    ]);
-    await completedLegacyClient.query('COMMIT');
-  } catch (error) {
-    await completedLegacyClient.query('ROLLBACK').catch(() => undefined);
-    throw error;
-  } finally {
-    completedLegacyClient.release();
-  }
+  await legacyPool.query("UPDATE omnis.tasks SET status='completed' WHERE id=$1", [
+    completedLegacyTask.id,
+  ]);
   const legacyAdmission = await legacyStore.admitRun(
     legacyTask.id,
     `legacy-upgrade-${suffix}`,
