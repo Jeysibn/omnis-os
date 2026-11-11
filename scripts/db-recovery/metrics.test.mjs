@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { assertBackupSafe, assertValidMetrics, metricsMatch } from './metrics.mjs';
+import { assertBackupSafe, assertValidMetrics, metricsMatch, metricsQuery } from './metrics.mjs';
 
 const safeSnapshot = {
   migrations: [
@@ -189,6 +189,7 @@ describe('database backup consistency policy', () => {
   });
 
   it('requires owner acceptance receipts and their fingerprints to survive restore', () => {
+    assert.match(metricsQuery, /'taskResultAcceptances'.*ORDER BY a\.task_id,\s*a\.run_id/s);
     assert.doesNotThrow(() => assertValidMetrics(safeSnapshot));
     assert.equal(metricsMatch(safeSnapshot, JSON.parse(JSON.stringify(safeSnapshot))), true);
     assert.equal(
