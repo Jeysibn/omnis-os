@@ -728,7 +728,7 @@ const postgresSuite = describe(
       `);
       assert.deepEqual(access.rows[0], {
         runtime_admission: true,
-        authorizer_admission: false,
+        authorizer_admission: true,
         launcher_admission: false,
         runtime_event_insert: false,
         runtime_clock_update: false,
@@ -738,10 +738,7 @@ const postgresSuite = describe(
         launcherPool!.query('SELECT omnis.acquire_mission_lane_admission(false)'),
         /permission denied/,
       );
-      await assert.rejects(
-        authorizerPool!.query('SELECT omnis.acquire_mission_lane_admission(false)'),
-        /permission denied/,
-      );
+      await authorizerPool!.query('SELECT omnis.acquire_mission_lane_admission(false, 3000)');
     });
 
     it('bounds sustained normal Task admission at 5, 8, 16, and 32 concurrent requests', async () => {
@@ -7631,7 +7628,7 @@ const postgresSuite = describe(
       );
       await assert.rejects(
         pool!.query("UPDATE omnis.tasks SET status='completed' WHERE id=$1", [task.id]),
-        /eligible owner acceptance/,
+        /requires an owner acceptance/,
       );
       const [firstAttempt, secondAttempt] = await Promise.all([
         acceptanceStore.acceptTaskResult(task.id, { runId: admitted.run.id }, requestId),
