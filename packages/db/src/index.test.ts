@@ -7713,6 +7713,13 @@ const postgresSuite = describe(
         (error: unknown) => error instanceof StoreError && error.code === 'conflict',
       );
       assert.equal(second.run.status, 'queued');
+      const secondClaim = await store.beginExecution(second.run.id, 'worker-stale-second', 30);
+      await store.completeRun(
+        second.run.id,
+        'worker-stale-second',
+        secondClaim.generation,
+        'Current result.',
+      );
 
       const failedTask = await store.createTask({
         title: 'Failed result',
