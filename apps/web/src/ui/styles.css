@@ -2535,3 +2535,11 @@ button:disabled {
 .accept-result-problem {
   margin-top: 10px;
 }
+.accept-result-receipt-title {
+  margin: 0 0 4px;
+  font-size: 12px;
+}
+.accept-result-receipt-title:focus-visible {
+  outline: 2px solid #294fae;
+  outline-offset: 2px;
+}

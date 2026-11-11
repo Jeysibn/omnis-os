@@ -25,6 +25,7 @@ export function AcceptResultAction({
   onAccepted,
   onSessionExpired,
   onStale,
+  getSessionGeneration,
 }: {
   ownerId: string;
   task: Task | null | undefined;
@@ -34,20 +35,45 @@ export function AcceptResultAction({
   /** The server's task (status `completed` with its receipt). */
   onAccepted: (task: Task) => void;
   onSessionExpired: (cause: unknown) => boolean;
-  /** A 409: refresh tasks and runs before anything else is offered. */
-  onStale: () => void;
+  /**
+   * A 409: re-read tasks and runs from the server. `ok` only when both reads were applied;
+   * `stale` when the session changed meanwhile (nothing was applied).
+   */
+  onStale: () => Promise<'ok' | 'failed' | 'stale'>;
+  /** Identifies the login session; differs between sessions even for the same owner. */
+  getSessionGeneration: () => number;
 }) {
   const headingId = useId();
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<Problem | null>(null);
   const inFlight = useRef(false);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  // After a 409 nothing may be submitted from the old task/run data until a read confirms it.
+  const [refresh, setRefresh] = useState<'idle' | 'refreshing' | 'failed' | 'done'>('idle');
+  const receiptRef = useRef<HTMLHeadingElement | null>(null);
+  const focusReceipt = useRef(false);
   const cancelRef = useRef<HTMLButtonElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
 
   const view = acceptanceViewFor(task, run, runs);
-  const eligible = view.kind === 'eligible' && task;
+  const blocked = refresh === 'refreshing' || refresh === 'failed';
+  const eligible = view.kind === 'eligible' && !blocked && task;
   const open = confirming && Boolean(eligible);
+
+  // Move focus to the receipt only after the server confirmed and the receipt is on screen.
+  useEffect(() => {
+    if (view.kind === 'accepted' && focusReceipt.current) {
+      focusReceipt.current = false;
+      receiptRef.current?.focus();
+    }
+  }, [view.kind]);
 
   // Safe default focus, as in the run-approval dialog: Cancel, never the consequential action.
   useEffect(() => {
@@ -68,20 +94,29 @@ export function AcceptResultAction({
   useEffect(() => {
     setConfirming(false);
     setProblem(null);
+    setRefresh('idle');
   }, [run.id, task?.id]);
 
   async function submit() {
-    if (!task || inFlight.current) return;
+    if (!task || inFlight.current || blocked) return;
     inFlight.current = true;
+    focusReceipt.current = false;
     setBusy(true);
     setProblem(null);
+    // The session this request belongs to. Every outcome is checked against it BEFORE any effect.
+    const generation = getSessionGeneration();
+    const current = () => mounted.current && generation === getSessionGeneration();
     const key = acceptanceAttempts.keyFor(ownerId, task.id, run.id);
     try {
       const result = await acceptTaskResult({ task, run, csrfToken, idempotencyKey: key });
+      // A response for a replaced session is never applied here; the new session reads the server.
+      if (!current()) return;
       acceptanceAttempts.settle(ownerId, task.id, run.id);
       setConfirming(false);
+      focusReceipt.current = true;
       onAccepted(result.task);
     } catch (cause) {
+      if (!current()) return; // a late 401 must not expire the session that replaced this one
       const failure = classifyAcceptanceFailure(cause);
       if (failure.kind === 'unauthorized') {
         // Keep the key: after signing in again the same owner may safely retry the same attempt.
@@ -92,12 +127,25 @@ export function AcceptResultAction({
         acceptanceAttempts.settle(ownerId, task.id, run.id);
         setConfirming(false);
         setProblem({ kind: failure.kind, message: failure.message });
-        if (failure.kind === 'conflict') onStale();
+        if (failure.kind === 'conflict') {
+          setRefresh('refreshing');
+          const outcome = await onStale();
+          if (current() && outcome !== 'stale') setRefresh(outcome === 'ok' ? 'done' : 'failed');
+        }
       }
     } finally {
       inFlight.current = false;
-      setBusy(false);
+      if (mounted.current) setBusy(false);
     }
+  }
+
+  async function reload() {
+    if (refresh === 'refreshing') return;
+    const generation = getSessionGeneration();
+    setRefresh('refreshing');
+    const outcome = await onStale();
+    if (mounted.current && generation === getSessionGeneration() && outcome !== 'stale')
+      setRefresh(outcome === 'ok' ? 'done' : 'failed');
   }
 
   function cancel() {
@@ -114,7 +162,7 @@ export function AcceptResultAction({
         Owner review
       </h3>
 
-      {view.kind === 'eligible' && (
+      {view.kind === 'eligible' && !blocked && (
         <>
           <div className="accept-result-pending">
             <Hourglass size={15} aria-hidden="true" />
@@ -183,9 +231,10 @@ export function AcceptResultAction({
         <div className="accept-result-receipt" role="status">
           <BadgeCheck size={15} aria-hidden="true" />
           <div>
-            <p>
-              <strong>Result accepted by owner.</strong> The task is completed.
-            </p>
+            <h4 ref={receiptRef} tabIndex={-1} className="accept-result-receipt-title">
+              Result accepted by owner.
+            </h4>
+            <p>The task is completed.</p>
             <dl className="metadata-list accept-result-meta">
               <div>
                 <dt>Accepted</dt>
@@ -219,11 +268,35 @@ export function AcceptResultAction({
         </p>
       )}
 
+      {refresh === 'refreshing' && (
+        <p className="accept-result-note" role="status">
+          Refreshing the task and runs from the server. Accept Result is unavailable until this
+          finishes.
+        </p>
+      )}
+      {refresh === 'done' && (
+        <p className="accept-result-note" role="status">
+          The task and runs were refreshed from the server. Review the current state before trying
+          again.
+        </p>
+      )}
+      {refresh === 'failed' && (
+        <div className="accept-result-note" role="alert">
+          <p>
+            The task and runs could not be refreshed, so Accept Result stays unavailable until
+            current data is loaded.
+          </p>
+          <button type="button" className="secondary-button" onClick={() => void reload()}>
+            Reload task and runs
+          </button>
+        </div>
+      )}
+
       {problem && (
         <div className="error-note accept-result-problem" role="alert">
           <p>
             {problem.kind === 'conflict'
-              ? `${problem.message} The task and runs were refreshed; review the current state before trying again.`
+              ? problem.message
               : problem.kind === 'uncertain'
                 ? `${problem.message} The result may or may not have been accepted. Retrying uses the same request and cannot accept it twice.`
                 : problem.message}

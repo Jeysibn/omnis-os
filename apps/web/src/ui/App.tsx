@@ -470,6 +470,27 @@ function App() {
     }
   }, [expireSessionIfNeeded]);
 
+  /**
+   * Authoritative re-read after a 409. Both reads must succeed and the session must be unchanged
+   * for anything to be applied; a stale answer or a 401 for an older session changes nothing.
+   */
+  const refreshAfterConflict = useCallback(async (): Promise<'ok' | 'failed' | 'stale'> => {
+    const generation = sessionGeneration.current;
+    try {
+      const [taskData, runData] = await Promise.all([
+        request('/api/v1/tasks', {}, parseTaskList),
+        request('/api/v1/runs', {}, parseRunList),
+      ]);
+      if (generation !== sessionGeneration.current) return 'stale';
+      setTasks(taskData);
+      setRuns(runData);
+      return 'ok';
+    } catch (cause) {
+      if (generation !== sessionGeneration.current) return 'stale';
+      return expireSessionIfNeeded(cause) ? 'stale' : 'failed';
+    }
+  }, [expireSessionIfNeeded]);
+
   const loadWorkspace = useCallback(async () => {
     await Promise.all([loadTasks(), loadRuns()]);
   }, [loadRuns, loadTasks]);
@@ -1321,7 +1342,8 @@ function App() {
                   current.map((task) => (task.id === updated.id ? updated : task)),
                 ),
               onSessionExpired: expireSessionIfNeeded,
-              onStale: () => void Promise.all([loadTasks(), loadRuns()]),
+              onStale: refreshAfterConflict,
+              getSessionGeneration: () => sessionGeneration.current,
             }}
           />
         )}
@@ -1823,7 +1845,8 @@ type AcceptanceBindings = {
   csrfToken: string;
   onAccepted: (task: Task) => void;
   onSessionExpired: (cause: unknown) => boolean;
-  onStale: () => void;
+  onStale: () => Promise<'ok' | 'failed' | 'stale'>;
+  getSessionGeneration: () => number;
 };
 
 function RunsWorkspace({
@@ -2117,6 +2140,7 @@ function RunInspector({
               onAccepted={acceptance.onAccepted}
               onSessionExpired={acceptance.onSessionExpired}
               onStale={acceptance.onStale}
+              getSessionGeneration={acceptance.getSessionGeneration}
             />
           )}
           {run.status === 'failed' && (

@@ -101,6 +101,9 @@ type AcceptBehavior =
   | 'lost-not-applied'
   | 'concurrency-limit'
   | 'stale-conflict'
+  | 'plain-conflict'
+  | 'hold-ok'
+  | 'hold-401'
   | 'unauthorized'
   | 'csrf';
 
@@ -108,6 +111,10 @@ type FixtureOptions = {
   /** Scripted POST /tasks/:id/accept-result outcomes, consumed in order; then `ok`. */
   acceptBehaviors?: AcceptBehavior[];
   acceptDelayMs?: number;
+  /** After a 409, hold the task/run re-reads this long. */
+  conflictReadHoldMs?: number;
+  /** After a 409, fail this many task re-reads with 503. */
+  conflictReadFailures?: number;
   /** The first event read finishes a running run and leaves its task in review, as the server does. */
   completeOnStream?: boolean;
   tasks?: Task[];
@@ -245,6 +252,14 @@ function createMockApi(page: Page) {
   let acceptBehaviors: AcceptBehavior[] = [];
   const acceptPosts: Array<{ taskId: string; key: string; body: { runId: string } }> = [];
   const acceptReceipts = new Map<string, TaskResultAcceptance>();
+  let releaseAcceptGate = () => {};
+  let acceptGate = new Promise<void>((resolve) => {
+    releaseAcceptGate = resolve;
+  });
+  let acceptSettled = 0;
+  let afterConflict = false;
+  let conflictReadFailures = 0;
+  let currentOwnerId = 'owner';
   const unexpected: string[] = [];
   const requests: Array<{
     method: string;
@@ -304,6 +319,13 @@ function createMockApi(page: Page) {
     acceptBehaviors = [...(options.acceptBehaviors ?? [])];
     acceptPosts.length = 0;
     acceptReceipts.clear();
+    acceptGate = new Promise<void>((resolve) => {
+      releaseAcceptGate = resolve;
+    });
+    acceptSettled = 0;
+    afterConflict = false;
+    conflictReadFailures = options.conflictReadFailures ?? 0;
+    currentOwnerId = 'owner';
     connectorRevokeIds.length = 0;
     connectorReadFailures = options.connectorReadFailures ?? 0;
     createdTaskCount = 0;
@@ -404,7 +426,7 @@ function createMockApi(page: Page) {
     }
     if (path === '/api/v1/me' && method === 'GET') {
       return authenticated
-        ? route.fulfill({ json: { id: 'owner', displayName: 'Director' } })
+        ? route.fulfill({ json: { id: currentOwnerId, displayName: 'Director' } })
         : fulfillError(route, 401, 'unauthorized', 'Sign in to continue.');
     }
     if (path === '/api/v1/agents' && method === 'GET') {
@@ -477,6 +499,12 @@ function createMockApi(page: Page) {
     if (path === '/api/v1/tasks' && method === 'GET') {
       if (options.taskDelayMs)
         await new Promise((resolve) => setTimeout(resolve, options.taskDelayMs));
+      if (afterConflict && options.conflictReadHoldMs)
+        await new Promise((resolve) => setTimeout(resolve, options.conflictReadHoldMs));
+      if (afterConflict && conflictReadFailures > 0) {
+        conflictReadFailures -= 1;
+        return fulfillError(route, 503, 'tasks_unavailable', 'Tasks are temporarily unavailable.');
+      }
       if (taskGetFailures > 0) {
         taskGetFailures -= 1;
         return fulfillError(route, 503, 'tasks_unavailable', 'Tasks are temporarily unavailable.');
@@ -843,7 +871,19 @@ function createMockApi(page: Page) {
         return fulfillError(route, 400, 'invalid_input', 'Accept payload is invalid.');
       acceptPosts.push({ taskId, key, body: parsed.data });
       if (options.acceptDelayMs) await new Promise((r) => setTimeout(r, options.acceptDelayMs));
-      const behavior = acceptBehaviors.shift() ?? 'ok';
+      let behavior = acceptBehaviors.shift() ?? 'ok';
+      if (behavior === 'hold-ok' || behavior === 'hold-401') {
+        const held = behavior;
+        await acceptGate;
+        acceptSettled += 1;
+        if (held === 'hold-401')
+          return fulfillError(route, 401, 'unauthorized', 'Sign in to continue.');
+        behavior = 'ok';
+      }
+      if (behavior === 'plain-conflict') {
+        afterConflict = true;
+        return fulfillError(route, 409, 'conflict', 'This run is no longer the current result.');
+      }
       if (behavior === 'unauthorized') {
         authenticated = false;
         return fulfillError(route, 401, 'unauthorized', 'Sign in to continue.');
@@ -856,6 +896,7 @@ function createMockApi(page: Page) {
       const task = currentTasks.find((item) => item.id === taskId);
       if (!task) return fulfillError(route, 404, 'not_found', 'Task not found.');
       if (behavior === 'stale-conflict') {
+        afterConflict = true;
         // A newer run exists: the task is back in progress and the offered run is stale.
         currentRuns = [
           makeRun('run-newer', taskId, task.title, 'running'),
@@ -986,6 +1027,13 @@ function createMockApi(page: Page) {
     runKeys,
     stopRunIds,
     acceptPosts,
+    releaseAccept: () => releaseAcceptGate(),
+    get acceptSettled() {
+      return acceptSettled;
+    },
+    setOwnerId: (id: string) => {
+      currentOwnerId = id;
+    },
     connectorRevokeIds,
     eventRequestCursors,
     get scenarioCursors() {
@@ -3078,7 +3126,7 @@ test.describe('R1 owner result acceptance', () => {
     await accept(page).click();
     await confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' }).click();
     await expect(page.getByRole('alert')).toContainText('no longer the current result');
-    await expect(page.getByRole('alert')).toContainText('refreshed');
+    await expect(page.getByText('The task and runs were refreshed from the server.')).toBeVisible();
     await expect(page.getByText('A newer run exists for this task.')).toBeVisible();
     await expect(accept(page)).toHaveCount(0);
     await expect(page.getByText('Result accepted by owner.')).toHaveCount(0);
@@ -3186,5 +3234,164 @@ test.describe('R1 owner result acceptance', () => {
       .boundingBox();
     expect(box && box.x >= 0 && box.x + box.width <= 360).toBe(true);
     await assertNoSeriousAxeViolations(page);
+  });
+
+  const signOutAndBackIn = async (page: Page) => {
+    await page.getByRole('button', { name: 'Sign out' }).click();
+    await expect(page.getByRole('heading', { name: 'Welcome back.' })).toBeVisible();
+    await page.getByLabel('Owner password').fill('fixture-owner-password');
+    await page.getByRole('button', { name: 'Sign in' }).click();
+    await expect(page.getByRole('navigation', { name: 'Primary navigation' })).toBeVisible();
+  };
+  const startHeldAcceptance = async (page: Page) => {
+    await openReview(page);
+    await accept(page).click();
+    await confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' }).click();
+    await expect(confirmGroup(page).getByRole('button', { name: 'Accepting…' })).toBeDisabled();
+  };
+  const settle = async (page: Page, api: MockApi, count = 1) => {
+    api.releaseAccept();
+    await expect.poll(() => api.acceptSettled).toBe(count);
+    await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 150)));
+  };
+
+  for (const [name, otherOwner] of [
+    ['the same owner signing out and back in', null],
+    ['a different owner signing in', 'owner-two'],
+  ] as const) {
+    test(`a delayed 401 for ${name} does not expire the replacement session`, async ({
+      page,
+      api,
+    }) => {
+      api.configure({ tasks: [reviewTask], runs: [reviewRun], acceptBehaviors: ['hold-401'] });
+      await startHeldAcceptance(page);
+      if (otherOwner) api.setOwnerId(otherOwner);
+      await signOutAndBackIn(page);
+      await settle(page, api);
+      await expect(page.getByRole('navigation', { name: 'Primary navigation' })).toBeVisible();
+      await expect(page.getByRole('heading', { name: 'Welcome back.' })).toHaveCount(0);
+      await expect(page.getByText('Your owner session expired')).toHaveCount(0);
+      await expect(page.getByText('Result accepted by owner.')).toHaveCount(0);
+      // No automatic replay after login.
+      expect(api.acceptPosts).toHaveLength(1);
+    });
+  }
+
+  test('an outdated success after session replacement is not applied to the new session', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ tasks: [reviewTask], runs: [reviewRun], acceptBehaviors: ['hold-ok'] });
+    await startHeldAcceptance(page);
+    await signOutAndBackIn(page);
+    // Wait until the new session has read the task, then let the old answer arrive.
+    await page.getByRole('link', { name: 'Tasks' }).click();
+    const pill = page
+      .getByRole('listitem')
+      .filter({ hasText: 'Review quarterly notes' })
+      .locator('.status-pill');
+    await expect(pill).toHaveText('Awaiting review');
+    await settle(page, api);
+    await expect(page.getByText('Result accepted by owner.')).toHaveCount(0);
+    expect(await page.evaluate(() => document.activeElement?.tagName)).not.toBe('H4');
+    // The old answer changed nothing in the new session.
+    await expect(pill).toHaveText('Awaiting review');
+    expect(api.acceptPosts).toHaveLength(1);
+  });
+
+  test('a current-session 401 still expires that session', async ({ page, api }) => {
+    api.configure({ tasks: [reviewTask], runs: [reviewRun], acceptBehaviors: ['hold-401'] });
+    await startHeldAcceptance(page);
+    api.releaseAccept();
+    await expect(page.getByRole('heading', { name: 'Welcome back.' })).toBeVisible();
+    await expect(page.getByText('Result accepted by owner.')).toHaveCount(0);
+  });
+
+  test('after a 409 the action stays unavailable until the refresh finishes, with no early message', async ({
+    page,
+    api,
+  }) => {
+    api.configure({
+      tasks: [reviewTask],
+      runs: [reviewRun],
+      acceptBehaviors: ['plain-conflict'],
+      conflictReadHoldMs: 700,
+    });
+    await openReview(page);
+    await accept(page).click();
+    await confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' }).click();
+    await expect(page.getByText('Refreshing the task and runs from the server.')).toBeVisible();
+    await expect(accept(page)).toHaveCount(0);
+    await expect(page.getByText('were refreshed')).toHaveCount(0);
+    await expect(page.getByText('The task and runs were refreshed from the server.')).toBeVisible();
+    // The server still says this run is the current result, so it is offered again.
+    await expect(accept(page)).toBeVisible();
+    expect(api.acceptPosts).toHaveLength(1);
+  });
+
+  test('a superseded run never becomes eligible again, even mid-refresh', async ({ page, api }) => {
+    api.configure({
+      tasks: [reviewTask],
+      runs: [reviewRun],
+      acceptBehaviors: ['stale-conflict'],
+      conflictReadHoldMs: 500,
+    });
+    await openReview(page);
+    await accept(page).click();
+    await confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' }).click();
+    await expect(page.getByText('Refreshing the task and runs from the server.')).toBeVisible();
+    await expect(accept(page)).toHaveCount(0);
+    await expect(page.getByText('A newer run exists for this task.')).toBeVisible();
+    await expect(accept(page)).toHaveCount(0);
+  });
+
+  test('a failed refresh keeps acceptance unavailable until an explicit successful reload', async ({
+    page,
+    api,
+  }) => {
+    api.configure({
+      tasks: [reviewTask],
+      runs: [reviewRun],
+      acceptBehaviors: ['plain-conflict'],
+      conflictReadFailures: 1,
+    });
+    await openReview(page);
+    await accept(page).click();
+    await confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' }).click();
+    await expect(page.getByText('could not be refreshed')).toBeVisible();
+    await expect(accept(page)).toHaveCount(0);
+    await expect(page.getByText('were refreshed')).toHaveCount(0);
+    await page.getByRole('button', { name: 'Reload task and runs' }).click();
+    await expect(page.getByText('The task and runs were refreshed from the server.')).toBeVisible();
+    await expect(accept(page)).toBeVisible();
+    expect(api.acceptPosts).toHaveLength(1);
+  });
+
+  test('focus moves to the receipt heading only after the server confirms acceptance', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ tasks: [reviewTask], runs: [reviewRun], acceptDelayMs: 300 });
+    await openReview(page);
+    await accept(page).click();
+    await confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' }).click();
+    await expect(page.getByRole('heading', { name: 'Result accepted by owner.' })).toHaveCount(0);
+    const heading = page.getByRole('heading', { name: 'Result accepted by owner.' });
+    await expect(heading).toBeFocused();
+    await expect(page.locator('.accept-result-receipt[role="status"]')).toContainText(
+      'The task is completed.',
+    );
+  });
+
+  test('an uncertain or rejected attempt does not move focus to a receipt', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ tasks: [reviewTask], runs: [reviewRun], acceptBehaviors: ['csrf'] });
+    await openReview(page);
+    await accept(page).click();
+    await confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' }).click();
+    await expect(page.getByRole('alert')).toContainText('CSRF');
+    expect(await page.evaluate(() => document.activeElement?.tagName)).not.toBe('H4');
   });
 });
