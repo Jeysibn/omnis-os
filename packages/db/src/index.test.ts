@@ -7695,7 +7695,10 @@ const postgresSuite = describe(
     });
 
     it('rejects stale, failed, and cancelled results while preserving legacy completed rows', async () => {
-      const staleTask = await store.createTask({ title: 'Superseded result', detail: 'Retry.' });
+      const staleTask = await store.createTask({
+        title: 'Superseded result',
+        detail: 'Retry this result.',
+      });
       const first = await admit(staleTask.id, key('accept-stale-first'), async () => 'job');
       const firstClaim = await store.beginExecution(first.run.id, 'worker-stale-first', 30);
       await store.completeRun(

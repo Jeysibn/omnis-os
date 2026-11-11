@@ -235,6 +235,7 @@ try {
     '0028_synthetic_broker_fencing',
     '0029_mission_lane_events',
     '0030_mission_lane_admission',
+    '0031_owner_verified_task_results',
   ];
   assert.deepEqual(afterUpgrade.migrations, expectedMigrations);
   assert.equal(afterUpgrade.unsafeRunStates, 3);
@@ -739,7 +740,7 @@ async function verifyPost0005ProvenanceUpgrade() {
       "SELECT id, length(checksum) AS checksum_length FROM omnis.schema_migrations WHERE id LIKE '00%' ORDER BY id",
     );
     assert.deepEqual(migrationRows.rows.at(-1), {
-      id: '0030_mission_lane_admission',
+      id: '0031_owner_verified_task_results',
       checksum_length: 64,
     });
   } finally {
