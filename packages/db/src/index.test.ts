@@ -7760,8 +7760,9 @@ const postgresSuite = describe(
         /eligible owner acceptance/,
       );
       const historical = await adminPool!.query<{ id: string }>(
-        `INSERT INTO omnis.tasks(title, detail, status)
-         VALUES ('Historical completion', 'Existing row remains compatible.', 'completed')
+        `INSERT INTO omnis.tasks(id, title, detail, status)
+         VALUES ('task-legacy-completion', 'Historical completion',
+           'Existing row remains compatible.', 'completed')
          RETURNING id`,
       );
       const preserved = await store.getTask(historical.rows[0]!.id);
