@@ -1,6 +1,7 @@
 import { type Ref } from 'react';
 import type { Run, Task } from '@omnis/contracts';
 import { NxButton, Panel } from '../design/index.js';
+import { latestRunForTask } from '../acceptResult.js';
 import { RunStatusBadge, isActiveRun } from './status.js';
 import { formatManilaStamp } from './time.js';
 import type { LoadState } from './vitals.js';
@@ -25,7 +26,8 @@ type Props = {
  * "What needs my attention?" Only categories the current API can support are shown:
  *  - open tasks waiting for the owner's start decision (same rule as the Tasks list),
  *  - active runs (with the existing stop request),
- *  - failed, interrupted and unknown-outcome runs.
+ *  - failed, interrupted and unknown-outcome runs,
+ *  - tasks in review whose latest completed run awaits the owner's acceptance.
  * There is no pending-approval list, security alert or agent-attribution endpoint, so none is
  * invented. Resources that failed to load are reported once, above the panels.
  */
@@ -35,6 +37,11 @@ export function AttentionPanel(props: Props) {
   const tasksReady = tasksState === 'ready';
   const taskHasActiveRun = new Set(runs.filter((r) => isActiveRun(r.status)).map((r) => r.taskId));
   const awaiting = tasks.filter((task) => task.status === 'open' && !taskHasActiveRun.has(task.id));
+  // A finished run is not an accepted task: these wait for the owner to review the latest result.
+  const inReview = tasks
+    .filter((task) => task.status === 'in_review')
+    .map((task) => ({ task, run: latestRunForTask(runs, task.id) }))
+    .filter((entry): entry is { task: Task; run: Run } => entry.run?.status === 'completed');
   const active = runs.filter((run) => isActiveRun(run.status));
   const problems = runs
     .filter((run) => ['failed', 'interrupted', 'unknown'].includes(run.status))
@@ -77,6 +84,32 @@ export function AttentionPanel(props: Props) {
             The owner approves each run when it starts; the API has no list of pending approvals.
           </p>
         </div>
+
+        {tasksReady && runsReady && inReview.length > 0 && (
+          <div className="ccx-block">
+            <h3>
+              Awaiting your review <span className="ccx-count">{inReview.length}</span>
+            </h3>
+            <ul className="ccx-list">
+              {inReview.slice(0, DECISION_LIMIT).map(({ task, run }) => (
+                <li key={task.id}>
+                  <span className="ccx-item-title">{task.title}</span>
+                  <NxButton
+                    aria-label={`Review result of ${task.title}`}
+                    onClick={() => props.onSelectRun(run)}
+                  >
+                    Review result
+                  </NxButton>
+                </li>
+              ))}
+            </ul>
+            {inReview.length > DECISION_LIMIT && (
+              <NxButton variant="ghost" onClick={() => props.onNavigate('tasks')}>
+                {inReview.length - DECISION_LIMIT} more in Tasks
+              </NxButton>
+            )}
+          </div>
+        )}
 
         <div className="ccx-block">
           <h3>Current activity</h3>

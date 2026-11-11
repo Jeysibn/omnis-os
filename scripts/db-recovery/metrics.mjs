@@ -42,6 +42,9 @@ export const metricsQuery = `SELECT json_build_object(
     'audits', (SELECT count(*) FROM omnis.task_execution_assignment_audit),
     'idempotency', (SELECT count(*) FROM omnis.task_execution_assignment_idempotency)
   ),
+  'taskResultAcceptanceCounts', json_build_object(
+    'acceptances', (SELECT count(*) FROM omnis.task_result_acceptances)
+  ),
   'leasedRuns', (SELECT count(*) FROM omnis.runs WHERE lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL),
   'recordFingerprints', json_build_object(
     'tasks', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(t)::text), ':' ORDER BY t.id), '')) FROM omnis.tasks t),
@@ -61,7 +64,8 @@ export const metricsQuery = `SELECT json_build_object(
     'taskProjectManagementAudit', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(a)::text), ':' ORDER BY a.id), '')) FROM omnis.task_project_management_audit a),
     'taskProjectManagementIdempotency', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(i)::text), ':' ORDER BY i.request_id), '')) FROM omnis.task_project_management_idempotency i),
     'taskExecutionAssignmentAudit', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(a)::text), ':' ORDER BY a.id), '')) FROM omnis.task_execution_assignment_audit a),
-    'taskExecutionAssignmentIdempotency', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(i)::text), ':' ORDER BY i.request_id), '')) FROM omnis.task_execution_assignment_idempotency i)
+    'taskExecutionAssignmentIdempotency', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(i)::text), ':' ORDER BY i.request_id), '')) FROM omnis.task_execution_assignment_idempotency i),
+    'taskResultAcceptances', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(a)::text), ':' ORDER BY a.task_id, a.run_id), '')) FROM omnis.task_result_acceptances a)
   ),
   'syntheticOnly', (SELECT COALESCE(bool_and(synthetic IS TRUE AND runtime_kind = 'mock'), true) FROM omnis.runs),
   'sequenceInvariants', (
@@ -145,10 +149,12 @@ export function assertValidMetrics(report) {
     !report.migrations.includes('0026_task_execution_assignment') ||
     !report.migrations.includes('0027_agent_identity_management') ||
     !report.migrations.includes('0029_mission_lane_events') ||
+    !report.migrations.includes('0031_owner_verified_task_results') ||
     !validAgentManagementCounts(report.agentManagementCounts) ||
     !validProjectManagementCounts(report.projectManagementCounts) ||
     !validTaskProjectManagementCounts(report.taskProjectManagementCounts) ||
     !validTaskExecutionAssignmentCounts(report.taskExecutionAssignmentCounts) ||
+    !validTaskResultAcceptanceCounts(report.taskResultAcceptanceCounts) ||
     !validManagementFingerprints(report.recordFingerprints) ||
     report.syntheticOnly !== true ||
     report.sequenceInvariants !== true ||
@@ -196,6 +202,16 @@ function validTaskExecutionAssignmentCounts(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   return ['audits', 'idempotency'].every(
     (key) => Number.isSafeInteger(value[key]) && value[key] >= 0,
+  );
+}
+
+function validTaskResultAcceptanceCounts(value) {
+  return (
+    value &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    Number.isSafeInteger(value.acceptances) &&
+    value.acceptances >= 0
   );
 }
 
@@ -248,6 +264,7 @@ export function metricsMatch(source, restored) {
     'projectManagementCounts',
     'taskProjectManagementCounts',
     'taskExecutionAssignmentCounts',
+    'taskResultAcceptanceCounts',
     'missionLane',
     'recordFingerprints',
   ]) {
@@ -292,6 +309,7 @@ function validManagementFingerprints(value) {
     'taskProjectManagementIdempotency',
     'taskExecutionAssignmentAudit',
     'taskExecutionAssignmentIdempotency',
+    'taskResultAcceptances',
     'missionLane',
   ].every((key) => typeof value[key] === 'string' && /^[a-f0-9]{32}$/.test(value[key]));
 }

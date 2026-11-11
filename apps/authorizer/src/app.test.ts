@@ -208,6 +208,80 @@ function makeStore() {
 }
 
 describe('independent authorizer service boundary', () => {
+  it('accepts owner result requests only from the authenticated API boundary', async () => {
+    const { store, calls } = makeStore();
+    const requestId = 'c0b527e0-6a09-46fd-a0dd-5e71ea3a23ce';
+    const acceptance = {
+      runId: 'run-0001',
+      acceptedBy: 'owner',
+      acceptedAt: '2026-11-12T00:00:00.000Z',
+      requestId,
+    };
+    const app = createAuthorizerApp({
+      store,
+      serviceToken,
+      checkDatabase: async () => undefined,
+      taskAcceptanceStore: {
+        async acceptTaskResult(taskId, input, receivedRequestId) {
+          calls.push({ method: 'acceptTaskResult', requestId: receivedRequestId });
+          assert.equal(taskId, 'task-0001');
+          assert.deepEqual(input, { runId: acceptance.runId });
+          return {
+            task: {
+              id: taskId,
+              title: 'Task title',
+              detail: 'Task detail',
+              status: 'completed',
+              createdAt: '2026-11-04T00:00:00.000Z',
+              projectId: null,
+              associationRevision: 1,
+              resultAcceptance: acceptance,
+            },
+            acceptance,
+            created: true,
+          };
+        },
+      },
+    });
+    try {
+      const unauthorized = await app.inject({
+        method: 'POST',
+        url: '/internal/v1/tasks/task-0001/accept-result',
+        headers: { 'idempotency-key': requestId },
+        payload: { runId: acceptance.runId },
+      });
+      assert.equal(unauthorized.statusCode, 401);
+      assert.deepEqual(calls, []);
+
+      const malformed = await app.inject({
+        method: 'POST',
+        url: '/internal/v1/tasks/task-0001/accept-result',
+        headers: {
+          'x-omnis-authorizer-token': serviceToken,
+          'idempotency-key': 'invalid',
+        },
+        payload: { runId: acceptance.runId },
+      });
+      assert.equal(malformed.statusCode, 400);
+      assert.deepEqual(calls, []);
+
+      const accepted = await app.inject({
+        method: 'POST',
+        url: '/internal/v1/tasks/task-0001/accept-result',
+        headers: {
+          'x-omnis-authorizer-token': serviceToken,
+          'idempotency-key': requestId,
+        },
+        payload: { runId: acceptance.runId },
+      });
+      assert.equal(accepted.statusCode, 200);
+      assert.equal(accepted.json().acceptance.requestId, requestId);
+      assert.deepEqual(calls, [{ method: 'acceptTaskResult', requestId }]);
+    } finally {
+      await app.close();
+    }
+  });
+
   it('rejects runtime and unauthenticated requests before calling the authorization store', async () => {
     const { store, calls } = makeStore();
     const app = createAuthorizerApp({ store, serviceToken, checkDatabase: async () => undefined });

@@ -28,7 +28,14 @@ const priorityTone: Record<Priority, StatusTone> = {
 const taskTone: Record<TaskStatus, StatusTone> = {
   open: 'info',
   in_progress: 'attention',
+  in_review: 'attention',
   completed: 'ok',
+};
+const taskLabel: Record<TaskStatus, string> = {
+  open: 'Open',
+  in_progress: 'In progress',
+  in_review: 'Awaiting review',
+  completed: 'Completed',
 };
 const runTone: Record<RunStatus, StatusTone> = {
   queued: 'info',
@@ -48,7 +55,7 @@ export const PriorityBadge = ({ priority }: { priority: Priority }) => (
   <StatusBadge tone={priorityTone[priority]}>{label(priority)}</StatusBadge>
 );
 export const TaskStatusBadge = ({ status }: { status: TaskStatus }) => (
-  <StatusBadge tone={taskTone[status]}>{label(status)}</StatusBadge>
+  <StatusBadge tone={taskTone[status]}>{taskLabel[status]}</StatusBadge>
 );
 export const RunStatusBadge = ({ status }: { status: RunStatus }) => (
   <StatusBadge tone={runTone[status]}>{label(status)}</StatusBadge>

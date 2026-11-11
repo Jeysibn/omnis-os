@@ -91,6 +91,7 @@ describe('durable mock run coordinator', () => {
       profileVersion: null,
       runtimeId: null,
       assignmentRevision: 1,
+      resultAcceptance: null,
     };
     const coordinator = testCoordinator(
       {
@@ -437,6 +438,7 @@ describe('durable mock run coordinator', () => {
       profileVersion: null,
       runtimeId: null,
       assignmentRevision: 1,
+      resultAcceptance: null,
     };
     let cancellationAcknowledged = false;
     const store = {
@@ -780,6 +782,7 @@ const lifecycleTask: Task = {
   profileVersion: null,
   runtimeId: null,
   assignmentRevision: 1,
+  resultAcceptance: null,
 };
 
 function failingRuntime(error: Error): RuntimeAdapter {
