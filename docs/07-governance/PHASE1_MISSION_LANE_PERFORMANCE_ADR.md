@@ -1,6 +1,6 @@
 # Phase 1 Mission Lane Performance Decision
 
-**Status:** Owner-approved direction; performance acceptance failed; PR #90 remains Draft.
+**Status:** Owner-approved direction; a PR #90-specific temporary performance exception is recorded below. The original 25 ms and related gates remain deferred or inconclusive where stated; PR #90 remains Draft.
 **Date:** 2026-11-10
 **Scope:** Phase 1 Mission Lane transactional projection only.
 
@@ -628,3 +628,59 @@ mutation, triggers, event insert/index work, and commit. Any further optimizatio
 must keep D5 ordering and receive independent review. If these limits still
 cannot be met without changing the approved architecture, return to the owner
 for a measured decision; do not relax the gates or enable a real provider.
+
+## 2026-11-11 owner-approved temporary PR #90 performance exception
+
+**Status:** Owner-approved, PR-specific exception. This section supersedes the
+earlier merge-blocking disposition above for PR #90 only. It does not change the
+long-term target, general production SLA, or correctness/security gates.
+
+The owner approved a temporary **four-writer pooled request p95 ≤35 ms**
+threshold for PR #90 and authorized completion without further speculative
+turnstile or D5 cursor optimization. The long-term target remains ≤25 ms. This
+exception does not waive source/event/sequence integrity, transaction atomicity,
+authorization, access controls, or admission safety invariants. It does not
+approve deployment or real-provider execution.
+
+The corrected candidate was measured at the reported base
+`30037abc00b38872b42cc86d016717aa123d76e4`, with the two-line redundant-unlock
+removal and regression test change applied as a working-tree patch. It was not
+yet committed at measurement time. The five focused four-writer repetitions
+per operation used PostgreSQL 17.6, the pinned image and 2 CPU / 2 GiB
+disposable instances. Each cell used 200 warmups and 2,000 measured operations,
+with fixture resets and alternating before/after order. The correction
+eliminated 29,968 duplicate-unlock warnings across 30,000 measured mutations;
+corrected source/event/sequence integrity passed in every cell.
+
+| Four-writer operation | Corrected pooled request p95 | Median throughput | Temporary ≤35 ms pooled p95 | ≥180 ops/s median |
+| --------------------- | ---------------------------: | ----------------: | --------------------------: | ----------------: |
+| Task create           |                     25.71 ms |      235.28 ops/s |                        PASS |              PASS |
+| Project assignment    |                     29.87 ms |      210.90 ops/s |                        PASS |              PASS |
+| Project reassignment  |                     30.43 ms |      220.58 ops/s |                        PASS |              PASS |
+
+The pooled p95 values satisfy the temporary threshold. This does not convert
+the original acceptance gates into passes:
+
+- The 25 ms long-term p95 target remains deferred.
+- Assignment and reassignment run-level p95 reached 35.86 ms and 35.13 ms,
+  respectively; the pooled threshold is met, but the observed run variation is
+  retained as a limitation.
+- Some throughput repetitions fell below 180 ops/s, despite pooled matrix
+  medians exceeding 180 ops/s.
+- Relative overhead versus migration 0028 is **INCONCLUSIVE** for this
+  correction comparison.
+- Cursor-wait p95 and maximum-wait gates are **INCONCLUSIVE** for the corrected
+  head; historical profiles are not substituted for exact-candidate evidence.
+- Sustained overload, starvation, and fairness performance evidence remains
+  incomplete. Correctness pressure tests do not establish these performance
+  gates.
+
+The focused methodology, run-level values, warning counts, environment and
+source provenance are recorded in
+[`PR #90 unlock correction evidence`](evidence/pr90/unlock-correction-2026-11-11.md).
+The corrective diff is limited to removing a final duplicate queue-slot unlock
+and adding regression assertions. It preserves the earlier guarded queue-slot
+release, exception cleanup, turnstile behavior, admission priority, D5 cursor
+ordering, and transaction boundary.
+
+Track the deferred work as performance technical debt in [GitHub issue #100](https://github.com/Jeysibn/omnis-os/issues/100), “Mission Lane — Restore 25 ms p95 and Complete Concurrency Performance Validation.” The issue covers the long-term p95 goal, transaction/lock cost attribution, cursor wait/max, sustained overload/fairness, reproducible throughput, and D5 preservation. Future high-load or real-runtime authorization must evaluate these deferred items; this exception is not a general SLA.

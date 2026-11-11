@@ -219,6 +219,7 @@ const postgresSuite = describe(
       const firstPool = createPool({ connectionString: databaseUrl!, max: 4 });
       const secondPool = createPool({ connectionString: databaseUrl!, max: 4 });
       const clients: PoolClient[] = [];
+      const admissionNotices: string[] = [];
       let turnstileBlocker: PoolClient | undefined;
       let cursorBlocker: PoolClient | undefined;
       let promoted: PoolClient | undefined;
@@ -246,6 +247,7 @@ const postgresSuite = describe(
         await cursorBlocker.query('SELECT pg_advisory_xact_lock($1::bigint)', ['70463909136525']);
 
         promoted = await connect(secondPool);
+        promoted.on('notice', (notice) => admissionNotices.push(notice.message ?? ''));
         const promotedPid = Number(
           (await promoted.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0]?.pid,
         );
@@ -329,14 +331,50 @@ const postgresSuite = describe(
           (error: unknown) => (error as { code?: string }).code === 'PML01',
         );
         await overflow.query('ROLLBACK');
+        const pendingAfterOverflow = await adminPool!.query<{ count: number }>(`
+          SELECT count(*)::int AS count FROM pg_locks
+           WHERE locktype='advisory' AND objsubid=1 AND granted
+             AND ((classid::bigint << 32) | objid::bigint)
+               BETWEEN 70463909136610 AND 70463909136612
+        `);
+        assert.equal(
+          pendingAfterOverflow.rows[0]?.count,
+          3,
+          "failed slot acquisition must not release another writer's queue reservation",
+        );
 
         await cursorBlocker.query('COMMIT');
         await promotedAcquire;
+        const promotedOwnership = await adminPool!.query<{ key: string }>(
+          `SELECT ((classid::bigint << 32) | objid::bigint)::text AS key
+             FROM pg_locks WHERE pid=$1 AND locktype='advisory' AND objsubid=1 AND granted
+               AND (((classid::bigint << 32) | objid::bigint)=70463909136525
+                 OR ((classid::bigint << 32) | objid::bigint) BETWEEN 70463909136600 AND 70463909136613)`,
+          [promotedPid],
+        );
+        const promotedKeys = promotedOwnership.rows.map((row) => BigInt(row.key));
+        assert.equal(promotedKeys.filter((key) => key === 70463909136525n).length, 1);
+        assert.equal(
+          promotedKeys.filter((key) => key >= 70463909136600n && key <= 70463909136603n).length,
+          1,
+          'the admitted transaction must keep exactly one active permit',
+        );
+        assert.equal(promotedKeys.length, 2, 'queue and turnstile session locks must be released');
         await promoted.query('COMMIT');
+        const afterCommit = await adminPool!.query(
+          `SELECT 1 FROM pg_locks WHERE pid=$1 AND locktype='advisory' AND objsubid=1 AND granted`,
+          [promotedPid],
+        );
+        assert.equal(afterCommit.rowCount, 0, 'commit must release the permit and D5 cursor');
         for (const [index, acquire] of pendingAcquires.entries()) {
           await acquire;
           await pendingClients[index]!.query('COMMIT');
         }
+        assert.deepEqual(
+          admissionNotices,
+          [],
+          'a queued writer must release its owned queue slot once, without a second unowned unlock',
+        );
       } finally {
         await Promise.allSettled(clients.map((client) => client.query('ROLLBACK')));
         if (promotedAcquire) await Promise.allSettled([promotedAcquire]);
@@ -505,6 +543,9 @@ const postgresSuite = describe(
       try {
         await blocker.query('BEGIN');
         await blocker.query('SELECT pg_advisory_xact_lock($1::bigint)', ['70463909136525']);
+        const writerPid = Number(
+          (await writer.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0]?.pid,
+        );
         await writer.query('BEGIN');
         await assert.rejects(
           writer.query('SELECT omnis.acquire_mission_lane_admission(false, 75)'),
@@ -528,6 +569,21 @@ const postgresSuite = describe(
           0,
           'expired admission must release its xact permit',
         );
+        const remainingLocks = await adminPool!.query(
+          `SELECT 1 FROM pg_locks WHERE pid=$1 AND locktype='advisory' AND objsubid=1 AND granted
+            AND (((classid::bigint << 32) | objid::bigint)=70463909136525
+              OR ((classid::bigint << 32) | objid::bigint) BETWEEN 70463909136600 AND 70463909136613)`,
+          [writerPid],
+        );
+        assert.equal(
+          remainingLocks.rowCount,
+          0,
+          'timeout cleanup must release session and xact locks',
+        );
+        await blocker.query('COMMIT');
+        await writer.query('BEGIN');
+        await writer.query('SELECT omnis.acquire_mission_lane_admission(false, 3000)');
+        await writer.query('COMMIT');
       } finally {
         await writer.query('ROLLBACK').catch(() => undefined);
         await blocker.query('ROLLBACK').catch(() => undefined);

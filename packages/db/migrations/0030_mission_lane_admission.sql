@@ -236,8 +236,6 @@ BEGIN
 
   PERFORM pg_catalog.pg_advisory_unlock(v_turnstile_key);
   v_has_turnstile := false;
-  PERFORM pg_catalog.pg_advisory_unlock(v_queue_key);
-  v_has_queue_slot := false;
   IF v_has_critical_marker THEN
     PERFORM pg_catalog.pg_advisory_unlock(v_critical_marker_key);
     v_has_critical_marker := false;
