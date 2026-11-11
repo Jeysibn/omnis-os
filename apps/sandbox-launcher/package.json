@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "node --watch --experimental-strip-types --env-file=../../.env.sandbox-launcher src/server.ts",
-    "build": "pnpm typecheck",
+    "build": "node ../../scripts/ci/verify-stage2a-exclusion.mjs --project tsconfig.json && pnpm typecheck",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --experimental-strip-types --test src/docker-sandbox.test.ts src/docker-sandbox.security.test.ts src/server.test.ts",
     "test:sandbox": "OMNIS_SANDBOX_INTEGRATION=1 node --experimental-strip-types --test src/docker-sandbox.security.test.ts"

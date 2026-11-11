@@ -14,7 +14,7 @@
     "./synthetic-connector-prompt": "./src/synthetic-connector-prompt.ts"
   },
   "scripts": {
-    "build": "pnpm typecheck",
+    "build": "node ../../scripts/ci/verify-stage2a-exclusion.mjs --project tsconfig.json && pnpm typecheck",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --experimental-strip-types --test src/index.test.ts src/connector-authorization.test.ts src/connector-broker.test.ts src/broker-ipc.test.ts src/synthetic-task-run.test.ts src/synthetic-connector-prompt.test.ts"
   },

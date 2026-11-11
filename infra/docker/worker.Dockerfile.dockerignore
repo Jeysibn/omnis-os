@@ -25,6 +25,10 @@
 !packages/runtime-adapters/src/**
 !packages/runtime-adapters/tsconfig.json
 !scripts/
+!scripts/ci/
+!scripts/ci/verify-stage2a-exclusion.mjs
+!scripts/ci/verify-stage2a-artifact.mjs
+scripts/mission9d/stage2a-simulated/
 !scripts/configure-hooks.ts
 !scripts/container-images/
 !scripts/container-images/compile-workspace-runtime.mjs

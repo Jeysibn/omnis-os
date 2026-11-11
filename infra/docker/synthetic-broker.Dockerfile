@@ -11,7 +11,8 @@ RUN pnpm install --frozen-lockfile \
     && pnpm --filter @omnis/synthetic-broker deploy --prod --legacy /out/broker \
     && pnpm exec tsc -p packages/contracts/tsconfig.json --noEmit false --rewriteRelativeImportExtensions true --outDir /out/contracts \
     && node scripts/platform/prepare-broker-runtime.mjs /out/broker /out/contracts \
-    && find /out -type f \( -name '*.test.ts' -o -name '*.spec.ts' -o -name 'tsconfig*.json' \) -delete
+    && find /out -type f \( -name '*.test.ts' -o -name '*.spec.ts' -o -name 'tsconfig*.json' \) -delete \
+    && node scripts/ci/verify-stage2a-artifact.mjs /out/broker /out/contracts
 
 FROM node:24.22.1-bookworm-slim@sha256:be8204d4bd327363357f532187b752ff62759c31bedf98e9e18fc08c9cbd605c AS runtime
 ENV NODE_ENV=production
