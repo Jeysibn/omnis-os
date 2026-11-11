@@ -203,6 +203,10 @@ try {
         EXECUTE 'REVOKE ALL ON FUNCTION omnis.acquire_mission_lane_admission(boolean,integer) FROM PUBLIC, omnis_authorizer, omnis_launcher';
         EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.acquire_mission_lane_admission(boolean,integer) TO omnis_runtime';
       END IF;
+      IF pg_catalog.to_regprocedure('omnis.accept_task_result(text,text,uuid)') IS NOT NULL THEN
+        EXECUTE 'REVOKE ALL ON FUNCTION omnis.accept_task_result(text,text,uuid) FROM PUBLIC, omnis_authorizer, omnis_launcher';
+        EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.accept_task_result(text,text,uuid) TO omnis_runtime';
+      END IF;
     END $restore_acl$;`,
   ]);
 
