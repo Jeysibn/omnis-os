@@ -29,18 +29,18 @@ import { summariseTasks } from './projects/planning/summary.js';
 
 /** Pure decisions behind the planning screens: no browser, no network. */
 
-const tasks = (...statuses: Array<'open' | 'in_progress' | 'completed'>) =>
+const tasks = (...statuses: Array<'open' | 'in_progress' | 'in_review' | 'completed'>) =>
   statuses.map((status) => ({ status }));
 
 test.describe('summariseTasks', () => {
   test('counts by status and calls a fully loaded, matching set complete', () => {
-    const summary = summariseTasks(tasks('open', 'open', 'completed'), {
-      observedTotal: 3,
+    const summary = summariseTasks(tasks('open', 'open', 'in_review', 'completed'), {
+      observedTotal: 4,
       complete: true,
     });
-    expect(summary.counts).toEqual({ open: 2, in_progress: 0, completed: 1 });
+    expect(summary.counts).toEqual({ open: 2, in_progress: 0, in_review: 1, completed: 1 });
     expect(summary.partial).toBe(false);
-    expect(summary.text).toBe('All 3 tasks loaded.');
+    expect(summary.text).toBe('All 4 tasks loaded.');
   });
 
   test('an unfinished read is partial and says how many were observed', () => {

@@ -2459,3 +2459,79 @@ button:disabled {
   flex: 1 1 240px;
   margin: 0;
 }
+
+/* R1: a finished run awaiting owner review is distinct from an accepted (completed) task. */
+.status-pill.status-in_review {
+  color: var(--amber);
+  border-color: #f0e2c7;
+  background: #fffaf1;
+}
+.status-pill.status-in_review > span {
+  background: #bd841e;
+}
+.task-state.state-in_review {
+  background: #bd841e;
+}
+.task-review-note {
+  margin: 8px 0 0;
+  color: #7a5a14;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.task-review-accepted {
+  color: #176d53;
+}
+.accept-result {
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid #f0e2c7;
+  border-radius: 8px;
+  background: #fffdf8;
+}
+.accept-result-title {
+  margin: 0 0 8px;
+  font-size: 12px;
+}
+.accept-result-pending,
+.accept-result-receipt {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  color: #7a5a14;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.accept-result-receipt {
+  color: #176d53;
+}
+.accept-result-button {
+  margin-top: 10px;
+  width: 100%;
+}
+.accept-result-confirm {
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid #d7dee8;
+  border-radius: 8px;
+  background: #fff;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.accept-result-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+.accept-result-actions button {
+  flex: 1 1 140px;
+}
+.accept-result-note {
+  margin: 0;
+  color: #566478;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.accept-result-problem {
+  margin-top: 10px;
+}

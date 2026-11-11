@@ -3,6 +3,7 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { expect, test as base, type Page, type Route } from '@playwright/test';
 import {
+  AcceptTaskResultRequestSchema,
   AuthorizationDecisionSchema,
   AuthorizationSchema,
   AgentDirectoryResponseSchema,
@@ -19,6 +20,7 @@ import {
   type Run,
   type RunEvent,
   type Task,
+  type TaskResultAcceptance,
 } from '@omnis/contracts';
 import {
   ConnectorAuthorizationDecisionSchema,
@@ -93,7 +95,21 @@ const defaultRuns = [
   makeRun('run-old', 'task-done', 'Audit access notes'),
 ];
 
+type AcceptBehavior =
+  | 'ok'
+  | 'lost-applied'
+  | 'lost-not-applied'
+  | 'concurrency-limit'
+  | 'stale-conflict'
+  | 'unauthorized'
+  | 'csrf';
+
 type FixtureOptions = {
+  /** Scripted POST /tasks/:id/accept-result outcomes, consumed in order; then `ok`. */
+  acceptBehaviors?: AcceptBehavior[];
+  acceptDelayMs?: number;
+  /** The first event read finishes a running run and leaves its task in review, as the server does. */
+  completeOnStream?: boolean;
   tasks?: Task[];
   runs?: Run[];
   projects?: ProjectSummary[];
@@ -226,6 +242,9 @@ function createMockApi(page: Page) {
   let eventDisconnects = 0;
   let csrfBootstrapFailures = 0;
   let stopMutationFailures = 0;
+  let acceptBehaviors: AcceptBehavior[] = [];
+  const acceptPosts: Array<{ taskId: string; key: string; body: { runId: string } }> = [];
+  const acceptReceipts = new Map<string, TaskResultAcceptance>();
   const unexpected: string[] = [];
   const requests: Array<{
     method: string;
@@ -282,6 +301,9 @@ function createMockApi(page: Page) {
     eventDisconnects = options.eventDisconnects ? 1 : 0;
     csrfBootstrapFailures = 0;
     stopMutationFailures = options.stopMutationFailures ?? 0;
+    acceptBehaviors = [...(options.acceptBehaviors ?? [])];
+    acceptPosts.length = 0;
+    acceptReceipts.clear();
     connectorRevokeIds.length = 0;
     connectorReadFailures = options.connectorReadFailures ?? 0;
     createdTaskCount = 0;
@@ -805,6 +827,72 @@ function createMockApi(page: Page) {
       currentRuns = [run, ...currentRuns];
       return route.fulfill({ status: 201, json: run });
     }
+    const acceptMatch = path.match(/^\/api\/v1\/tasks\/([^/]+)\/accept-result$/);
+    if (acceptMatch && method === 'POST') {
+      const taskId = acceptMatch[1]!;
+      const key = headers['idempotency-key'] ?? '';
+      if (!zodUuid(key))
+        return fulfillError(
+          route,
+          400,
+          'invalid_input',
+          'A valid UUID Idempotency-Key is required.',
+        );
+      const parsed = AcceptTaskResultRequestSchema.safeParse(body);
+      if (!parsed.success)
+        return fulfillError(route, 400, 'invalid_input', 'Accept payload is invalid.');
+      acceptPosts.push({ taskId, key, body: parsed.data });
+      if (options.acceptDelayMs) await new Promise((r) => setTimeout(r, options.acceptDelayMs));
+      const behavior = acceptBehaviors.shift() ?? 'ok';
+      if (behavior === 'unauthorized') {
+        authenticated = false;
+        return fulfillError(route, 401, 'unauthorized', 'Sign in to continue.');
+      }
+      if (behavior === 'csrf')
+        return fulfillError(route, 403, 'csrf', 'The request origin or CSRF token is invalid.');
+      if (behavior === 'concurrency-limit')
+        return fulfillError(route, 503, 'concurrency_limit', 'Mission Lane is busy. Retry.');
+      if (behavior === 'lost-not-applied') return route.abort();
+      const task = currentTasks.find((item) => item.id === taskId);
+      if (!task) return fulfillError(route, 404, 'not_found', 'Task not found.');
+      if (behavior === 'stale-conflict') {
+        // A newer run exists: the task is back in progress and the offered run is stale.
+        currentRuns = [
+          makeRun('run-newer', taskId, task.title, 'running'),
+          ...currentRuns.map((run) => ({ ...run, createdAt: '2026-11-03T09:00:00.000Z' })),
+        ];
+        currentTasks = currentTasks.map((item) =>
+          item.id === taskId ? { ...item, status: 'in_progress' } : item,
+        );
+        return fulfillError(route, 409, 'conflict', 'This run is no longer the current result.');
+      }
+      const replay = acceptReceipts.get(taskId);
+      let created = false;
+      let receipt = replay;
+      if (!receipt) {
+        const latest = [...currentRuns]
+          .filter((run) => run.taskId === taskId)
+          .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id))[0];
+        if (task.status !== 'in_review' || latest?.id !== parsed.data.runId)
+          return fulfillError(route, 409, 'conflict', 'This task is not awaiting review.');
+        receipt = {
+          runId: parsed.data.runId,
+          acceptedBy: 'owner',
+          acceptedAt: now,
+          requestId: key,
+        };
+        acceptReceipts.set(taskId, receipt);
+        created = true;
+        currentTasks = currentTasks.map((item) =>
+          item.id === taskId
+            ? { ...item, status: 'completed', resultAcceptance: receipt ?? null }
+            : item,
+        );
+      }
+      if (behavior === 'lost-applied') return route.abort();
+      const updated = TaskSchema.parse(currentTasks.find((item) => item.id === taskId));
+      return route.fulfill({ json: { task: updated, acceptance: receipt, created } });
+    }
     const stopMatch = path.match(/^\/api\/v1\/runs\/([^/]+)\/stop$/);
     if (stopMatch && method === 'POST') {
       stopRunIds.push(stopMatch[1]!);
@@ -839,7 +927,15 @@ function createMockApi(page: Page) {
         return route.continue({ url: scenario.url });
       }
       const after = Number(headers['last-event-id'] ?? '0');
-      const events = makeEvents(run).filter((event) => event.sequence > after);
+      let streamRun = run;
+      if (options.completeOnStream && run.status === 'running') {
+        streamRun = { ...run, status: 'completed' };
+        currentRuns = currentRuns.map((item) => (item.id === run.id ? streamRun : item));
+        currentTasks = currentTasks.map((item) =>
+          item.id === run.taskId ? { ...item, status: 'in_review' } : item,
+        );
+      }
+      const events = makeEvents(streamRun).filter((event) => event.sequence > after);
       const orderedEvents = options.eventOrder === 'reverse' ? [...events].reverse() : events;
       const deliveredEvents = options.eventDuplicates
         ? orderedEvents.flatMap((event) => [event, event])
@@ -889,6 +985,7 @@ function createMockApi(page: Page) {
     runPosts,
     runKeys,
     stopRunIds,
+    acceptPosts,
     connectorRevokeIds,
     eventRequestCursors,
     get scenarioCursors() {
@@ -2748,5 +2845,346 @@ test.describe('synthetic approval revocation fails closed', () => {
     expect(read(api)).toHaveLength(2); // exactly one more
     expect(api.connectorRevokeIds).toHaveLength(1); // and no second revoke
     expect(syntheticRunPosts(api)).toHaveLength(0);
+  });
+});
+
+test.describe('R1 owner result acceptance', () => {
+  const reviewTask = makeTask('task-review', 'Review quarterly notes', 'in_review');
+  const reviewRun = makeRun('run-review', 'task-review', 'Review quarterly notes');
+  const accept = (page: Page) => page.getByRole('button', { name: 'Accept Result' });
+  const confirmGroup = (page: Page) =>
+    page.getByRole('group', { name: 'Confirm result acceptance' });
+  const openReview = async (page: Page, hash = '#runs/run-review') => {
+    await openWorkspace(page, hash);
+    await expect(page.getByRole('complementary', { name: 'Run inspector' })).toBeVisible();
+  };
+
+  test('every task status has its own label and in_review is not Completed', async ({
+    page,
+    api,
+  }) => {
+    api.configure({
+      tasks: [
+        makeTask('t-open', 'Open one'),
+        makeTask('t-prog', 'Progress one', 'in_progress'),
+        reviewTask,
+        makeTask('t-done', 'Done one', 'completed'),
+      ],
+      runs: [],
+    });
+    await openWorkspace(page);
+    await page.getByRole('link', { name: 'Tasks' }).click();
+    const row = (title: string) => page.getByRole('listitem').filter({ hasText: title });
+    await expect(row('Open one').locator('.status-pill')).toHaveText('Open');
+    await expect(row('Progress one').locator('.status-pill')).toHaveText('In Progress');
+    await expect(row('Review quarterly notes').locator('.status-pill')).toHaveText(
+      'Awaiting review',
+    );
+    await expect(row('Done one').locator('.status-pill')).toHaveText('Completed');
+    await expect(row('Review quarterly notes').locator('.status-pill')).not.toHaveText(/Completed/);
+    // A task awaiting review can still be re-run through the normal approval path.
+    await expect(
+      row('Review quarterly notes').getByRole('button', { name: 'Approve & run' }),
+    ).toBeEnabled();
+  });
+
+  test('a finished run leaves the task awaiting review with an Accept Result action', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ tasks: [reviewTask], runs: [reviewRun] });
+    await openReview(page);
+    await expect(page.getByText('Awaiting your review.')).toBeVisible();
+    await expect(page.getByText('the task is not completed')).toBeVisible();
+    await expect(accept(page)).toBeVisible();
+    await expect(confirmGroup(page)).toHaveCount(0);
+    expect(api.acceptPosts).toHaveLength(0);
+    await assertNoSeriousAxeViolations(page);
+  });
+
+  test('Command Center and the task detail point the owner at the pending review', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ tasks: [reviewTask], runs: [reviewRun] });
+    await openWorkspace(page);
+    await expect(page.getByRole('heading', { name: /Awaiting your review/ })).toBeVisible();
+    await page.getByRole('button', { name: 'Review result of Review quarterly notes' }).click();
+    await expect(page).toHaveURL(/#runs\/run-review$/);
+    await expect(accept(page)).toBeVisible();
+    await page.getByRole('link', { name: 'Tasks' }).click();
+    await page.getByRole('button', { name: /Review quarterly notes/ }).click();
+    await expect(
+      page.getByRole('status').filter({ hasText: 'Awaiting your review' }),
+    ).toBeVisible();
+  });
+
+  test('ineligible results get no action: not latest, still in progress, failed, historical', async ({
+    page,
+    api,
+  }) => {
+    const older = { ...makeRun('run-old-1', 'task-review', 'Review quarterly notes') };
+    older.createdAt = '2026-11-03T08:00:00.000Z';
+    api.configure({
+      tasks: [
+        reviewTask,
+        makeTask('t-prog', 'Progress one', 'in_progress'),
+        makeTask('t-hist', 'Historic one', 'completed'),
+        makeTask('t-fail', 'Failed one', 'in_progress'),
+      ],
+      runs: [
+        reviewRun,
+        older,
+        makeRun('r-prog', 't-prog', 'Progress one'),
+        makeRun('r-hist', 't-hist', 'Historic one'),
+        makeRun('r-fail', 't-fail', 'Failed one', 'failed'),
+      ],
+    });
+    await openReview(page, '#runs/run-old-1');
+    await expect(accept(page)).toHaveCount(0);
+    await expect(page.getByText('A newer run exists for this task.')).toBeVisible();
+
+    await page.goto('/#runs/r-prog');
+    await expect(page.getByText('r-prog').first()).toBeVisible();
+    await expect(accept(page)).toHaveCount(0);
+
+    await page.goto('/#runs/r-fail');
+    await expect(page.getByText('r-fail').first()).toBeVisible();
+    await expect(accept(page)).toHaveCount(0);
+
+    await page.goto('/#runs/r-hist');
+    await expect(page.getByText('r-hist').first()).toBeVisible();
+    await expect(page.getByText('completed before owner acceptance was recorded')).toBeVisible();
+    await expect(accept(page)).toHaveCount(0);
+    expect(api.acceptPosts).toHaveLength(0);
+  });
+
+  test('acceptance needs a deliberate second step that is keyboard operable and cancellable', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ tasks: [reviewTask], runs: [reviewRun] });
+    await openReview(page);
+    await accept(page).focus();
+    await page.keyboard.press('Enter');
+    const group = confirmGroup(page);
+    await expect(group).toContainText('run-review');
+    await expect(group).toContainText('Review quarterly notes');
+    // Safe default focus: Cancel, never the consequential action.
+    await expect(group.getByRole('button', { name: 'Cancel' })).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(group).toHaveCount(0);
+    await expect(accept(page)).toBeFocused();
+    await accept(page).click();
+    await group.getByRole('button', { name: 'Cancel' }).press('Enter');
+    await expect(group).toHaveCount(0);
+    expect(api.acceptPosts).toHaveLength(0);
+    await expect(api.tasks[0]?.status).toBe('in_review');
+  });
+
+  test('confirming sends the secure request and shows the server outcome as completed', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ tasks: [reviewTask], runs: [reviewRun] });
+    await openReview(page);
+    await accept(page).click();
+    await confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' }).click();
+    await expect(page.getByText('Result accepted by owner.')).toBeVisible();
+    await expect(accept(page)).toHaveCount(0);
+    expect(api.acceptPosts).toHaveLength(1);
+    const post = api.requests.find((entry) => entry.path.endsWith('/accept-result'));
+    expect(post?.path).toBe('/api/v1/tasks/task-review/accept-result');
+    expect(post?.headers['x-omnis-csrf']).toBe(csrfToken);
+    expect(post?.headers['idempotency-key']).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(post?.body).toEqual({ runId: 'run-review' });
+    // Server timestamp, rendered in Philippine time.
+    await expect(page.locator('.accept-result-receipt')).toContainText('PHT');
+    await expect(page.locator('.accept-result-receipt')).toContainText('6:00');
+    await page.getByRole('link', { name: 'Tasks' }).click();
+    await expect(
+      page
+        .getByRole('listitem')
+        .filter({ hasText: 'Review quarterly notes' })
+        .locator('.status-pill'),
+    ).toHaveText('Completed');
+    await expect(page.getByText('Owner accepted run run-review')).toBeVisible();
+  });
+
+  test('rapid repeated clicks submit one acceptance and show progress', async ({ page, api }) => {
+    api.configure({ tasks: [reviewTask], runs: [reviewRun], acceptDelayMs: 400 });
+    await openReview(page);
+    await accept(page).click();
+    const confirm = confirmGroup(page).getByRole('button', {
+      name: /Confirm acceptance|Accepting/,
+    });
+    await confirm.evaluate((element) => {
+      for (let i = 0; i < 4; i += 1)
+        element.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await expect(confirmGroup(page).getByRole('button', { name: 'Accepting…' })).toBeDisabled();
+    await expect(page.getByText('Result accepted by owner.')).toBeVisible();
+    expect(api.acceptPosts).toHaveLength(1);
+  });
+
+  test('an uncertain response is not reported as success and the retry reuses the same key', async ({
+    page,
+    api,
+  }) => {
+    api.configure({
+      tasks: [reviewTask],
+      runs: [reviewRun],
+      acceptBehaviors: ['lost-applied', 'concurrency-limit'],
+    });
+    await openReview(page);
+    await accept(page).click();
+    await confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' }).click();
+    await expect(page.getByRole('alert')).toContainText('may or may not have been accepted');
+    await expect(page.getByText('Result accepted by owner.')).toHaveCount(0);
+    await confirmGroup(page).getByRole('button', { name: 'Retry acceptance' }).click();
+    await expect(page.getByRole('alert')).toContainText('Mission Lane is busy');
+    await confirmGroup(page).getByRole('button', { name: 'Retry acceptance' }).click();
+    // The first attempt applied; the replay returns the original receipt (created: false).
+    await expect(page.getByText('Result accepted by owner.')).toBeVisible();
+    expect(api.acceptPosts).toHaveLength(3);
+    expect(new Set(api.acceptPosts.map((entry) => entry.key)).size).toBe(1);
+  });
+
+  test('a network failure that never applied can be retried with the same key', async ({
+    page,
+    api,
+  }) => {
+    api.configure({
+      tasks: [reviewTask],
+      runs: [reviewRun],
+      acceptBehaviors: ['lost-not-applied'],
+    });
+    await openReview(page);
+    await accept(page).click();
+    await confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' }).click();
+    await expect(page.getByRole('alert')).toContainText("Can't reach Omnis OS");
+    await confirmGroup(page).getByRole('button', { name: 'Retry acceptance' }).click();
+    await expect(page.getByText('Result accepted by owner.')).toBeVisible();
+    expect(api.acceptPosts).toHaveLength(2);
+    expect(api.acceptPosts[1]?.key).toBe(api.acceptPosts[0]?.key);
+  });
+
+  test('a stale-run conflict refreshes the task and runs and offers no action on the old run', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ tasks: [reviewTask], runs: [reviewRun], acceptBehaviors: ['stale-conflict'] });
+    await openReview(page);
+    await accept(page).click();
+    await confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' }).click();
+    await expect(page.getByRole('alert')).toContainText('no longer the current result');
+    await expect(page.getByRole('alert')).toContainText('refreshed');
+    await expect(page.getByText('A newer run exists for this task.')).toBeVisible();
+    await expect(accept(page)).toHaveCount(0);
+    await expect(page.getByText('Result accepted by owner.')).toHaveCount(0);
+    expect(api.acceptPosts).toHaveLength(1);
+  });
+
+  test('a lost session signs the owner out without reporting acceptance, and keeps the key', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ tasks: [reviewTask], runs: [reviewRun], acceptBehaviors: ['unauthorized'] });
+    await openReview(page);
+    await accept(page).click();
+    await confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' }).click();
+    await expect(page.getByRole('heading', { name: 'Welcome back.' })).toBeVisible();
+    await expect(page.getByText('Result accepted by owner.')).toHaveCount(0);
+    await page.getByLabel('Owner password').fill('fixture-owner-password');
+    await page.getByRole('button', { name: 'Sign in' }).click();
+    await expect(page.getByRole('navigation', { name: 'Primary navigation' })).toBeVisible();
+    await openReview(page);
+    await accept(page).click();
+    await confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' }).click();
+    await expect(page.getByText('Result accepted by owner.')).toBeVisible();
+    expect(api.acceptPosts).toHaveLength(2);
+    expect(api.acceptPosts[1]?.key).toBe(api.acceptPosts[0]?.key);
+  });
+
+  test('an authorization failure keeps the session, reports the error, and a new attempt gets a new key', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ tasks: [reviewTask], runs: [reviewRun], acceptBehaviors: ['csrf'] });
+    await openReview(page);
+    await accept(page).click();
+    await confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' }).click();
+    await expect(page.getByRole('alert')).toContainText('CSRF');
+    await expect(page.getByRole('navigation', { name: 'Primary navigation' })).toBeVisible();
+    await expect(page.getByText('Result accepted by owner.')).toHaveCount(0);
+    await accept(page).click();
+    await confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' }).click();
+    await expect(page.getByText('Result accepted by owner.')).toBeVisible();
+    expect(api.acceptPosts).toHaveLength(2);
+    expect(api.acceptPosts[1]?.key).not.toBe(api.acceptPosts[0]?.key);
+  });
+
+  test('after a mock rerun only the latest run can be accepted and the receipt belongs to it', async ({
+    page,
+    api,
+  }) => {
+    const first = makeRun('run-first', 'task-review', 'Review quarterly notes');
+    first.createdAt = '2026-11-03T08:00:00.000Z';
+    const second = makeRun('run-second', 'task-review', 'Review quarterly notes');
+    api.configure({ tasks: [reviewTask], runs: [first, second] });
+    await openReview(page, '#runs/run-first');
+    await expect(accept(page)).toHaveCount(0);
+    await page.goto('/#runs/run-second');
+    await accept(page).click();
+    await confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' }).click();
+    await expect(page.getByText('Result accepted by owner.')).toBeVisible();
+    expect(api.acceptPosts[0]?.body).toEqual({ runId: 'run-second' });
+    // The earlier run never shows the later run's receipt.
+    await page
+      .getByRole('button', { name: /Review quarterly notes/ })
+      .first()
+      .click();
+    await page.goto('/#runs/run-first');
+    await expect(page.getByText('Result accepted by owner.')).toHaveCount(0);
+    await expect(page.getByText('A newer run exists for this task.')).toBeVisible();
+  });
+
+  test('a live run that completes surfaces the review state without a reload', async ({
+    page,
+    api,
+  }) => {
+    api.configure({
+      tasks: [makeTask('task-live', 'Live task', 'in_progress')],
+      runs: [makeRun('run-live', 'task-live', 'Live task', 'running')],
+      completeOnStream: true,
+    });
+    await openReview(page, '#runs/run-live');
+    // The stream delivers run.completed; the run and its task are re-read from the API.
+    await expect(accept(page)).toBeVisible();
+    await page.getByRole('link', { name: 'Tasks' }).click();
+    await expect(
+      page.getByRole('listitem').filter({ hasText: 'Live task' }).locator('.status-pill'),
+    ).toHaveText('Awaiting review');
+  });
+
+  test('the review panel fits a narrow phone viewport and keeps targets reachable', async ({
+    page,
+    api,
+  }) => {
+    await page.setViewportSize({ width: 360, height: 740 });
+    api.configure({ tasks: [reviewTask], runs: [reviewRun] });
+    await openReview(page);
+    await accept(page).scrollIntoViewIfNeeded();
+    await accept(page).click();
+    await expect(confirmGroup(page)).toBeVisible();
+    const overflow = await page.evaluate(
+      () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    );
+    expect(overflow).toBeLessThanOrEqual(0);
+    const box = await confirmGroup(page)
+      .getByRole('button', { name: 'Confirm acceptance' })
+      .boundingBox();
+    expect(box && box.x >= 0 && box.x + box.width <= 360).toBe(true);
+    await assertNoSeriousAxeViolations(page);
   });
 });
