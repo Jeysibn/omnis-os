@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -24,6 +24,7 @@ test('deployment packaging includes tracked app files and excludes nested secret
     execFileSync('git', ['init', '-q', source]);
     const fixtures = [
       'apps/api/src/index.ts',
+      'scripts/mission9d/stage2a-simulated/module.test-only.ts',
       'apps/api/.env',
       'apps/api/.env.local',
       'packages/nested/.env.production',
@@ -58,6 +59,10 @@ test('deployment packaging includes tracked app files and excludes nested secret
     assert.equal(
       readFileSync(path.join(stage, 'apps/api/src/index.ts'), 'utf8'),
       'fixture: apps/api/src/index.ts',
+    );
+    assert.equal(
+      existsSync(path.join(stage, 'scripts/mission9d/stage2a-simulated/module.test-only.ts')),
+      false,
     );
     assert.equal(
       readFileSync(path.join(stage, 'node_modules/.pnpm/demo/node_modules/demo/index.js'), 'utf8'),

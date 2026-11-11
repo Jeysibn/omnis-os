@@ -21,4 +21,8 @@
 !packages/contracts/src/**
 !packages/contracts/tsconfig.json
 !scripts/
+!scripts/ci/
+!scripts/ci/verify-stage2a-exclusion.mjs
+!scripts/ci/verify-stage2a-artifact.mjs
+scripts/mission9d/stage2a-simulated/
 !scripts/configure-hooks.ts

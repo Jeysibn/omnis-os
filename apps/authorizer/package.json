@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "node --watch --experimental-strip-types --env-file=../../.env.authorizer src/server.ts",
-    "build": "pnpm typecheck",
+    "build": "node ../../scripts/ci/verify-stage2a-exclusion.mjs --project tsconfig.json && pnpm typecheck",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --experimental-strip-types --test src/app.test.ts src/broker-ipc-app.test.ts src/decision-signing-key.test.ts"
   },

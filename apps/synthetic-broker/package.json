@@ -6,7 +6,7 @@
     "dev": "node --watch --experimental-strip-types src/server.ts",
     "start": "node --permission --allow-fs-read=/opt/omnis-os/apps/synthetic-broker --allow-fs-read=/opt/omnis-os/packages/contracts --allow-fs-read=/run/omnis-synthetic-broker --allow-fs-write=/run/omnis-synthetic-broker --experimental-strip-types src/server.ts",
     "start:provider": "node --experimental-strip-types src/fake-provider.ts",
-    "build": "pnpm typecheck",
+    "build": "node ../../scripts/ci/verify-stage2a-exclusion.mjs --project tsconfig.json && pnpm typecheck",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --experimental-strip-types --test src/*.test.ts"
   },

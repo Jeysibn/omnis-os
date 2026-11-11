@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "node --watch --experimental-strip-types --env-file=../../.env src/server.ts",
-    "build": "pnpm typecheck",
+    "build": "node ../../scripts/ci/verify-stage2a-exclusion.mjs --project tsconfig.json && pnpm typecheck",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --experimental-strip-types --test src/auth.test.ts src/session-store.test.ts src/run-event-stream-registry.test.ts src/run-events-route.test.ts src/auth-throttle.test.ts src/authorizer-client.test.ts src/agent-routes.test.ts src/agent-management-routes.test.ts src/department-routes.test.ts src/project-routes.test.ts src/project-milestone-routes.test.ts src/project-epic-routes.test.ts src/project-workspace-routes.test.ts src/task-routes.test.ts src/connector-authorization-routes.test.ts src/synthetic-task-run-routes.test.ts src/synthetic-run-stop.test.ts src/run-stop-route.test.ts src/runtime-capability-routes.test.ts src/deployment-config.test.ts"
   },

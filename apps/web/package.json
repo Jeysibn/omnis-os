@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 5173",
-    "build": "vite build && tsc -p tsconfig.server.json --noEmit false",
+    "build": "node ../../scripts/ci/verify-stage2a-exclusion.mjs --project tsconfig.json --project tsconfig.server.json && vite build && tsc -p tsconfig.server.json --noEmit false && node ../../scripts/ci/verify-stage2a-artifact.mjs dist server-dist",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.server.json --noEmit",
     "test:e2e": "playwright test",
     "test:e2e:integration": "playwright test --config playwright.integration.config.ts"
