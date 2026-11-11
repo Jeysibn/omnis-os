@@ -564,12 +564,25 @@ export const ProtocolResponseSchema = z
     if (value.classification === 'PERMITTED') {
       if (value.policy_decision !== 'allow')
         addIssue('permitted responses require an allow decision');
-      if (value.reason_code !== 'permitted')
-        addIssue('permitted responses require the permitted reason');
+      if (
+        value.reason_code !== 'permitted' &&
+        !(value.reason_code === 'engine_rejected' && value.effect_state === 'rejected')
+      )
+        addIssue('permitted responses require the permitted or confirmed engine-rejected reason');
       if (value.effect_state === 'unknown')
         addIssue('unknown effects require OUTCOME_UNKNOWN classification');
+      if (value.effect_state === 'rejected' && value.reason_code !== 'engine_rejected')
+        addIssue('rejected effects require the engine_rejected reason');
       if (value.effect_state === 'not_attempted' && value.result !== null)
         addIssue('unattempted operations cannot include a runtime result');
+      if (
+        value.result !== null &&
+        typeof value.result === 'object' &&
+        !Array.isArray(value.result) &&
+        'state' in value.result &&
+        value.result.state === 'unknown'
+      )
+        addIssue('unknown result states require OUTCOME_UNKNOWN classification');
       return;
     }
 

@@ -438,6 +438,37 @@ test('response validation rejects contradictory classifications and execution st
     ).success,
     false,
   );
+  assert.equal(
+    validateResponseForOperation(
+      { ...permitted, result: { ...result, state: 'unknown' } },
+      'launch',
+    ).success,
+    false,
+  );
+  assert.equal(
+    validateResponseForOperation({ ...permitted, effect_state: 'rejected', result: null }, 'launch')
+      .success,
+    false,
+  );
+  assert.equal(
+    validateResponseForOperation(
+      {
+        ...permitted,
+        reason_code: 'engine_rejected',
+        effect_state: 'rejected',
+        result: null,
+      },
+      'launch',
+    ).success,
+    true,
+  );
+  assert.equal(
+    validateResponseForOperation(
+      { ...permitted, reason_code: 'engine_rejected', effect_state: 'committed' },
+      'launch',
+    ).success,
+    false,
+  );
 });
 
 test('response frames enforce exact payload boundaries and exit classes are closed', () => {
