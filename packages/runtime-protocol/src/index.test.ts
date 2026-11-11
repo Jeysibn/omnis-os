@@ -333,6 +333,113 @@ test('request entry point enforces framed payload cap and response result matche
   );
 });
 
+test('response validation rejects contradictory classifications and execution states', () => {
+  const result = { run_id: uuid, generation: 1, state: 'running', output_cursor: null };
+  const permitted = {
+    protocol_version: 1,
+    request_id: uuid,
+    operation_id: uuid,
+    classification: 'PERMITTED',
+    policy_decision: 'allow',
+    reason_code: 'permitted',
+    policy_digest: `sha256:${'a'.repeat(64)}`,
+    effect_state: 'committed',
+    result,
+  };
+  assert.equal(validateResponseForOperation(permitted, 'launch').success, true);
+  assert.equal(
+    validateResponseForOperation({ ...permitted, classification: 'POLICY_DENIAL' }, 'launch')
+      .success,
+    false,
+  );
+  assert.equal(
+    validateResponseForOperation(
+      { ...permitted, classification: 'AUTHORIZATION_FAILURE' },
+      'launch',
+    ).success,
+    false,
+  );
+  assert.equal(
+    validateResponseForOperation(
+      {
+        ...permitted,
+        classification: 'OUTCOME_UNKNOWN',
+        reason_code: 'outcome_unknown',
+        effect_state: 'not_attempted',
+        result: null,
+      },
+      'launch',
+    ).success,
+    false,
+  );
+  assert.equal(
+    validateResponseForOperation(
+      {
+        ...permitted,
+        classification: 'INTERNAL_FAILURE',
+        reason_code: 'internal_failure',
+        effect_state: 'committed',
+        result: null,
+      },
+      'launch',
+    ).success,
+    false,
+  );
+  assert.equal(
+    validateResponseForOperation(
+      {
+        ...permitted,
+        classification: 'POLICY_DENIAL',
+        reason_code: 'policy_denied',
+        policy_decision: 'deny',
+        effect_state: 'not_attempted',
+        result: null,
+      },
+      'launch',
+    ).success,
+    true,
+  );
+  assert.equal(
+    validateResponseForOperation(
+      {
+        ...permitted,
+        classification: 'OUTCOME_UNKNOWN',
+        reason_code: 'outcome_unknown',
+        effect_state: 'unknown',
+        result: null,
+      },
+      'launch',
+    ).success,
+    true,
+  );
+  assert.equal(
+    validateResponseForOperation(
+      {
+        ...permitted,
+        classification: 'OUTCOME_UNKNOWN',
+        reason_code: 'outcome_unknown',
+        effect_state: 'unknown',
+        result: { run_id: uuid, generation: 1, state: 'unknown', output_cursor: null },
+      },
+      'launch',
+    ).success,
+    true,
+  );
+  assert.equal(
+    validateResponseForOperation(
+      {
+        ...permitted,
+        classification: 'OUTCOME_UNKNOWN',
+        reason_code: 'outcome_unknown',
+        effect_state: 'unknown',
+        result,
+      },
+      'launch',
+    ).success,
+    false,
+  );
+});
+
 test('response frames enforce exact payload boundaries and exit classes are closed', () => {
   const response = Buffer.alloc(16384, 0x61);
   assert.equal(decodeResponseFrame(encodeResponseFrame(response)).length, 16384);

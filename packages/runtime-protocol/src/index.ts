@@ -558,6 +558,64 @@ export const ProtocolResponseSchema = z
       ),
   })
   .strict()
+  .superRefine((value, context) => {
+    const addIssue = (message: string) => context.addIssue({ code: 'custom', message });
+
+    if (value.classification === 'PERMITTED') {
+      if (value.policy_decision !== 'allow')
+        addIssue('permitted responses require an allow decision');
+      if (value.reason_code !== 'permitted')
+        addIssue('permitted responses require the permitted reason');
+      if (value.effect_state === 'unknown')
+        addIssue('unknown effects require OUTCOME_UNKNOWN classification');
+      if (value.effect_state === 'not_attempted' && value.result !== null)
+        addIssue('unattempted operations cannot include a runtime result');
+      return;
+    }
+
+    if (value.classification === 'OUTCOME_UNKNOWN') {
+      if (value.policy_decision !== 'allow')
+        addIssue('unknown post-dispatch outcomes require an allow decision');
+      if (value.reason_code !== 'outcome_unknown')
+        addIssue('unknown outcomes require the outcome_unknown reason');
+      if (value.effect_state !== 'unknown')
+        addIssue('unknown outcomes require unknown effect state');
+      if (
+        value.result !== null &&
+        (typeof value.result !== 'object' ||
+          Array.isArray(value.result) ||
+          !('state' in value.result) ||
+          value.result.state !== 'unknown')
+      )
+        addIssue('unknown outcomes may include only an unknown-state summary');
+      return;
+    }
+
+    if (value.effect_state !== 'not_attempted')
+      addIssue('non-permitted failures must be confirmed before dispatch');
+    if (value.result !== null) addIssue('failure responses cannot include a runtime result');
+
+    if (
+      value.classification === 'POLICY_DENIAL' ||
+      value.classification === 'AUTHORIZATION_FAILURE' ||
+      value.classification === 'REPLAY_CONFLICT'
+    ) {
+      if (value.policy_decision !== 'deny') addIssue('denials require a deny policy decision');
+    } else if (value.policy_decision !== 'not_evaluated') {
+      addIssue('pre-policy failures require not_evaluated policy decision');
+    }
+
+    if (value.classification === 'POLICY_DENIAL' && value.reason_code !== 'policy_denied')
+      addIssue('policy denials require the policy_denied reason');
+    if (value.classification === 'REPLAY_CONFLICT' && value.reason_code !== 'replay_conflict')
+      addIssue('replay conflicts require the replay_conflict reason');
+    if (
+      value.classification === 'INTERNAL_FAILURE' &&
+      value.reason_code !== 'internal_failure' &&
+      value.reason_code !== 'dependency_unavailable'
+    )
+      addIssue('internal failures require an internal failure reason');
+  })
   .refine((value) => Buffer.byteLength(JSON.stringify(value), 'utf8') <= 16384);
 
 const outputCursor = z
@@ -629,6 +687,14 @@ export function validateResponseForOperation(
   if (!response.success) return { success: false as const };
   if (response.data.result === null) return { success: true as const, data: response.data };
   const result = resultSchemas[operation].safeParse(response.data.result);
+  if (
+    response.data.classification === 'OUTCOME_UNKNOWN' &&
+    (typeof response.data.result !== 'object' ||
+      Array.isArray(response.data.result) ||
+      !('state' in response.data.result) ||
+      response.data.result.state !== 'unknown')
+  )
+    return { success: false as const };
   return result.success
     ? { success: true as const, data: response.data }
     : { success: false as const };
