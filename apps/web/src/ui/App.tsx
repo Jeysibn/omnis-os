@@ -262,8 +262,18 @@ function App() {
   // session probe, a retry budget) must not affect the session that replaced it.
   const sessionGeneration = useRef(0);
   const streamBudgets = useRef(new Map<string, RunStreamBudget>());
+  // Freshness gate after an acceptance 409. Owned here so selection changes cannot clear it; it
+  // is conservative (covers every task and run) until both authoritative reads are applied.
+  const [acceptGate, setAcceptGate] = useState<{
+    phase: 'idle' | 'refreshing' | 'failed' | 'done';
+    runId: string | null;
+  }>({ phase: 'idle', runId: null });
+  const gateSeq = useRef(0);
   const rotateSession = useCallback(() => {
     sessionGeneration.current += 1;
+    // A new session reads fresh data on sign-in; an old refresh must not touch it.
+    gateSeq.current += 1;
+    setAcceptGate({ phase: 'idle', runId: null });
     streamBudgets.current.clear();
   }, []);
   const [page, setPage] = useState<Page>(() => readRoute().page);
@@ -471,25 +481,33 @@ function App() {
   }, [expireSessionIfNeeded]);
 
   /**
-   * Authoritative re-read after a 409. Both reads must succeed and the session must be unchanged
-   * for anything to be applied; a stale answer or a 401 for an older session changes nothing.
+   * Authoritative re-read after a 409 (or an explicit reload). Both reads must succeed, and this
+   * must still be the newest refresh of the same session, before anything is applied or the gate
+   * moves. A superseded refresh or an older session's answer changes nothing.
    */
-  const refreshAfterConflict = useCallback(async (): Promise<'ok' | 'failed' | 'stale'> => {
-    const generation = sessionGeneration.current;
-    try {
-      const [taskData, runData] = await Promise.all([
-        request('/api/v1/tasks', {}, parseTaskList),
-        request('/api/v1/runs', {}, parseRunList),
-      ]);
-      if (generation !== sessionGeneration.current) return 'stale';
-      setTasks(taskData);
-      setRuns(runData);
-      return 'ok';
-    } catch (cause) {
-      if (generation !== sessionGeneration.current) return 'stale';
-      return expireSessionIfNeeded(cause) ? 'stale' : 'failed';
-    }
-  }, [expireSessionIfNeeded]);
+  const refreshAfterConflict = useCallback(
+    async (runId: string) => {
+      const generation = sessionGeneration.current;
+      const seq = (gateSeq.current += 1);
+      const live = () => generation === sessionGeneration.current && seq === gateSeq.current;
+      setAcceptGate({ phase: 'refreshing', runId });
+      try {
+        const [taskData, runData] = await Promise.all([
+          request('/api/v1/tasks', {}, parseTaskList),
+          request('/api/v1/runs', {}, parseRunList),
+        ]);
+        if (!live()) return;
+        setTasks(taskData);
+        setRuns(runData);
+        setAcceptGate({ phase: 'done', runId });
+      } catch (cause) {
+        if (generation !== sessionGeneration.current) return;
+        if (expireSessionIfNeeded(cause)) return;
+        if (live()) setAcceptGate({ phase: 'failed', runId });
+      }
+    },
+    [expireSessionIfNeeded],
+  );
 
   const loadWorkspace = useCallback(async () => {
     await Promise.all([loadTasks(), loadRuns()]);
@@ -1342,7 +1360,9 @@ function App() {
                   current.map((task) => (task.id === updated.id ? updated : task)),
                 ),
               onSessionExpired: expireSessionIfNeeded,
-              onStale: refreshAfterConflict,
+              gate: acceptGate,
+              onConflict: (runId) => void refreshAfterConflict(runId),
+              onReload: (runId) => void refreshAfterConflict(runId),
               getSessionGeneration: () => sessionGeneration.current,
             }}
           />
@@ -1845,7 +1865,9 @@ type AcceptanceBindings = {
   csrfToken: string;
   onAccepted: (task: Task) => void;
   onSessionExpired: (cause: unknown) => boolean;
-  onStale: () => Promise<'ok' | 'failed' | 'stale'>;
+  gate: { phase: 'idle' | 'refreshing' | 'failed' | 'done'; runId: string | null };
+  onConflict: (runId: string) => void;
+  onReload: (runId: string) => void;
   getSessionGeneration: () => number;
 };
 
@@ -2139,7 +2161,9 @@ function RunInspector({
               csrfToken={acceptance.csrfToken}
               onAccepted={acceptance.onAccepted}
               onSessionExpired={acceptance.onSessionExpired}
-              onStale={acceptance.onStale}
+              gate={acceptance.gate}
+              onConflict={acceptance.onConflict}
+              onReload={acceptance.onReload}
               getSessionGeneration={acceptance.getSessionGeneration}
             />
           )}

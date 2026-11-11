@@ -24,7 +24,9 @@ export function AcceptResultAction({
   csrfToken,
   onAccepted,
   onSessionExpired,
-  onStale,
+  gate,
+  onConflict,
+  onReload,
   getSessionGeneration,
 }: {
   ownerId: string;
@@ -36,10 +38,14 @@ export function AcceptResultAction({
   onAccepted: (task: Task) => void;
   onSessionExpired: (cause: unknown) => boolean;
   /**
-   * A 409: re-read tasks and runs from the server. `ok` only when both reads were applied;
-   * `stale` when the session changed meanwhile (nothing was applied).
+   * Freshness gate, owned by the app (not by this component) so changing the selected task or run
+   * cannot clear it. While `refreshing` or `failed`, nothing may be submitted from loaded data.
    */
-  onStale: () => Promise<'ok' | 'failed' | 'stale'>;
+  gate: { phase: 'idle' | 'refreshing' | 'failed' | 'done'; runId: string | null };
+  /** A 409: start the authoritative task+run re-read. */
+  onConflict: (runId: string) => void;
+  /** Explicit reload after a failed re-read. */
+  onReload: (runId: string) => void;
   /** Identifies the login session; differs between sessions even for the same owner. */
   getSessionGeneration: () => number;
 }) {
@@ -55,15 +61,13 @@ export function AcceptResultAction({
       mounted.current = false;
     };
   }, []);
-  // After a 409 nothing may be submitted from the old task/run data until a read confirms it.
-  const [refresh, setRefresh] = useState<'idle' | 'refreshing' | 'failed' | 'done'>('idle');
   const receiptRef = useRef<HTMLHeadingElement | null>(null);
   const focusReceipt = useRef(false);
   const cancelRef = useRef<HTMLButtonElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
 
   const view = acceptanceViewFor(task, run, runs);
-  const blocked = refresh === 'refreshing' || refresh === 'failed';
+  const blocked = gate.phase === 'refreshing' || gate.phase === 'failed';
   const eligible = view.kind === 'eligible' && !blocked && task;
   const open = confirming && Boolean(eligible);
 
@@ -94,7 +98,6 @@ export function AcceptResultAction({
   useEffect(() => {
     setConfirming(false);
     setProblem(null);
-    setRefresh('idle');
   }, [run.id, task?.id]);
 
   async function submit() {
@@ -127,25 +130,12 @@ export function AcceptResultAction({
         acceptanceAttempts.settle(ownerId, task.id, run.id);
         setConfirming(false);
         setProblem({ kind: failure.kind, message: failure.message });
-        if (failure.kind === 'conflict') {
-          setRefresh('refreshing');
-          const outcome = await onStale();
-          if (current() && outcome !== 'stale') setRefresh(outcome === 'ok' ? 'done' : 'failed');
-        }
+        if (failure.kind === 'conflict') onConflict(run.id);
       }
     } finally {
       inFlight.current = false;
       if (mounted.current) setBusy(false);
     }
-  }
-
-  async function reload() {
-    if (refresh === 'refreshing') return;
-    const generation = getSessionGeneration();
-    setRefresh('refreshing');
-    const outcome = await onStale();
-    if (mounted.current && generation === getSessionGeneration() && outcome !== 'stale')
-      setRefresh(outcome === 'ok' ? 'done' : 'failed');
   }
 
   function cancel() {
@@ -268,25 +258,25 @@ export function AcceptResultAction({
         </p>
       )}
 
-      {refresh === 'refreshing' && (
+      {view.kind !== 'none' && gate.phase === 'refreshing' && (
         <p className="accept-result-note" role="status">
           Refreshing the task and runs from the server. Accept Result is unavailable until this
           finishes.
         </p>
       )}
-      {refresh === 'done' && (
+      {view.kind !== 'none' && gate.phase === 'done' && gate.runId === run.id && (
         <p className="accept-result-note" role="status">
           The task and runs were refreshed from the server. Review the current state before trying
           again.
         </p>
       )}
-      {refresh === 'failed' && (
+      {view.kind !== 'none' && gate.phase === 'failed' && (
         <div className="accept-result-note" role="alert">
           <p>
             The task and runs could not be refreshed, so Accept Result stays unavailable until
             current data is loaded.
           </p>
-          <button type="button" className="secondary-button" onClick={() => void reload()}>
+          <button type="button" className="secondary-button" onClick={() => onReload(run.id)}>
             Reload task and runs
           </button>
         </div>

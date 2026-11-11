@@ -113,6 +113,8 @@ type FixtureOptions = {
   acceptDelayMs?: number;
   /** After a 409, hold the task/run re-reads this long. */
   conflictReadHoldMs?: number;
+  /** After a 409, hold the first task re-read until `api.releaseReads()`. */
+  conflictReadsManual?: boolean;
   /** After a 409, fail this many task re-reads with 503. */
   conflictReadFailures?: number;
   /** The first event read finishes a running run and leaves its task in review, as the server does. */
@@ -257,6 +259,11 @@ function createMockApi(page: Page) {
     releaseAcceptGate = resolve;
   });
   let acceptSettled = 0;
+  let readsHeld = false;
+  let releaseReadsGate = () => {};
+  let readsGate = new Promise<void>((resolve) => {
+    releaseReadsGate = resolve;
+  });
   let afterConflict = false;
   let conflictReadFailures = 0;
   let currentOwnerId = 'owner';
@@ -323,6 +330,10 @@ function createMockApi(page: Page) {
       releaseAcceptGate = resolve;
     });
     acceptSettled = 0;
+    readsHeld = false;
+    readsGate = new Promise<void>((resolve) => {
+      releaseReadsGate = resolve;
+    });
     afterConflict = false;
     conflictReadFailures = options.conflictReadFailures ?? 0;
     currentOwnerId = 'owner';
@@ -499,6 +510,10 @@ function createMockApi(page: Page) {
     if (path === '/api/v1/tasks' && method === 'GET') {
       if (options.taskDelayMs)
         await new Promise((resolve) => setTimeout(resolve, options.taskDelayMs));
+      if (afterConflict && options.conflictReadsManual && !readsHeld) {
+        readsHeld = true;
+        await readsGate;
+      }
       if (afterConflict && options.conflictReadHoldMs)
         await new Promise((resolve) => setTimeout(resolve, options.conflictReadHoldMs));
       if (afterConflict && conflictReadFailures > 0) {
@@ -1028,6 +1043,7 @@ function createMockApi(page: Page) {
     stopRunIds,
     acceptPosts,
     releaseAccept: () => releaseAcceptGate(),
+    releaseReads: () => releaseReadsGate(),
     get acceptSettled() {
       return acceptSettled;
     },
@@ -3393,5 +3409,129 @@ test.describe('R1 owner result acceptance', () => {
     await confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' }).click();
     await expect(page.getByRole('alert')).toContainText('CSRF');
     expect(await page.evaluate(() => document.activeElement?.tagName)).not.toBe('H4');
+  });
+
+  const otherTask = makeTask('task-other', 'Draft vendor summary', 'in_review');
+  const otherRun = makeRun('run-other', 'task-other', 'Draft vendor summary');
+  const pick = (page: Page, title: string) =>
+    page
+      .getByRole('button', { name: new RegExp(title) })
+      .first()
+      .click();
+  const confirmAccept = async (page: Page) => {
+    await accept(page).click();
+    await confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' }).click();
+  };
+  const refreshing = (page: Page) =>
+    page.getByText('Refreshing the task and runs from the server.');
+  const refreshed = (page: Page) =>
+    page.getByText('The task and runs were refreshed from the server.');
+
+  test('switching runs during a pending 409 refresh cannot re-enable acceptance', async ({
+    page,
+    api,
+  }) => {
+    api.configure({
+      tasks: [reviewTask, otherTask],
+      runs: [reviewRun, otherRun],
+      acceptBehaviors: ['plain-conflict'],
+      conflictReadsManual: true,
+    });
+    await openReview(page);
+    await confirmAccept(page);
+    await expect(refreshing(page)).toBeVisible();
+    await pick(page, 'Draft vendor summary');
+    await expect(page.getByText('Owner review')).toBeVisible();
+    await expect(refreshing(page)).toBeVisible();
+    await expect(accept(page)).toHaveCount(0);
+    await pick(page, 'Review quarterly notes');
+    await expect(refreshing(page)).toBeVisible();
+    await expect(accept(page)).toHaveCount(0);
+    await expect(page.getByText('were refreshed')).toHaveCount(0);
+    api.releaseReads();
+    await expect(refreshed(page)).toBeVisible();
+    await expect(accept(page)).toBeVisible();
+    expect(api.acceptPosts).toHaveLength(1);
+  });
+
+  test('switching runs after a failed refresh keeps acceptance blocked until a successful reload', async ({
+    page,
+    api,
+  }) => {
+    api.configure({
+      tasks: [reviewTask, otherTask],
+      runs: [reviewRun, otherRun],
+      acceptBehaviors: ['plain-conflict'],
+      conflictReadFailures: 1,
+    });
+    await openReview(page);
+    await confirmAccept(page);
+    await expect(page.getByText('could not be refreshed')).toBeVisible();
+    await pick(page, 'Draft vendor summary');
+    await expect(page.getByText('could not be refreshed')).toBeVisible();
+    await expect(accept(page)).toHaveCount(0);
+    await pick(page, 'Review quarterly notes');
+    await expect(page.getByText('could not be refreshed')).toBeVisible();
+    await expect(accept(page)).toHaveCount(0);
+    await page.getByRole('button', { name: 'Reload task and runs' }).click();
+    await expect(refreshed(page)).toBeVisible();
+    await expect(accept(page)).toBeVisible();
+    await pick(page, 'Draft vendor summary');
+    await expect(accept(page)).toBeVisible();
+  });
+
+  test('a result superseded during a held refresh stays unacceptable after switching away and back', async ({
+    page,
+    api,
+  }) => {
+    api.configure({
+      tasks: [reviewTask, otherTask],
+      runs: [reviewRun, otherRun],
+      acceptBehaviors: ['stale-conflict'],
+      conflictReadsManual: true,
+    });
+    await openReview(page);
+    await confirmAccept(page);
+    await expect(refreshing(page)).toBeVisible();
+    await pick(page, 'Draft vendor summary');
+    await expect(accept(page)).toHaveCount(0);
+    await pick(page, 'Review quarterly notes');
+    await expect(accept(page)).toHaveCount(0);
+    api.releaseReads();
+    await expect(page.getByText('A newer run exists for this task.')).toBeVisible();
+    await expect(accept(page)).toHaveCount(0);
+    await pick(page, 'Draft vendor summary');
+    // Two runs now share the title, so return to the original one by route (no reload).
+    await page.evaluate(() => {
+      window.location.hash = '#runs/run-review';
+    });
+    await expect(page.getByText('A newer run exists for this task.')).toBeVisible();
+    await expect(accept(page)).toHaveCount(0);
+  });
+
+  test('a refresh held across a session replacement cannot touch the replacement session', async ({
+    page,
+    api,
+  }) => {
+    api.configure({
+      tasks: [reviewTask],
+      runs: [reviewRun],
+      acceptBehaviors: ['plain-conflict'],
+      conflictReadsManual: true,
+    });
+    await openReview(page);
+    await confirmAccept(page);
+    await expect(refreshing(page)).toBeVisible();
+    await signOutAndBackIn(page);
+    await openReview(page);
+    // The new session has its own fresh data and no inherited gate.
+    await expect(accept(page)).toBeVisible();
+    await expect(refreshing(page)).toHaveCount(0);
+    api.releaseReads();
+    await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 200)));
+    await expect(refreshed(page)).toHaveCount(0);
+    await expect(refreshing(page)).toHaveCount(0);
+    await expect(accept(page)).toBeVisible();
+    expect(api.acceptPosts).toHaveLength(1);
   });
 });
