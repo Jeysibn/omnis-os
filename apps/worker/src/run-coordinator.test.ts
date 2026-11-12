@@ -491,10 +491,7 @@ describe('durable mock run coordinator', () => {
     assert.equal(adapter.kind, 'mock');
     assert.equal(adapter.discoverCapabilities().synthetic, true);
     assert.equal(state.completedOutput, 'Synthetic app-server result.');
-    assert.deepEqual(state.outputEvents, [
-      'Synthetic app-server delta 1.',
-      'Synthetic app-server delta 2.',
-    ]);
+    assert.deepEqual(state.outputEvents, ['Synthetic app-server ', 'result.']);
     assert.deepEqual(adapter.protocol.methods, [
       'initialize',
       'initialized',

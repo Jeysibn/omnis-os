@@ -4,6 +4,7 @@ import { TaskStatusSchema, type Run, type Task } from '@omnis/contracts';
 import {
   acceptanceAttempts,
   acceptanceViewFor,
+  isAwaitingOwnerReview,
   classifyAcceptanceFailure,
   latestRunForTask,
 } from './acceptResult.js';
@@ -103,4 +104,19 @@ test('failures map to the documented handling', () => {
   expect(classifyAcceptanceFailure(failure(null, 'uncertain')).kind).toBe('uncertain');
   expect(classifyAcceptanceFailure(failure(200, 'invalid-response')).kind).toBe('uncertain');
   expect(classifyAcceptanceFailure(new Error('x')).kind).toBe('uncertain');
+});
+
+test('issue #106: an in_review task with a receipt for its latest run is not awaiting review', () => {
+  const runs = [run('run-0001', '2026-11-03T09:00:00.000Z'), run('run-0002')];
+  const restored = task('in_review', { resultAcceptance: receipt('run-0002') });
+  const view = acceptanceViewFor(restored, runs[1]!, runs);
+  expect(view.kind).toBe('receipt-in-review');
+  expect(isAwaitingOwnerReview(restored, runs)).toBe(false);
+  // A receipt for an older run does not block reviewing the newer result.
+  const older = task('in_review', { resultAcceptance: receipt('run-0001') });
+  expect(acceptanceViewFor(older, runs[1]!, runs).kind).toBe('eligible');
+  expect(isAwaitingOwnerReview(older, runs)).toBe(true);
+  // Without any receipt it is genuinely awaiting; other statuses never are.
+  expect(isAwaitingOwnerReview(task('in_review'), runs)).toBe(true);
+  expect(isAwaitingOwnerReview(task('completed'), runs)).toBe(false);
 });

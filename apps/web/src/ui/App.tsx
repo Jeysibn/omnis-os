@@ -42,6 +42,7 @@ import {
 import { ApiRequestError, request } from './api.js';
 import { formatDate } from './manilaTime.js';
 import { AcceptResultAction } from './AcceptResultAction.js';
+import { isAwaitingOwnerReview } from './acceptResult.js';
 import { CommandCenter } from './command-center/CommandCenter.js';
 import {
   createRunStreamBudget,
@@ -258,6 +259,8 @@ function App() {
   const [streamState, setStreamState] = useState<StreamState>('connecting');
   const [streamEpoch, setStreamEpoch] = useState(0);
   const recreatingStream = useRef(false);
+  // Always the run on screen now, for callbacks that settle after the owner has moved elsewhere.
+  const selectedRunIdRef = useRef<string | null>(null);
   // Identifies the current owner session. Anything started under an older value (a delayed
   // session probe, a retry budget) must not affect the session that replaced it.
   const sessionGeneration = useRef(0);
@@ -611,7 +614,9 @@ function App() {
   }, [loadWorkspace, refreshCsrf, restoredTaskCreate, rotateSession]);
 
   useEffect(() => {
+    selectedRunIdRef.current = page === 'runs' ? selectedRunId : null;
     if (!owner || page !== 'runs' || !selectedRunId || !selectedRunExists) {
+      recreatingStream.current = false;
       setEvents([]);
       setStreamState('closed');
       return;
@@ -1355,10 +1360,18 @@ function App() {
             acceptance={{
               ownerId: owner.id,
               csrfToken,
-              onAccepted: (updated) =>
+              onAccepted: (updated, runId) => {
+                // The server's task replaces local state; nothing is inferred locally. Then the
+                // run and its ordered events are read again so the owner transition shows in order.
                 setTasks((current) =>
                   current.map((task) => (task.id === updated.id ? updated : task)),
-                ),
+                );
+                void reconcileRun(runId);
+                if (selectedRunIdRef.current === runId) {
+                  recreatingStream.current = true;
+                  setStreamEpoch((epoch) => epoch + 1);
+                }
+              },
               onSessionExpired: expireSessionIfNeeded,
               gate: acceptGate,
               onConflict: (runId) => void refreshAfterConflict(runId),
@@ -1796,11 +1809,19 @@ function TasksWorkspace({
         {selectedTask ? (
           <>
             <StatusPill status={selectedTask.status} />
-            {selectedTask.status === 'in_review' && (
-              <p className="task-review-note" role="status">
-                Awaiting your review. Open the task&apos;s latest run in Runs to accept its result.
-              </p>
-            )}
+            {selectedTask.status === 'in_review' &&
+              (isAwaitingOwnerReview(selectedTask, runs) ? (
+                <p className="task-review-note" role="status">
+                  Awaiting your review. Open the task&apos;s latest run in Runs to accept its
+                  result.
+                </p>
+              ) : (
+                <p className="task-review-note" role="status">
+                  An owner receipt for run {selectedTask.resultAcceptance?.runId} already exists,
+                  but the task still reads in review. This is not awaiting your review; open its
+                  latest run in Runs to reload the current state.
+                </p>
+              ))}
             {selectedTask.status === 'completed' && selectedTask.resultAcceptance && (
               <p className="task-review-note task-review-accepted">
                 Owner accepted run {selectedTask.resultAcceptance.runId} on{' '}
@@ -1863,7 +1884,7 @@ function TasksWorkspace({
 type AcceptanceBindings = {
   ownerId: string;
   csrfToken: string;
-  onAccepted: (task: Task) => void;
+  onAccepted: (task: Task, runId: string) => void;
   onSessionExpired: (cause: unknown) => boolean;
   gate: { phase: 'idle' | 'refreshing' | 'failed' | 'done'; runId: string | null };
   onConflict: (runId: string) => void;
