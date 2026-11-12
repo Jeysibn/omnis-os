@@ -285,6 +285,7 @@ function createMockApi(page: Page) {
   const connectorRevokeIds: string[] = [];
   let connectorReadFailures = 0;
   const eventRequestCursors: string[] = [];
+  const eventRequestRunIds: string[] = [];
   let scenario: EventScenarioServer | undefined;
   const runDetailGets = new Map<string, number>();
   let createdTaskCount = 0;
@@ -985,6 +986,7 @@ function createMockApi(page: Page) {
     const eventMatch = path.match(/^\/api\/v1\/runs\/([^/]+)\/events$/);
     if (eventMatch && method === 'GET') {
       eventRequestCursors.push(headers['last-event-id'] ?? '');
+      eventRequestRunIds.push(eventMatch[1]!);
       if (options.eventRevoked) {
         authenticated = false;
         return route.abort();
@@ -1072,6 +1074,7 @@ function createMockApi(page: Page) {
     },
     connectorRevokeIds,
     eventRequestCursors,
+    eventRequestRunIds,
     get scenarioCursors() {
       return scenario?.cursors ?? [];
     },
@@ -3225,6 +3228,46 @@ test.describe('R1 owner result acceptance', () => {
     await expect(page.getByRole('heading', { name: 'Result accepted by owner.' })).toBeVisible();
     expect(api.acceptPosts).toHaveLength(2);
     expect(new Set(api.acceptPosts.map((entry) => entry.key)).size).toBe(1);
+  });
+
+  test("reconcile: a late response for run A never recreates or corrupts run B's event stream", async ({
+    page,
+    api,
+  }) => {
+    // B is also completed, so the review panel stays mounted while the owner moves from A to B and
+    // A's response can still settle into the same component.
+    const runB = makeRun('run-b', 'task-b', 'Second task', 'completed');
+    api.configure({
+      tasks: [restoredTask, makeTask('task-b', 'Second task', 'completed')],
+      runs: [reviewRun, runB],
+      acceptDelayMs: 1200,
+    });
+    await openReview(page);
+    await reconcile(page).click();
+    await confirmReconcile(page).getByRole('button', { name: 'Confirm reconciliation' }).click();
+    await expect.poll(() => api.acceptPosts.length).toBe(1);
+    // The owner moves to run B before A's response settles.
+    await page.evaluate(() => {
+      window.location.hash = '#runs/run-b';
+    });
+    await expect(page.locator('.event-row')).toHaveCount(3);
+    const streamsFor = (id: string) =>
+      api.eventRequestRunIds.filter((entry) => entry === id).length;
+    expect(streamsFor('run-b')).toBe(1);
+    // Let A's late response land, then give any wrongly scheduled stream refresh time to act.
+    await page.waitForTimeout(2500);
+    expect(api.acceptPosts).toHaveLength(1);
+    // B's stream was opened once and not recreated by A's response; B still shows its own events.
+    expect(streamsFor('run-b')).toBe(1);
+    await expect(page.locator('.event-row')).toHaveCount(3);
+    // The reconciliation of A reached the server once and its task was updated from the response.
+    await page.getByRole('link', { name: 'Tasks' }).click();
+    await expect(
+      page
+        .getByRole('listitem')
+        .filter({ hasText: 'Review quarterly notes' })
+        .locator('.status-pill'),
+    ).toHaveText('Completed');
   });
 
   test('ineligible results get no action: not latest, still in progress, failed, historical', async ({
