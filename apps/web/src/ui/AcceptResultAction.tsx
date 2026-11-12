@@ -239,6 +239,33 @@ export function AcceptResultAction({
         </div>
       )}
 
+      {view.kind === 'receipt-in-review' && (
+        <div className="accept-result-receipt" role="status">
+          <BadgeCheck size={15} aria-hidden="true" />
+          <div>
+            <h4 className="accept-result-receipt-title">Owner receipt on record.</h4>
+            <p>
+              The owner already accepted this run, but the task still reads &ldquo;in review&rdquo;.
+              The receipt is unchanged and Accept Result is not offered again. Reload from the
+              server to see the task&rsquo;s current state.
+            </p>
+            <dl className="metadata-list accept-result-meta">
+              <div>
+                <dt>Accepted</dt>
+                <dd>{formatManilaWithZone(view.acceptance.acceptedAt)}</dd>
+              </div>
+              <div>
+                <dt>Accepted run</dt>
+                <dd>{view.acceptance.runId}</dd>
+              </div>
+            </dl>
+            <button type="button" className="secondary-button" onClick={() => onReload(run.id)}>
+              Reload task and runs
+            </button>
+          </div>
+        </div>
+      )}
+
       {view.kind === 'historical' && (
         <p className="accept-result-note">
           This task was completed before owner acceptance was recorded, so there is no acceptance

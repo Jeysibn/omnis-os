@@ -2983,6 +2983,40 @@ test.describe('R1 owner result acceptance', () => {
     ).toBeVisible();
   });
 
+  test('issue #106: an in_review task with an existing receipt shows the receipt and no Accept Result', async ({
+    page,
+    api,
+  }) => {
+    const restored = {
+      ...reviewTask,
+      resultAcceptance: {
+        runId: 'run-review',
+        acceptedBy: 'owner' as const,
+        acceptedAt: '2026-11-03T10:00:00.000Z',
+        requestId: '00000000-0000-4000-8000-000000000000',
+      },
+    };
+    api.configure({ tasks: [restored], runs: [reviewRun] });
+    await openReview(page);
+    await expect(page.getByRole('heading', { name: 'Owner receipt on record.' })).toBeVisible();
+    await expect(accept(page)).toHaveCount(0);
+    await expect(page.getByText('Awaiting your review.')).toHaveCount(0);
+    expect(api.acceptPosts).toHaveLength(0);
+    await assertNoSeriousAxeViolations(page);
+    // Command Center no longer lists it as awaiting the owner; the task detail says why.
+    await page.getByRole('link', { name: 'Command Center' }).click();
+    await expect(
+      page.getByRole('button', { name: 'Review result of Review quarterly notes' }),
+    ).toHaveCount(0);
+    await page.getByRole('link', { name: 'Tasks' }).click();
+    await page.getByRole('button', { name: /Review quarterly notes/ }).click();
+    await expect(
+      page
+        .getByRole('status')
+        .filter({ hasText: 'already exists, but the task still reads in review' }),
+    ).toBeVisible();
+  });
+
   test('ineligible results get no action: not latest, still in progress, failed, historical', async ({
     page,
     api,

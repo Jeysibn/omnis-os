@@ -42,6 +42,7 @@ import {
 import { ApiRequestError, request } from './api.js';
 import { formatDate } from './manilaTime.js';
 import { AcceptResultAction } from './AcceptResultAction.js';
+import { isAwaitingOwnerReview } from './acceptResult.js';
 import { CommandCenter } from './command-center/CommandCenter.js';
 import {
   createRunStreamBudget,
@@ -1796,11 +1797,19 @@ function TasksWorkspace({
         {selectedTask ? (
           <>
             <StatusPill status={selectedTask.status} />
-            {selectedTask.status === 'in_review' && (
-              <p className="task-review-note" role="status">
-                Awaiting your review. Open the task&apos;s latest run in Runs to accept its result.
-              </p>
-            )}
+            {selectedTask.status === 'in_review' &&
+              (isAwaitingOwnerReview(selectedTask, runs) ? (
+                <p className="task-review-note" role="status">
+                  Awaiting your review. Open the task&apos;s latest run in Runs to accept its
+                  result.
+                </p>
+              ) : (
+                <p className="task-review-note" role="status">
+                  An owner receipt for run {selectedTask.resultAcceptance?.runId} already exists,
+                  but the task still reads in review. This is not awaiting your review; reload to
+                  see the current state.
+                </p>
+              ))}
             {selectedTask.status === 'completed' && selectedTask.resultAcceptance && (
               <p className="task-review-note task-review-accepted">
                 Owner accepted run {selectedTask.resultAcceptance.runId} on{' '}
