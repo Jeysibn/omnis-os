@@ -68,6 +68,7 @@ const TextItemLifecycleSchema = z
             id: SafeIdentitySchema,
             type: z.literal('agentMessage'),
             text: z.string().max(MAX_OUTPUT_BYTES),
+            phase: z.enum(['commentary', 'partial_answer', 'final_answer']).optional(),
           })
           .strict(),
       })
@@ -145,6 +146,7 @@ export type ProviderOperationStatus =
   | 'submission_attempted'
   | 'submitted'
   | 'started'
+  | 'cancellation_requested_before_submission'
   | 'cancellation_requested'
   | 'cancelled'
   | 'completed'
@@ -432,10 +434,13 @@ export function transitionProviderOperation(
     ProviderOperationStatus,
     Partial<Record<ProviderOperationSignal, ProviderOperationStatus>>
   > = {
-    requested: { authorized: 'authorized', cancel_requested: 'cancellation_requested' },
+    requested: {
+      authorized: 'authorized',
+      cancel_requested: 'cancellation_requested_before_submission',
+    },
     authorized: {
       submission_attempted: 'submission_attempted',
-      cancel_requested: 'cancellation_requested',
+      cancel_requested: 'cancellation_requested_before_submission',
     },
     submission_attempted: {
       submission_acknowledged: 'submitted',
@@ -462,13 +467,13 @@ export function transitionProviderOperation(
       submission_acknowledged: 'cancellation_requested',
       submission_ack_lost: 'unknown',
       started: 'cancellation_requested',
-      cancel_confirmed: 'cancelled',
       cancel_outcome_unknown: 'unknown',
       provider_terminal_completed: 'completed',
       provider_terminal_failed: 'failed',
-      provider_terminal_interrupted: 'interrupted',
+      provider_terminal_interrupted: 'cancelled',
       connection_lost: 'unknown',
     },
+    cancellation_requested_before_submission: { cancel_confirmed: 'cancelled' },
     unknown: {
       reconciled_completed: 'completed',
       reconciled_failed: 'failed',

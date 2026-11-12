@@ -48,7 +48,7 @@ describe('offline Codex app-server contract fixtures', () => {
         frame('item/started', {
           threadId: context.threadId,
           turnId: context.turnId,
-          item: { id: 'item-1', type: 'agentMessage', text: '' },
+          item: { id: 'item-1', type: 'agentMessage', text: '', phase: 'commentary' },
         }),
       ),
     );
@@ -71,7 +71,7 @@ describe('offline Codex app-server contract fixtures', () => {
         frame('item/completed', {
           threadId: context.threadId,
           turnId: context.turnId,
-          item: { id: 'item-1', type: 'agentMessage', text: 'hello' },
+          item: { id: 'item-1', type: 'agentMessage', text: 'hello', phase: 'final_answer' },
         }),
       ),
     );
@@ -183,6 +183,49 @@ describe('offline Codex app-server contract fixtures', () => {
           }),
         ),
       ),
+    );
+
+    const finalTextMismatch = new OfflineCodexEventProjector(context);
+    finalTextMismatch.accept(
+      delivery(1, 'turn-start', frame('turn/started', { turn: { id: context.turnId } })),
+    );
+    finalTextMismatch.accept(
+      delivery(
+        2,
+        'item-start',
+        frame('item/started', {
+          threadId: context.threadId,
+          turnId: context.turnId,
+          item: { id: 'item-1', type: 'agentMessage', text: '' },
+        }),
+      ),
+    );
+    finalTextMismatch.accept(
+      delivery(
+        3,
+        'delta',
+        frame('item/agentMessage/delta', {
+          threadId: context.threadId,
+          turnId: context.turnId,
+          itemId: 'item-1',
+          delta: 'x',
+        }),
+      ),
+    );
+    assert.throws(
+      () =>
+        finalTextMismatch.accept(
+          delivery(
+            4,
+            'item-end',
+            frame('item/completed', {
+              threadId: context.threadId,
+              turnId: context.turnId,
+              item: { id: 'item-1', type: 'agentMessage', text: 'other' },
+            }),
+          ),
+        ),
+      /completion mismatch/,
     );
   });
 
@@ -512,6 +555,19 @@ describe('offline Codex app-server contract fixtures', () => {
     assert.throws(
       () => transitionProviderOperation(status, 'cancel_confirmed'),
       /invalid provider operation transition/,
+    );
+  });
+
+  it('requires terminal interruption evidence to cancel work that may have been submitted', () => {
+    const inFlight = transitionProviderOperation('submission_attempted', 'cancel_requested');
+    assert.equal(inFlight, 'cancellation_requested');
+    assert.throws(
+      () => transitionProviderOperation(inFlight, 'cancel_confirmed'),
+      /invalid provider operation transition/,
+    );
+    assert.equal(
+      transitionProviderOperation(inFlight, 'provider_terminal_interrupted'),
+      'cancelled',
     );
   });
 

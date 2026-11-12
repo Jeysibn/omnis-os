@@ -82,14 +82,14 @@ These are separate decisions and identities:
 The fixture contract provides:
 
 - A bounded single-text `turn/start` request builder with no tool fields. It is a fixture constructor, never a transport request.
-- Strict parsing of a small notification subset: turn started, text delta, and terminal completed/failed/interrupted. Server-initiated method calls, tool/non-text items, malformed frames, unknown methods, and identity mismatches are denied.
+- Strict parsing of a small notification subset: turn started, text item start/completion (including documented optional `phase` values), text delta, and terminal completed/failed/interrupted. Server-initiated method calls, tool/non-text items, malformed frames, unknown methods, and identity mismatches are denied.
 - Local correlation to `runId`, operation UUID, execution generation, synthetic session ID, thread ID, and turn ID. Identity is validated before projection.
 - Monotonic fixture delivery sequence and delivery-ID deduplication. Reusing a delivery ID with changed bytes or a changed sequence, and any new out-of-order or gapped sequence, are rejected. After disconnect the projector stays unknown and rejects stream events; only a separate authoritative reconciliation can resolve it. Delivery IDs and sequence numbers are **synthetic harness metadata**, not app-server-provided replay guarantees.
 - UTF-8 frame/delta/aggregate output caps. Output is emitted only for the accepted text item; the completed item must match the accumulated deltas.
-- Completion-after-cancel-request remains completed when app-server reports completion. Cancellation is confirmed only by matching interrupted terminal status. Disconnect, lost submission acknowledgement, or lost cancellation outcome becomes unknown.
+- Completion-after-cancel-request remains completed when app-server reports completion. Cancellation before dispatch uses a distinct local state; after possible dispatch it is confirmed only by matching interrupted terminal status. Disconnect, lost submission acknowledgement, or lost cancellation outcome becomes unknown.
 - Synthetic usage normalization that checks nonnegative safe integers and total consistency. Missing usage is `unknown`; this shape is not claimed to match the undocumented app-server usage notification payload.
 - Safe failure categories. Raw provider failure text is not included in normalized events.
-- An in-memory operation reducer with one-way `submission_attempted` and `unknown` transitions. Unknown can reconcile to a terminal observation but cannot return to a submission state. This demonstrates the intended transition contract only; it is not durable authorization, a provider operation, or a production retry guard.
+- An in-memory operation reducer with separate pre-submission and possible-dispatch cancellation states, explicit provider-terminal evidence signals, and one-way `submission_attempted`/`unknown` transitions. Bare cancellation confirmation is allowed only before submission is attempted. Unknown can reconcile to a terminal observation but cannot return to a submission state. The caller must establish authoritative evidence before using a `reconciled_*` signal; this pure reducer cannot verify evidence provenance. It demonstrates transition rules only; it is not durable authorization, a provider operation, or a production retry guard.
 
 ### Offline negative-test matrix
 
