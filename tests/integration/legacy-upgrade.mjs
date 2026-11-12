@@ -250,6 +250,7 @@ try {
     '0031_owner_verified_task_results',
     '0032_owner_acceptance_authorizer_acl',
     '0033_authorizer_task_completion_gate',
+    '0034_reconcile_accepted_task_state',
   ];
   assert.deepEqual(afterUpgrade.migrations, expectedMigrations);
   assert.equal(afterUpgrade.unsafeRunStates, 3);
@@ -754,7 +755,7 @@ async function verifyPost0005ProvenanceUpgrade() {
       "SELECT id, length(checksum) AS checksum_length FROM omnis.schema_migrations WHERE id LIKE '00%' ORDER BY id",
     );
     assert.deepEqual(migrationRows.rows.at(-1), {
-      id: '0033_authorizer_task_completion_gate',
+      id: '0034_reconcile_accepted_task_state',
       checksum_length: 64,
     });
   } finally {
