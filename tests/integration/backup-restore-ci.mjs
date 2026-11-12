@@ -6,6 +6,7 @@ import { copyFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { metricsQuery } from '../../scripts/db-recovery/metrics.mjs';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const randomSuffix = randomBytes(6).toString('hex');
@@ -298,6 +299,24 @@ async function createSyntheticRecords(runtimeUrl, adminUrl, suffix) {
       [admitted.run.id],
     );
     assert.equal(rows[0]?.count, 3);
+    assert.deepEqual(await readAcceptanceCounts(admin, task.id), {
+      receipts: '1',
+      ownerEvents: '1',
+    });
+    const ownerAcceptanceEvents = await admin.query(
+      `SELECT actor, origin, synthetic, payload
+         FROM omnis.mission_lane_events
+        WHERE task_id=$1 AND event_type='task.status_changed' AND actor='owner'`,
+      [task.id],
+    );
+    assert.deepEqual(ownerAcceptanceEvents.rows, [
+      {
+        actor: 'owner',
+        origin: 'api',
+        synthetic: false,
+        payload: { from: 'in_review', to: 'completed', runId: admitted.run.id },
+      },
+    ]);
     return {
       runId: admitted.run.id,
       taskId: task.id,
@@ -364,6 +383,44 @@ async function verifyRestoredMigrationAcl(runtimeUrl, authorizerUrl, adminUrl, p
       ],
       'restore must preserve a populated immutable owner acceptance receipt',
     );
+    const receiptRelations = await admin.query(
+      `SELECT a.task_id, a.run_id, t.status AS task_status, r.status AS run_status,
+              a.accepted_by, a.accepted_at IS NOT NULL AS has_accepted_at
+         FROM omnis.task_result_acceptances a
+         JOIN omnis.tasks t ON t.id = a.task_id
+         JOIN omnis.runs r ON r.id = a.run_id AND r.task_id = a.task_id
+        WHERE a.task_id=$1 AND a.run_id=$2`,
+      [provenance.taskId, provenance.runId],
+    );
+    assert.deepEqual(receiptRelations.rows, [
+      {
+        task_id: provenance.taskId,
+        run_id: provenance.runId,
+        task_status: 'completed',
+        run_status: 'completed',
+        accepted_by: 'owner',
+        has_accepted_at: true,
+      },
+    ]);
+    const restoredCounts = await readAcceptanceCounts(admin, provenance.taskId);
+    assert.deepEqual(restoredCounts, { receipts: '1', ownerEvents: '1' });
+    const acl = await admin.query(
+      `SELECT has_table_privilege('omnis_runtime', 'omnis.task_result_acceptances', 'SELECT') AS runtime_can_read,
+              has_table_privilege('omnis_runtime', 'omnis.task_result_acceptances', 'INSERT') AS runtime_can_insert,
+              has_table_privilege('omnis_runtime', 'omnis.task_result_acceptances', 'UPDATE') AS runtime_can_update,
+              has_table_privilege('omnis_runtime', 'omnis.task_result_acceptances', 'DELETE') AS runtime_can_delete,
+              has_function_privilege('omnis_runtime', 'omnis.accept_task_result(text,text,uuid)', 'EXECUTE') AS runtime_can_accept,
+              has_function_privilege('omnis_authorizer', 'omnis.accept_task_result(text,text,uuid)', 'EXECUTE') AS authorizer_can_accept`,
+    );
+    assert.deepEqual(acl.rows[0], {
+      runtime_can_read: true,
+      runtime_can_insert: false,
+      runtime_can_update: false,
+      runtime_can_delete: false,
+      runtime_can_accept: false,
+      authorizer_can_accept: true,
+    });
+    await assertAcceptanceFingerprintTimezoneDeterminism(admin);
     await assert.rejects(
       runtime.query('SELECT omnis.accept_task_result($1,$2,$3)', [
         provenance.taskId,
@@ -373,6 +430,13 @@ async function verifyRestoredMigrationAcl(runtimeUrl, authorizerUrl, adminUrl, p
       /permission denied/,
       'runtime must not execute the privileged owner acceptance function after restore',
     );
+    await attemptRestoredRuntimeReopenAttack(runtime, provenance.taskId);
+    const countsAfterAttack = await readAcceptanceCounts(admin, provenance.taskId);
+    assert.deepEqual(
+      countsAfterAttack,
+      restoredCounts,
+      'runtime status-transition and direct-function attacks must not alter the receipt or owner event',
+    );
     const acceptanceReplay = await new PostgresRunStore(authorizer).acceptTaskResult(
       provenance.taskId,
       { runId: provenance.runId },
@@ -380,6 +444,11 @@ async function verifyRestoredMigrationAcl(runtimeUrl, authorizerUrl, adminUrl, p
     );
     assert.equal(acceptanceReplay.created, false);
     assert.equal(acceptanceReplay.acceptance.requestId, provenance.requestId);
+    assert.deepEqual(
+      await readAcceptanceCounts(admin, provenance.taskId),
+      restoredCounts,
+      'authorized idempotent replay must not duplicate the immutable receipt or owner event',
+    );
     await assert.rejects(
       runtime.query('SELECT * FROM omnis.legacy_unscoped_runs'),
       /permission denied/,
@@ -406,6 +475,79 @@ async function verifyRestoredMigrationAcl(runtimeUrl, authorizerUrl, adminUrl, p
     await authorizer.end();
     await admin.end();
   }
+}
+
+async function attemptRestoredRuntimeReopenAttack(runtime, taskId) {
+  for (const [expectedStatus, nextStatus] of [
+    ['completed', 'in_progress'],
+    ['in_progress', 'in_review'],
+  ]) {
+    const client = await runtime.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT omnis.acquire_mission_lane_admission(false, 3000)');
+      const update = await client.query(
+        'UPDATE omnis.tasks SET status=$2 WHERE id=$1 AND status=$3',
+        [taskId, nextStatus, expectedStatus],
+      );
+      assert.equal(update.rowCount, 1, `attack setup must transition to ${nextStatus}`);
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  const client = await runtime.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SELECT omnis.acquire_mission_lane_admission(false, 3000)');
+    await assert.rejects(
+      client.query("UPDATE omnis.tasks SET status='completed' WHERE id=$1 AND status='in_review'", [
+        taskId,
+      ]),
+      /requires the owner authorizer/,
+      'restored runtime role must not forge owner-attributed completion through status transitions',
+    );
+    await client.query('ROLLBACK');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function readAcceptanceCounts(admin, taskId) {
+  const { rows } = await admin.query(
+    `SELECT (SELECT count(*)::text FROM omnis.task_result_acceptances WHERE task_id=$1) AS receipts,
+            (SELECT count(*)::text FROM omnis.mission_lane_events
+              WHERE task_id=$1 AND event_type='task.status_changed' AND actor='owner') AS "ownerEvents"`,
+    [taskId],
+  );
+  return rows[0];
+}
+
+async function assertAcceptanceFingerprintTimezoneDeterminism(admin) {
+  const fingerprintFor = async (timeZone) => {
+    const client = await admin.connect();
+    try {
+      await client.query("SELECT set_config('TimeZone', $1, false)", [timeZone]);
+      const { rows } = await client.query(metricsQuery);
+      const report = Object.values(rows[0])[0];
+      return report.recordFingerprints.taskResultAcceptances;
+    } finally {
+      client.release();
+    }
+  };
+
+  assert.equal(
+    await fingerprintFor('UTC'),
+    await fingerprintFor('America/Los_Angeles'),
+    'owner acceptance receipt fingerprint must be deterministic across PostgreSQL session timezones',
+  );
 }
 
 async function verifyLiveAclBoundaries(adminUrl) {
