@@ -1,7 +1,8 @@
 # Phase 1 Backend Connector Readiness
 
-**Baseline:** `7bb6e9d3a79e749b5dfaf63561bb442fde188d9`
-**Assessment date:** 2026-11-05
+**Original baseline:** `7bb6e9d3a79e749b5dfaf63561bb442fde188d9`
+**Latest source reassessment:** `fd576d19ad9f393970783533096da910a73bc8ef` (main after PR #111)
+**Assessment date:** 2026-11-13
 **Scope:** Backend readiness and credential-free synthetic protocol harness
 **Decision:** Keep real connector implementation and real inference blocked.
 
@@ -24,7 +25,7 @@ This document records a source-based assessment and defines a future boundary. T
 | AO-112 — usage reporting                       | PARTIAL                                | Mock usage is forced to unknown.                                                                                               | Per-run measured usage only where the provider returns reliable fields; otherwise unknown/unavailable. Account-level usage is not per-run usage or cost.            |
 | AO-113 — end-to-end acceptance                 | BLOCKED                                | CI and browser tests exercise synthetic execution only.                                                                        | Separately authorized real request after all policy, host, credential, tool, lifecycle, UI and reviewer gates pass.                                                 |
 | G4-3 — host/process/credential isolation       | PARTIAL                                | Restricted rootful launcher and disposable-host mock verification.                                                             | Signed assertions, replay protection, coordinated token rotation, broker and connector host boundary remain open.                                                   |
-| R1-G5 — host authorizer isolation              | PARTIAL                                | Mock-only service identities and protected launcher path have disposable Ubuntu evidence.                                      | Codex #3 connector identity, authenticated IPC, egress, process confinement, credential custody and crash/restart validation.                                       |
+| R1-G5 — host authorizer isolation              | PARTIAL                                | Mock-only service identities and protected launcher path have disposable Ubuntu evidence.                                      | Codex #2 connector identity, authenticated IPC, egress, process confinement, credential custody and crash/restart validation.                                       |
 
 ## Existing execution path and attachment boundary
 
@@ -89,17 +90,19 @@ The fixture has no process-launch, network or credential API and keeps `RuntimeA
 
 Malformed frames fail the in-process fake exchange; a missing matching response or terminal notification fails the fake interruption rather than confirming it. Its synthetic asynchronous exchange failures model failure propagation only: they do not exercise a real process, stream transport, parser, or disconnect timing.
 
-## Codex #3 platform dependency
+## Codex #2 platform dependency
 
 PR #38's host-boundary feasibility assessment is on main at squash commit `513ff457c8a1645e71db8f55ea643bd1e40b8b17`: `docs/06-delivery/PHASE_1_CONNECTOR_HOST_BOUNDARY_FEASIBILITY.md`. It selects the owner's Docker-on-WSL deployment target and retains **BLOCK for real-runtime readiness**. An independently proven host-enforced no-tool boundary, credential custody, admission, egress, process/filesystem isolation, and lifecycle controls remain unimplemented or unverified. Rootful Docker and the existing launcher remain part of the trusted computing base.
 
 Docker Compose on WSL2 Ubuntu remains the intended deployment target. A separate VM is an optional architecture requiring a separate owner decision; KVM and VMM prerequisites have not been verified for that target. A Docker container is not automatically equivalent to a VM isolation boundary, and missing required host-isolation controls must fail closed.
 
-No platform control is treated as passed by this backend change. Required future evidence includes dedicated service identity, authenticated IPC, broker-mediated provider requests without credential delivery to the sandbox, deny-by-default provider egress, OS-enforced no-tool confinement, resource/output limits, observed cancellation and crash/restart semantics, and disposable-host negative tests. Codex #3 owns the platform controls; Codex #1 owns the authorization and broker contracts.
+No platform control is treated as passed by this backend assessment. Required future evidence includes dedicated service identity, authenticated IPC, broker-mediated provider requests without credential delivery to the sandbox, deny-by-default provider egress, OS-enforced no-tool confinement, resource/output limits, observed cancellation and crash/restart semantics, and disposable-host negative tests. Codex #2 owns the Docker/gateway/WSL2 platform controls; Codex #1 owns the authorization and broker contracts.
 
 ## Review dispositions and remaining gates
 
-- Independent architecture reviewer: documentation/protocol assessment **APPROVE**; synthetic-only contract/harness **CONDITIONAL** with the restrictions above; real connector implementation **BLOCK**; real-provider activation **BLOCK**.
+- Historical independent architecture review: documentation/protocol assessment **APPROVE**; synthetic-only contract/harness **CONDITIONAL** with the restrictions above; real connector implementation **BLOCK**; real-provider activation **BLOCK**. This is not an approval of a current provider operation or host boundary.
 - G4-3 remains **Partially Fixed**. R1-G5 remains **Partially Complete**. ADR-0010 and ADR-0011 remain Proposed.
 - A future real request additionally requires current host feasibility approval, provider-policy/consent decision, exact app-server/toolless behavior verification, backend authorization/credential architecture review, implementation review, exact-head CI and a separate owner authorization packet for that exact synthetic prompt.
 - The first actual inference call remains blocked. No deployment, real-provider integration, frontend work or platform work is included here.
+
+The latest main-based source audit, current app-server feasibility evidence, offline fixture contract, Stage A review disposition, and Codex #2 / Claude handoffs are documented in [P0-R1 Codex App-Server Offline Contract and Feasibility](P0_R1_CODEX_APP_SERVER_OFFLINE_CONTRACT.md). That document is the current P0-R1 contract; it does not enable or authorize inference.
