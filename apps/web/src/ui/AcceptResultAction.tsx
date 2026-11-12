@@ -128,6 +128,7 @@ export function AcceptResultAction({
         setProblem({ kind: 'uncertain', message: failure.message });
       } else {
         acceptanceAttempts.settle(ownerId, task.id, run.id);
+        restoreFocus.current = true;
         setConfirming(false);
         setProblem({ kind: failure.kind, message: failure.message });
         if (failure.kind === 'conflict') onConflict(run.id);
@@ -240,7 +241,7 @@ export function AcceptResultAction({
       )}
 
       {view.kind === 'receipt-in-review' && (
-        <div className="accept-result-receipt" role="status">
+        <div className="accept-result-receipt">
           <BadgeCheck size={15} aria-hidden="true" />
           <div>
             <h4 className="accept-result-receipt-title">Owner receipt on record.</h4>
@@ -259,9 +260,16 @@ export function AcceptResultAction({
                 <dd>{view.acceptance.runId}</dd>
               </div>
             </dl>
-            <button type="button" className="secondary-button" onClick={() => onReload(run.id)}>
-              Reload task and runs
-            </button>
+            {gate.phase !== 'failed' && (
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => onReload(run.id)}
+                disabled={gate.phase === 'refreshing'}
+              >
+                Reload task and runs
+              </button>
+            )}
           </div>
         </div>
       )}

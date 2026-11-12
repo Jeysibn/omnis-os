@@ -1806,8 +1806,8 @@ function TasksWorkspace({
               ) : (
                 <p className="task-review-note" role="status">
                   An owner receipt for run {selectedTask.resultAcceptance?.runId} already exists,
-                  but the task still reads in review. This is not awaiting your review; reload to
-                  see the current state.
+                  but the task still reads in review. This is not awaiting your review; open its
+                  latest run in Runs to reload the current state.
                 </p>
               ))}
             {selectedTask.status === 'completed' && selectedTask.resultAcceptance && (

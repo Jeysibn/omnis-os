@@ -147,6 +147,8 @@ type FixtureOptions = {
   stopMutationFailures?: number;
   eventCount?: number;
   eventDisconnects?: boolean;
+  /** The session is revoked as the stream opens: the stream drops and authenticated reads 401. */
+  eventRevoked?: boolean;
   eventOrder?: 'reverse';
   eventDuplicates?: boolean;
   syntheticEnabled?: boolean;
@@ -970,6 +972,10 @@ function createMockApi(page: Page) {
     const eventMatch = path.match(/^\/api\/v1\/runs\/([^/]+)\/events$/);
     if (eventMatch && method === 'GET') {
       eventRequestCursors.push(headers['last-event-id'] ?? '');
+      if (options.eventRevoked) {
+        authenticated = false;
+        return route.abort();
+      }
       if (eventDisconnects > 0) {
         eventDisconnects -= 1;
         return route.abort();
@@ -1006,6 +1012,7 @@ function createMockApi(page: Page) {
     }
     const detailMatch = path.match(/^\/api\/v1\/runs\/([^/]+)$/);
     if (detailMatch && method === 'GET') {
+      if (!authenticated) return fulfillError(route, 401, 'unauthorized', 'Sign in to continue.');
       runDetailGets.set(detailMatch[1]!, (runDetailGets.get(detailMatch[1]!) ?? 0) + 1);
       if (detailFailures > 0) {
         detailFailures -= 1;
@@ -2163,6 +2170,22 @@ test('event stream retries with the last delivered event sequence', async ({ pag
   await expect(page.getByRole('heading', { name: 'Task list' })).toBeVisible();
 });
 
+test('a session revoked while streaming returns to sign-in and stops reconnecting', async ({
+  page,
+  api,
+}) => {
+  test.setTimeout(20_000);
+  api.configure({ eventRevoked: true });
+  await openWorkspace(page, '#runs/run-active');
+  await expect(page.getByRole('alert')).toContainText('session expired');
+  await expect(page.getByRole('button', { name: 'Sign in' })).toBeVisible();
+  // No run action survives the expiry, and the stream is not hammered afterwards.
+  await expect(page.getByRole('button', { name: /Stop/ })).toHaveCount(0);
+  const seen = api.eventRequestCursors.length;
+  await page.waitForTimeout(2500);
+  expect(api.eventRequestCursors.length).toBe(seen);
+});
+
 test('native EventSource reconnect after a delivered event sends Last-Event-ID and dedupes the replay', async ({
   page,
   api,
@@ -3003,6 +3026,17 @@ test.describe('R1 owner result acceptance', () => {
     await expect(page.getByText('Awaiting your review.')).toHaveCount(0);
     expect(api.acceptPosts).toHaveLength(0);
     await assertNoSeriousAxeViolations(page);
+    const shots = process.env.OMNIS_SHOT_DIR;
+    if (shots) {
+      await page
+        .locator('.accept-result')
+        .screenshot({ path: `${shots}/receipt-in-review-desktop.png` });
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page
+        .locator('.accept-result')
+        .screenshot({ path: `${shots}/receipt-in-review-390.png` });
+      await page.setViewportSize({ width: 1280, height: 720 });
+    }
     // Command Center no longer lists it as awaiting the owner; the task detail says why.
     await page.getByRole('link', { name: 'Command Center' }).click();
     await expect(
