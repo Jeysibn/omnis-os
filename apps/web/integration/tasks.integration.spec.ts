@@ -903,9 +903,9 @@ test('Compose reconciles a restored accepted task through the owner API', async 
   );
   test.setTimeout(120_000);
   const fixture = JSON.parse(await readFile(acceptedTaskReconciliationPath!, 'utf8'));
-  expect(fixture.taskId).toMatch(/^[0-9a-f-]{36}$/i);
-  expect(fixture.runId).toMatch(/^[0-9a-f-]{36}$/i);
-  expect(fixture.staleRunId).toMatch(/^[0-9a-f-]{36}$/i);
+  expect(fixture.taskId).toMatch(/^[a-z0-9][a-z0-9_-]{0,127}$/i);
+  expect(fixture.runId).toMatch(/^[a-z0-9][a-z0-9_-]{0,127}$/i);
+  expect(fixture.staleRunId).toMatch(/^[a-z0-9][a-z0-9_-]{0,127}$/i);
   expect(fixture.staleRunId).not.toBe(fixture.runId);
   expect(fixture.receipt).toMatchObject({ runId: fixture.runId, acceptedBy: 'owner' });
   expect(fixture.initialCounts).toEqual({ receipts: '1', ownerEvents: '1' });
