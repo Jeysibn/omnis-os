@@ -37,6 +37,10 @@ const apiEnvPath = join(directory, 'api.env');
 const workerEnvPath = join(directory, 'worker.env');
 const browserEnvPath = join(directory, 'browser.env');
 const browserResultsDirectory = join(directory, 'browser-results');
+const acceptedTaskReconciliationPath = join(
+  browserResultsDirectory,
+  'accepted-task-reconciliation.json',
+);
 const postgresSocketDirectory = join(directory, 'postgres-socket');
 const dbPassword = randomBytes(32).toString('hex');
 const migrationPassword = randomBytes(32).toString('hex');
@@ -342,6 +346,10 @@ try {
     ['OMNIS_TEST_OWNER_PASSWORD', testOwnerPassword],
     ['OMNIS_COMPOSE_JOURNEY_RESULT_PATH', '/results/compose-journey.json'],
     ['OMNIS_TEST_OUTPUT_DIR', '/tmp/playwright-output'],
+    [
+      'OMNIS_COMPOSE_ACCEPTED_TASK_RECONCILIATION_PATH',
+      '/results/accepted-task-reconciliation.json',
+    ],
   ]);
   await writeEnv(composeEnvPath, [
     ['OMNIS_DB_NAME', dbName],
@@ -557,14 +565,15 @@ try {
   const generatedWorker = (await readFile(fixtures.workerEnvPath, 'utf8'))
     .split(/\r?\n/)
     .filter(Boolean);
-  await replaceEnv(apiEnvPath, generatedApi, {
+  const composeApiOverrides = {
     OMNIS_API_HOST: '0.0.0.0',
     OMNIS_API_PORT: '4100',
     OMNIS_WORKER_HOST: 'worker',
     OMNIS_WORKER_PORT: '4101',
     OMNIS_ALLOWED_ORIGIN: browserOrigin,
     OMNIS_AUTHORIZER_SOCKET: '/run/omnis-authorizer/authorizer.sock',
-  });
+  };
+  await replaceEnv(apiEnvPath, generatedApi, composeApiOverrides);
   await replaceEnv(workerEnvPath, generatedWorker, {
     OMNIS_WORKER_HOST: '0.0.0.0',
     OMNIS_WORKER_PORT: '4101',
@@ -617,6 +626,31 @@ try {
   await assertBrowserNetworkIsolation();
 
   runBrowserPlaywright();
+  const acceptedTaskFixture = JSON.parse(await readFile(acceptedTaskReconciliationPath, 'utf8'));
+  const reopenedAcceptance =
+    await fixtures.reopenAcceptedTaskForReconciliation(acceptedTaskFixture);
+  const reconciliationFixture = {
+    taskId: acceptedTaskFixture.taskId,
+    runId: acceptedTaskFixture.runId,
+    staleRunId: reopenedAcceptance.staleRunId,
+    receipt: reopenedAcceptance.receipt,
+    initialCounts: reopenedAcceptance.counts,
+  };
+  await writeFile(acceptedTaskReconciliationPath, JSON.stringify(reconciliationFixture), {
+    mode: 0o600,
+  });
+  await replaceEnv(apiEnvPath, generatedApi, {
+    ...composeApiOverrides,
+    OMNIS_CI_DISPOSABLE: 'true',
+    OMNIS_TEST_SESSION_MAX_AGE_SECONDS: '60',
+  });
+  compose(['up', '--detach', '--force-recreate', '--no-deps', 'api']);
+  await waitForHealthy('api', 30_000);
+  runBrowserPlaywright(false, true);
+  await fixtures.assertAcceptedTaskReconciliation(reconciliationFixture);
+  await replaceEnv(apiEnvPath, generatedApi, composeApiOverrides);
+  compose(['up', '--detach', '--force-recreate', '--no-deps', 'api']);
+  await waitForHealthy('api', 30_000);
   const browserJourney = JSON.parse(
     await readFile(join(browserResultsDirectory, 'compose-journey.json'), 'utf8'),
   );
@@ -1235,24 +1269,28 @@ async function assertBrowserNetworkIsolation() {
   }
 }
 
-function runBrowserPlaywright(recovery = false) {
+function runBrowserPlaywright(recovery = false, acceptanceReconciliation = false) {
   const args = [
     'exec',
     '-T',
     ...(recovery ? ['-e', 'OMNIS_COMPOSE_RECOVERY=1'] : []),
+    ...(acceptanceReconciliation ? ['-e', 'OMNIS_COMPOSE_ACCEPTANCE_RECONCILIATION=1'] : []),
     'browser',
     'node',
     'apps/web/node_modules/@playwright/test/cli.js',
     'test',
     '--config',
     'apps/web/playwright.integration.config.ts',
+    ...(acceptanceReconciliation
+      ? ['--grep', 'Compose reconciles a restored accepted task through the owner API']
+      : []),
     ...(recovery ? ['--grep', 'Compose recovery preserves'] : []),
   ];
   const browser = compose(args, { timeout: 240_000, allowFailure: true });
   if (browser.error || browser.status !== 0) {
     const output = redact(`${browser.stdout ?? ''}\n${browser.stderr ?? ''}`.trim());
     throw new Error(
-      `Isolated Compose Playwright ${recovery ? 'recovery' : 'journey'} failed: ${output}`,
+      `Isolated Compose Playwright ${acceptanceReconciliation ? 'acceptance reconciliation' : recovery ? 'recovery' : 'journey'} failed: ${output}`,
     );
   }
   process.stdout.write(redact(browser.stdout));

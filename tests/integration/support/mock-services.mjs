@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 import {
   generateKeyPairSync,
   randomBytes,
@@ -442,6 +443,12 @@ export async function startMockServices({
       syntheticBrokerProcess,
 
       syntheticBrokerCompose,
+      async reopenAcceptedTaskForReconciliation(fixture) {
+        return reopenAcceptedTaskForReconciliation({ databaseUrl, auditPool, fixture });
+      },
+      async assertAcceptedTaskReconciliation(fixture) {
+        return assertAcceptedTaskReconciliation({ auditPool, fixture });
+      },
 
       assertSensitiveValuesAbsentFromLogs: () => {
         assertSensitiveValuesAbsentFromLogs(sensitiveLogCanaries, [
@@ -1114,6 +1121,183 @@ async function startSyntheticBrokerCompose({
     runCompose(['down', '--volumes', '--remove-orphans']);
     throw error;
   }
+}
+
+async function reopenAcceptedTaskForReconciliation({ databaseUrl, auditPool, fixture }) {
+  if (!auditPool)
+    throw new Error('The disposable acceptance fixture requires its admin audit pool.');
+  const { taskId, runId, receipt } = fixture ?? {};
+  if (
+    !/^[0-9a-f-]{36}$/i.test(taskId ?? '') ||
+    !/^[0-9a-f-]{36}$/i.test(runId ?? '') ||
+    receipt?.runId !== runId ||
+    receipt?.acceptedBy !== 'owner' ||
+    !/^[0-9a-f-]{36}$/i.test(receipt?.requestId ?? '')
+  ) {
+    throw new Error('The accepted-task reconciliation fixture is malformed.');
+  }
+
+  const before = await readAcceptanceFixtureState(auditPool, taskId, runId);
+  assert.equal(before.taskStatus, 'completed');
+  assert.equal(before.runStatus, 'completed');
+  assert.equal(
+    before.latestRunId,
+    runId,
+    'the accepted receipt must reference the latest task run',
+  );
+  assert.deepEqual(before.receipt, receipt, 'the browser-captured receipt must match PostgreSQL');
+  assert.deepEqual(before.counts, { receipts: '1', ownerEvents: '1' });
+
+  const runtime = createPool({
+    connectionString: databaseUrl,
+    max: 1,
+    application_name: 'omnis-test-accepted-task-reopen-fixture',
+  });
+  try {
+    const client = await runtime.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT omnis.acquire_mission_lane_admission(false, 3000)');
+      const reopened = await client.query(
+        `UPDATE omnis.tasks SET status='in_progress'
+          WHERE id=$1 AND status='completed'`,
+        [taskId],
+      );
+      assert.equal(reopened.rowCount, 1, 'fixture must reopen only an accepted completed task');
+      const reviewed = await client.query(
+        `UPDATE omnis.tasks SET status='in_review'
+          WHERE id=$1 AND status='in_progress'`,
+        [taskId],
+      );
+      assert.equal(reviewed.rowCount, 1, 'fixture must place the accepted task back in review');
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+
+    await assertRuntimeCannotForgeAcceptance(runtime, taskId, runId);
+  } finally {
+    await runtime.end();
+  }
+
+  const after = await readAcceptanceFixtureState(auditPool, taskId, runId);
+  assert.equal(after.taskStatus, 'in_review');
+  assert.deepEqual(
+    after.receipt,
+    before.receipt,
+    'runtime fixture must preserve the immutable receipt',
+  );
+  assert.deepEqual(
+    after.counts,
+    before.counts,
+    'runtime fixture must not create owner events or receipts',
+  );
+  const staleRun = await auditPool.query(
+    `SELECT prior.id FROM omnis.runs AS target
+       JOIN omnis.runs AS prior ON prior.created_at < target.created_at
+      WHERE target.id=$1 AND prior.task_id <> target.task_id
+      ORDER BY prior.created_at DESC, prior.id DESC LIMIT 1`,
+    [runId],
+  );
+  assert.ok(staleRun.rows[0]?.id, 'an earlier synthetic run must exist for the stale-run test');
+  return {
+    ...before,
+    staleRunId: staleRun.rows[0].id,
+    reopenedTaskStatus: after.taskStatus,
+  };
+}
+
+async function assertRuntimeCannotForgeAcceptance(runtime, taskId, runId) {
+  const completionClient = await runtime.connect();
+  try {
+    await completionClient.query('BEGIN');
+    await completionClient.query('SELECT omnis.acquire_mission_lane_admission(false, 3000)');
+    await assert.rejects(
+      completionClient.query(
+        `UPDATE omnis.tasks SET status='completed'
+          WHERE id=$1 AND status='in_review'`,
+        [taskId],
+      ),
+      /requires the owner authorizer/,
+      'runtime credentials must not directly complete an accepted task',
+    );
+    await completionClient.query('ROLLBACK');
+  } catch (error) {
+    await completionClient.query('ROLLBACK').catch(() => undefined);
+    throw error;
+  } finally {
+    completionClient.release();
+  }
+
+  await assert.rejects(
+    runtime.query(
+      `INSERT INTO omnis.task_result_acceptances(task_id, run_id, request_id)
+       VALUES ($1, $2, $3)`,
+      [taskId, runId, randomUUID()],
+    ),
+    /permission denied/,
+    'runtime credentials must not insert owner acceptance receipts',
+  );
+}
+
+async function assertAcceptedTaskReconciliation({ auditPool, fixture }) {
+  const { taskId, runId, receipt, initialCounts } = fixture ?? {};
+  if (!auditPool || !/^[0-9a-f-]{36}$/i.test(taskId ?? '') || !runId || !receipt) {
+    throw new Error('The accepted-task reconciliation verification input is malformed.');
+  }
+  const state = await readAcceptanceFixtureState(auditPool, taskId, runId);
+  assert.equal(state.taskStatus, 'completed', 'owner API reconciliation must complete the task');
+  assert.equal(state.runStatus, 'completed');
+  assert.equal(state.latestRunId, runId);
+  assert.deepEqual(
+    state.receipt,
+    receipt,
+    'owner API reconciliation must preserve the original receipt',
+  );
+  assert.deepEqual(state.counts, {
+    receipts: '1',
+    ownerEvents: String(Number(initialCounts?.ownerEvents) + 1),
+  });
+  return state;
+}
+
+async function readAcceptanceFixtureState(auditPool, taskId, runId) {
+  const { rows } = await auditPool.query(
+    `SELECT task.status AS task_status, run.status AS run_status,
+            receipt.run_id AS receipt_run_id, receipt.accepted_by,
+            to_char(receipt.accepted_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS accepted_at,
+            receipt.request_id,
+            (SELECT latest.id FROM omnis.runs AS latest WHERE latest.task_id=task.id
+              ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1) AS latest_run_id,
+            (SELECT count(*)::text FROM omnis.task_result_acceptances WHERE task_id=task.id) AS receipts,
+            (SELECT count(*)::text FROM omnis.mission_lane_events
+              WHERE task_id=task.id AND event_type='task.status_changed' AND actor='owner') AS owner_events
+       FROM omnis.tasks AS task
+       JOIN omnis.runs AS run ON run.id=$2 AND run.task_id=task.id
+       LEFT JOIN omnis.task_result_acceptances AS receipt
+         ON receipt.task_id=task.id AND receipt.run_id=run.id
+      WHERE task.id=$1`,
+    [taskId, runId],
+  );
+  assert.equal(rows.length, 1, 'fixture task and run must exist and belong together');
+  const row = rows[0];
+  return {
+    taskStatus: row.task_status,
+    runStatus: row.run_status,
+    latestRunId: row.latest_run_id,
+    receipt: row.receipt_run_id
+      ? {
+          runId: row.receipt_run_id,
+          acceptedBy: row.accepted_by,
+          acceptedAt: new Date(row.accepted_at).toISOString(),
+          requestId: row.request_id,
+        }
+      : null,
+    counts: { receipts: row.receipts, ownerEvents: row.owner_events },
+  };
 }
 
 export function appendCapturedLogChunk(child, chunk, values, maxBytes = 262_144) {
