@@ -1140,10 +1140,14 @@ async function createAcceptedTaskReconciliationFixture({ databaseUrl, authorizer
     max: 1,
     application_name: 'omnis-test-accepted-task-fixture',
   });
+  let task;
+  let staleRunId;
+  let runId;
+  let acceptance;
   try {
     const store = new PostgresRunStore(runtime);
     const authorizationStore = new PostgresAuthorizationStore(runtime, authorizer);
-    const task = await store.createTask({
+    task = await store.createTask({
       title: `Synthetic accepted-task reconciliation ${randomUUID()}`,
       detail: 'Disposable PostgreSQL fixture for owner receipt reconciliation.',
     });
@@ -1167,10 +1171,10 @@ async function createAcceptedTaskReconciliationFixture({ databaseUrl, authorizer
       return admitted.run.id;
     };
 
-    const staleRunId = await completeSyntheticRun(`acceptance-fixture-${randomUUID()}`);
+    staleRunId = await completeSyntheticRun(`acceptance-fixture-${randomUUID()}`);
     await transitionTaskWithRuntime(runtime, task.id, 'in_review', 'in_progress');
-    const runId = await completeSyntheticRun(`acceptance-fixture-${randomUUID()}`);
-    const acceptance = await new PostgresRunStore(authorizer).acceptTaskResult(
+    runId = await completeSyntheticRun(`acceptance-fixture-${randomUUID()}`);
+    acceptance = await new PostgresRunStore(authorizer).acceptTaskResult(
       task.id,
       { runId },
       randomUUID(),
