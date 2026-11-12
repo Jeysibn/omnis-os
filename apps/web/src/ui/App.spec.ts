@@ -3159,6 +3159,25 @@ test.describe('R1 owner result acceptance', () => {
     expect(api.acceptPosts).toHaveLength(1);
   });
 
+  test('keyboard focus stays on Confirm while acceptance is pending, and Escape cannot cancel it', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ tasks: [reviewTask], runs: [reviewRun], acceptDelayMs: 600 });
+    await openReview(page);
+    await accept(page).click();
+    const confirm = confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' });
+    await confirm.focus();
+    await page.keyboard.press('Enter');
+    const pending = confirmGroup(page).getByRole('button', { name: 'Accepting…' });
+    await expect(pending).toBeFocused();
+    await expect(pending).toHaveAttribute('aria-disabled', 'true');
+    await page.keyboard.press('Escape');
+    await expect(confirmGroup(page)).toBeVisible();
+    await expect(page.getByText('Result accepted by owner.')).toBeVisible();
+    expect(api.acceptPosts).toHaveLength(1);
+  });
+
   test('an uncertain response is not reported as success and the retry reuses the same key', async ({
     page,
     api,

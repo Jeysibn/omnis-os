@@ -193,7 +193,7 @@ export function AcceptResultAction({
                   type="button"
                   className="primary-button"
                   onClick={() => void submit()}
-                  disabled={busy}
+                  aria-disabled={busy}
                   aria-busy={busy}
                 >
                   <Check size={15} aria-hidden="true" />
@@ -208,7 +208,7 @@ export function AcceptResultAction({
                   type="button"
                   className="secondary-button"
                   onClick={cancel}
-                  disabled={busy}
+                  aria-disabled={busy}
                 >
                   Cancel
                 </button>
