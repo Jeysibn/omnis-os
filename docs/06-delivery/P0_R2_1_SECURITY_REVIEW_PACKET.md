@@ -1,15 +1,21 @@
 # P0-R2.1 Rootless WSL2 Security Review Packet
 
 **Status:** Ready to relay for exact-revision review; required reviews and owner architecture decisions are pending. No deployment or feasibility test is approved by this packet.
-**Reviewed source baseline:** `origin/main` at `04e9b31b89b0034aac00bc4130ca10a1b9c90335`, fetched 2026-11-13.
-**Related PR:** #107 remains open and unmerged; it is not part of this baseline. Its proposed handoff is available at <https://github.com/Jeysibn/omnis-os/pull/107>.
+**Reviewed source baseline:** `origin/main` at `9b3afd3733932d769045cd6a31d0c548986b8271`, fetched 2026-11-13.
+**Related PRs:** #107 merged as `d32022091a1f7cab43acd4b1f930e61dbaae7f5e`; #109 is current `main` at the source baseline above. #107's infrastructure handoff is [a historical source snapshot](../07-governance/PHASE1_RUNTIME_INFRASTRUCTURE_HANDOFF.md), not a current-main attestation.
 **Companion test package:** [P0-R2.1 disposable feasibility package](./P0_R2_1_DISPOSABLE_FEASIBILITY_PACKAGE.md).
 
 ## Purpose and scope
 
 This packet is for Codex #1's direct security/authorization review, Claude #1's independent threat-model review, and the project owner's architecture and environment decisions. Each reviewer must inspect the exact final PR commit and identify that full SHA in their response. The PR branch's final head SHA is recorded in the PR description. A review of an earlier source SHA, this summary alone, or an AI subagent's findings is not approval of the current head.
 
-The P0-R2.1 design document still records its historical baseline `a830aeb28f388ab7b569ce5f61c663e6e0c461c2`. This packet supplements that document against current main `04e9b31b89b0034aac00bc4130ca10a1b9c90335`; it does not rewrite or reinterpret prior approval history. The owner-reported Codex #1 planning approval remains planning-only and is not a security verdict for this packet or permission to execute tests.
+The P0-R2.1 design document still records its historical baseline `a830aeb28f388ab7b569ce5f61c663e6e0c461c2`; the merged #107 handoff records `04e9b31b89b0034aac00bc4130ca10a1b9c90335`. This packet updates the source assessment to current main `9b3afd3733932d769045cd6a31d0c548986b8271` without rewriting either historical record or prior approval history. The owner-reported Codex #1 planning approval remains planning-only and is not a security verdict for this packet or permission to execute tests.
+
+### Changes since the prior assessment
+
+- **PR #107 (`d320220`)** merged the infrastructure handoff. Its source snapshot and conclusions correctly describe the hybrid deployment at `04e9b31`; merge status has changed, but the Docker-only target remains proposed. No second rootless Engine or Runtime API Policy Gateway was added by #107.
+- **PR #109 (`9b3afd3`)** made runtime protocol hashing reject non-number protocol versions instead of coercing values, added acceptance replay/reconciliation behavior and tests, and added the backend/frontend handoff. The hash change is still in the pure Stage A package; it does not add a listener, live verifier, Engine gateway, or runtime authority. Acceptance reconciliation is a Mission Lane/task state transition and does not change container isolation, provider credentials, egress, or ingress provenance.
+- Current-main post-merge CI run [43280547684](https://github.com/Jeysibn/omnis-os/actions/runs/43280547684) has a reported Mission Lane database lock-timeout failure in `database-integration (legacy-upgrade)`. Codex #1 owns that investigation. It is tracked separately and is not attributed to PR #110; this packet does not diagnose or modify it.
 
 Review and approval scopes are separate:
 
@@ -20,7 +26,7 @@ Review and approval scopes are separate:
 
 ## Current security disposition
 
-| Property | Evidence class | Disposition at `04e9b31` |
+| Property | Evidence class | Disposition at `9b3afd3` |
 |---|---|---|
 | Mock container isolation | Implemented in source; existing disposable CI evidence | Fixed mock path requests network none, read-only root, non-root UID/GID, dropped capabilities, no-new-privileges, resource bounds, a private workspace and bounded output. This is not provider runtime isolation. |
 | Separate service identities | Source definitions and disposable Ubuntu systemd CI evidence | API, authorizer, worker and launcher identities/socket groups exist in the transitional hybrid deployment. Target WSL2 permissions are unverified. |
@@ -29,6 +35,8 @@ Review and approval scopes are separate:
 | Runtime Engine egress | Mock `network=none` and synthetic CI fixtures; no external independent policy | Provider/default-deny egress enforcement is not implemented or target-verified. No public endpoints were probed. |
 | Windows-local ingress provenance | ADR-0012, threat model and observation fixture | **BLOCKED.** Loopback binding, TLS, `Host`, `Origin`, and forwarded headers do not prove that an accepted request came from a Windows-local principal. No approved discriminator or independent verdict exists. |
 | Runtime authorization/credentials | Pure Stage A protocol and synthetic broker only | No live issuer/store, provider secret custody, approved Codex identity/model, or real provider connection. The injected Stage A verifier is not live authentication. |
+| Protocol request hashing | Pure Stage A source and tests; #109 merged | Protocol version must now be a number before hashing; this reduces coercion ambiguity in the pure function. It is not a live gateway/authentication or operation authorization control. |
+| Mission Lane acceptance replay | #109 authorizer/database source and CI tests | Owner acceptance can reconcile an eligible previously accepted Run and append the owner transition. This changes task lifecycle and lock behavior, not the infrastructure trust boundaries in this packet. Current-main legacy-upgrade lock-timeout investigation belongs to Codex #1. |
 | WSL2 lifecycle/recovery | Generic vendor documentation and source design | No target WSL2 test; Docker daemon loss, manager loss, distro stop/start and an independent persistent start interlock remain unverified. |
 | CI evidence | Historical merged PR and disposable Ubuntu CI | Evidence is scoped to its commit and runner. It is not target WSL2, rootless dual-engine, or provider evidence. |
 
@@ -90,8 +98,8 @@ Owner decisions must name the exact revision and answer each numbered decision a
 
 | Required disposition | State |
 |---|---|
-| Codex #1 direct review of exact P0-R2.1/P0-R2.2 scope | **PENDING — no exact-revision verdict recorded.** |
-| Claude #1 independent threat-model review of same exact SHA | **PENDING — no exact-revision verdict recorded.** |
+| Codex #1 direct review of exact PR #110 head (listed in PR description) | **PENDING — no attributable exact-head verdict recorded; request packet ready.** |
+| Claude independent threat-model review of exact PR #110 head (listed in PR description) | **PENDING — no attributable exact-head verdict recorded; request packet ready.** |
 | Owner ingress candidate decision | **PENDING — provenance remains BLOCKED.** |
 | Owner disposable Linux VM authorization | **PENDING — no VM or guest-root actions authorized by this packet.** |
 | Owner separate WSL2 distro/profile authorization | **PENDING — no WSL2 host experiment authorized by this packet.** |
@@ -101,7 +109,7 @@ Four supporting agent reviews were performed read-only for this PR package. They
 
 ### Independent design-only subagent reviews
 
-All four reviews inspected source/design at `04e9b31b89b0034aac00bc4130ca10a1b9c90335`. They did not edit the repository, run host/runtime tests, or issue a human security approval.
+All four reviews inspected source/design at `04e9b31b89b0034aac00bc4130ca10a1b9c90335`. They did not review the subsequent #109 diff, edit the repository, run host/runtime tests, or issue a human security approval. Their findings remain supporting historical observations and do not satisfy exact-head review of this updated PR.
 
 | Review area | Findings and severity | Evidence / disposition |
 |---|---|---|

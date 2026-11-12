@@ -1,7 +1,7 @@
 # P0-R2.1 Disposable Rootless WSL2 Feasibility Package
 
 **Status:** Proposed test package only; execution is not authorized. All runtime/WSL2 cases are **NOT TESTED**.
-**Source reviewed:** fetched `origin/main` commit `04e9b31b89b0034aac00bc4130ca10a1b9c90335` (2026-11-13).
+**Source reviewed:** fetched `origin/main` commit `9b3afd3733932d769045cd6a31d0c548986b8271` (2026-11-13).
 **Approval packet:** [P0-R2.1 Security Review Packet](./P0_R2_1_SECURITY_REVIEW_PACKET.md).
 **Existing normative plans:** [P0-R2.1 compatibility harness design](./P0_R2_1_ROOTLESS_COMPATIBILITY_HARNESS_DESIGN.md), [P0-R2.2 implementation plan](./P0_R2_2_ROOTLESS_HARNESS_IMPLEMENTATION_PLAN.md), [WSL2 ingress experiments](./WSL2_DISPOSABLE_EXPERIMENTS.md), [ADR-0012 review packet](../05-security/ADR_0012_REVIEW_PACKET.md), [Docker-only proof register](./P0_R2_DOCKER_ONLY_PROOF_REGISTER.md).
 
@@ -30,8 +30,10 @@ Use the fixture specifications below as normative test inputs. Do not invent com
 | Engine API filter | No gateway or Docker AuthZ policy source | AuthZ plugin is defense-in-depth only; gRPC, upgrades, non-JSON and streaming coverage gaps require gateway denial. |
 | Provider/runtime egress | Current mock container requests `network=none`; separate synthetic CI networks are fixtures | No external provider default-deny policy or target packet evidence. Network-none request alone is not independent enforcement against a compromised controller. |
 | Resource limits | Mock container declares CPU/memory/PID/output/time bounds | Target cgroup v2/systemd delegation, aggregate parent caps, quota-backed storage and enforcement under rootless WSL remain unverified. Unsupported limits must fail the test. |
-| Recovery | Source has mock orphan cleanup and uncertain-outcome fencing | No independent termination guarantee through gateway/daemon/systemd/WSL failure; no persistent pre-autostart deny-start interlock is proved. |
+| Recovery | Source has mock orphan cleanup and uncertain-outcome fencing; #109 adds owner-acceptance reconciliation for Mission Lane task state | No independent termination guarantee through gateway/daemon/systemd/WSL failure; no persistent pre-autostart deny-start interlock is proved. #109 acceptance replay does not reconcile a runtime Engine operation or establish process termination. |
 | Owner ingress | Current Compose port publication is loopback-only; no approved provenance discriminator | ADR-0012 stays **BLOCKED**. Loopback, TLS, Host, Origin and forwarded headers are not locality evidence. |
+
+PR #109 tightened pure Stage A protocol hashing to reject non-number versions before hashing. This is a useful protocol validation correction, but its pure package still has no live transport, credential, Engine dispatch, or host authority. #107's infrastructure handoff merged with a historical `04e9b31` source snapshot; its merge does not turn the proposed topology into implemented infrastructure. The #109 post-merge legacy-upgrade lock-timeout is tracked by Codex #1 and is outside this feasibility package's infrastructure findings.
 
 Evidence classes must not be collapsed: **implemented in source**, **vendor-documented generic support**, **design-only**, **disposable experiment**, and **target WSL2 experiment** are distinct. No rootless/double-engine/gateway or target WSL2 row is experimentally verified.
 
