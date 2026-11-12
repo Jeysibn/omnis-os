@@ -11,10 +11,11 @@
     "test:sandbox": "pnpm --filter @omnis/sandbox-launcher test:sandbox"
   },
   "dependencies": {
-    "@omnis/db": "workspace:*",
     "@omnis/contracts": "workspace:*",
+    "@omnis/db": "workspace:*",
     "@omnis/policy": "workspace:*",
     "@omnis/runtime-adapters": "workspace:*",
+    "@omnis/runtime-protocol": "workspace:*",
     "fastify": "5.12.7",
     "pg-boss": "12.38.0",
     "zod": "4.6.7"

@@ -248,6 +248,19 @@ describe('offline Codex app-server contract fixtures', () => {
     }
   });
 
+  it('rejects duplicate object keys before protocol schema validation', () => {
+    for (const raw of [
+      '{"method":"turn/completed","method":"item/commandExecution/requestApproval","params":{"turn":{"id":"turn-synthetic-1","status":"completed"}}}',
+      '{"method":"turn/completed","params":{"turn":{"id":"turn-synthetic-1","id":"turn-other","status":"completed"}}}',
+      '{"method":"turn/completed","params":{"turn":{"id":"turn-synthetic-1","status":"failed","status":"completed"}}}',
+    ]) {
+      assert.throws(
+        () => new OfflineCodexEventProjector(context).accept(delivery(1, 'duplicate-key', raw)),
+        /malformed app-server JSON/,
+      );
+    }
+  });
+
   it('rejects duplicate deliveries with conflicting bytes and out-of-order delivery sequences', () => {
     const projector = new OfflineCodexEventProjector(context);
     const first = delivery(

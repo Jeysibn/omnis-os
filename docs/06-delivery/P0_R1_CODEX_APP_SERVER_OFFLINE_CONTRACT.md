@@ -82,7 +82,7 @@ These are separate decisions and identities:
 The fixture contract provides:
 
 - A bounded single-text `turn/start` request builder with no tool fields. It is a fixture constructor, never a transport request.
-- Strict parsing of a small notification subset: turn started, text item start/completion (including documented optional `phase` values), text delta, and terminal completed/failed/interrupted. Server-initiated method calls, tool/non-text items, malformed frames, unknown methods, and identity mismatches are denied.
+- Strict parsing of a small notification subset: turn started, text item start/completion (including documented optional `phase` values), text delta, and terminal completed/failed/interrupted. The existing runtime-protocol JSON parser rejects duplicate object keys before schema validation. Server-initiated method calls, tool/non-text items, malformed frames, unknown methods, and identity mismatches are denied.
 - Local correlation to `runId`, operation UUID, execution generation, synthetic session ID, thread ID, and turn ID. Identity is validated before projection.
 - Monotonic fixture delivery sequence and delivery-ID deduplication. Reusing a delivery ID with changed bytes or a changed sequence, and any new out-of-order or gapped sequence, are rejected. After disconnect the projector stays unknown and rejects stream events; only a separate authoritative reconciliation can resolve it. Delivery IDs and sequence numbers are **synthetic harness metadata**, not app-server-provided replay guarantees.
 - UTF-8 frame/delta/aggregate output caps. Output is emitted only for the accepted text item; the completed item must match the accumulated deltas.
@@ -101,7 +101,7 @@ The worker fixture test file covers these rows with local objects/strings and no
 |   2 | Streamed text response                | Correlated deltas project in deterministic local sequence.                                        |
 |   3 | Tool-call attempt                     | Command execution item rejected.                                                                  |
 |   4 | Unsupported method/server request     | Tool-control request and unsupported method rejected.                                             |
-|   5 | Malformed message                     | Invalid JSON rejected.                                                                            |
+|   5 | Malformed message                     | Invalid JSON and duplicate object keys rejected before schema validation.                         |
 |   6 | Unknown event                         | Unknown notification rejected.                                                                    |
 |   7 | Duplicate event                       | Same synthetic delivery ID/bytes/sequence is idempotent; changed bytes or sequence are rejected.  |
 |   8 | Out-of-order event                    | Sequence gaps/reordering are rejected.                                                            |

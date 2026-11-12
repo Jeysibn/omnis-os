@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { parseProtocolJson } from '@omnis/runtime-protocol';
 
 const MAX_FRAME_BYTES = 16_384;
 const MAX_DELTA_BYTES = 4_096;
@@ -285,7 +286,7 @@ export class OfflineCodexEventProjector {
 
     let decoded: unknown;
     try {
-      decoded = JSON.parse(checkedDelivery.frame) as unknown;
+      decoded = parseProtocolJson(checkedDelivery.frame);
     } catch {
       throw new Error('malformed app-server JSON');
     }
