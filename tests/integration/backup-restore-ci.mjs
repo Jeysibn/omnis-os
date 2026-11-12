@@ -444,10 +444,11 @@ async function verifyRestoredMigrationAcl(runtimeUrl, authorizerUrl, adminUrl, p
     );
     assert.equal(acceptanceReplay.created, false);
     assert.equal(acceptanceReplay.acceptance.requestId, provenance.requestId);
+    assert.equal(acceptanceReplay.task.status, 'completed');
     assert.deepEqual(
       await readAcceptanceCounts(admin, provenance.taskId),
-      restoredCounts,
-      'authorized idempotent replay must not duplicate the immutable receipt or owner event',
+      { receipts: restoredCounts.receipts, ownerEvents: '2' },
+      'authorized replay must preserve the receipt and append one owner event for reconciliation',
     );
     await assert.rejects(
       runtime.query('SELECT * FROM omnis.legacy_unscoped_runs'),

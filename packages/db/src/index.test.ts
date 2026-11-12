@@ -7702,6 +7702,11 @@ const postgresSuite = describe(
         BigInt(acceptanceEvent.global_sequence) > BigInt(runCompleted.rows[0]!.global_sequence),
       );
       assert.equal(events.rows.filter((event) => event.actor === 'owner').length, 1);
+      const receiptBeforeReopen = await adminPool!.query(
+        `SELECT task_id, run_id, request_id, accepted_by, accepted_at
+           FROM omnis.task_result_acceptances WHERE task_id=$1 AND run_id=$2`,
+        [task.id, admitted.run.id],
+      );
 
       const reopen = await pool!.connect();
       try {
@@ -7724,12 +7729,51 @@ const postgresSuite = describe(
       } finally {
         recommit.release();
       }
+
+      const reconciled = await acceptanceStore.acceptTaskResult(
+        task.id,
+        { runId: admitted.run.id },
+        accepted.acceptance.requestId,
+      );
+      assert.equal(reconciled.created, false);
+      assert.equal(reconciled.task.status, 'completed');
+      assert.deepEqual(reconciled.acceptance, accepted.acceptance);
+      const immutableReceipt = await adminPool!.query(
+        `SELECT task_id, run_id, request_id, accepted_by, accepted_at
+           FROM omnis.task_result_acceptances WHERE task_id=$1 AND run_id=$2`,
+        [task.id, admitted.run.id],
+      );
+      assert.deepEqual(immutableReceipt.rows, receiptBeforeReopen.rows);
+      const reconciliationEvents = await adminPool!.query<{
+        global_sequence: string;
+        actor: string;
+        payload: { from: string; to: string; runId?: string };
+      }>(
+        `SELECT global_sequence::text, actor, payload FROM omnis.mission_lane_events
+          WHERE task_id=$1 AND event_type='task.status_changed'
+          ORDER BY global_sequence::bigint`,
+        [task.id],
+      );
+      assert.deepEqual(
+        reconciliationEvents.rows
+          .slice(-3)
+          .map(({ actor, payload }) => [actor, payload.from, payload.to, payload.runId ?? null]),
+        [
+          ['owner', 'in_review', 'completed', admitted.run.id],
+          ['service:omnis-worker', 'completed', 'in_review', null],
+          ['owner', 'in_review', 'completed', admitted.run.id],
+        ],
+      );
+      assert.ok(
+        BigInt(reconciliationEvents.rows.at(-1)!.global_sequence) >
+          BigInt(reconciliationEvents.rows.at(-2)!.global_sequence),
+      );
       const ownerCompletionCount = await adminPool!.query<{ count: string }>(
         `SELECT count(*)::text FROM omnis.mission_lane_events
           WHERE task_id=$1 AND event_type='task.status_changed' AND actor='owner'`,
         [task.id],
       );
-      assert.equal(ownerCompletionCount.rows[0]?.count, '1');
+      assert.equal(ownerCompletionCount.rows[0]?.count, '2');
     });
 
     it('rejects stale, failed, and cancelled results while preserving legacy completed rows', async () => {
@@ -7846,6 +7890,19 @@ const postgresSuite = describe(
         [task.id],
       );
       assert.equal(receipts.rows[0]?.count, '2');
+      const reopen = await pool!.connect();
+      try {
+        await reopen.query('BEGIN');
+        await reopen.query('SELECT omnis.acquire_mission_lane_admission(false, 3000)');
+        await reopen.query("UPDATE omnis.tasks SET status='in_progress' WHERE id=$1", [task.id]);
+        await reopen.query("UPDATE omnis.tasks SET status='in_review' WHERE id=$1", [task.id]);
+        await reopen.query('COMMIT');
+      } catch (error) {
+        await reopen.query('ROLLBACK').catch(() => undefined);
+        throw error;
+      } finally {
+        reopen.release();
+      }
       const replay = await acceptanceStore.acceptTaskResult(
         task.id,
         { runId: first.run.id },
@@ -7854,6 +7911,7 @@ const postgresSuite = describe(
       assert.equal(replay.created, false);
       assert.equal(replay.acceptance.runId, first.run.id);
       assert.equal(replay.task.resultAcceptance?.runId, second.run.id);
+      assert.equal(replay.task.status, 'in_review');
     });
 
     it('rejects stale completion after a new worker generation owns the execution', async () => {

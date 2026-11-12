@@ -280,8 +280,8 @@ export function requestHash(input: Record<string, unknown>): string {
     operation: input.operation,
     arguments: input.arguments,
   };
-  const version = Number(input.protocol_version);
-  if (!Number.isInteger(version) || version < 0 || version > 65535)
+  const version = input.protocol_version;
+  if (typeof version !== 'number' || !Number.isInteger(version) || version < 0 || version > 65535)
     throw new Error('invalid protocol version');
   const prefix = Buffer.from([version >> 8, version & 0xff]);
   return createHash('sha256')

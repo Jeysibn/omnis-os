@@ -1018,6 +1018,23 @@ function sendAgentLifecycleError(error: unknown, reply: FastifyReply) {
 }
 
 function sendStoreError(error: unknown, reply: FastifyReply) {
+  const storeError =
+    error instanceof Error
+      ? (error as Error & { code?: unknown; statusCode?: unknown })
+      : undefined;
+  if (
+    storeError &&
+    typeof storeError.code === 'string' &&
+    typeof storeError.statusCode === 'number' &&
+    ['invalid_input', 'not_found', 'conflict', 'invalid_transition', 'concurrency_limit'].includes(
+      storeError.code,
+    ) &&
+    [400, 404, 409, 422, 503].includes(storeError.statusCode)
+  ) {
+    return reply
+      .code(storeError.statusCode)
+      .send({ error: { code: storeError.code, message: storeError.message } });
+  }
   if (error && typeof error === 'object' && 'code' in error && error.code === '55P03') {
     return reply.code(503).send({
       error: {
