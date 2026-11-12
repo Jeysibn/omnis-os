@@ -281,9 +281,11 @@ describe('offline Codex app-server contract fixtures', () => {
       () => projector.accept(delivery(99, 'delivery-1', first.frame)),
       /duplicate delivery identity conflict/,
     );
+    const outOfOrder = new OfflineCodexEventProjector(context);
+    outOfOrder.accept(first);
     assert.throws(
       () =>
-        projector.accept(
+        outOfOrder.accept(
           delivery(
             3,
             'delivery-3',
@@ -369,11 +371,14 @@ describe('offline Codex app-server contract fixtures', () => {
       'failed',
     );
     const interrupted = new OfflineCodexEventProjector(context);
+    interrupted.accept(
+      delivery(1, 'turn-start', frame('turn/started', { turn: { id: context.turnId } })),
+    );
     interrupted.requestCancellation();
     assert.equal(
       interrupted.accept(
         delivery(
-          1,
+          2,
           'interrupted',
           frame('turn/completed', { turn: { id: context.turnId, status: 'interrupted' } }),
         ),
@@ -476,6 +481,131 @@ describe('offline Codex app-server contract fixtures', () => {
     assert.equal(projector.status, 'cancellation_requested');
   });
 
+  it('enforces turn lifecycle ordering while cancellation is pending', () => {
+    const makeProjector = () => new OfflineCodexEventProjector(context);
+    const turnStarted = (sequence: number, id = 'turn-start') =>
+      delivery(sequence, id, frame('turn/started', { turn: { id: context.turnId } }));
+    const itemStarted = (sequence: number) =>
+      delivery(
+        sequence,
+        `item-started-${sequence}`,
+        frame('item/started', {
+          threadId: context.threadId,
+          turnId: context.turnId,
+          item: { id: 'item-1', type: 'agentMessage', text: '' },
+        }),
+      );
+    const delta = (sequence: number) =>
+      delivery(
+        sequence,
+        `delta-${sequence}`,
+        frame('item/agentMessage/delta', {
+          threadId: context.threadId,
+          turnId: context.turnId,
+          itemId: 'item-1',
+          delta: 'x',
+        }),
+      );
+
+    const cancelBeforeStart = makeProjector();
+    assert.equal(cancelBeforeStart.requestCancellation().type, 'cancel_requested');
+    assert.equal(cancelBeforeStart.accept(turnStarted(1)).event?.type, 'started');
+    assert.equal(cancelBeforeStart.status, 'cancellation_requested');
+    assert.throws(() => cancelBeforeStart.accept(turnStarted(2, 'duplicate-start')));
+
+    const textBeforeStart = makeProjector();
+    textBeforeStart.requestCancellation();
+    assert.throws(
+      () => textBeforeStart.accept(itemStarted(1)),
+      /unexpected app-server text item start/,
+    );
+    const deltaBeforeStart = makeProjector();
+    deltaBeforeStart.requestCancellation();
+    assert.throws(() => deltaBeforeStart.accept(delta(1)));
+
+    const startAfterText = makeProjector();
+    startAfterText.accept(turnStarted(1));
+    startAfterText.accept(itemStarted(2));
+    startAfterText.accept(delta(3));
+    assert.throws(() => startAfterText.accept(turnStarted(4, 'late-start')));
+
+    const cancelAfterStart = makeProjector();
+    cancelAfterStart.accept(turnStarted(1));
+    assert.equal(cancelAfterStart.requestCancellation().type, 'cancel_requested');
+    cancelAfterStart.accept(itemStarted(2));
+    assert.equal(cancelAfterStart.accept(delta(3)).event?.type, 'text_delta');
+  });
+
+  it('rejects completed terminal evidence with a non-null error', () => {
+    const projector = new OfflineCodexEventProjector(context);
+    projector.accept(
+      delivery(1, 'started', frame('turn/started', { turn: { id: context.turnId } })),
+    );
+    projector.accept(
+      delivery(
+        2,
+        'item-started',
+        frame('item/started', {
+          threadId: context.threadId,
+          turnId: context.turnId,
+          item: { id: 'item-1', type: 'agentMessage', text: '' },
+        }),
+      ),
+    );
+    projector.accept(
+      delivery(
+        3,
+        'item-completed',
+        frame('item/completed', {
+          threadId: context.threadId,
+          turnId: context.turnId,
+          item: { id: 'item-1', type: 'agentMessage', text: '' },
+        }),
+      ),
+    );
+    assert.throws(
+      () =>
+        projector.accept(
+          delivery(
+            4,
+            'contradictory-completion',
+            frame('turn/completed', {
+              turn: {
+                id: context.turnId,
+                status: 'completed',
+                error: { codexErrorInfo: 'unauthorized' },
+              },
+            }),
+          ),
+        ),
+      /contradictory app-server completion evidence/,
+    );
+    assert.equal(projector.status, 'unknown');
+  });
+
+  it('requires text item start to have an empty initial text value', () => {
+    const projector = new OfflineCodexEventProjector(context);
+    projector.accept(
+      delivery(1, 'started', frame('turn/started', { turn: { id: context.turnId } })),
+    );
+    assert.throws(
+      () =>
+        projector.accept(
+          delivery(
+            2,
+            'prepopulated-item',
+            frame('item/started', {
+              threadId: context.threadId,
+              turnId: context.turnId,
+              item: { id: 'item-1', type: 'agentMessage', text: 'unprojected prefix' },
+            }),
+          ),
+        ),
+      /unexpected app-server text item start/,
+    );
+    assert.equal(projector.status, 'unknown');
+  });
+
   it('deduplicates a repeated terminal delivery without emitting a second terminal event', () => {
     const projector = new OfflineCodexEventProjector(context);
     projector.accept(
@@ -511,6 +641,33 @@ describe('offline Codex app-server contract fixtures', () => {
     assert.equal(projector.accept(terminal).event?.type, 'completed');
     assert.equal(projector.accept(terminal).duplicate, true);
     assert.equal(projector.status, 'completed');
+  });
+
+  it('latches protocol violations as unknown and rejects later frames pending reconciliation', () => {
+    const projector = new OfflineCodexEventProjector(context);
+    assert.throws(
+      () =>
+        projector.accept(
+          delivery(1, 'wrong-turn', frame('turn/started', { turn: { id: 'turn-other' } })),
+        ),
+      /turn identity mismatch/,
+    );
+    assert.equal(projector.status, 'unknown');
+    assert.throws(
+      () =>
+        projector.accept(
+          delivery(1, 'correct-turn', frame('turn/started', { turn: { id: context.turnId } })),
+        ),
+      /requires authoritative reconciliation/,
+    );
+  });
+
+  it('emits cancellation intent only once when cancellation is repeated', () => {
+    const projector = new OfflineCodexEventProjector(context);
+    const first = projector.requestCancellation();
+    const repeated = projector.requestCancellation();
+    assert.deepEqual(repeated, first);
+    assert.equal(repeated.type, 'cancel_requested');
   });
 
   it('normalizes missing usage as unknown and rejects malformed or inconsistent synthetic usage', () => {
@@ -564,7 +721,7 @@ describe('offline Codex app-server contract fixtures', () => {
     let status: ProviderOperationStatus = 'started';
     status = transitionProviderOperation(status, 'cancel_requested');
     status = transitionProviderOperation(status, 'cancel_outcome_unknown');
-    assert.equal(status, 'unknown');
+    assert.equal(status, 'cancellation_unknown');
     assert.throws(
       () => transitionProviderOperation(status, 'cancel_confirmed'),
       /invalid provider operation transition/,
@@ -593,7 +750,10 @@ describe('offline Codex app-server contract fixtures', () => {
       transitionProviderOperation(status, 'submission_acknowledged'),
       'cancellation_requested',
     );
-    assert.equal(transitionProviderOperation(status, 'submission_ack_lost'), 'unknown');
+    assert.equal(
+      transitionProviderOperation(status, 'submission_ack_lost'),
+      'cancellation_unknown',
+    );
   });
 
   it('requires authoritative terminal evidence for definitive provider failure', () => {
@@ -617,6 +777,14 @@ describe('offline Codex app-server contract fixtures', () => {
     assert.throws(
       () => transitionProviderOperation(status, 'submission_attempted'),
       /invalid provider operation transition/,
+    );
+    assert.throws(
+      () => transitionProviderOperation('unknown', 'reconciled_cancelled'),
+      /invalid provider operation transition/,
+    );
+    assert.equal(
+      transitionProviderOperation('cancellation_unknown', 'reconciled_cancelled'),
+      'cancelled',
     );
   });
 });

@@ -153,6 +153,7 @@ export type ProviderOperationStatus =
   | 'completed'
   | 'failed'
   | 'interrupted'
+  | 'cancellation_unknown'
   | 'unknown';
 
 export type ProviderOperationSignal =
@@ -204,6 +205,8 @@ export class OfflineCodexEventProjector {
   private deliverySequence = 0;
   private outputValue = '';
   private cancellationWasRequested = false;
+  private turnHasStarted = false;
+  private cancellationEvent: OfflineCodexProjectedEvent | undefined;
   private readonly seenDeliveries = new Map<string, { frame: string; sequence: number }>();
   private messageItemId: string | undefined;
   private messageCompleted = false;
@@ -240,22 +243,38 @@ export class OfflineCodexEventProjector {
       this.statusValue === 'interrupted'
     )
       throw new Error('cannot cancel a terminal provider operation');
-    if (this.statusValue === 'unknown') return this.event('outcome_unknown');
+    if (this.statusValue === 'unknown' || this.statusValue === 'cancellation_unknown')
+      return this.event('outcome_unknown');
     if (!this.cancellationWasRequested) {
       this.cancellationWasRequested = true;
       this.statusValue = 'cancellation_requested';
+      this.cancellationEvent = this.event('cancel_requested');
     }
-    return this.event('cancel_requested');
+    return this.cancellationEvent!;
   }
 
   disconnect(): OfflineCodexProjectedEvent {
     if (isTerminal(this.statusValue))
       throw new Error('cannot mark a terminal provider operation unknown');
-    this.statusValue = 'unknown';
+    this.statusValue = this.cancellationWasRequested ? 'cancellation_unknown' : 'unknown';
     return this.event('outcome_unknown');
   }
 
   accept(delivery: Delivery): { duplicate: boolean; event?: OfflineCodexProjectedEvent } {
+    try {
+      return this.acceptValidated(delivery);
+    } catch (error) {
+      // A rejected protocol frame cannot be skipped safely: the caller must reconcile.
+      if (!isTerminal(this.statusValue))
+        this.statusValue = this.cancellationWasRequested ? 'cancellation_unknown' : 'unknown';
+      throw error;
+    }
+  }
+
+  private acceptValidated(delivery: Delivery): {
+    duplicate: boolean;
+    event?: OfflineCodexProjectedEvent;
+  } {
     const checkedDelivery = z
       .object({
         sequence: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER).safe(),
@@ -277,7 +296,7 @@ export class OfflineCodexEventProjector {
         throw new Error('duplicate delivery identity conflict');
       return { duplicate: true };
     }
-    if (this.statusValue === 'unknown')
+    if (this.statusValue === 'unknown' || this.statusValue === 'cancellation_unknown')
       throw new Error('unknown outcome requires authoritative reconciliation');
     if (checkedDelivery.sequence !== this.deliverySequence + 1)
       throw new Error('app-server events are out-of-order or have a gap');
@@ -313,9 +332,11 @@ export class OfflineCodexEventProjector {
         throw new Error('app-server session or turn identity mismatch');
       if (method === 'item/started') {
         if (
+          !this.turnHasStarted ||
           (this.statusValue !== 'started' && this.statusValue !== 'cancellation_requested') ||
           this.messageItemId !== undefined ||
-          this.messageCompleted
+          this.messageCompleted ||
+          params.item.text !== ''
         )
           throw new Error('unexpected app-server text item start');
         this.messageItemId = params.item.id;
@@ -335,8 +356,12 @@ export class OfflineCodexEventProjector {
     if (started.success) {
       const turnId = started.data.params.turn.id;
       if (turnId !== this.context.turnId) throw new Error('app-server turn identity mismatch');
-      if (this.statusValue !== 'submitted' && this.statusValue !== 'cancellation_requested')
+      if (
+        this.turnHasStarted ||
+        (this.statusValue !== 'submitted' && this.statusValue !== 'cancellation_requested')
+      )
         throw new Error('unexpected app-server start event');
+      this.turnHasStarted = true;
       if (!this.cancellationWasRequested) this.statusValue = 'started';
       return this.event('started');
     }
@@ -344,6 +369,7 @@ export class OfflineCodexEventProjector {
     const delta = TextDeltaSchema.safeParse(value);
     if (delta.success) {
       if (
+        !this.turnHasStarted ||
         delta.data.params.threadId !== this.context.threadId ||
         delta.data.params.turnId !== this.context.turnId ||
         delta.data.params.itemId !== this.messageItemId ||
@@ -368,6 +394,7 @@ export class OfflineCodexEventProjector {
       if (turn.id !== this.context.turnId) throw new Error('app-server turn identity mismatch');
       switch (turn.status) {
         case 'completed':
+          if (turn.error != null) throw new Error('contradictory app-server completion evidence');
           if (!this.messageCompleted)
             throw new Error('app-server completed before text item completion');
           this.statusValue = 'completed';
@@ -466,16 +493,21 @@ export function transitionProviderOperation(
     },
     cancellation_requested: {
       submission_acknowledged: 'cancellation_requested',
-      submission_ack_lost: 'unknown',
+      submission_ack_lost: 'cancellation_unknown',
       started: 'cancellation_requested',
-      cancel_outcome_unknown: 'unknown',
+      cancel_outcome_unknown: 'cancellation_unknown',
       provider_terminal_completed: 'completed',
       provider_terminal_failed: 'failed',
       provider_terminal_interrupted: 'cancelled',
-      connection_lost: 'unknown',
+      connection_lost: 'cancellation_unknown',
     },
     cancellation_requested_before_submission: { cancel_confirmed: 'cancelled' },
     unknown: {
+      reconciled_completed: 'completed',
+      reconciled_failed: 'failed',
+      reconciled_interrupted: 'interrupted',
+    },
+    cancellation_unknown: {
       reconciled_completed: 'completed',
       reconciled_failed: 'failed',
       reconciled_interrupted: 'interrupted',
