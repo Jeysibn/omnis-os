@@ -630,6 +630,10 @@ try {
   await writeFile(acceptedTaskReconciliationPath, JSON.stringify(reconciliationFixture), {
     mode: 0o600,
   });
+  // Refresh the disposable browser container after adding a file to its bind-mounted results
+  // directory. This makes the fixture visible even on container hosts that snapshot bind mounts
+  // when a container is created.
+  compose(['up', '--detach', '--force-recreate', '--no-deps', 'browser']);
   await replaceEnv(apiEnvPath, generatedApi, {
     ...composeApiOverrides,
     OMNIS_CI_DISPOSABLE: 'true',
