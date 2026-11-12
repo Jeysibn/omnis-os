@@ -503,6 +503,31 @@ describe('durable mock run coordinator', () => {
     assert.equal(adapter.protocol.launchesNativeProcess, false);
   });
 
+  it('keeps fake assistant phases separate and concatenates final-answer items deterministically', async () => {
+    const adapter = new FakeCodexAppServerRuntimeAdapter({ mode: 'mixed-phases' });
+    const { coordinator, state } = lifecycleHarness(adapter);
+
+    await coordinator.handleQueueJob({ runId: lifecycleRun.id });
+
+    assert.equal(state.completedOutput, 'Synthetic app-server result.');
+    assert.deepEqual(state.outputEvents, ['Synthetic ', 'app-server result.']);
+  });
+
+  it('does not resubmit a synthetic turn after its acknowledgement is lost', async () => {
+    const adapter = new FakeCodexAppServerRuntimeAdapter({ mode: 'turn-start-ack-lost' });
+    const { coordinator, state } = lifecycleHarness(adapter);
+
+    await coordinator.handleQueueJob({ runId: lifecycleRun.id });
+
+    assert.equal(adapter.protocol.turnSubmissionCount, 1);
+    assert.equal(adapter.protocol.methods.filter((method) => method === 'turn/start').length, 1);
+    assert.equal(state.completedOutput, undefined);
+    assert.equal(
+      state.failureMessage,
+      'The mock runtime failed inside its isolated execution environment.',
+    );
+  });
+
   it('rejects tool requests from the fake protocol without emitting them as run authority', async () => {
     const adapter = new FakeCodexAppServerRuntimeAdapter({ mode: 'tool-request' });
     const { coordinator, state } = lifecycleHarness(adapter);
@@ -613,6 +638,32 @@ describe('durable mock run coordinator', () => {
       );
     }
   });
+
+  for (const mode of [
+    'out-of-order-item',
+    'wrong-item-delta',
+    'duplicate-terminal',
+    'contradictory-terminal',
+  ] as const) {
+    it(`routes fake ${mode} events through the shared offline projector`, async () => {
+      const adapter = new FakeCodexAppServerRuntimeAdapter({ mode });
+      const { coordinator, state } = lifecycleHarness(adapter);
+
+      await coordinator.handleQueueJob({ runId: lifecycleRun.id });
+
+      assert.equal(state.completedOutput, undefined);
+      assert.deepEqual(
+        state.outputEvents,
+        ['duplicate-terminal', 'contradictory-terminal'].includes(mode)
+          ? ['Synthetic app-server ', 'result.']
+          : [],
+      );
+      assert.equal(
+        state.failureMessage,
+        'The mock runtime failed inside its isolated execution environment.',
+      );
+    });
+  }
 
   it('keeps fake app-server timeout behavior bounded and synthetic', async () => {
     const adapter = new FakeCodexAppServerRuntimeAdapter({ mode: 'timeout' });
