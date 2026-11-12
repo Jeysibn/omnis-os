@@ -148,6 +148,12 @@ test('request hash uses the approved domain and semantic fields', () => {
     expected,
   );
   assert.notEqual(requestHash({ ...request, protocol_version: 2 }), expected);
+  for (const protocolVersion of ['1', null, true, {}, undefined, Number.NaN]) {
+    assert.throws(
+      () => requestHash({ ...request, protocol_version: protocolVersion }),
+      /invalid protocol version/,
+    );
+  }
   assert.notEqual(
     requestHash({ ...request, arguments: { run_id: uuid, generation: 2 } }),
     expected,

@@ -282,6 +282,40 @@ describe('independent authorizer service boundary', () => {
     }
   });
 
+  it('preserves safe acceptance store status and error codes at the authorizer boundary', async () => {
+    const { store } = makeStore();
+    const app = createAuthorizerApp({
+      store,
+      serviceToken,
+      checkDatabase: async () => undefined,
+      taskAcceptanceStore: {
+        async acceptTaskResult() {
+          throw Object.assign(new Error('Task result conflicts with current state.'), {
+            code: 'conflict',
+            statusCode: 409,
+          });
+        },
+      },
+    });
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/internal/v1/tasks/task-0001/accept-result',
+        headers: {
+          'x-omnis-authorizer-token': serviceToken,
+          'idempotency-key': 'c0b527e0-6a09-46fd-a0dd-5e71ea3a23ce',
+        },
+        payload: { runId: 'run-0001' },
+      });
+      assert.equal(response.statusCode, 409);
+      assert.deepEqual(response.json(), {
+        error: { code: 'conflict', message: 'Task result conflicts with current state.' },
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
   it('rejects runtime and unauthenticated requests before calling the authorization store', async () => {
     const { store, calls } = makeStore();
     const app = createAuthorizerApp({ store, serviceToken, checkDatabase: async () => undefined });
