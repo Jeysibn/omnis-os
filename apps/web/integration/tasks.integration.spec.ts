@@ -560,13 +560,6 @@ test('owner sees an authorized synthetic broker Run, ordered events, result and 
   expect(accepted.status).toBe('completed');
   expect(accepted.resultAcceptance.runId).toBe(runId);
   expect(accepted.resultAcceptance.acceptedBy).toBe('owner');
-  if (acceptedTaskReconciliationPath) {
-    await writeFile(
-      acceptedTaskReconciliationPath,
-      JSON.stringify({ taskId: assigned.body.id, runId, receipt: accepted.resultAcceptance }),
-      { mode: 0o600 },
-    );
-  }
   // A deliberate replay with a fresh key is safe: no second receipt and the original is intact.
   const replay = await ownerRequest(page, `/api/v1/tasks/${assigned.body.id}/accept-result`, {
     method: 'POST',
@@ -935,6 +928,17 @@ test('Compose reconciles a restored accepted task through the owner API', async 
   expect(restoredTask.resultAcceptance).toEqual(fixture.receipt);
   expect(restoredTask.resultAcceptance.runId).toBe(fixture.runId);
 
+  const staleRun = await ownerRequest(page, `/api/v1/tasks/${fixture.taskId}/accept-result`, {
+    method: 'POST',
+    idempotencyKey: randomUUID(),
+    body: { runId: fixture.staleRunId },
+  });
+  expect(staleRun.status).toBe(409);
+  const afterStaleRun = await ownerRequest(page, '/api/v1/tasks');
+  const unchangedTask = afterStaleRun.body.find((task) => task.id === fixture.taskId);
+  expect(unchangedTask.status).toBe('in_review');
+  expect(unchangedTask.resultAcceptance).toEqual(fixture.receipt);
+
   await page.goto(`/#runs/${fixture.runId}`);
   await page.reload();
   await expect(page.getByRole('button', { name: 'Reconcile task status' })).toBeVisible();
@@ -982,13 +986,6 @@ test('Compose reconciles a restored accepted task through the owner API', async 
   expect(replay.status).toBe(200);
   expect(replay.body).toMatchObject({ created: false, acceptance: fixture.receipt });
   expect(replay.body.task.status).toBe('completed');
-
-  const staleRun = await ownerRequest(page, `/api/v1/tasks/${fixture.taskId}/accept-result`, {
-    method: 'POST',
-    idempotencyKey: randomUUID(),
-    body: { runId: fixture.staleRunId },
-  });
-  expect(staleRun.status).toBe(409);
 
   await delay(Math.max(0, ownerCookie!.expires * 1000 - Date.now() + 250));
   const expiredSessionRequest = await playwrightRequest.newContext({ baseURL: frontendOrigin });

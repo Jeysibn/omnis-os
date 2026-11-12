@@ -626,16 +626,7 @@ try {
   await assertBrowserNetworkIsolation();
 
   runBrowserPlaywright();
-  const acceptedTaskFixture = JSON.parse(await readFile(acceptedTaskReconciliationPath, 'utf8'));
-  const reopenedAcceptance =
-    await fixtures.reopenAcceptedTaskForReconciliation(acceptedTaskFixture);
-  const reconciliationFixture = {
-    taskId: acceptedTaskFixture.taskId,
-    runId: acceptedTaskFixture.runId,
-    staleRunId: reopenedAcceptance.staleRunId,
-    receipt: reopenedAcceptance.receipt,
-    initialCounts: reopenedAcceptance.counts,
-  };
+  const reconciliationFixture = await fixtures.createAcceptedTaskReconciliationFixture();
   await writeFile(acceptedTaskReconciliationPath, JSON.stringify(reconciliationFixture), {
     mode: 0o600,
   });

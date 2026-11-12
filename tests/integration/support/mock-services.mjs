@@ -14,7 +14,11 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
-import { createPool } from '../../../packages/db/src/index.ts';
+import {
+  PostgresAuthorizationStore,
+  PostgresRunStore,
+  createPool,
+} from '../../../packages/db/src/index.ts';
 
 const scrypt = promisify(scryptCallback);
 const repositoryRoot = fileURLToPath(new URL('../../../', import.meta.url));
@@ -443,8 +447,8 @@ export async function startMockServices({
       syntheticBrokerProcess,
 
       syntheticBrokerCompose,
-      async reopenAcceptedTaskForReconciliation(fixture) {
-        return reopenAcceptedTaskForReconciliation({ databaseUrl, auditPool, fixture });
+      async createAcceptedTaskReconciliationFixture() {
+        return createAcceptedTaskReconciliationFixture({ databaseUrl, authorizerUrl, auditPool });
       },
       async assertAcceptedTaskReconciliation(fixture) {
         return assertAcceptedTaskReconciliation({ auditPool, fixture });
@@ -1123,91 +1127,104 @@ async function startSyntheticBrokerCompose({
   }
 }
 
-async function reopenAcceptedTaskForReconciliation({ databaseUrl, auditPool, fixture }) {
+async function createAcceptedTaskReconciliationFixture({ databaseUrl, authorizerUrl, auditPool }) {
   if (!auditPool)
     throw new Error('The disposable acceptance fixture requires its admin audit pool.');
-  const { taskId, runId, receipt } = fixture ?? {};
-  if (
-    !/^[0-9a-f-]{36}$/i.test(taskId ?? '') ||
-    !/^[0-9a-f-]{36}$/i.test(runId ?? '') ||
-    receipt?.runId !== runId ||
-    receipt?.acceptedBy !== 'owner' ||
-    !/^[0-9a-f-]{36}$/i.test(receipt?.requestId ?? '')
-  ) {
-    throw new Error('The accepted-task reconciliation fixture is malformed.');
-  }
-
-  const before = await readAcceptanceFixtureState(auditPool, taskId, runId);
-  assert.equal(before.taskStatus, 'completed');
-  assert.equal(before.runStatus, 'completed');
-  assert.equal(
-    before.latestRunId,
-    runId,
-    'the accepted receipt must reference the latest task run',
-  );
-  assert.deepEqual(before.receipt, receipt, 'the browser-captured receipt must match PostgreSQL');
-  assert.deepEqual(before.counts, { receipts: '1', ownerEvents: '1' });
-
   const runtime = createPool({
     connectionString: databaseUrl,
+    max: 2,
+    application_name: 'omnis-test-accepted-task-fixture',
+  });
+  const authorizer = createPool({
+    connectionString: authorizerUrl,
     max: 1,
-    application_name: 'omnis-test-accepted-task-reopen-fixture',
+    application_name: 'omnis-test-accepted-task-fixture',
   });
   try {
-    const client = await runtime.connect();
-    try {
-      await client.query('BEGIN');
-      await client.query('SELECT omnis.acquire_mission_lane_admission(false, 3000)');
-      const reopened = await client.query(
-        `UPDATE omnis.tasks SET status='in_progress'
-          WHERE id=$1 AND status='completed'`,
-        [taskId],
+    const store = new PostgresRunStore(runtime);
+    const authorizationStore = new PostgresAuthorizationStore(runtime, authorizer);
+    const task = await store.createTask({
+      title: `Synthetic accepted-task reconciliation ${randomUUID()}`,
+      detail: 'Disposable PostgreSQL fixture for owner receipt reconciliation.',
+    });
+    const completeSyntheticRun = async (workerId) => {
+      const request = await authorizationStore.request(task.id, 'owner');
+      const authorization = await authorizationStore.decide(request.id, 'owner', 'approve');
+      const admitted = await store.admitRun(
+        task.id,
+        workerId,
+        authorization.id,
+        async () => `fixture-job-${workerId}`,
       );
-      assert.equal(reopened.rowCount, 1, 'fixture must reopen only an accepted completed task');
-      const reviewed = await client.query(
-        `UPDATE omnis.tasks SET status='in_review'
-          WHERE id=$1 AND status='in_progress'`,
-        [taskId],
+      const claim = await store.beginExecution(admitted.run.id, workerId, 30);
+      await store.completeRun(
+        admitted.run.id,
+        workerId,
+        claim.generation,
+        `Synthetic completion ${workerId}.`,
+        [],
       );
-      assert.equal(reviewed.rowCount, 1, 'fixture must place the accepted task back in review');
-      await client.query('COMMIT');
-    } catch (error) {
-      await client.query('ROLLBACK').catch(() => undefined);
-      throw error;
-    } finally {
-      client.release();
-    }
+      return admitted.run.id;
+    };
 
-    await assertRuntimeCannotForgeAcceptance(runtime, taskId, runId);
+    const staleRunId = await completeSyntheticRun(`acceptance-fixture-${randomUUID()}`);
+    await transitionTaskWithRuntime(runtime, task.id, 'in_review', 'in_progress');
+    const runId = await completeSyntheticRun(`acceptance-fixture-${randomUUID()}`);
+    const acceptance = await new PostgresRunStore(authorizer).acceptTaskResult(
+      task.id,
+      { runId },
+      randomUUID(),
+    );
+    assert.equal(acceptance.created, true);
+    assert.equal(acceptance.acceptance.acceptedBy, 'owner');
+    assert.equal(acceptance.acceptance.runId, runId);
+
+    await transitionTaskWithRuntime(runtime, task.id, 'completed', 'in_progress');
+    await transitionTaskWithRuntime(runtime, task.id, 'in_progress', 'in_review');
+    await assertRuntimeCannotForgeAcceptance(runtime, task.id, runId);
   } finally {
     await runtime.end();
+    await authorizer.end();
   }
 
-  const after = await readAcceptanceFixtureState(auditPool, taskId, runId);
-  assert.equal(after.taskStatus, 'in_review');
+  const state = await readAcceptanceFixtureState(auditPool, task.id, runId);
+  assert.equal(state.taskStatus, 'in_review');
+  assert.equal(state.runStatus, 'completed');
+  assert.equal(state.latestRunId, runId);
+  assert.equal(state.receipt?.acceptedBy, 'owner');
+  assert.equal(state.receipt?.runId, runId);
   assert.deepEqual(
-    after.receipt,
-    before.receipt,
-    'runtime fixture must preserve the immutable receipt',
+    state.receipt,
+    acceptance.acceptance,
+    'reopening the accepted task must leave its immutable owner receipt unchanged',
   );
-  assert.deepEqual(
-    after.counts,
-    before.counts,
-    'runtime fixture must not create owner events or receipts',
-  );
-  const staleRun = await auditPool.query(
-    `SELECT prior.id FROM omnis.runs AS target
-       JOIN omnis.runs AS prior ON prior.created_at < target.created_at
-      WHERE target.id=$1 AND prior.task_id <> target.task_id
-      ORDER BY prior.created_at DESC, prior.id DESC LIMIT 1`,
-    [runId],
-  );
-  assert.ok(staleRun.rows[0]?.id, 'an earlier synthetic run must exist for the stale-run test');
+  assert.deepEqual(state.counts, { receipts: '1', ownerEvents: '1' });
   return {
-    ...before,
-    staleRunId: staleRun.rows[0].id,
-    reopenedTaskStatus: after.taskStatus,
+    taskId: task.id,
+    runId,
+    staleRunId,
+    receipt: state.receipt,
+    initialCounts: state.counts,
   };
+}
+
+async function transitionTaskWithRuntime(runtime, taskId, from, to) {
+  const client = await runtime.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SELECT omnis.acquire_mission_lane_admission(false, 3000)');
+    const update = await client.query(
+      'UPDATE omnis.tasks SET status=$3 WHERE id=$1 AND status=$2',
+      [taskId, from, to],
+    );
+    assert.equal(update.rowCount, 1, `fixture must transition task ${from} to ${to}`);
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 async function assertRuntimeCannotForgeAcceptance(runtime, taskId, runId) {
