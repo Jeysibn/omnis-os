@@ -258,6 +258,20 @@ test('policy binds peer and authoritative identities before allow', async () => 
     'capability_invalid',
   );
   assert.equal(
+    evaluatePolicy(frame(JSON.stringify(request)), { ...args, now: Number.NaN }).decision,
+    'deny',
+  );
+  assert.equal(
+    evaluatePolicy(frame(JSON.stringify(request)), { ...args, now: Number.MAX_SAFE_INTEGER + 1 })
+      .decision,
+    'deny',
+  );
+  assert.equal(
+    evaluatePolicy(frame(JSON.stringify(request)), { ...args, allowed: 1 as unknown as boolean })
+      .decision,
+    'deny',
+  );
+  assert.equal(
     evaluatePolicy(frame(JSON.stringify(request)), { ...args, peerSubject: 'substituted' })
       .decision,
     'deny',
@@ -358,6 +372,48 @@ test('response validation rejects contradictory classifications and execution st
       'launch',
     ).success,
     false,
+  );
+  assert.equal(
+    validateResponseForOperation(
+      {
+        ...permitted,
+        classification: 'MALFORMED_REQUEST',
+        policy_decision: 'not_evaluated',
+        reason_code: 'permitted',
+        effect_state: 'not_attempted',
+        result: null,
+      },
+      'launch',
+    ).success,
+    false,
+  );
+  assert.equal(
+    validateResponseForOperation(
+      {
+        ...permitted,
+        classification: 'AUTHORIZATION_FAILURE',
+        policy_decision: 'deny',
+        reason_code: 'internal_failure',
+        effect_state: 'not_attempted',
+        result: null,
+      },
+      'launch',
+    ).success,
+    false,
+  );
+  assert.equal(
+    validateResponseForOperation(
+      {
+        ...permitted,
+        classification: 'MALFORMED_REQUEST',
+        policy_decision: 'not_evaluated',
+        reason_code: 'frame_invalid',
+        effect_state: 'not_attempted',
+        result: null,
+      },
+      'launch',
+    ).success,
+    true,
   );
   assert.equal(
     validateResponseForOperation(

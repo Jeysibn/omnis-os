@@ -405,6 +405,8 @@ export function evaluatePolicy(
   const evaluated = evaluateRequest(input);
   if (!evaluated.ok)
     return { decision: 'deny', reason: evaluated.code, effectState: 'not_attempted' };
+  if (!Number.isSafeInteger(context.now) || context.now < 0)
+    return { decision: 'deny', reason: 'capability_invalid', effectState: 'not_attempted' };
   const request = evaluated.request;
   const claims = request.capability.claims;
   if (
@@ -426,7 +428,7 @@ export function evaluatePolicy(
     return { decision: 'deny', reason: 'capability_invalid', effectState: 'not_attempted' };
   if (!verifySyntheticCapability(request.capability, context.verify).ok)
     return { decision: 'deny', reason: 'capability_invalid', effectState: 'not_attempted' };
-  if (!context.allowed)
+  if (context.allowed !== true)
     return { decision: 'deny', reason: 'policy_denied', effectState: 'not_attempted' };
   return { decision: 'allow', reason: 'permitted', effectState: 'not_attempted' };
 }
@@ -442,6 +444,28 @@ export const ClassificationSchema = z.enum([
   'OUTCOME_UNKNOWN',
   'INTERNAL_FAILURE',
 ]);
+
+const reasonCodesByClassification: Record<
+  z.infer<typeof ClassificationSchema>,
+  readonly string[]
+> = {
+  PERMITTED: ['permitted', 'engine_rejected'],
+  POLICY_DENIAL: ['policy_denied'],
+  MALFORMED_REQUEST: ['frame_invalid', 'encoding_invalid', 'schema_invalid'],
+  UNSUPPORTED: ['unsupported_version', 'unsupported_operation'],
+  REPLAY_CONFLICT: ['replay_conflict'],
+  AUTHORIZATION_FAILURE: [
+    'peer_mismatch',
+    'capability_invalid',
+    'capability_expired',
+    'capability_revoked',
+    'scope_mismatch',
+    'generation_mismatch',
+    'request_hash_mismatch',
+  ],
+  OUTCOME_UNKNOWN: ['outcome_unknown'],
+  INTERNAL_FAILURE: ['dependency_unavailable', 'internal_failure'],
+};
 
 export type AuditInput = {
   requestId: string | null;
@@ -560,19 +584,16 @@ export const ProtocolResponseSchema = z
   .strict()
   .superRefine((value, context) => {
     const addIssue = (message: string) => context.addIssue({ code: 'custom', message });
+    if (!reasonCodesByClassification[value.classification].includes(value.reason_code))
+      addIssue('reason code does not match response classification');
 
     if (value.classification === 'PERMITTED') {
       if (value.policy_decision !== 'allow')
         addIssue('permitted responses require an allow decision');
-      if (
-        value.reason_code !== 'permitted' &&
-        !(value.reason_code === 'engine_rejected' && value.effect_state === 'rejected')
-      )
-        addIssue('permitted responses require the permitted or confirmed engine-rejected reason');
       if (value.effect_state === 'unknown')
         addIssue('unknown effects require OUTCOME_UNKNOWN classification');
-      if (value.effect_state === 'rejected' && value.reason_code !== 'engine_rejected')
-        addIssue('rejected effects require the engine_rejected reason');
+      if ((value.reason_code === 'engine_rejected') !== (value.effect_state === 'rejected'))
+        addIssue('engine rejection reason and rejected effect state must appear together');
       if (value.effect_state === 'not_attempted' && value.result !== null)
         addIssue('unattempted operations cannot include a runtime result');
       if (
@@ -617,17 +638,6 @@ export const ProtocolResponseSchema = z
     } else if (value.policy_decision !== 'not_evaluated') {
       addIssue('pre-policy failures require not_evaluated policy decision');
     }
-
-    if (value.classification === 'POLICY_DENIAL' && value.reason_code !== 'policy_denied')
-      addIssue('policy denials require the policy_denied reason');
-    if (value.classification === 'REPLAY_CONFLICT' && value.reason_code !== 'replay_conflict')
-      addIssue('replay conflicts require the replay_conflict reason');
-    if (
-      value.classification === 'INTERNAL_FAILURE' &&
-      value.reason_code !== 'internal_failure' &&
-      value.reason_code !== 'dependency_unavailable'
-    )
-      addIssue('internal failures require an internal failure reason');
   })
   .refine((value) => Buffer.byteLength(JSON.stringify(value), 'utf8') <= 16384);
 
