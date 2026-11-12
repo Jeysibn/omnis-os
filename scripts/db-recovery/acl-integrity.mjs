@@ -103,6 +103,7 @@ const applicationReadTables = new Set([
   'run_idempotency',
   'mission_lane_clock',
   'mission_lane_events',
+  'task_result_acceptances',
   'runtime_authorizations',
   'departments',
   'agents',
@@ -310,6 +311,8 @@ export function assertRuntimeAclPolicy(snapshot) {
         entry.schema === 'omnis' &&
         [
           'revoke_run_authorization(p_authorization_id text, p_actor_id text)',
+          'accept_task_result(p_task_id text, p_run_id text, p_request_id uuid)',
+          'acquire_mission_lane_admission(p_critical boolean, p_remaining_ms integer)',
           'archive_department(p_department_id text, p_request_id text)',
           'create_agent(p_id text, p_name text, p_slug text, p_department_id text, p_request_id uuid, p_fingerprint_version integer, p_fingerprint bytea)',
           'get_agent_profile_draft(p_agent_id text)',
@@ -354,6 +357,7 @@ export function assertRuntimeAclPolicy(snapshot) {
             ['SELECT', 'INSERT'].includes(entry.privilege)) ||
           (entry.object === 'connector_authorization_audit' &&
             ['SELECT', 'INSERT'].includes(entry.privilege)) ||
+          (entry.object === 'task_result_acceptances' && entry.privilege === 'SELECT') ||
           (entry.object === 'departments' && entry.privilege === 'SELECT'))
       )
         continue;

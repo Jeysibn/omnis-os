@@ -12,8 +12,23 @@ export const RunStatusSchema = z.enum([
 ]);
 export type RunStatus = z.infer<typeof RunStatusSchema>;
 
-export const TaskStatusSchema = z.enum(['open', 'in_progress', 'completed']);
+export const TaskStatusSchema = z.enum(['open', 'in_progress', 'in_review', 'completed']);
 export type TaskStatus = z.infer<typeof TaskStatusSchema>;
+
+export const TaskResultAcceptanceSchema = z
+  .object({
+    runId: z.string().min(1).max(128),
+    acceptedBy: z.literal('owner'),
+    acceptedAt: z.string().datetime(),
+    requestId: z.string().uuid(),
+  })
+  .strict();
+export type TaskResultAcceptance = z.infer<typeof TaskResultAcceptanceSchema>;
+
+export const AcceptTaskResultRequestSchema = z
+  .object({ runId: z.string().min(1).max(128) })
+  .strict();
+export type AcceptTaskResultRequest = z.infer<typeof AcceptTaskResultRequestSchema>;
 
 export const ProjectIdSchema = z.string().regex(/^prj_[0-9a-f]{32}$/);
 export const TaskIdSchema = z
@@ -39,6 +54,7 @@ export const TaskSchema = z
     profileVersion: z.number().int().positive().safe().nullable().default(null),
     runtimeId: z.literal('mock').nullable().default(null),
     assignmentRevision: z.number().int().positive().safe().default(1),
+    resultAcceptance: TaskResultAcceptanceSchema.nullable().default(null),
   })
   .superRefine((task, context) => {
     const assigned = [task.agentId, task.profileVersion, task.runtimeId].filter(
@@ -51,7 +67,19 @@ export const TaskSchema = z
       });
     }
   });
-export type Task = z.infer<typeof TaskSchema>;
+export type Task = Omit<z.infer<typeof TaskSchema>, 'resultAcceptance'> & {
+  /** Optional in TypeScript for compatibility with historical callers; parsed tasks default to null. */
+  resultAcceptance?: TaskResultAcceptance | null;
+};
+
+export const TaskResultAcceptanceResponseSchema = z
+  .object({
+    task: TaskSchema,
+    acceptance: TaskResultAcceptanceSchema,
+    created: z.boolean(),
+  })
+  .strict();
+export type TaskResultAcceptanceResponse = z.infer<typeof TaskResultAcceptanceResponseSchema>;
 
 export const CreateTaskSchema = z.object({
   title: z.string().trim().min(3).max(120),
@@ -550,6 +578,9 @@ const MissionEventPayloadSchema = z.union([
     })
     .strict(),
   z.object({ from: TaskStatusSchema, to: TaskStatusSchema }).strict(),
+  z
+    .object({ from: TaskStatusSchema, to: TaskStatusSchema, runId: z.string().min(1).max(128) })
+    .strict(),
 ]);
 
 /** Strict provisional UI contract for the append-only Mission Lane ledger. */
@@ -597,6 +628,16 @@ export const MissionEventSchema = z
         ['service:omnis-runtime', 'service:omnis-worker'].includes(event.actor) &&
         ['api', 'mock-worker'].includes(event.origin) &&
         event.synthetic) ||
+      (taskStatusEvent &&
+        event.sourceKind === 'task' &&
+        event.runId === null &&
+        event.actor === 'owner' &&
+        event.origin === 'api' &&
+        !event.synthetic &&
+        'from' in event.payload &&
+        event.payload.from === 'in_review' &&
+        event.payload.to === 'completed' &&
+        'runId' in event.payload) ||
       (ordinaryTaskEvent &&
         event.sourceKind === 'task' &&
         event.runId === null &&
@@ -672,6 +713,21 @@ export const MissionEventSchema = z
       context.addIssue({
         code: 'custom',
         message: 'Task status events require transition states.',
+      });
+    }
+    if (
+      event.type === 'task.status_changed' &&
+      'runId' in event.payload &&
+      !(
+        'from' in event.payload &&
+        'to' in event.payload &&
+        event.payload.from === 'in_review' &&
+        event.payload.to === 'completed'
+      )
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Run identity is only allowed on owner acceptance status events.',
       });
     }
     if (event.type.startsWith('task.') && event.runId !== null) {

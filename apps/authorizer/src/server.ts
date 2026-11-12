@@ -5,6 +5,7 @@ import {
   PostgresProjectMilestoneStore,
   PostgresProjectEpicStore,
   PostgresConnectorAuthorizationStore,
+  PostgresRunStore,
 } from '@omnis/db';
 import { chmod, lstat, mkdir, rm } from 'node:fs/promises';
 import path from 'node:path';
@@ -62,11 +63,13 @@ const connectorStore = new PostgresConnectorAuthorizationStore(
   pool,
   signingKey ? { signDecision: createAuthorizerDecisionSigner(signingKey) } : {},
 );
+const taskAcceptanceStore = new PostgresRunStore(pool, undefined, missionLaneWriterPool);
 await store.recordExpiredAuthorizations();
 
 const app = createAuthorizerApp({
   store,
   connectorStore,
+  taskAcceptanceStore,
   serviceToken: env.serviceToken,
   checkDatabase: async () => {
     await pool.query('SELECT 1');

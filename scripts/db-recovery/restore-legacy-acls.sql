@@ -19,6 +19,13 @@ ALTER DEFAULT PRIVILEGES FOR ROLE omnis_migrator IN SCHEMA pgboss
 
 GRANT SELECT ON omnis.tasks, omnis.runs, omnis.run_events, omnis.run_idempotency
   TO omnis_runtime;
+DO $owner_acceptance_acl$
+BEGIN
+  IF pg_catalog.to_regclass('omnis.task_result_acceptances') IS NOT NULL THEN
+    EXECUTE 'GRANT SELECT ON omnis.task_result_acceptances TO omnis_runtime';
+  END IF;
+END
+$owner_acceptance_acl$;
 GRANT UPDATE (status) ON omnis.tasks TO omnis_runtime;
 GRANT INSERT (id, task_id, task_title) ON omnis.runs TO omnis_runtime;
 GRANT UPDATE (
@@ -61,6 +68,9 @@ BEGIN
   END IF;
   IF pg_catalog.to_regprocedure('omnis.reject_mission_lane_mutation()') IS NOT NULL THEN
     EXECUTE 'REVOKE ALL ON FUNCTION omnis.reject_mission_lane_mutation() FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.require_authorizer_task_completion()') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.require_authorizer_task_completion() FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
   END IF;
   IF pg_catalog.to_regprocedure('omnis.create_task_mission_lane_impl(text,text,text,uuid,bytea)') IS NOT NULL THEN
     EXECUTE 'REVOKE ALL ON FUNCTION omnis.create_task_mission_lane_impl(text, text, text, uuid, bytea) FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
@@ -417,12 +427,21 @@ $task_execution_assignment_acl$;
 DO $mission_lane_admission_acl$
 BEGIN
   IF pg_catalog.to_regprocedure('omnis.acquire_mission_lane_admission(boolean)') IS NOT NULL THEN
-    EXECUTE 'REVOKE ALL ON FUNCTION omnis.acquire_mission_lane_admission(boolean) FROM PUBLIC, omnis_authorizer, omnis_launcher';
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.acquire_mission_lane_admission(boolean) FROM PUBLIC, omnis_launcher';
     EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.acquire_mission_lane_admission(boolean) TO omnis_runtime';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.acquire_mission_lane_admission(boolean) TO omnis_authorizer';
   END IF;
   IF pg_catalog.to_regprocedure('omnis.acquire_mission_lane_admission(boolean,integer)') IS NOT NULL THEN
-    EXECUTE 'REVOKE ALL ON FUNCTION omnis.acquire_mission_lane_admission(boolean,integer) FROM PUBLIC, omnis_authorizer, omnis_launcher';
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.acquire_mission_lane_admission(boolean,integer) FROM PUBLIC, omnis_launcher';
     EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.acquire_mission_lane_admission(boolean,integer) TO omnis_runtime';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.acquire_mission_lane_admission(boolean,integer) TO omnis_authorizer';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.accept_task_result(text,text,uuid)') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.accept_task_result(text, text, uuid) FROM PUBLIC, omnis_runtime, omnis_launcher';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION omnis.accept_task_result(text, text, uuid) TO omnis_authorizer';
+  END IF;
+  IF pg_catalog.to_regprocedure('omnis.require_authorizer_task_completion()') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON FUNCTION omnis.require_authorizer_task_completion() FROM PUBLIC, omnis_runtime, omnis_authorizer, omnis_launcher';
   END IF;
 END
 $mission_lane_admission_acl$;

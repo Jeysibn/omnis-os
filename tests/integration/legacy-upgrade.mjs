@@ -107,6 +107,13 @@ try {
     title: 'Legacy upgrade fixture',
     detail: 'Created by the implementation at the audited R1 revision.',
   });
+  const completedLegacyTask = await legacyStore.createTask({
+    title: 'Legacy completed task',
+    detail: 'Completed before migration 0031 introduced owner acceptance.',
+  });
+  await legacyPool.query("UPDATE omnis.tasks SET status='completed' WHERE id=$1", [
+    completedLegacyTask.id,
+  ]);
   const legacyAdmission = await legacyStore.admitRun(
     legacyTask.id,
     `legacy-upgrade-${suffix}`,
@@ -157,7 +164,7 @@ try {
   ).rows[0].json_build_object;
   const beforeRunCoreFingerprint = await runCoreFingerprint(databaseAdminPool);
   const beforeTaskCoreFingerprint = await taskCoreFingerprint(databaseAdminPool);
-  assert.equal(beforeUpgrade.tasks, 3);
+  assert.equal(beforeUpgrade.tasks, 4);
   assert.equal(beforeUpgrade.runs, 3);
   assert.equal(beforeUpgrade.events, 3);
   assert.equal(beforeUpgrade.idempotencyRecords, 1);
@@ -173,6 +180,11 @@ try {
     launcher: launcherPassword,
   });
   await runCurrentMigration();
+  const migratedLegacyTask = await new PostgresRunStore(runtimePool).getTask(
+    completedLegacyTask.id,
+  );
+  assert.equal(migratedLegacyTask?.status, 'completed');
+  assert.equal(migratedLegacyTask?.resultAcceptance, null);
   const cutover = await databaseAdminPool.query(`
     SELECT c.feed_epoch, c.last_global_sequence, c.history_started_at,
       c.history_start_sequence,
@@ -235,6 +247,9 @@ try {
     '0028_synthetic_broker_fencing',
     '0029_mission_lane_events',
     '0030_mission_lane_admission',
+    '0031_owner_verified_task_results',
+    '0032_owner_acceptance_authorizer_acl',
+    '0033_authorizer_task_completion_gate',
   ];
   assert.deepEqual(afterUpgrade.migrations, expectedMigrations);
   assert.equal(afterUpgrade.unsafeRunStates, 3);
@@ -739,7 +754,7 @@ async function verifyPost0005ProvenanceUpgrade() {
       "SELECT id, length(checksum) AS checksum_length FROM omnis.schema_migrations WHERE id LIKE '00%' ORDER BY id",
     );
     assert.deepEqual(migrationRows.rows.at(-1), {
-      id: '0030_mission_lane_admission',
+      id: '0033_authorizer_task_completion_gate',
       checksum_length: 64,
     });
   } finally {

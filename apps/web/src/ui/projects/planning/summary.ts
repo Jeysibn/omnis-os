@@ -1,7 +1,12 @@
 import type { ProjectWorkspacePage, ProjectWorkspaceTaskSummary } from '@omnis/contracts';
 
 export type TaskStatus = ProjectWorkspaceTaskSummary['status'];
-export const taskStatuses: readonly TaskStatus[] = ['open', 'in_progress', 'completed'];
+export const taskStatuses: readonly TaskStatus[] = [
+  'open',
+  'in_progress',
+  'in_review',
+  'completed',
+];
 
 export type TaskSummary = {
   counts: Record<TaskStatus, number>;
@@ -24,7 +29,12 @@ export function summariseTasks(
   tasks: readonly Pick<ProjectWorkspaceTaskSummary, 'status'>[],
   page: Pick<ProjectWorkspacePage, 'observedTotal' | 'complete'> | null,
 ): TaskSummary {
-  const counts: Record<TaskStatus, number> = { open: 0, in_progress: 0, completed: 0 };
+  const counts: Record<TaskStatus, number> = {
+    open: 0,
+    in_progress: 0,
+    in_review: 0,
+    completed: 0,
+  };
   for (const task of tasks) counts[task.status] += 1;
   const loaded = tasks.length;
   const observed = page?.observedTotal ?? loaded;

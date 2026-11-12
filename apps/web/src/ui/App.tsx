@@ -41,6 +41,7 @@ import {
 } from '@omnis/contracts';
 import { ApiRequestError, request } from './api.js';
 import { formatDate } from './manilaTime.js';
+import { AcceptResultAction } from './AcceptResultAction.js';
 import { CommandCenter } from './command-center/CommandCenter.js';
 import {
   createRunStreamBudget,
@@ -228,6 +229,8 @@ function authorizationScopeError(authorization: Authorization, task: Task): stri
 }
 
 function statusLabel(status: Run['status'] | Task['status']): string {
+  // A finished run is not an accepted task: in_review reads as pending owner review.
+  if (status === 'in_review') return 'Awaiting review';
   return status.replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
@@ -259,8 +262,18 @@ function App() {
   // session probe, a retry budget) must not affect the session that replaced it.
   const sessionGeneration = useRef(0);
   const streamBudgets = useRef(new Map<string, RunStreamBudget>());
+  // Freshness gate after an acceptance 409. Owned here so selection changes cannot clear it; it
+  // is conservative (covers every task and run) until both authoritative reads are applied.
+  const [acceptGate, setAcceptGate] = useState<{
+    phase: 'idle' | 'refreshing' | 'failed' | 'done';
+    runId: string | null;
+  }>({ phase: 'idle', runId: null });
+  const gateSeq = useRef(0);
   const rotateSession = useCallback(() => {
     sessionGeneration.current += 1;
+    // A new session reads fresh data on sign-in; an old refresh must not touch it.
+    gateSeq.current += 1;
+    setAcceptGate({ phase: 'idle', runId: null });
     streamBudgets.current.clear();
   }, []);
   const [page, setPage] = useState<Page>(() => readRoute().page);
@@ -457,6 +470,45 @@ function App() {
     }
   }, [expireSessionIfNeeded]);
 
+  /** Re-read tasks without the list's loading state; a failed read keeps what is shown. */
+  const refreshTasksQuietly = useCallback(async () => {
+    try {
+      const taskData = await request('/api/v1/tasks', {}, parseTaskList);
+      setTasks(taskData);
+    } catch (cause) {
+      expireSessionIfNeeded(cause);
+    }
+  }, [expireSessionIfNeeded]);
+
+  /**
+   * Authoritative re-read after a 409 (or an explicit reload). Both reads must succeed, and this
+   * must still be the newest refresh of the same session, before anything is applied or the gate
+   * moves. A superseded refresh or an older session's answer changes nothing.
+   */
+  const refreshAfterConflict = useCallback(
+    async (runId: string) => {
+      const generation = sessionGeneration.current;
+      const seq = (gateSeq.current += 1);
+      const live = () => generation === sessionGeneration.current && seq === gateSeq.current;
+      setAcceptGate({ phase: 'refreshing', runId });
+      try {
+        const [taskData, runData] = await Promise.all([
+          request('/api/v1/tasks', {}, parseTaskList),
+          request('/api/v1/runs', {}, parseRunList),
+        ]);
+        if (!live()) return;
+        setTasks(taskData);
+        setRuns(runData);
+        setAcceptGate({ phase: 'done', runId });
+      } catch (cause) {
+        if (generation !== sessionGeneration.current) return;
+        if (expireSessionIfNeeded(cause)) return;
+        if (live()) setAcceptGate({ phase: 'failed', runId });
+      }
+    },
+    [expireSessionIfNeeded],
+  );
+
   const loadWorkspace = useCallback(async () => {
     await Promise.all([loadTasks(), loadRuns()]);
   }, [loadRuns, loadTasks]);
@@ -469,13 +521,16 @@ function App() {
           RunSchema.parse(value),
         );
         setRuns((current) => current.map((entry) => (entry.id === run.id ? run : entry)));
+        // A finished run moves its task on the server (a completed mock run leaves the task in
+        // review). The run stream is run-scoped and never carries that, so read the task again.
+        if (run.status === 'completed') await refreshTasksQuietly();
       } catch (cause) {
         if (!expireSessionIfNeeded(cause)) {
           setReconcileError(failureMessage(cause, 'The final run state could not be confirmed.'));
         }
       }
     },
-    [expireSessionIfNeeded],
+    [expireSessionIfNeeded, refreshTasksQuietly],
   );
 
   // Authenticated Run read used to tell a dropped network from an ended owner session after a
@@ -1297,6 +1352,19 @@ function App() {
               navigate('runs', setPage);
             }}
             onStop={(run) => void stopRun(run)}
+            acceptance={{
+              ownerId: owner.id,
+              csrfToken,
+              onAccepted: (updated) =>
+                setTasks((current) =>
+                  current.map((task) => (task.id === updated.id ? updated : task)),
+                ),
+              onSessionExpired: expireSessionIfNeeded,
+              gate: acceptGate,
+              onConflict: (runId) => void refreshAfterConflict(runId),
+              onReload: (runId) => void refreshAfterConflict(runId),
+              getSessionGeneration: () => sessionGeneration.current,
+            }}
           />
         )}
         {page === 'agents' && (
@@ -1728,6 +1796,17 @@ function TasksWorkspace({
         {selectedTask ? (
           <>
             <StatusPill status={selectedTask.status} />
+            {selectedTask.status === 'in_review' && (
+              <p className="task-review-note" role="status">
+                Awaiting your review. Open the task&apos;s latest run in Runs to accept its result.
+              </p>
+            )}
+            {selectedTask.status === 'completed' && selectedTask.resultAcceptance && (
+              <p className="task-review-note task-review-accepted">
+                Owner accepted run {selectedTask.resultAcceptance.runId} on{' '}
+                {formatDate(selectedTask.resultAcceptance.acceptedAt)} PHT.
+              </p>
+            )}
             <h3>{selectedTask.title}</h3>
             <p className="detail-copy">{selectedTask.detail}</p>
             <dl className="metadata-list">
@@ -1781,6 +1860,17 @@ function TasksWorkspace({
   );
 }
 
+type AcceptanceBindings = {
+  ownerId: string;
+  csrfToken: string;
+  onAccepted: (task: Task) => void;
+  onSessionExpired: (cause: unknown) => boolean;
+  gate: { phase: 'idle' | 'refreshing' | 'failed' | 'done'; runId: string | null };
+  onConflict: (runId: string) => void;
+  onReload: (runId: string) => void;
+  getSessionGeneration: () => number;
+};
+
 function RunsWorkspace({
   runs,
   tasks,
@@ -1798,7 +1888,9 @@ function RunsWorkspace({
   onSelectRun,
   onStop,
   onClearRun,
+  acceptance,
 }: {
+  acceptance: AcceptanceBindings;
   runs: Run[];
   tasks: Task[];
   selectedRun: Run | null;
@@ -1878,6 +1970,8 @@ function RunsWorkspace({
         onReconcile={onReconcile}
         onRetryStream={onRetryStream}
         announcement={announcement}
+        runs={runs}
+        acceptance={acceptance}
       />
     </div>
   );
@@ -1899,7 +1993,11 @@ function RunInspector({
   onReconcile,
   onRetryStream,
   announcement,
+  runs,
+  acceptance,
 }: {
+  runs: Run[];
+  acceptance: AcceptanceBindings;
   run: Run | null;
   loading: boolean;
   error: string;
@@ -2053,6 +2151,21 @@ function RunInspector({
               <Check size={15} />
               <p>This run completed. Its output remains synthetic and is not a verified result.</p>
             </div>
+          )}
+          {run.status === 'completed' && (
+            <AcceptResultAction
+              ownerId={acceptance.ownerId}
+              task={task}
+              run={run}
+              runs={runs}
+              csrfToken={acceptance.csrfToken}
+              onAccepted={acceptance.onAccepted}
+              onSessionExpired={acceptance.onSessionExpired}
+              gate={acceptance.gate}
+              onConflict={acceptance.onConflict}
+              onReload={acceptance.onReload}
+              getSessionGeneration={acceptance.getSessionGeneration}
+            />
           )}
           {run.status === 'failed' && (
             <div className="run-notice">

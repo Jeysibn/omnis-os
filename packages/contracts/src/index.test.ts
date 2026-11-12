@@ -20,6 +20,9 @@ import {
   CreateTaskSchema,
   SetTaskProjectSchema,
   SetTaskExecutionAssignmentSchema,
+  AcceptTaskResultRequestSchema,
+  TaskResultAcceptanceSchema,
+  TaskResultAcceptanceResponseSchema,
   TaskSchema,
   UpdateProjectSchema,
   ArchiveProjectSchema,
@@ -166,6 +169,34 @@ describe('Mission Lane event contract', () => {
         origin: 'api',
         synthetic: true,
         payload: { from: 'open', to: 'in_progress', unexpected: 'value' },
+      }).success,
+      false,
+    );
+  });
+
+  it('accepts owner-attributed task result acceptance events only with exact task provenance', () => {
+    const accepted = {
+      ...base,
+      sourceKey: 'task:task-0001:status:2',
+      sourceKind: 'task',
+      sourceRecordId: 'task-0001',
+      type: 'task.status_changed',
+      actor: 'owner',
+      origin: 'api',
+      synthetic: false,
+      runId: null,
+      payload: { from: 'in_review', to: 'completed', runId: 'run-0001' },
+    };
+    assert.equal(MissionEventSchema.safeParse(accepted).success, true);
+    assert.equal(
+      MissionEventSchema.safeParse({ ...accepted, actor: 'service:omnis-worker' }).success,
+      false,
+    );
+    assert.equal(MissionEventSchema.safeParse({ ...accepted, runId: 'run-0001' }).success, false);
+    assert.equal(
+      MissionEventSchema.safeParse({
+        ...accepted,
+        payload: { from: 'in_review', to: 'completed', runId: 'run-0001', extra: true },
       }).success,
       false,
     );
@@ -349,7 +380,41 @@ describe('task project association contracts', () => {
       profileVersion: null,
       runtimeId: null,
       assignmentRevision: 1,
+      resultAcceptance: null,
     });
+  });
+
+  it('represents pending review separately and validates exact owner acceptance receipts', () => {
+    const pendingReview = TaskSchema.parse({ ...task, status: 'in_review' });
+    assert.equal(pendingReview.status, 'in_review');
+    assert.equal(pendingReview.resultAcceptance, null);
+    const acceptance = {
+      runId: 'run-0001',
+      acceptedBy: 'owner',
+      acceptedAt: '2026-11-12T00:00:00.000Z',
+      requestId: 'b9d5fd0e-4681-4a41-90c0-50b120843aa5',
+    };
+    assert.deepEqual(TaskResultAcceptanceSchema.parse(acceptance), acceptance);
+    assert.equal(
+      TaskResultAcceptanceSchema.safeParse({ ...acceptance, acceptedBy: 'worker' }).success,
+      false,
+    );
+    assert.deepEqual(AcceptTaskResultRequestSchema.parse({ runId: acceptance.runId }), {
+      runId: acceptance.runId,
+    });
+    assert.equal(
+      AcceptTaskResultRequestSchema.safeParse({ runId: acceptance.runId, acceptedBy: 'owner' })
+        .success,
+      false,
+    );
+    assert.equal(
+      TaskResultAcceptanceResponseSchema.safeParse({
+        task: { ...task, status: 'completed', resultAcceptance: acceptance },
+        acceptance,
+        created: true,
+      }).success,
+      true,
+    );
   });
 
   it('accepts optional project assignment on task creation and validates project reassignment', () => {
@@ -403,6 +468,7 @@ describe('task project association contracts', () => {
     assert.deepEqual(TaskSchema.parse({ ...task, ...assigned }), {
       ...task,
       ...assigned,
+      resultAcceptance: null,
     });
     assert.equal(
       TaskSchema.safeParse({ ...task, agentId: 'agent-001', profileVersion: 2 }).success,

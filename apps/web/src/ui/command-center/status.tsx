@@ -21,6 +21,8 @@ const runStatuses: Record<Run['status'], Descriptor> = {
 const taskStatuses: Record<Task['status'], Descriptor> = {
   open: { tone: 'neutral', label: 'Open' },
   in_progress: { tone: 'info', label: 'In progress' },
+  // A finished run is not an accepted task: the owner has not yet verified the result.
+  in_review: { tone: 'attention', label: 'Awaiting review' },
   completed: { tone: 'ok', label: 'Completed' },
 };
 

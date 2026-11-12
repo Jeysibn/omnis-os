@@ -545,7 +545,7 @@ test.describe('tasks in an epic', () => {
     const tasks = group(page, 'Tasks in Onboarding flow');
     await expect(tasks.getByText('All 3 tasks loaded.')).toBeVisible();
     expect(await countsText(page, 'Tasks in Onboarding flow')).toBe(
-      'Open 1 In progress 1 Completed 1',
+      'Open 1 In progress 1 Awaiting review 0 Completed 1',
     );
     // Navigation to the existing task detail and run.
     await expect(tasks.getByRole('link', { name: 'Task number 1' })).toHaveAttribute(
@@ -569,7 +569,7 @@ test.describe('tasks in an epic', () => {
       group(page, 'Tasks in Onboarding flow').getByText('No tasks in this epic'),
     ).toBeVisible();
     expect(await countsText(page, 'Tasks in Onboarding flow')).toBe(
-      'Open 0 In progress 0 Completed 0',
+      'Open 0 In progress 0 Awaiting review 0 Completed 0',
     );
   });
 
@@ -592,13 +592,13 @@ test.describe('tasks in an epic', () => {
     ).toBeVisible();
     await expect(tasks.locator('.pw-counts')).toHaveAttribute('data-partial', 'true');
     expect(await countsText(page, 'Tasks in Onboarding flow')).toBe(
-      'Open 17 In progress 17 Completed 16',
+      'Open 17 In progress 17 Awaiting review 0 Completed 16',
     );
     await tasks.getByRole('button', { name: 'Load more tasks' }).click();
     await expect(tasks.getByText('All 60 tasks loaded.')).toBeVisible();
     await expect(tasks.locator('.pw-counts')).toHaveAttribute('data-partial', 'false');
     expect(await countsText(page, 'Tasks in Onboarding flow')).toBe(
-      'Open 20 In progress 20 Completed 20',
+      'Open 20 In progress 20 Awaiting review 0 Completed 20',
     );
   });
 
