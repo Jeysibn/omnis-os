@@ -1266,7 +1266,12 @@ async function assertRuntimeCannotForgeAcceptance(runtime, taskId, runId) {
 
 async function assertAcceptedTaskReconciliation({ auditPool, fixture }) {
   const { taskId, runId, receipt, initialCounts } = fixture ?? {};
-  if (!auditPool || !/^[0-9a-f-]{36}$/i.test(taskId ?? '') || !runId || !receipt) {
+  if (
+    !auditPool ||
+    !/^[a-z0-9][a-z0-9_-]{0,127}$/i.test(taskId ?? '') ||
+    !/^[a-z0-9][a-z0-9_-]{0,127}$/i.test(runId ?? '') ||
+    !receipt
+  ) {
     throw new Error('The accepted-task reconciliation verification input is malformed.');
   }
   const state = await readAcceptanceFixtureState(auditPool, taskId, runId);
