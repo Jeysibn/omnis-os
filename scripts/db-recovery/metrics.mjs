@@ -65,7 +65,7 @@ export const metricsQuery = `SELECT json_build_object(
     'taskProjectManagementIdempotency', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(i)::text), ':' ORDER BY i.request_id), '')) FROM omnis.task_project_management_idempotency i),
     'taskExecutionAssignmentAudit', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(a)::text), ':' ORDER BY a.id), '')) FROM omnis.task_execution_assignment_audit a),
     'taskExecutionAssignmentIdempotency', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(i)::text), ':' ORDER BY i.request_id), '')) FROM omnis.task_execution_assignment_idempotency i),
-    'taskResultAcceptances', (SELECT md5(COALESCE(string_agg(md5(to_jsonb(a)::text), ':' ORDER BY a.task_id, a.run_id), '')) FROM omnis.task_result_acceptances a)
+    'taskResultAcceptances', (SELECT md5(COALESCE(string_agg(md5((to_jsonb(a) || jsonb_build_object('accepted_at', to_char(a.accepted_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US')) )::text), ':' ORDER BY a.task_id, a.run_id), '')) FROM omnis.task_result_acceptances a)
   ),
   'syntheticOnly', (SELECT COALESCE(bool_and(synthetic IS TRUE AND runtime_kind = 'mock'), true) FROM omnis.runs),
   'sequenceInvariants', (
