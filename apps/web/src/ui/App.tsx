@@ -259,6 +259,8 @@ function App() {
   const [streamState, setStreamState] = useState<StreamState>('connecting');
   const [streamEpoch, setStreamEpoch] = useState(0);
   const recreatingStream = useRef(false);
+  // Always the run on screen now, for callbacks that settle after the owner has moved elsewhere.
+  const selectedRunIdRef = useRef<string | null>(null);
   // Identifies the current owner session. Anything started under an older value (a delayed
   // session probe, a retry budget) must not affect the session that replaced it.
   const sessionGeneration = useRef(0);
@@ -612,7 +614,9 @@ function App() {
   }, [loadWorkspace, refreshCsrf, restoredTaskCreate, rotateSession]);
 
   useEffect(() => {
+    selectedRunIdRef.current = page === 'runs' ? selectedRunId : null;
     if (!owner || page !== 'runs' || !selectedRunId || !selectedRunExists) {
+      recreatingStream.current = false;
       setEvents([]);
       setStreamState('closed');
       return;
@@ -1363,7 +1367,7 @@ function App() {
                   current.map((task) => (task.id === updated.id ? updated : task)),
                 );
                 void reconcileRun(runId);
-                if (selectedRunId === runId) {
+                if (selectedRunIdRef.current === runId) {
                   recreatingStream.current = true;
                   setStreamEpoch((epoch) => epoch + 1);
                 }
