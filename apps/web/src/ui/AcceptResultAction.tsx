@@ -35,7 +35,7 @@ export function AcceptResultAction({
   runs: readonly Run[];
   csrfToken: string;
   /** The server's task (status `completed` with its receipt). */
-  onAccepted: (task: Task) => void;
+  onAccepted: (task: Task, runId: string) => void;
   onSessionExpired: (cause: unknown) => boolean;
   /**
    * Freshness gate, owned by the app (not by this component) so changing the selected task or run
@@ -68,7 +68,10 @@ export function AcceptResultAction({
 
   const view = acceptanceViewFor(task, run, runs);
   const blocked = gate.phase === 'refreshing' || gate.phase === 'failed';
-  const eligible = view.kind === 'eligible' && !blocked && task;
+  // A receipt that already exists for this exact latest run can be reconciled (issue #106) by the
+  // same owner-authorised endpoint; the backend, not this component, decides the outcome.
+  const reconciling = view.kind === 'receipt-in-review';
+  const eligible = (view.kind === 'eligible' || reconciling) && !blocked && task;
   const open = confirming && Boolean(eligible);
 
   // Move focus to the receipt only after the server confirmed and the receipt is on screen.
@@ -117,7 +120,7 @@ export function AcceptResultAction({
       acceptanceAttempts.settle(ownerId, task.id, run.id);
       setConfirming(false);
       focusReceipt.current = true;
-      onAccepted(result.task);
+      onAccepted(result.task, run.id);
     } catch (cause) {
       if (!current()) return; // a late 401 must not expire the session that replaced this one
       const failure = classifyAcceptanceFailure(cause);
@@ -126,6 +129,8 @@ export function AcceptResultAction({
         onSessionExpired(cause);
       } else if (failure.kind === 'uncertain') {
         setProblem({ kind: 'uncertain', message: failure.message });
+        // The request may have applied: read the authoritative state before any retry is offered.
+        onReload(run.id);
       } else {
         acceptanceAttempts.settle(ownerId, task.id, run.id);
         restoreFocus.current = true;
@@ -247,8 +252,8 @@ export function AcceptResultAction({
             <h4 className="accept-result-receipt-title">Owner receipt on record.</h4>
             <p>
               The owner already accepted this run, but the task still reads &ldquo;in review&rdquo;.
-              The receipt is unchanged and Accept Result is not offered again. Reload from the
-              server to see the task&rsquo;s current state.
+              The receipt is unchanged. Reconciling asks Omnis OS to bring the task status in line
+              with it; the task is not completed until the server says so.
             </p>
             <dl className="metadata-list accept-result-meta">
               <div>
@@ -260,15 +265,58 @@ export function AcceptResultAction({
                 <dd>{view.acceptance.runId}</dd>
               </div>
             </dl>
-            {gate.phase !== 'failed' && (
+            {!open && !blocked && (
               <button
+                ref={triggerRef}
                 type="button"
-                className="secondary-button"
-                onClick={() => onReload(run.id)}
-                disabled={gate.phase === 'refreshing'}
+                className="primary-button accept-result-button"
+                onClick={() => setConfirming(true)}
+                disabled={busy}
               >
-                Reload task and runs
+                <BadgeCheck size={15} aria-hidden="true" />
+                Reconcile task status
               </button>
+            )}
+            {open && task && (
+              <div
+                className="accept-result-confirm"
+                role="group"
+                aria-label="Confirm task status reconciliation"
+                onKeyDown={(event) => {
+                  if (event.key === 'Escape') cancel();
+                }}
+              >
+                <p>
+                  Reconcile task <strong>{task.title}</strong> against the existing receipt for run{' '}
+                  <strong>{run.id}</strong>? No new receipt is created and the original is not
+                  changed.
+                </p>
+                <div className="accept-result-actions">
+                  <button
+                    type="button"
+                    className="primary-button"
+                    onClick={() => void submit()}
+                    aria-disabled={busy}
+                    aria-busy={busy}
+                  >
+                    <Check size={15} aria-hidden="true" />
+                    {busy
+                      ? 'Reconciling…'
+                      : problem?.kind === 'uncertain'
+                        ? 'Retry reconciliation'
+                        : 'Confirm reconciliation'}
+                  </button>
+                  <button
+                    ref={cancelRef}
+                    type="button"
+                    className="secondary-button"
+                    onClick={cancel}
+                    aria-disabled={busy}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
             )}
           </div>
         </div>

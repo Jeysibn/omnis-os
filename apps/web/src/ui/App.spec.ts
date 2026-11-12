@@ -924,7 +924,20 @@ function createMockApi(page: Page) {
         );
         return fulfillError(route, 409, 'conflict', 'This run is no longer the current result.');
       }
-      const replay = acceptReceipts.get(taskId);
+      let replay = acceptReceipts.get(taskId);
+      if (!replay && task.status === 'in_review' && task.resultAcceptance) {
+        // Backend contract (PHASE1_BACKEND_FRONTEND_HANDOFF.md): an owner replay for the same
+        // latest run reconciles the task, keeps the original receipt and returns created: false.
+        const newest = [...currentRuns]
+          .filter((run) => run.taskId === taskId)
+          .sort((x, y) => y.createdAt.localeCompare(x.createdAt) || y.id.localeCompare(x.id))[0];
+        if (newest?.id === parsed.data.runId && task.resultAcceptance.runId === parsed.data.runId) {
+          replay = task.resultAcceptance;
+          currentTasks = currentTasks.map((item) =>
+            item.id === taskId ? { ...item, status: 'completed' } : item,
+          );
+        }
+      }
       let created = false;
       let receipt = replay;
       if (!receipt) {
@@ -3051,6 +3064,169 @@ test.describe('R1 owner result acceptance', () => {
     ).toBeVisible();
   });
 
+  const receiptFor = (runId: string) => ({
+    runId,
+    acceptedBy: 'owner' as const,
+    acceptedAt: '2026-11-03T10:00:00.000Z',
+    requestId: '00000000-0000-4000-8000-000000000000',
+  });
+  const restoredTask = { ...reviewTask, resultAcceptance: receiptFor('run-review') };
+  const reconcile = (page: Page) => page.getByRole('button', { name: 'Reconcile task status' });
+  const confirmReconcile = (page: Page) =>
+    page.getByRole('group', { name: 'Confirm task status reconciliation' });
+
+  test('reconcile: deliberate two-step action reuses the same run, keeps the receipt, shows the server task', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ tasks: [restoredTask], runs: [reviewRun] });
+    await openReview(page);
+    await expect(reconcile(page)).toBeVisible();
+    const shots = process.env.OMNIS_SHOT_DIR;
+    if (shots)
+      await page.locator('.accept-result').screenshot({ path: `${shots}/reconcile-action.png` });
+    await reconcile(page).click();
+    if (shots)
+      await page.locator('.accept-result').screenshot({ path: `${shots}/reconcile-confirm.png` });
+    // Nothing is sent until the owner confirms; Cancel is the safe default focus.
+    expect(api.acceptPosts).toHaveLength(0);
+    await expect(confirmReconcile(page).getByRole('button', { name: 'Cancel' })).toBeFocused();
+    await confirmReconcile(page).getByRole('button', { name: 'Confirm reconciliation' }).click();
+    await expect(page.getByRole('heading', { name: 'Result accepted by owner.' })).toBeFocused();
+    expect(api.acceptPosts).toHaveLength(1);
+    expect(api.acceptPosts[0]!.body).toEqual({ runId: 'run-review' });
+    // The original receipt is unchanged (not re-stamped) and the task now reads Completed.
+    await expect(page.getByText('Nov 3, 2026, 6:00:00 PM PHT')).toBeVisible();
+    await page.getByRole('link', { name: 'Tasks' }).click();
+    await expect(
+      page
+        .getByRole('listitem')
+        .filter({ hasText: 'Review quarterly notes' })
+        .locator('.status-pill'),
+    ).toHaveText('Completed');
+  });
+
+  test('reconcile: cancelling sends nothing and rapid clicks submit once', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ tasks: [restoredTask], runs: [reviewRun], acceptDelayMs: 400 });
+    await openReview(page);
+    await reconcile(page).click();
+    await confirmReconcile(page).getByRole('button', { name: 'Cancel' }).click();
+    await expect(reconcile(page)).toBeFocused();
+    expect(api.acceptPosts).toHaveLength(0);
+    await reconcile(page).click();
+    const confirm = confirmReconcile(page).getByRole('button', {
+      name: /Confirm reconciliation|Reconciling/,
+    });
+    await confirm.evaluate((element) => {
+      for (let i = 0; i < 4; i += 1)
+        element.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await expect(page.getByRole('heading', { name: 'Result accepted by owner.' })).toBeVisible();
+    expect(api.acceptPosts).toHaveLength(1);
+  });
+
+  test('reconcile: a receipt for an older run is never reconciled against a newer run', async ({
+    page,
+    api,
+  }) => {
+    const older = { ...makeRun('run-old', 'task-review', 'Review quarterly notes') };
+    older.createdAt = '2026-11-03T08:00:00.000Z';
+    api.configure({
+      tasks: [{ ...reviewTask, resultAcceptance: receiptFor('run-old') }],
+      runs: [reviewRun, older],
+    });
+    await openReview(page, '#runs/run-old');
+    await expect(reconcile(page)).toHaveCount(0);
+    await expect(page.getByText('A newer run exists for this task.')).toBeVisible();
+    // The newer run has no receipt of its own, so it is a normal review, not a reconciliation.
+    await openReview(page, '#runs/run-review');
+    await expect(reconcile(page)).toHaveCount(0);
+    await expect(accept(page)).toBeVisible();
+    expect(api.acceptPosts).toHaveLength(0);
+  });
+
+  test('reconcile: a 409 refreshes from the server and offers nothing stale', async ({
+    page,
+    api,
+  }) => {
+    api.configure({
+      tasks: [restoredTask],
+      runs: [reviewRun],
+      acceptBehaviors: ['stale-conflict'],
+    });
+    await openReview(page);
+    await reconcile(page).click();
+    await confirmReconcile(page).getByRole('button', { name: 'Confirm reconciliation' }).click();
+    await expect(
+      page.getByRole('alert').filter({ hasText: 'no longer the current result' }),
+    ).toBeVisible();
+    await expect(reconcile(page)).toHaveCount(0);
+    expect(api.acceptPosts).toHaveLength(1);
+  });
+
+  test('reconcile: 403 is shown as a rejection without signing out or retrying', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ tasks: [restoredTask], runs: [reviewRun], acceptBehaviors: ['csrf'] });
+    await openReview(page);
+    await reconcile(page).click();
+    await confirmReconcile(page).getByRole('button', { name: 'Confirm reconciliation' }).click();
+    await expect(page.getByRole('alert').filter({ hasText: 'CSRF' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Sign in' })).toHaveCount(0);
+    expect(api.acceptPosts).toHaveLength(1);
+  });
+
+  test('reconcile: an expired session returns to sign-in and the task is not changed locally', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ tasks: [restoredTask], runs: [reviewRun], acceptBehaviors: ['unauthorized'] });
+    await openReview(page);
+    await reconcile(page).click();
+    await confirmReconcile(page).getByRole('button', { name: 'Confirm reconciliation' }).click();
+    await expect(page.getByRole('alert')).toContainText('session expired');
+    await expect(page.getByRole('heading', { name: 'Result accepted by owner.' })).toHaveCount(0);
+    expect(api.acceptPosts).toHaveLength(1);
+  });
+
+  test('reconcile: an uncertain outcome reads server state first and never auto-retries', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ tasks: [restoredTask], runs: [reviewRun], acceptBehaviors: ['lost-applied'] });
+    await openReview(page);
+    await reconcile(page).click();
+    await confirmReconcile(page).getByRole('button', { name: 'Confirm reconciliation' }).click();
+    // The reconciliation did apply, and the authoritative re-read shows it; no second POST.
+    await expect(page.getByRole('heading', { name: 'Result accepted by owner.' })).toBeVisible();
+    expect(api.acceptPosts).toHaveLength(1);
+  });
+
+  test('reconcile: an ambiguous 503 keeps one idempotency key for the explicit retry', async ({
+    page,
+    api,
+  }) => {
+    api.configure({
+      tasks: [restoredTask],
+      runs: [reviewRun],
+      acceptBehaviors: ['concurrency-limit'],
+    });
+    await openReview(page);
+    await reconcile(page).click();
+    await confirmReconcile(page).getByRole('button', { name: 'Confirm reconciliation' }).click();
+    const retry = confirmReconcile(page).getByRole('button', { name: 'Retry reconciliation' });
+    await expect(retry).toBeVisible();
+    expect(api.acceptPosts).toHaveLength(1);
+    await retry.click();
+    await expect(page.getByRole('heading', { name: 'Result accepted by owner.' })).toBeVisible();
+    expect(api.acceptPosts).toHaveLength(2);
+    expect(new Set(api.acceptPosts.map((entry) => entry.key)).size).toBe(1);
+  });
+
   test('ineligible results get no action: not latest, still in progress, failed, historical', async ({
     page,
     api,
@@ -3185,7 +3361,7 @@ test.describe('R1 owner result acceptance', () => {
     api.configure({
       tasks: [reviewTask],
       runs: [reviewRun],
-      acceptBehaviors: ['lost-applied', 'concurrency-limit'],
+      acceptBehaviors: ['concurrency-limit', 'concurrency-limit'],
     });
     await openReview(page);
     await accept(page).click();
@@ -3195,10 +3371,21 @@ test.describe('R1 owner result acceptance', () => {
     await confirmGroup(page).getByRole('button', { name: 'Retry acceptance' }).click();
     await expect(page.getByRole('alert')).toContainText('Mission Lane is busy');
     await confirmGroup(page).getByRole('button', { name: 'Retry acceptance' }).click();
-    // The first attempt applied; the replay returns the original receipt (created: false).
     await expect(page.getByText('Result accepted by owner.')).toBeVisible();
     expect(api.acceptPosts).toHaveLength(3);
     expect(new Set(api.acceptPosts.map((entry) => entry.key)).size).toBe(1);
+  });
+
+  test('a lost response that did apply is learned from an authoritative re-read, not a blind retry', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ tasks: [reviewTask], runs: [reviewRun], acceptBehaviors: ['lost-applied'] });
+    await openReview(page);
+    await accept(page).click();
+    await confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' }).click();
+    await expect(page.getByText('Result accepted by owner.')).toBeVisible();
+    expect(api.acceptPosts).toHaveLength(1);
   });
 
   test('a network failure that never applied can be retried with the same key', async ({

@@ -1356,10 +1356,18 @@ function App() {
             acceptance={{
               ownerId: owner.id,
               csrfToken,
-              onAccepted: (updated) =>
+              onAccepted: (updated, runId) => {
+                // The server's task replaces local state; nothing is inferred locally. Then the
+                // run and its ordered events are read again so the owner transition shows in order.
                 setTasks((current) =>
                   current.map((task) => (task.id === updated.id ? updated : task)),
-                ),
+                );
+                void reconcileRun(runId);
+                if (selectedRunId === runId) {
+                  recreatingStream.current = true;
+                  setStreamEpoch((epoch) => epoch + 1);
+                }
+              },
               onSessionExpired: expireSessionIfNeeded,
               gate: acceptGate,
               onConflict: (runId) => void refreshAfterConflict(runId),
@@ -1872,7 +1880,7 @@ function TasksWorkspace({
 type AcceptanceBindings = {
   ownerId: string;
   csrfToken: string;
-  onAccepted: (task: Task) => void;
+  onAccepted: (task: Task, runId: string) => void;
   onSessionExpired: (cause: unknown) => boolean;
   gate: { phase: 'idle' | 'refreshing' | 'failed' | 'done'; runId: string | null };
   onConflict: (runId: string) => void;
