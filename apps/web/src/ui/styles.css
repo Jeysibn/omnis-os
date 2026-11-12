@@ -2498,7 +2498,7 @@ button:disabled {
   align-items: flex-start;
   gap: 9px;
   color: #7a5a14;
-  font-size: 11px;
+  font-size: 13px;
   line-height: 1.5;
 }
 .accept-result-receipt {
@@ -2514,7 +2514,7 @@ button:disabled {
   border: 1px solid #d7dee8;
   border-radius: 8px;
   background: #fff;
-  font-size: 11px;
+  font-size: 13px;
   line-height: 1.5;
 }
 .accept-result-actions {
@@ -2529,7 +2529,7 @@ button:disabled {
 .accept-result-note {
   margin: 0;
   color: #566478;
-  font-size: 11px;
+  font-size: 13px;
   line-height: 1.5;
 }
 .accept-result-problem {
@@ -2542,4 +2542,13 @@ button:disabled {
 .accept-result-receipt-title:focus-visible {
   outline: 2px solid #294fae;
   outline-offset: 2px;
+}
+
+.accept-result button {
+  min-height: 44px;
+}
+
+.accept-result button[aria-disabled='true'] {
+  opacity: 0.6;
+  cursor: not-allowed;
 }

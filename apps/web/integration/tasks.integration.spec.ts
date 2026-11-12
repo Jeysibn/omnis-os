@@ -540,6 +540,37 @@ test('owner sees an authorized synthetic broker Run, ordered events, result and 
   await expect(inspector).toContainText('Synthetic provider response.');
   await expect(page.getByText('completed', { exact: true })).toBeVisible();
 
+  // Owner acceptance against the real API and PostgreSQL: a completed Run never accepts itself.
+  const beforeAccept = await ownerRequest(page, '/api/v1/tasks');
+  const reviewed = beforeAccept.body.find((task) => task.id === assigned.body.id);
+  expect(reviewed.status).toBe('in_review');
+  expect(reviewed.resultAcceptance ?? null).toBeNull();
+  await expect(page.getByText('Awaiting your review.')).toBeVisible();
+  await page.getByRole('button', { name: 'Accept Result' }).click();
+  await page
+    .getByRole('group', { name: 'Confirm result acceptance' })
+    .getByRole('button', { name: 'Confirm acceptance' })
+    .click();
+  await expect(page.getByRole('heading', { name: 'Result accepted by owner.' })).toBeVisible();
+  const afterAccept = await ownerRequest(page, '/api/v1/tasks');
+  const accepted = afterAccept.body.find((task) => task.id === assigned.body.id);
+  expect(accepted.status).toBe('completed');
+  expect(accepted.resultAcceptance.runId).toBe(runId);
+  expect(accepted.resultAcceptance.acceptedBy).toBe('owner');
+  // A deliberate replay with a fresh key is safe: no second receipt and the original is intact.
+  const replay = await ownerRequest(page, `/api/v1/tasks/${assigned.body.id}/accept-result`, {
+    method: 'POST',
+    idempotencyKey: randomUUID(),
+    body: { runId },
+  });
+  expect(replay.status).toBe(200);
+  expect(replay.body.created).toBe(false);
+  expect(replay.body.acceptance).toEqual(accepted.resultAcceptance);
+  expect(replay.body.task.status).toBe('completed');
+  // The receipt survives a browser refresh.
+  await page.reload();
+  await expect(page.getByRole('heading', { name: 'Result accepted by owner.' })).toBeVisible();
+
   const cancellationTask = await ownerRequest(page, '/api/v1/tasks', {
     method: 'POST',
     idempotencyKey: randomUUID(),
