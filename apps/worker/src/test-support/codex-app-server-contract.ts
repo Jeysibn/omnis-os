@@ -207,6 +207,7 @@ export class OfflineCodexEventProjector {
   private cancellationWasRequested = false;
   private turnHasStarted = false;
   private cancellationEvent: OfflineCodexProjectedEvent | undefined;
+  private uncertainOutcomeEvent: OfflineCodexProjectedEvent | undefined;
   private readonly seenDeliveries = new Map<string, { frame: string; sequence: number }>();
   private messageItemId: string | undefined;
   private messageCompleted = false;
@@ -244,7 +245,7 @@ export class OfflineCodexEventProjector {
     )
       throw new Error('cannot cancel a terminal provider operation');
     if (this.statusValue === 'unknown' || this.statusValue === 'cancellation_unknown')
-      return this.event('outcome_unknown');
+      return this.unknownOutcomeEvent();
     if (!this.cancellationWasRequested) {
       this.cancellationWasRequested = true;
       this.statusValue = 'cancellation_requested';
@@ -257,7 +258,7 @@ export class OfflineCodexEventProjector {
     if (isTerminal(this.statusValue))
       throw new Error('cannot mark a terminal provider operation unknown');
     this.statusValue = this.cancellationWasRequested ? 'cancellation_unknown' : 'unknown';
-    return this.event('outcome_unknown');
+    return this.unknownOutcomeEvent();
   }
 
   accept(delivery: Delivery): { duplicate: boolean; event?: OfflineCodexProjectedEvent } {
@@ -423,6 +424,11 @@ export class OfflineCodexEventProjector {
       type,
       sequence: ++this.eventSequence,
     };
+  }
+
+  private unknownOutcomeEvent(): OfflineCodexProjectedEvent {
+    this.uncertainOutcomeEvent ??= this.event('outcome_unknown');
+    return this.uncertainOutcomeEvent;
   }
 }
 

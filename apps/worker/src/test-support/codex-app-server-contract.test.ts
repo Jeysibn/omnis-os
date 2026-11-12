@@ -668,6 +668,18 @@ describe('offline Codex app-server contract fixtures', () => {
     const repeated = projector.requestCancellation();
     assert.deepEqual(repeated, first);
     assert.equal(repeated.type, 'cancel_requested');
+
+    const uncertain = new OfflineCodexEventProjector(context);
+    const disconnected = uncertain.disconnect();
+    assert.equal(disconnected.type, 'outcome_unknown');
+    assert.deepEqual(uncertain.requestCancellation(), disconnected);
+    assert.deepEqual(uncertain.disconnect(), disconnected);
+
+    const cancellationUnknown = new OfflineCodexEventProjector(context);
+    cancellationUnknown.requestCancellation();
+    const cancelledWhileDisconnected = cancellationUnknown.disconnect();
+    assert.equal(cancellationUnknown.status, 'cancellation_unknown');
+    assert.deepEqual(cancellationUnknown.requestCancellation(), cancelledWhileDisconnected);
   });
 
   it('normalizes missing usage as unknown and rejects malformed or inconsistent synthetic usage', () => {
