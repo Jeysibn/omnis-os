@@ -14,6 +14,8 @@ import {
   type PolicyContext,
   requestHash,
   reduceReplay,
+  ReplayClassificationSchema,
+  ClassificationSchema,
   verifySyntheticCapability,
 } from './index.ts';
 
@@ -170,7 +172,8 @@ test('schema and synthetic verifier reject substitution and invalid signatures',
   assert.equal(evaluateRequest(frame(JSON.stringify(mutated))).ok, false);
   let observed: Uint8Array | undefined;
   assert.equal(
-    verifySyntheticCapability(request.capability, (message, signature) => {
+    verifySyntheticCapability(request.capability, (keyId, message, signature) => {
+      assert.equal(keyId, 'synthetic');
       observed = message;
       assert.equal(signature.length, 64);
       return true;
@@ -188,6 +191,16 @@ test('schema and synthetic verifier reject substitution and invalid signatures',
     false,
   );
   assert.equal(verifySyntheticCapability(request.capability, () => false).ok, false);
+  assert.equal(
+    verifySyntheticCapability(
+      {
+        ...request.capability,
+        protected: { ...request.capability.protected, kid: 'untrusted-key' },
+      },
+      (keyId) => keyId === 'synthetic',
+    ).ok,
+    false,
+  );
   assert.equal(
     verifySyntheticCapability({ ...request.capability, signature: '***' }, () => true).ok,
     false,
@@ -218,6 +231,7 @@ test('policy denies unsafe profiles and replay never grants a second permit', ()
   const repeat = reduceReplay(first.state, { operationId: uuid, jti: uuid, requestHash: hash });
   assert.equal(repeat.permit, false);
   assert.equal(repeat.classification, 'OUTCOME_UNKNOWN');
+  assert.equal(ReplayClassificationSchema.parse(repeat.classification), 'OUTCOME_UNKNOWN');
   assert.equal(
     reduceReplay(first.state, {
       operationId: uuid,
@@ -232,6 +246,22 @@ test('policy denies unsafe profiles and replay never grants a second permit', ()
     requestHash: Buffer.alloc(32, 1).toString('base64url'),
   });
   assert.equal(conflict.classification, 'REPLAY_CONFLICT');
+  assert.equal(ReplayClassificationSchema.parse(conflict.classification), 'REPLAY_CONFLICT');
+  const saved = reduceReplay(
+    [
+      {
+        operationId: uuid,
+        jti: uuid,
+        requestHash: hash,
+        status: 'resolved',
+        result: { state: 'completed' },
+      },
+    ],
+    { operationId: uuid, jti: uuid, requestHash: hash },
+  );
+  assert.equal(saved.classification, 'SAVED_RESULT');
+  assert.equal(ReplayClassificationSchema.parse(saved.classification), 'SAVED_RESULT');
+  assert.equal(ClassificationSchema.safeParse(saved.classification).success, false);
 });
 
 test('policy binds peer and authoritative identities before allow', async () => {
@@ -248,7 +278,13 @@ test('policy binds peer and authoritative identities before allow', async () => 
     fixedRestrictions: request.capability.claims.restrictions as PolicyContext['fixedRestrictions'],
     now: 1,
     allowed: true,
-    verify: () => true,
+    verify: (keyId: string, message: Uint8Array, signature: Uint8Array) => {
+      assert.equal(keyId, 'synthetic');
+      assert.ok(message instanceof Uint8Array);
+      assert.ok(message.byteLength > 0);
+      assert.deepEqual(signature, decodeBase64Url(request.capability.signature, 64));
+      return true;
+    },
   };
   assert.deepEqual(evaluatePolicy(frame(JSON.stringify(request)), args), {
     decision: 'allow',

@@ -323,7 +323,7 @@ export function evaluateRequest(
 
 export function verifySyntheticCapability(
   value: unknown,
-  verifier: (message: Uint8Array, signature: Uint8Array) => boolean,
+  verifier: (keyId: string, message: Uint8Array, signature: Uint8Array) => boolean,
 ): { ok: boolean } {
   const parsed = envelope.safeParse(value);
   if (!parsed.success) return { ok: false };
@@ -335,16 +335,32 @@ export function verifySyntheticCapability(
     Buffer.from(canonicalJson(parsed.data.claims)),
   ]);
   try {
-    return { ok: verifier(message, signature) === true };
+    return { ok: verifier(parsed.data.protected.kid, message, signature) === true };
   } catch {
     return { ok: false };
   }
 }
 
+/**
+ * Replay-reducer outcomes are deliberately distinct from policy/audit classifications below.
+ * The reducer has no issuer, clock, persistence, peer-authentication, or dispatch authority.
+ */
+export const ReplayClassificationSchema = z.enum([
+  'PERMITTED',
+  'AUTHORIZATION_FAILURE',
+  'REPLAY_CONFLICT',
+  'OUTCOME_UNKNOWN',
+  'SAVED_RESULT',
+]);
+
 export function reduceReplay(
   state: readonly ReplayRecord[],
   input: Omit<ReplayRecord, 'status'>,
-): { permit: boolean; classification: string; state: ReplayRecord[] } {
+): {
+  permit: boolean;
+  classification: z.infer<typeof ReplayClassificationSchema>;
+  state: ReplayRecord[];
+} {
   const validRecord = (record: Omit<ReplayRecord, 'status'> | ReplayRecord): boolean =>
     uuidSchema.safeParse(record.operationId).success &&
     uuidSchema.safeParse(record.jti).success &&
@@ -394,7 +410,7 @@ export type PolicyContext = {
   fixedRestrictions: z.infer<typeof restrictions>;
   now: number;
   allowed: boolean;
-  verify: (message: Uint8Array, signature: Uint8Array) => boolean;
+  verify: (keyId: string, message: Uint8Array, signature: Uint8Array) => boolean;
 };
 
 /** Deterministic synthetic policy gate. It has no clock, I/O, key loading, or persistence of its own. */
