@@ -168,6 +168,29 @@ test('fake issuer binds exact payload, revisions, identity and one ordered ticke
   assert.equal(authority.consume(first.ticket, { payload }).status, 'consumed');
   assert.equal(authority.completeStep(first.ticket.jti, 'completed').ok, true);
 
+  const registration = authority.registerRuntime({
+    runId,
+    generation: 1,
+    registrationId: 'registration-fixture-1',
+    revision: 1,
+    digest: 'sha256:registration-fixture',
+    handle: 'opaque-registration-handle',
+  });
+  assert.equal(registration.ok, true);
+  const stopLease = authority.armStopLease({
+    runId,
+    generation: 1,
+    stopLeaseId: 'stop-lease-fixture-1',
+    registrationId: registration.registration.registrationId,
+    registrationRevision: registration.registration.revision,
+    registrationDigest: registration.registration.digest,
+    absoluteDeadline: 2000,
+    expiresAt: 2200,
+    maximumTerminationGraceMs: 100,
+    evidenceWindowMs: 100,
+  });
+  assert.equal(stopLease.ok, true);
+
   const second = authority.reserve({
     peerIdentity: 'uid:61001',
     operationId,
@@ -180,6 +203,10 @@ test('fake issuer binds exact payload, revisions, identity and one ordered ticke
     taskRevision: 2,
     profileRevision: 3,
     leaseRevision: 7,
+    registrationId: registration.registration.registrationId,
+    registrationRevision: registration.registration.revision,
+    registrationDigest: registration.registration.digest,
+    stopLeaseId: stopLease.lease.stopLeaseId,
   });
   assert.equal(second.ok, true);
   assert.notEqual(second.ticket.jti, first.ticket.jti);
@@ -214,7 +241,7 @@ test('fake issuer binds exact payload, revisions, identity and one ordered ticke
       profileRevision: 3,
       leaseRevision: 7,
     }).reason,
-    'step_order',
+    'stop_registration_missing',
   );
 });
 
@@ -244,7 +271,10 @@ test('fake issuer fails closed on substituted payload, stale revisions, invalid 
   );
   assert.equal(authority.reserve({ ...validIntent, taskRevision: 1 }).reason, 'stale_revision');
   assert.equal(authority.reserve({ ...validIntent, profileRevision: 2 }).reason, 'stale_revision');
-  assert.equal(authority.reserve({ ...validIntent, stepType: 'start' }).reason, 'step_order');
+  assert.equal(
+    authority.reserve({ ...validIntent, stepType: 'start' }).reason,
+    'stop_registration_missing',
+  );
   assert.equal(authority.reserve({ ...validIntent, stepIndex: 1 }).reason, 'step_order');
   assert.equal(authority.reserve({ ...validIntent, stepType: 'exec' }).reason, 'unsupported_step');
   assert.equal(authority.reserve({ ...validIntent, leaseRevision: 6 }).reason, 'lease_lost');

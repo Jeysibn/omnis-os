@@ -121,6 +121,7 @@ export class FakeAuthorizationAuthority {
     taskId = 'task-fixture-1',
     profileId = 'profile-fixture-1',
     leaseId = 'lease-fixture-1',
+    environmentEpoch = 'environment-fixture-1',
     inputProfileVersion = 'synthetic-input-v1',
     leaseOwner = 'worker-1',
     workerIdentity = 'uid:61001',
@@ -137,6 +138,7 @@ export class FakeAuthorizationAuthority {
     this.taskId = taskId;
     this.profileId = profileId;
     this.leaseId = leaseId;
+    this.environmentEpoch = environmentEpoch;
     this.inputProfileVersion = inputProfileVersion;
     this.leaseOwner = leaseOwner;
     this.workerIdentity = workerIdentity;
@@ -147,6 +149,9 @@ export class FakeAuthorizationAuthority {
     this.nextReservation = 1;
     this.operations = new Map();
     this.tickets = new Map();
+    this.registrations = new Map();
+    this.armedStopLeases = new Map();
+    this.fencedGenerations = new Set();
   }
 
   digestPayload(payload, binding = {}) {
@@ -188,6 +193,35 @@ export class FakeAuthorizationAuthority {
     if (payload.length === 0) return rejected('payload_missing');
     if (payload.length > maxInputBytes) return rejected('payload_too_large');
     if (!stepTypes.has(intent.stepType)) return rejected('unsupported_step');
+
+    let startBinding = null;
+    if (intent.stepType === 'start') {
+      const scope = `${intent.runId}:${intent.generation}`;
+      if (this.fencedGenerations.has(scope)) return rejected('generation_fenced');
+      const registration = this.registrations.get(scope);
+      const stopLease = this.armedStopLeases.get(scope);
+      if (!registration || !stopLease) return rejected('stop_registration_missing');
+      if (
+        registration.environmentEpoch !== this.environmentEpoch ||
+        registration.registrationId !== intent.registrationId ||
+        registration.revision !== intent.registrationRevision ||
+        registration.digest !== intent.registrationDigest ||
+        registration.revoked
+      )
+        return rejected('stale_stop_registration');
+      if (
+        stopLease.stopLeaseId !== intent.stopLeaseId ||
+        stopLease.registrationId !== registration.registrationId ||
+        stopLease.registrationRevision !== registration.revision ||
+        stopLease.registrationDigest !== registration.digest ||
+        stopLease.environmentEpoch !== this.environmentEpoch ||
+        !stopLease.armed
+      )
+        return rejected('stop_lease_unarmed');
+      if (this.now >= stopLease.absoluteDeadline || this.now >= stopLease.expiresAt)
+        return rejected('stop_lease_expired');
+      startBinding = { registration, stopLease };
+    }
 
     const payloadContext = {
       inputProfileVersion: this.inputProfileVersion,
@@ -260,6 +294,21 @@ export class FakeAuthorizationAuthority {
         tools: 'none',
         outputLimit: maxOutputBytes,
       }),
+      registration: startBinding
+        ? Object.freeze({
+            registrationId: startBinding.registration.registrationId,
+            revision: startBinding.registration.revision,
+            digest: startBinding.registration.digest,
+            handle: startBinding.registration.handle,
+          })
+        : null,
+      stopLease: startBinding
+        ? Object.freeze({
+            stopLeaseId: startBinding.stopLease.stopLeaseId,
+            absoluteDeadline: startBinding.stopLease.absoluteDeadline,
+            expiresAt: startBinding.stopLease.expiresAt,
+          })
+        : null,
       issuer: 'stage-a-authorizer',
       audience: 'stage-a-gateway',
       peerIdentity: 'uid:61002',
@@ -315,6 +364,129 @@ export class FakeAuthorizationAuthority {
   revoke() {
     this.revoked = true;
     this.authorizationRevision++;
+  }
+
+  registerRuntime({
+    runId,
+    generation,
+    registrationId,
+    revision,
+    digest,
+    handle,
+    environmentEpoch = this.environmentEpoch,
+    registrarSignatureValid = true,
+    terminatorArmingValid = true,
+  }) {
+    const scope = `${runId}:${generation}`;
+    if (this.fencedGenerations.has(scope)) return rejected('generation_fenced');
+    if (
+      environmentEpoch !== this.environmentEpoch ||
+      !uuidPattern.test(runId) ||
+      !Number.isSafeInteger(generation) ||
+      generation < 1 ||
+      typeof registrationId !== 'string' ||
+      registrationId.length < 1 ||
+      !Number.isSafeInteger(revision) ||
+      revision < 1 ||
+      typeof digest !== 'string' ||
+      digest.length < 1 ||
+      typeof handle !== 'string' ||
+      handle.length < 1 ||
+      !registrarSignatureValid ||
+      !terminatorArmingValid
+    )
+      return rejected('registration_invalid');
+    const registration = Object.freeze({
+      runId,
+      generation,
+      registrationId,
+      revision,
+      digest,
+      handle,
+      environmentEpoch,
+      revoked: false,
+      fixtureOnly: true,
+    });
+    this.registrations.set(scope, registration);
+    return { ok: true, registration };
+  }
+
+  armStopLease({
+    runId,
+    generation,
+    stopLeaseId,
+    registrationId,
+    registrationRevision,
+    registrationDigest,
+    absoluteDeadline,
+    notBefore = this.now,
+    expiresAt,
+    maximumTerminationGraceMs,
+    evidenceWindowMs,
+    environmentEpoch = this.environmentEpoch,
+    issuerValid = true,
+  }) {
+    const scope = `${runId}:${generation}`;
+    const registration = this.registrations.get(scope);
+    if (
+      !registration ||
+      registration.registrationId !== registrationId ||
+      registration.revision !== registrationRevision ||
+      registration.digest !== registrationDigest
+    )
+      return rejected('stop_registration_mismatch');
+    if (
+      environmentEpoch !== this.environmentEpoch ||
+      !issuerValid ||
+      typeof stopLeaseId !== 'string' ||
+      stopLeaseId.length < 1 ||
+      !Number.isSafeInteger(absoluteDeadline) ||
+      !Number.isSafeInteger(notBefore) ||
+      !Number.isSafeInteger(expiresAt) ||
+      !Number.isSafeInteger(maximumTerminationGraceMs) ||
+      maximumTerminationGraceMs < 0 ||
+      !Number.isSafeInteger(evidenceWindowMs) ||
+      evidenceWindowMs < 0 ||
+      notBefore > this.now ||
+      expiresAt < absoluteDeadline + maximumTerminationGraceMs + evidenceWindowMs
+    )
+      return rejected('stop_lease_invalid');
+    const lease = Object.freeze({
+      runId,
+      generation,
+      stopLeaseId,
+      registrationId,
+      registrationRevision,
+      registrationDigest,
+      absoluteDeadline,
+      notBefore,
+      expiresAt,
+      maximumTerminationGraceMs,
+      evidenceWindowMs,
+      environmentEpoch,
+      armed: true,
+      fixtureOnly: true,
+    });
+    this.armedStopLeases.set(scope, lease);
+    return { ok: true, lease };
+  }
+
+  recordStopIntent({ runId, generation, stopOperationId }) {
+    if (!uuidPattern.test(runId) || !Number.isSafeInteger(generation) || generation < 1)
+      return rejected('stop_scope_invalid');
+    if (typeof stopOperationId !== 'string' || stopOperationId.length < 1)
+      return rejected('stop_operation_invalid');
+    this.fencedGenerations.add(`${runId}:${generation}`);
+    return { ok: true, fenced: true, fixtureOnly: true };
+  }
+
+  revokeRegistration({ runId, generation, revision }) {
+    const scope = `${runId}:${generation}`;
+    const registration = this.registrations.get(scope);
+    if (!registration || registration.revision !== revision) return rejected('stale_registration');
+    this.registrations.set(scope, Object.freeze({ ...registration, revoked: true }));
+    this.fencedGenerations.add(scope);
+    return { ok: true, fenced: true };
   }
 
   supersedeLease() {
@@ -398,6 +570,14 @@ export class FakeDockerEngineRecorder {
     assert.deepStrictEqual(body, expected);
     const saved = cloneFixture(request);
     this.calls.push({ operation: 'create', request: saved });
+    return saved;
+  }
+
+  startContainer(binding) {
+    if (!binding || binding.authorized !== true || !binding.registrationId || !binding.stopLeaseId)
+      throw new Error('start authorization, registration, and armed stop lease are required');
+    const saved = cloneFixture(binding);
+    this.calls.push({ operation: 'start', request: saved });
     return saved;
   }
 
