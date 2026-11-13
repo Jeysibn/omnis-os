@@ -1,7 +1,7 @@
 # Phase 1 Docker-Only WSL2 Platform Readiness
 
 **Status:** P0-R2 design approved for disposable harness planning only; P0-R2.1 exact-head reviews and owner decisions remain required. No deployment candidate is accepted or target-host validated.
-**Reviewed source snapshot:** `0e1efbe803826059089fcfc16de65e9bb081bfcf` (main, 2026-11-13)
+**Current main snapshot for this packet:** `fcd4c1bd179d9d680fc8ee449e3029c5db97e5f5` (PR #114 merged, 2026-11-13). Its post-merge CI run `43478834756` was in progress as of 2026-11-14; this packet does not claim that run passed. The detailed static platform inspection below was performed at `0e1efbe803826059089fcfc16de65e9bb081bfcf`; PR #114 changes offline Codex app-server text-item parsing/fake parity only and does not alter the platform trust boundaries summarized here.
 **Scope:** Mock-only application and synthetic execution on the owner's existing WSL2 Ubuntu installation. This document is a source and design review, not operational acceptance.
 
 **P0-R2 proof register:** [`P0_R2_DOCKER_ONLY_PROOF_REGISTER.md`](./P0_R2_DOCKER_ONLY_PROOF_REGISTER.md).
@@ -19,7 +19,7 @@ P0-R2.1 requires exact-head Codex security and cross-document reviews before any
 
 ## Snapshot and evidence scope
 
-The reviewed checkout is an isolated detached worktree at the exact main SHA above. Static source, Compose, systemd, migration, CI, governance, and delivery documents were inspected. GitHub main was refreshed and matched the stated SHA. No Docker, WSL2, systemd, privileged command, test suite, deployment, or protected-host experiment was run. The local primary checkout's untracked files were left untouched.
+The historical platform inspection used an isolated detached worktree at `0e1efbe803826059089fcfc16de65e9bb081bfcf`; static source, Compose, systemd, migration, CI, governance, and delivery documents were inspected there. This packet is now rebased to current main `fcd4c1bd179d9d680fc8ee449e3029c5db97e5f5`. PR #114's exact-head diff was reviewed and its offline-only scope was checked against this packet; no platform topology or trust-boundary change was found. No Docker, WSL2, systemd, privileged command, test suite, deployment, or protected-host experiment was run for that historical inspection. The local primary checkout's untracked files were left untouched.
 
 The older `docs/06-delivery/DOCKER_ONLY_WSL2_ACCEPTANCE.md` and `docs/07-governance/adr/0012-docker-only-wsl2-control-plane.md` describe earlier snapshots and proposed design, not current deployment approval. ADR-0012 remains a proposal and its ingress-provenance gate is blocked. Reuse its networkless-core and restricted-gateway ideas only after the missing contracts are resolved; do not infer that it authorizes a bootstrap or a Docker-only privileged service.
 

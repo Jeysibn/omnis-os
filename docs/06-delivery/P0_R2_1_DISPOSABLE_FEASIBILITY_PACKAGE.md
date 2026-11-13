@@ -1,6 +1,6 @@
 # P0-R2.1 Disposable Rootless WSL2 Feasibility Package
 
-**Current verified source baseline:** `0e1efbe803826059089fcfc16de65e9bb081bfcf` (PR #115 merged). Earlier `b67aa2a` source assessments and exact reviewer SHAs below are historical. #115 adds disposable reconciliation integration coverage and a disposable-only shortened session lifetime; it does not implement or change the proposed Gateway/registrar/actuator/anchor security boundaries.
+**Reviewed current main snapshot:** `fcd4c1bd179d9d680fc8ee449e3029c5db97e5f5` (PR #114 merged). Main CI run `43478834756` was in progress as of 2026-11-14; no post-merge CI pass is claimed here. `0e1efbe803826059089fcfc16de65e9bb081bfcf` remains the historical #115 baseline. PR #114 tightened the offline Codex app-server text-item contract and fake/projector parity; it does not add live dispatch or change the host/runtime trust boundaries assessed here. Earlier `b67aa2a` source assessments and exact reviewer SHAs below are historical.
 **Status:** Proposed test package only; execution is not authorized. All runtime/WSL2 cases are **NOT TESTED**.
 **Historical source reviewed:** fetched `origin/main` commit `b67aa2a4b49cf47e1cbaa9d985b0c270fa9ed965` (2026-11-13). The prior baselines are historical; #112 adds offline app-server fixtures and protocol corrections but no live gateway or deployment authority.
 **Approval packet:** [P0-R2.1 Security Review Packet](./P0_R2_1_SECURITY_REVIEW_PACKET.md).
