@@ -1,9 +1,9 @@
 # Phase 1 Backend Connector Readiness
 
 **Original baseline:** `7bb6e9d3a79e749b5dfaf63561bb442fde188d9`
-**Latest source reassessment:** `fcd4c1bd179d9d680fc8ee449e3029c5db97e5f5` (main after PR #114)
+**Latest source reassessment:** `c8a168bfd12801f8b5ab374af2d79d91ea4bfee5` (main after PRs #114 and #110)
 **Assessment date:** 2026-11-14
-**Post-merge main CI:** [run 43478834756](https://github.com/Jeysibn/omnis-os/actions/runs/43478834756) passed all ten required jobs.
+**Post-merge main CI:** [run 43483785571](https://github.com/Jeysibn/omnis-os/actions/runs/43483785571) passed all ten required jobs.
 **Scope:** Backend readiness and credential-free synthetic protocol harness
 **Decision:** Keep real connector implementation and real inference blocked.
 
