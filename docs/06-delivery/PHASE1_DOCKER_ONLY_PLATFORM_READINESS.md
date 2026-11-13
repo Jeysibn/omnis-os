@@ -1,7 +1,7 @@
 # Phase 1 Docker-Only WSL2 Platform Readiness
 
 **Status:** P0-R2 design approved for disposable harness planning only; P0-R2.1 exact-head reviews and owner decisions remain required. No deployment candidate is accepted or target-host validated.
-**Current main snapshot for this packet:** `fcd4c1bd179d9d680fc8ee449e3029c5db97e5f5` (PR #114 merged, 2026-11-13). Its post-merge CI run `43478834756` was in progress as of 2026-11-14; this packet does not claim that run passed. The detailed static platform inspection below was performed at `0e1efbe803826059089fcfc16de65e9bb081bfcf`; PR #114 changes offline Codex app-server text-item parsing/fake parity only and does not alter the platform trust boundaries summarized here.
+**Current main snapshot for this packet:** `fcd4c1bd179d9d680fc8ee449e3029c5db97e5f5` (PR #114 merged, 2026-11-13). Its post-merge main CI run [43478834756](https://github.com/Jeysibn/omnis-os/actions/runs/43478834756) passed all ten required jobs. The detailed static platform inspection below was performed at `0e1efbe803826059089fcfc16de65e9bb081bfcf`; PR #114 changes offline Codex app-server text-item parsing/fake parity only and does not alter the platform trust boundaries summarized here.
 **Scope:** Mock-only application and synthetic execution on the owner's existing WSL2 Ubuntu installation. This document is a source and design review, not operational acceptance.
 
 **P0-R2 proof register:** [`P0_R2_DOCKER_ONLY_PROOF_REGISTER.md`](./P0_R2_DOCKER_ONLY_PROOF_REGISTER.md).

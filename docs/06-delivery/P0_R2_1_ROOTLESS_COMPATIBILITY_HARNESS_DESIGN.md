@@ -1,6 +1,6 @@
 # P0-R2.1 Disposable Rootless-Engine Compatibility Harness Design
 
-**Reviewed current main snapshot:** `fcd4c1bd179d9d680fc8ee449e3029c5db97e5f5` (PR #114 merged). Main CI run `43478834756` was in progress as of 2026-11-14; no post-merge CI pass is claimed here. `0e1efbe803826059089fcfc16de65e9bb081bfcf` remains the historical #115 baseline. PR #114 tightened the offline Codex app-server text-item contract and fake/projector parity; it does not add live dispatch or change the host/runtime trust boundaries assessed here. Earlier `b67aa2a` source assessments and exact reviewer SHAs below are historical.
+**Reviewed current main snapshot:** `fcd4c1bd179d9d680fc8ee449e3029c5db97e5f5` (PR #114 merged). Post-merge main CI run [43478834756](https://github.com/Jeysibn/omnis-os/actions/runs/43478834756) passed all ten required jobs on this source snapshot. `0e1efbe803826059089fcfc16de65e9bb081bfcf` remains the historical #115 baseline. PR #114 tightened the offline Codex app-server text-item contract and fake/projector parity; it does not add live dispatch or change the host/runtime trust boundaries assessed here. Earlier `b67aa2a` source assessments and exact reviewer SHAs below are historical.
 **Status:** Non-executing design artifact; current exact-head delta review is pending. No implementation or experiment is authorized.
 **Baseline:** `a830aeb28f388ab7b569ce5f61c663e6e0c461c2`.
 **Scope:** Test architecture and acceptance specifications only. No harness, code, runnable config, Dockerfile, Compose file, CI workflow, or environment was created or executed.
