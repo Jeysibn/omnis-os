@@ -505,6 +505,8 @@ export class FakeAuthorityLedger {
       epoch: this.epoch,
     };
     let transition = this.transitions.get(transitionId);
+    if (transition && stable(transition.intent) !== stable(intent))
+      return reject('transition_conflict');
     if (!transition) {
       const preFence = this.anchor.preFence(intent);
       if (!preFence.ok) return { ...preFence, databaseCommitted: false };

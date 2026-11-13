@@ -507,6 +507,14 @@ test('C-3 rollback, stale revisions, duplicate receipts and unavailable anchor a
     }).protection,
     'anchored',
   );
+  assert.equal(
+    ledger.change({
+      transitionId: 'lease-advance',
+      kind: 'authorization_revocation',
+      subjectId: 'auth-1',
+    }).reason,
+    'transition_conflict',
+  );
   assert.equal(ledger.restore(before, { freshEpoch: true }).reason, 'rollback_detected');
   assert.equal(
     ledger.change({ transitionId: 'stale-auth', expectedRevision: 0 }).reason,
