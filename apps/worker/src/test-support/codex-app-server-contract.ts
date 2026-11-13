@@ -4,7 +4,10 @@ import { parseProtocolJson } from '@omnis/runtime-protocol';
 const MAX_FRAME_BYTES = 16_384;
 const MAX_DELTA_BYTES = 4_096;
 const MAX_OUTPUT_BYTES = 32_000;
+const MAX_TEXT_ITEMS = 64;
 const GenerationSchema = z.number().int().min(1).max(2_147_483_647).safe();
+const AssistantMessagePhaseSchema = z.enum(['commentary', 'partial_answer', 'final_answer']);
+type AssistantMessagePhase = z.infer<typeof AssistantMessagePhaseSchema>;
 const SafeIdentitySchema = z
   .string()
   .min(1)
@@ -69,7 +72,7 @@ const TextItemLifecycleSchema = z
             id: SafeIdentitySchema,
             type: z.literal('agentMessage'),
             text: z.string().max(MAX_OUTPUT_BYTES),
-            phase: z.enum(['commentary', 'partial_answer', 'final_answer']).optional(),
+            phase: AssistantMessagePhaseSchema.optional(),
           })
           .strict(),
       })
@@ -119,6 +122,7 @@ export type OfflineCodexProjectedEvent = {
   sequence: number;
   eventId?: string;
   itemId?: string;
+  phase?: AssistantMessagePhase;
   message?: string;
   errorClass?: AppServerFailureClass;
 };
@@ -209,8 +213,12 @@ export class OfflineCodexEventProjector {
   private cancellationEvent: OfflineCodexProjectedEvent | undefined;
   private uncertainOutcomeEvent: OfflineCodexProjectedEvent | undefined;
   private readonly seenDeliveries = new Map<string, { frame: string; sequence: number }>();
-  private messageItemId: string | undefined;
-  private messageCompleted = false;
+  private readonly textItems = new Map<
+    string,
+    { phase: AssistantMessagePhase; text: string; completed: boolean }
+  >();
+  private activeTextItemId: string | undefined;
+  private receivedTextBytes = 0;
 
   constructor(context: ProjectorContext) {
     const parsed = z
@@ -335,21 +343,33 @@ export class OfflineCodexEventProjector {
         if (
           !this.turnHasStarted ||
           (this.statusValue !== 'started' && this.statusValue !== 'cancellation_requested') ||
-          this.messageItemId !== undefined ||
-          this.messageCompleted ||
+          this.activeTextItemId !== undefined ||
+          this.textItems.size >= MAX_TEXT_ITEMS ||
+          this.textItems.has(params.item.id) ||
           params.item.text !== ''
         )
           throw new Error('unexpected app-server text item start');
-        this.messageItemId = params.item.id;
+        this.activeTextItemId = params.item.id;
+        // Older synthetic fixtures omitted phase; preserve their former single-answer meaning.
+        this.textItems.set(params.item.id, {
+          phase: params.item.phase ?? 'final_answer',
+          text: '',
+          completed: false,
+        });
         return undefined;
       }
+      const item = this.textItems.get(params.item.id);
       if (
-        params.item.id !== this.messageItemId ||
-        this.messageCompleted ||
-        params.item.text !== this.outputValue
+        !item ||
+        this.activeTextItemId !== params.item.id ||
+        item.completed ||
+        (params.item.phase !== undefined && params.item.phase !== item.phase) ||
+        params.item.text !== item.text
       )
         throw new Error('app-server text item completion mismatch');
-      this.messageCompleted = true;
+      item.completed = true;
+      this.activeTextItemId = undefined;
+      if (item.phase === 'final_answer') this.outputValue += item.text;
       return undefined;
     }
 
@@ -373,18 +393,21 @@ export class OfflineCodexEventProjector {
         !this.turnHasStarted ||
         delta.data.params.threadId !== this.context.threadId ||
         delta.data.params.turnId !== this.context.turnId ||
-        delta.data.params.itemId !== this.messageItemId ||
-        this.messageCompleted
+        delta.data.params.itemId !== this.activeTextItemId
       )
         throw new Error('app-server session or turn identity mismatch');
       if (this.statusValue !== 'started' && this.statusValue !== 'cancellation_requested')
         throw new Error('unexpected app-server text event');
-      const nextOutput = this.outputValue + delta.data.params.delta;
-      if (Buffer.byteLength(nextOutput, 'utf8') > this.context.maxOutputBytes)
+      const item = this.textItems.get(delta.data.params.itemId);
+      if (!item || item.completed) throw new Error('unexpected app-server text item delta');
+      const deltaBytes = Buffer.byteLength(delta.data.params.delta, 'utf8');
+      if (this.receivedTextBytes + deltaBytes > this.context.maxOutputBytes)
         throw new Error('app-server output limit exceeded');
-      this.outputValue = nextOutput;
+      item.text += delta.data.params.delta;
+      this.receivedTextBytes += deltaBytes;
       return this.event('text_delta', {
         itemId: delta.data.params.itemId,
+        phase: item.phase,
         message: delta.data.params.delta,
       });
     }
@@ -396,8 +419,14 @@ export class OfflineCodexEventProjector {
       switch (turn.status) {
         case 'completed':
           if (turn.error != null) throw new Error('contradictory app-server completion evidence');
-          if (!this.messageCompleted)
-            throw new Error('app-server completed before text item completion');
+          if (
+            !this.turnHasStarted ||
+            this.activeTextItemId !== undefined ||
+            ![...this.textItems.values()].some(
+              (item) => item.phase === 'final_answer' && item.completed,
+            )
+          )
+            throw new Error('app-server completed without a final answer item');
           this.statusValue = 'completed';
           return this.event('completed');
         case 'failed':
@@ -416,7 +445,7 @@ export class OfflineCodexEventProjector {
 
   private event(
     type: OfflineCodexLifecycleType,
-    fields: Pick<OfflineCodexProjectedEvent, 'itemId' | 'message' | 'errorClass'> = {},
+    fields: Pick<OfflineCodexProjectedEvent, 'itemId' | 'phase' | 'message' | 'errorClass'> = {},
   ): OfflineCodexProjectedEvent {
     return {
       ...this.context,

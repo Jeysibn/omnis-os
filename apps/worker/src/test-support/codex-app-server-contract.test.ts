@@ -48,7 +48,7 @@ describe('offline Codex app-server contract fixtures', () => {
         frame('item/started', {
           threadId: context.threadId,
           turnId: context.turnId,
-          item: { id: 'item-1', type: 'agentMessage', text: '', phase: 'commentary' },
+          item: { id: 'item-1', type: 'agentMessage', text: '', phase: 'final_answer' },
         }),
       ),
     );
@@ -103,6 +103,190 @@ describe('offline Codex app-server contract fixtures', () => {
       [1, 2, 3],
     );
     assert.equal(projector.output, 'hello');
+  });
+
+  it('keeps assistant message phases separate and deterministically selects final-answer items', () => {
+    const projector = new OfflineCodexEventProjector({ ...context, maxOutputBytes: 64 });
+    let sequence = 0;
+    const accept = (method: string, params: unknown) =>
+      projector.accept(delivery(++sequence, `phase-${sequence}`, frame(method, params))).event;
+    const item = (id: string, phase: 'commentary' | 'partial_answer' | 'final_answer') => ({
+      threadId: context.threadId,
+      turnId: context.turnId,
+      item: { id, type: 'agentMessage', text: '', phase },
+    });
+    const delta = (itemId: string, text: string) => ({
+      threadId: context.threadId,
+      turnId: context.turnId,
+      itemId,
+      delta: text,
+    });
+    const complete = (
+      id: string,
+      phase: 'commentary' | 'partial_answer' | 'final_answer',
+      text: string,
+    ) => ({
+      threadId: context.threadId,
+      turnId: context.turnId,
+      item: { id, type: 'agentMessage', text, phase },
+    });
+
+    accept('turn/started', { turn: { id: context.turnId } });
+    accept('item/started', item('commentary-1', 'commentary'));
+    const commentaryDelta = accept('item/agentMessage/delta', delta('commentary-1', 'thinking'));
+    accept('item/completed', complete('commentary-1', 'commentary', 'thinking'));
+    accept('item/started', item('partial-1', 'partial_answer'));
+    const partialDelta = accept('item/agentMessage/delta', delta('partial-1', 'draft'));
+    accept('item/completed', complete('partial-1', 'partial_answer', 'draft'));
+    accept('item/started', item('final-1', 'final_answer'));
+    const firstFinalDelta = accept('item/agentMessage/delta', delta('final-1', 'first '));
+    accept('item/completed', complete('final-1', 'final_answer', 'first '));
+    accept('item/started', item('final-2', 'final_answer'));
+    const secondFinalDelta = accept('item/agentMessage/delta', delta('final-2', 'answer'));
+    accept('item/completed', complete('final-2', 'final_answer', 'answer'));
+    const terminal = accept('turn/completed', {
+      turn: { id: context.turnId, status: 'completed' },
+    });
+
+    assert.deepEqual(
+      [
+        commentaryDelta?.phase,
+        partialDelta?.phase,
+        firstFinalDelta?.phase,
+        secondFinalDelta?.phase,
+      ],
+      ['commentary', 'partial_answer', 'final_answer', 'final_answer'],
+    );
+    assert.equal(terminal?.type, 'completed');
+    assert.equal(projector.output, 'first answer');
+  });
+
+  it('does not promote commentary or partial-answer items to a completed result', () => {
+    for (const phase of ['commentary', 'partial_answer'] as const) {
+      const projector = new OfflineCodexEventProjector(context);
+      projector.accept(
+        delivery(1, 'turn-start', frame('turn/started', { turn: { id: context.turnId } })),
+      );
+      projector.accept(
+        delivery(
+          2,
+          'item-start',
+          frame('item/started', {
+            threadId: context.threadId,
+            turnId: context.turnId,
+            item: { id: `item-${phase}`, type: 'agentMessage', text: '', phase },
+          }),
+        ),
+      );
+      projector.accept(
+        delivery(
+          3,
+          'delta',
+          frame('item/agentMessage/delta', {
+            threadId: context.threadId,
+            turnId: context.turnId,
+            itemId: `item-${phase}`,
+            delta: 'not final',
+          }),
+        ),
+      );
+      projector.accept(
+        delivery(
+          4,
+          'item-completed',
+          frame('item/completed', {
+            threadId: context.threadId,
+            turnId: context.turnId,
+            item: { id: `item-${phase}`, type: 'agentMessage', text: 'not final', phase },
+          }),
+        ),
+      );
+      assert.throws(
+        () =>
+          projector.accept(
+            delivery(
+              5,
+              'terminal',
+              frame('turn/completed', { turn: { id: context.turnId, status: 'completed' } }),
+            ),
+          ),
+        /final answer item/,
+      );
+      assert.equal(projector.status, 'unknown');
+    }
+  });
+
+  it('rejects reused assistant item IDs and phase changes within one item lifecycle', () => {
+    const reused = new OfflineCodexEventProjector(context);
+    reused.accept(delivery(1, 'turn', frame('turn/started', { turn: { id: context.turnId } })));
+    const start = (sequence: number, phase: 'commentary' | 'final_answer') =>
+      reused.accept(
+        delivery(
+          sequence,
+          `start-${sequence}`,
+          frame('item/started', {
+            threadId: context.threadId,
+            turnId: context.turnId,
+            item: { id: 'same-item', type: 'agentMessage', text: '', phase },
+          }),
+        ),
+      );
+    start(2, 'commentary');
+    reused.accept(
+      delivery(
+        3,
+        'delta',
+        frame('item/agentMessage/delta', {
+          threadId: context.threadId,
+          turnId: context.turnId,
+          itemId: 'same-item',
+          delta: 'x',
+        }),
+      ),
+    );
+    reused.accept(
+      delivery(
+        4,
+        'complete',
+        frame('item/completed', {
+          threadId: context.threadId,
+          turnId: context.turnId,
+          item: { id: 'same-item', type: 'agentMessage', text: 'x', phase: 'commentary' },
+        }),
+      ),
+    );
+    assert.throws(() => start(5, 'final_answer'), /unexpected app-server text item start/);
+
+    const phaseChange = new OfflineCodexEventProjector(context);
+    phaseChange.accept(
+      delivery(1, 'turn', frame('turn/started', { turn: { id: context.turnId } })),
+    );
+    phaseChange.accept(
+      delivery(
+        2,
+        'start',
+        frame('item/started', {
+          threadId: context.threadId,
+          turnId: context.turnId,
+          item: { id: 'phase-item', type: 'agentMessage', text: '', phase: 'partial_answer' },
+        }),
+      ),
+    );
+    assert.throws(
+      () =>
+        phaseChange.accept(
+          delivery(
+            3,
+            'complete',
+            frame('item/completed', {
+              threadId: context.threadId,
+              turnId: context.turnId,
+              item: { id: 'phase-item', type: 'agentMessage', text: '', phase: 'final_answer' },
+            }),
+          ),
+        ),
+      /completion mismatch/,
+    );
   });
 
   it('rejects a tool attempt at the offline parser boundary', () => {
