@@ -292,6 +292,93 @@ test('C-2 start requires current registration and armed lease; denials dispatch 
     }),
   );
   assert.equal(recorder.calls.filter((call) => call.operation === 'start').length, 1);
+
+  const registrationModel = new FakeAuthorizationAuthority();
+  const registrationInput = {
+    runId,
+    generation: 1,
+    registrationId: 'ordered-reg-1',
+    revision: 1,
+    digest: 'sha256:ordered-reg-1',
+    handle: 'ordered-handle-1',
+  };
+  const firstRegistration = registrationModel.registerRuntime(registrationInput);
+  assert.equal(firstRegistration.ok, true);
+  assert.equal(registrationModel.registerRuntime(registrationInput).replayed, true);
+  assert.equal(
+    registrationModel.registerRuntime({ ...registrationInput, revision: 0 }).reason,
+    'registration_invalid',
+  );
+  assert.equal(
+    registrationModel.registerRuntime({
+      ...registrationInput,
+      registrationId: 'conflicting-same-revision',
+    }).reason,
+    'registration_conflict',
+  );
+  const newerRegistration = registrationModel.registerRuntime({
+    ...registrationInput,
+    registrationId: 'ordered-reg-2',
+    revision: 2,
+    digest: 'sha256:ordered-reg-2',
+    handle: 'ordered-handle-2',
+  });
+  assert.equal(newerRegistration.ok, true);
+  assert.equal(
+    registrationModel.registerRuntime({ ...registrationInput, revision: 1 }).reason,
+    'stale_registration',
+  );
+  assert.equal(
+    registrationModel.armStopLease({
+      runId,
+      generation: 1,
+      stopLeaseId: 'stale-armed-lease',
+      registrationId: registrationInput.registrationId,
+      registrationRevision: registrationInput.revision,
+      registrationDigest: registrationInput.digest,
+      absoluteDeadline: 2000,
+      expiresAt: 2200,
+      maximumTerminationGraceMs: 100,
+      evidenceWindowMs: 100,
+    }).reason,
+    'stop_registration_mismatch',
+  );
+  assert.equal(
+    registrationModel.reserve({
+      ...start,
+      registrationId: registrationInput.registrationId,
+      registrationRevision: registrationInput.revision,
+      registrationDigest: registrationInput.digest,
+      stopLeaseId: 'stale-armed-lease',
+    }).reason,
+    'stop_registration_missing',
+  );
+
+  const { stop: stopRegistrationModel, request: oldStopRequest } = stopFixture();
+  const originalRegistration = stopRegistrationModel.registrations.get(`${runId}:1`);
+  assert.equal(stopRegistrationModel.register(originalRegistration).replayed, true);
+  assert.equal(
+    stopRegistrationModel.register({ ...originalRegistration, revision: 0 }).reason,
+    'registration_invalid',
+  );
+  assert.equal(
+    stopRegistrationModel.register({
+      ...originalRegistration,
+      handle: 'same-revision-substitution',
+    }).reason,
+    'registration_conflict',
+  );
+  const replacement = stopRegistrationModel.register({
+    ...originalRegistration,
+    revision: 2,
+    registrationId: 'reg-2',
+    digest: 'sha256:reg-2',
+    handle: 'opaque-reg-handle-2',
+  });
+  assert.equal(replacement.ok, true);
+  assert.equal(stopRegistrationModel.register(originalRegistration).reason, 'stale_registration');
+  assert.equal(stopRegistrationModel.requestStop(oldStopRequest).ok, false);
+
   const preFenced = new FakeAuthorizationAuthority();
   preFenced.recordStopIntent({ runId, generation: 1, stopOperationId: 'stop-before-registration' });
   assert.equal(
@@ -437,6 +524,18 @@ test('R-03 Gateway and Engine observations cannot authorize or prove termination
   );
   stop.fenceBeforeRegistration({ runId, generation: 1, stopId: 'pre-registration-stop' });
   assert.equal(
+    stop.confirm('pre-registration-stop', {
+      source: 'synthetic-actuator',
+      runId,
+      generation: 1,
+      registrationId: undefined,
+      inventoryComplete: true,
+      remainingProcesses: 0,
+    }).status,
+    'UNKNOWN',
+  );
+  assert.equal(stop.records.get('pre-registration-stop').status, 'UNKNOWN');
+  assert.equal(
     stop.register({
       runId,
       generation: 1,
@@ -529,6 +628,19 @@ test('C-3 rollback, stale revisions, duplicate receipts and unavailable anchor a
     }).reason,
     'stale_revision',
   );
+  assert.equal(
+    ledger.restore({ ...before, authorizations: [] }, { freshEpoch: true }).reason,
+    'snapshot_identity_set',
+  );
+  assert.equal(
+    ledger.restore({ ...before, leases: [] }, { freshEpoch: true }).reason,
+    'snapshot_identity_set',
+  );
+  assert.equal(
+    ledger.restore({ ...before, authorizations: [['auth-1']] }, { freshEpoch: true }).reason,
+    'snapshot_identity_set',
+  );
+  assert.equal(ledger.restore(null, { freshEpoch: true }).reason, 'fresh_epoch_required');
 
   const intent = {
     transitionId: 'duplicate',

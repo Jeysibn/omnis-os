@@ -212,6 +212,8 @@ export class FakeStopAuthority {
     if (
       !value?.runId ||
       !Number.isSafeInteger(value.generation) ||
+      !Number.isSafeInteger(value.revision) ||
+      value.revision < 1 ||
       !value.registrationId ||
       !value.digest ||
       !value.handle ||
@@ -219,6 +221,25 @@ export class FakeStopAuthority {
     )
       return reject('registration_invalid');
     const registration = Object.freeze({ ...value, fixtureOnly: true });
+    const current = this.registrations.get(id);
+    if (current) {
+      const binding = (entry) =>
+        stable({
+          runId: entry.runId,
+          generation: entry.generation,
+          registrationId: entry.registrationId,
+          revision: entry.revision,
+          digest: entry.digest,
+          handle: entry.handle,
+          bootId: entry.bootId,
+        });
+      if (registration.revision < current.revision) return reject('stale_registration');
+      if (registration.revision === current.revision)
+        return binding(registration) === binding(current)
+          ? { ok: true, registration: current, replayed: true }
+          : reject('registration_conflict');
+      this.leases.delete(id);
+    }
     this.registrations.set(id, registration);
     return { ok: true, registration };
   }
@@ -242,7 +263,14 @@ export class FakeStopAuthority {
 
   fenceBeforeRegistration({ runId, generation, stopId }) {
     this.fenced.add(scope({ runId, generation }));
-    this.records.set(stopId, { status: 'UNKNOWN', runId, generation, evidence: null });
+    this.records.set(stopId, {
+      status: 'UNKNOWN',
+      runId,
+      generation,
+      registrationId: null,
+      attempted: false,
+      evidence: null,
+    });
     return { ok: true, status: 'UNKNOWN', fixtureOnly: true };
   }
 
@@ -282,6 +310,7 @@ export class FakeStopAuthority {
       generation: request.generation,
       registrationId: registration.registrationId,
       stopId: request.stopId,
+      attempted: true,
       evidence: null,
     };
     this.records.set(request.stopId, record);
@@ -299,6 +328,8 @@ export class FakeStopAuthority {
           status: 'UNKNOWN',
           runId: lease.runId,
           generation: lease.generation,
+          registrationId: registration?.registrationId ?? null,
+          attempted: false,
           evidence: null,
         });
         return { status: 'UNKNOWN', reason: 'actuator_unavailable' };
@@ -311,6 +342,7 @@ export class FakeStopAuthority {
           generation: lease.generation,
           registrationId: registration.registrationId,
           stopId: lease.stopId,
+          attempted: true,
           evidence: null,
         };
         this.records.set(lease.stopId, record);
@@ -333,6 +365,8 @@ export class FakeStopAuthority {
     const record = this.records.get(stopId);
     if (
       !record ||
+      record.attempted !== true ||
+      !record.registrationId ||
       peerIdentity !== this.actuatorPeer ||
       !storageAvailable ||
       evidence?.source !== 'synthetic-actuator' ||
@@ -611,9 +645,17 @@ export class FakeAuthorityLedger {
   }
 
   restore(snapshot, { freshEpoch = false } = {}) {
-    if (!freshEpoch || snapshot.epoch !== this.epoch) return reject('fresh_epoch_required');
+    if (!freshEpoch || !snapshot || snapshot.epoch !== this.epoch)
+      return reject('fresh_epoch_required');
     if ([...this.transitions.values()].some((entry) => !entry.finalized))
       return reject('transition_pending');
+    if (
+      !Array.isArray(snapshot.authorizations) ||
+      !Array.isArray(snapshot.leases) ||
+      !this.#hasExactRecordSet(snapshot.authorizations, this.authorizations) ||
+      !this.#hasExactRecordSet(snapshot.leases, this.leases)
+    )
+      return reject('snapshot_identity_set');
     for (const [id, record] of snapshot.authorizations) {
       const anchored = this.anchor.entries.get(`authorization_revocation:${id}`);
       if (!anchored || anchored.revision !== record.revision || anchored.fenced !== record.revoked)
@@ -629,6 +671,29 @@ export class FakeAuthorityLedger {
         return reject('rollback_detected');
     }
     return { ok: true, fixtureOnly: true };
+  }
+
+  #hasExactRecordSet(entries, expected) {
+    if (
+      !Array.isArray(entries) ||
+      entries.some(
+        (entry) =>
+          !Array.isArray(entry) ||
+          entry.length !== 2 ||
+          typeof entry[0] !== 'string' ||
+          !entry[1] ||
+          typeof entry[1] !== 'object' ||
+          !Number.isSafeInteger(entry[1].revision) ||
+          typeof (entry[1].revoked ?? entry[1].superseded) !== 'boolean',
+      )
+    )
+      return false;
+    const ids = entries.map(([id]) => id);
+    return (
+      ids.length === expected.size &&
+      new Set(ids).size === expected.size &&
+      ids.every((id) => expected.has(id))
+    );
   }
 
   snapshot() {

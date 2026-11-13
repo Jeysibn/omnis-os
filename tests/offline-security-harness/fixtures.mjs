@@ -318,7 +318,7 @@ export class FakeAuthorizationAuthority {
       signature: 'synthetic-fixture-only',
     });
     operation.activeJti = jti;
-    this.tickets.set(jti, { ticket, operation, state: 'reserved' });
+    this.tickets.set(jti, { ticket, operation, state: 'reserved', dispatchClaimed: false });
     return { ok: true, ticket };
   }
 
@@ -328,6 +328,10 @@ export class FakeAuthorizationAuthority {
     if (!record || JSON.stringify(record.ticket) !== JSON.stringify(ticket))
       return rejected('authorization_failure');
     if (record.state !== 'reserved') return rejected('replay_conflict');
+    if (this.revoked) return rejected('authorization_revoked');
+    if (ticket.authorizationRevision !== this.authorizationRevision)
+      return rejected('stale_revision');
+    if (ticket.leaseRevision !== this.leaseRevision) return rejected('lease_lost');
     if (!Number.isSafeInteger(now) || now < 0 || now >= ticket.expiresAt)
       return rejected('ticket_expired');
     if (!Buffer.isBuffer(payload) && !(payload instanceof Uint8Array))
@@ -342,9 +346,26 @@ export class FakeAuthorizationAuthority {
     return { ok: true, status: 'consumed' };
   }
 
+  claimDispatch(jti, { now = this.now } = {}) {
+    const record = this.tickets.get(jti);
+    if (!this.available) return rejected('authority_unavailable');
+    if (!record || record.state !== 'consumed' || record.dispatchClaimed)
+      return rejected('dispatch_not_permitted');
+    if (this.revoked) return rejected('authorization_revoked');
+    if (record.ticket.authorizationRevision !== this.authorizationRevision)
+      return rejected('stale_revision');
+    if (record.ticket.leaseRevision !== this.leaseRevision) return rejected('lease_lost');
+    if (!Number.isSafeInteger(now) || now < 0 || now >= record.ticket.expiresAt)
+      return rejected('ticket_expired');
+    record.dispatchClaimed = true;
+    record.state = 'dispatched';
+    return { ok: true, fixtureOnly: true };
+  }
+
   completeStep(jti, outcome) {
     const record = this.tickets.get(jti);
-    if (!record || record.state !== 'consumed') return rejected('invalid_transition');
+    if (!record || !['consumed', 'dispatched'].includes(record.state))
+      return rejected('invalid_transition');
     if (outcome === 'unknown') {
       record.state = 'unknown';
       record.operation.status = 'unknown';
@@ -407,6 +428,35 @@ export class FakeAuthorizationAuthority {
       revoked: false,
       fixtureOnly: true,
     });
+    const current = this.registrations.get(scope);
+    if (current) {
+      const currentBody = JSON.stringify({
+        runId: current.runId,
+        generation: current.generation,
+        registrationId: current.registrationId,
+        revision: current.revision,
+        digest: current.digest,
+        handle: current.handle,
+        environmentEpoch: current.environmentEpoch,
+        revoked: current.revoked,
+      });
+      const nextBody = JSON.stringify({
+        runId: registration.runId,
+        generation: registration.generation,
+        registrationId: registration.registrationId,
+        revision: registration.revision,
+        digest: registration.digest,
+        handle: registration.handle,
+        environmentEpoch: registration.environmentEpoch,
+        revoked: registration.revoked,
+      });
+      if (registration.revision < current.revision) return rejected('stale_registration');
+      if (registration.revision === current.revision)
+        return currentBody === nextBody
+          ? { ok: true, registration: current, replayed: true }
+          : rejected('registration_conflict');
+      this.armedStopLeases.delete(scope);
+    }
     this.registrations.set(scope, registration);
     return { ok: true, registration };
   }

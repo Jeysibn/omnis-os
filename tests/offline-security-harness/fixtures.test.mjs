@@ -324,10 +324,30 @@ test('revocation and lease supersession serialize with reservation; concurrent c
   const after = new FakeAuthorizationAuthority();
   const reservation = after.reserve(validIntent);
   after.revoke();
-  assert.equal(after.consume(reservation.ticket, { payload }).status, 'consumed');
+  assert.equal(after.consume(reservation.ticket, { payload }).reason, 'authorization_revoked');
+  assert.equal(after.claimDispatch(reservation.ticket.jti).reason, 'dispatch_not_permitted');
   assert.equal(
     after.reserve({ ...validIntent, stepIndex: 1, stepType: 'start' }).reason,
     'authorization_revoked',
+  );
+
+  const consumedBeforeFence = new FakeAuthorizationAuthority();
+  const consumedTicket = consumedBeforeFence.reserve(validIntent).ticket;
+  assert.equal(consumedBeforeFence.consume(consumedTicket, { payload }).status, 'consumed');
+  consumedBeforeFence.revoke();
+  assert.equal(
+    consumedBeforeFence.claimDispatch(consumedTicket.jti).reason,
+    'authorization_revoked',
+  );
+
+  const dispatchedBeforeFence = new FakeAuthorizationAuthority();
+  const dispatchedTicket = dispatchedBeforeFence.reserve(validIntent).ticket;
+  assert.equal(dispatchedBeforeFence.consume(dispatchedTicket, { payload }).status, 'consumed');
+  assert.equal(dispatchedBeforeFence.claimDispatch(dispatchedTicket.jti).ok, true);
+  dispatchedBeforeFence.revoke();
+  assert.equal(
+    dispatchedBeforeFence.claimDispatch(dispatchedTicket.jti).reason,
+    'dispatch_not_permitted',
   );
 
   const racing = new FakeAuthorizationAuthority();
