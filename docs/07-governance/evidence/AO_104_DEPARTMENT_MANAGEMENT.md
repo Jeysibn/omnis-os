@@ -1,6 +1,6 @@
 # AO-104 Department Management and Profile Write Validation Evidence
 
-**Historical increment:** This document began as the PR #19 department foundation and issue #18 validation prerequisite. Current source evidence is assessed at `c8a168bfd12801f8b5ab374af2d79d91ea4bfee5` (main after #114 and #110); the original implementation and CI SHAs below remain historical unless stated otherwise.
+**Historical increment:** This document began as the PR #19 department foundation and issue #18 validation prerequisite. Current source evidence is assessed at `3d37b9f0b645e86963b6174de0e3c7ff2771dbcf` (main after #114, #110, and #116); the original implementation and CI SHAs below remain historical unless stated otherwise.
 
 ## Scope
 

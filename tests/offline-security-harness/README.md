@@ -2,7 +2,7 @@
 
 This directory contains test-only, deterministic fixtures for the proposed P0-R2.1 runtime contract. It does not implement a Gateway, Authorizer, Docker client, terminator, durable journal, or provider connector. Its fixtures use in-memory state and synthetic identities, IDs, payloads, signatures, and responses.
 
-**Current main baseline:** `c8a168bfd12801f8b5ab374af2d79d91ea4bfee5` (PR #110 merged). Runtime-protocol code is consumed unchanged. Contract reference: reviewed PR #110 head `1ba369cc2a719595069973d3f5d8faf366631c12`, merged as `c8a168bfd12801f8b5ab374af2d79d91ea4bfee5`. Stage A remains fixture-only; M-3 is still an owner decision, M-4 is still open design, and these fixtures do not authorize later stages.
+**Current main baseline:** `3d37b9f0b645e86963b6174de0e3c7ff2771dbcf` (PRs #110 and #116 merged). Runtime-protocol code is consumed unchanged. Contract reference: reviewed PR #110 head `1ba369cc2a719595069973d3f5d8faf366631c12`, merged as `c8a168bfd12801f8b5ab374af2d79d91ea4bfee5`. Stage A remains fixture-only; M-3 is still an owner decision, M-4 is still open design, and these fixtures do not authorize later stages.
 
 Use Node 24, matching the current CI runtime.
 
