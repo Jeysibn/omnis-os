@@ -166,6 +166,8 @@ test('fake issuer binds exact payload, revisions, identity and one ordered ticke
     },
   );
   assert.equal(authority.consume(first.ticket, { payload }).status, 'consumed');
+  assert.equal(authority.completeStep(first.ticket.jti, 'completed').reason, 'invalid_transition');
+  assert.equal(authority.claimDispatch(first.ticket.jti).ok, true);
   assert.equal(authority.completeStep(first.ticket.jti, 'completed').ok, true);
 
   const registration = authority.registerRuntime({
@@ -326,6 +328,7 @@ test('revocation and lease supersession serialize with reservation; concurrent c
   after.revoke();
   assert.equal(after.consume(reservation.ticket, { payload }).reason, 'authorization_revoked');
   assert.equal(after.claimDispatch(reservation.ticket.jti).reason, 'dispatch_not_permitted');
+  assert.equal(after.dispatchClaims.size, 0);
   assert.equal(
     after.reserve({ ...validIntent, stepIndex: 1, stepType: 'start' }).reason,
     'authorization_revoked',
@@ -335,10 +338,13 @@ test('revocation and lease supersession serialize with reservation; concurrent c
   const consumedTicket = consumedBeforeFence.reserve(validIntent).ticket;
   assert.equal(consumedBeforeFence.consume(consumedTicket, { payload }).status, 'consumed');
   consumedBeforeFence.revoke();
+  assert.equal(consumedBeforeFence.claimDispatch(consumedTicket.jti).ok, true);
+  assert.equal(consumedBeforeFence.dispatchClaims.has(consumedTicket.jti), true);
   assert.equal(
     consumedBeforeFence.claimDispatch(consumedTicket.jti).reason,
-    'authorization_revoked',
+    'dispatch_not_permitted',
   );
+  assert.equal(consumedBeforeFence.dispatchClaims.size, 1);
 
   const dispatchedBeforeFence = new FakeAuthorizationAuthority();
   const dispatchedTicket = dispatchedBeforeFence.reserve(validIntent).ticket;
@@ -349,6 +355,7 @@ test('revocation and lease supersession serialize with reservation; concurrent c
     dispatchedBeforeFence.claimDispatch(dispatchedTicket.jti).reason,
     'dispatch_not_permitted',
   );
+  assert.equal(dispatchedBeforeFence.dispatchClaims.size, 1);
 
   const racing = new FakeAuthorizationAuthority();
   const ticket = racing.reserve(validIntent).ticket;

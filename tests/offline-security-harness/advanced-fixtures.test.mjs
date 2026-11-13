@@ -211,6 +211,11 @@ test('C-2 start requires current registration and armed lease; denials dispatch 
   const created = authority.reserve(intent());
   assert.equal(created.ok, true);
   assert.equal(authority.consume(created.ticket, { payload }).ok, true);
+  assert.equal(
+    authority.completeStep(created.ticket.jti, 'completed').reason,
+    'invalid_transition',
+  );
+  assert.equal(authority.claimDispatch(created.ticket.jti).ok, true);
   assert.equal(authority.completeStep(created.ticket.jti, 'completed').ok, true);
 
   const registration = authority.registerRuntime({
@@ -398,6 +403,7 @@ test('C-2 start requires current registration and armed lease; denials dispatch 
     intent({ operationId: '44444444-4444-4444-8444-444444444444' }),
   );
   expiredAuthority.consume(create.ticket, { payload });
+  expiredAuthority.claimDispatch(create.ticket.jti);
   expiredAuthority.completeStep(create.ticket.jti, 'completed');
   const expReg = expiredAuthority.registerRuntime({
     runId,
@@ -445,13 +451,29 @@ test('C-2 stop deadline is independent of Authorizer/Gateway and missing confirm
 });
 
 test('terminator and actuator reject forged, stale, foreign and overbroad stop requests', () => {
-  const { stop, request } = stopFixture();
+  const { stop, registration, request } = stopFixture();
+  const lease = {
+    ...registration,
+    registrationRevision: registration.revision,
+    registrationDigest: registration.digest,
+    stopId: 'stop-1',
+    stopCapability: 'stop-cap-1',
+    deadline: 2000,
+    expiresAt: 2200,
+    signatureValid: true,
+  };
+  assert.equal(stop.arm(lease).replayed, true);
+  assert.equal(
+    stop.arm({ ...lease, stopId: 'replacement-stop', stopCapability: 'replacement-cap' }).reason,
+    'stop_lease_conflict',
+  );
   const denials = [
     { ...request, peerIdentity: 'launcher-uid' },
     { ...request, handle: 'substituted-handle' },
     { ...request, runId: otherRunId },
     { ...request, generation: 2 },
     { ...request, stopCapability: 'stale-capability' },
+    { ...request, stopId: 'substituted-first-use-stop-id' },
     { ...request, operation: 'kill_any_pid' },
     { ...request, pid: 1 },
     { ...request, path: '/tmp/anything' },
@@ -461,7 +483,7 @@ test('terminator and actuator reject forged, stale, foreign and overbroad stop r
   assert.equal(stop.requestStop(request).ok, true);
   assert.equal(
     stop.requestStop({ ...request, stopId: 'another-stop' }).reason,
-    'stop_capability_reused',
+    'stop_authorization',
   );
   assert.equal(
     stop.confirm('stop-1', {
@@ -641,6 +663,17 @@ test('C-3 rollback, stale revisions, duplicate receipts and unavailable anchor a
     'snapshot_identity_set',
   );
   assert.equal(ledger.restore(null, { freshEpoch: true }).reason, 'fresh_epoch_required');
+  const rollbackAnchor = new FakeIndependentAnchor();
+  const restoredGuest = new FakeAuthorityLedger({ anchor: rollbackAnchor });
+  restoredGuest.authorizations.clear();
+  restoredGuest.leases.clear();
+  assert.equal(
+    restoredGuest.restore(
+      { epoch: rollbackAnchor.epoch, authorizations: [], leases: [] },
+      { freshEpoch: true },
+    ).reason,
+    'snapshot_identity_set',
+  );
 
   const intent = {
     transitionId: 'duplicate',

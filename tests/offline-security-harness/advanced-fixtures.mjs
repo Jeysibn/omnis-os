@@ -252,12 +252,40 @@ export class FakeStopAuthority {
       value.registrationRevision !== registration.revision ||
       value.registrationDigest !== registration.digest ||
       value.signatureValid !== true ||
+      typeof value.stopId !== 'string' ||
+      value.stopId.length === 0 ||
+      typeof value.stopCapability !== 'string' ||
+      value.stopCapability.length === 0 ||
       !Number.isSafeInteger(value.deadline) ||
       !Number.isSafeInteger(value.expiresAt) ||
       value.expiresAt < value.deadline
     )
       return reject('stop_lease_invalid');
-    this.leases.set(scope(value), Object.freeze({ ...value, fixtureOnly: true }));
+    const id = scope(value);
+    const lease = Object.freeze({ ...value, fixtureOnly: true });
+    const current = this.leases.get(id);
+    if (current) {
+      const binding = (entry) =>
+        stable(
+          Object.fromEntries(
+            [
+              'runId',
+              'generation',
+              'registrationId',
+              'registrationRevision',
+              'registrationDigest',
+              'stopId',
+              'stopCapability',
+              'deadline',
+              'expiresAt',
+            ].map((key) => [key, entry[key]]),
+          ),
+        );
+      return binding(lease) === binding(current)
+        ? { ok: true, replayed: true, fixtureOnly: true }
+        : reject('stop_lease_conflict');
+    }
+    this.leases.set(id, lease);
     return { ok: true, fixtureOnly: true };
   }
 
@@ -293,6 +321,7 @@ export class FakeStopAuthority {
       request.generation !== registration.generation ||
       request.runId !== registration.runId ||
       request.stopCapability !== lease.stopCapability ||
+      request.stopId !== lease.stopId ||
       this.now >= lease.expiresAt ||
       typeof request.stopId !== 'string' ||
       request.stopId.length === 0 ||
@@ -391,12 +420,15 @@ export class FakeIndependentAnchor {
     this.epoch = epoch;
     this.sequence = 0;
     this.entries = new Map();
+    this.protectedIdentities = new Set();
     this.transitions = new Map();
     this.nonces = new Set();
   }
 
   seed(kind, subjectId, revision) {
-    this.entries.set(`${kind}:${subjectId}`, { revision, fenced: false });
+    const key = `${kind}:${subjectId}`;
+    this.entries.set(key, { revision, fenced: false });
+    this.protectedIdentities.add(key);
   }
 
   preFence(intent) {
@@ -652,8 +684,11 @@ export class FakeAuthorityLedger {
     if (
       !Array.isArray(snapshot.authorizations) ||
       !Array.isArray(snapshot.leases) ||
-      !this.#hasExactRecordSet(snapshot.authorizations, this.authorizations) ||
-      !this.#hasExactRecordSet(snapshot.leases, this.leases)
+      !this.#hasExactRecordSet(
+        snapshot.authorizations,
+        this.#protectedSubjectIds('authorization_revocation'),
+      ) ||
+      !this.#hasExactRecordSet(snapshot.leases, this.#protectedSubjectIds('lease_supersession'))
     )
       return reject('snapshot_identity_set');
     for (const [id, record] of snapshot.authorizations) {
@@ -673,7 +708,16 @@ export class FakeAuthorityLedger {
     return { ok: true, fixtureOnly: true };
   }
 
-  #hasExactRecordSet(entries, expected) {
+  #protectedSubjectIds(kind) {
+    const prefix = `${kind}:`;
+    return new Set(
+      [...this.anchor.protectedIdentities]
+        .filter((identity) => identity.startsWith(prefix))
+        .map((identity) => identity.slice(prefix.length)),
+    );
+  }
+
+  #hasExactRecordSet(entries, expectedIds) {
     if (
       !Array.isArray(entries) ||
       entries.some(
@@ -690,9 +734,9 @@ export class FakeAuthorityLedger {
       return false;
     const ids = entries.map(([id]) => id);
     return (
-      ids.length === expected.size &&
-      new Set(ids).size === expected.size &&
-      ids.every((id) => expected.has(id))
+      ids.length === expectedIds.size &&
+      new Set(ids).size === expectedIds.size &&
+      ids.every((id) => expectedIds.has(id))
     );
   }
 

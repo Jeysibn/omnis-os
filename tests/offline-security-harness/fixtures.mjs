@@ -149,6 +149,7 @@ export class FakeAuthorizationAuthority {
     this.nextReservation = 1;
     this.operations = new Map();
     this.tickets = new Map();
+    this.dispatchClaims = new Set();
     this.registrations = new Map();
     this.armedStopLeases = new Map();
     this.fencedGenerations = new Set();
@@ -351,26 +352,29 @@ export class FakeAuthorizationAuthority {
     if (!this.available) return rejected('authority_unavailable');
     if (!record || record.state !== 'consumed' || record.dispatchClaimed)
       return rejected('dispatch_not_permitted');
-    if (this.revoked) return rejected('authorization_revoked');
-    if (record.ticket.authorizationRevision !== this.authorizationRevision)
-      return rejected('stale_revision');
-    if (record.ticket.leaseRevision !== this.leaseRevision) return rejected('lease_lost');
     if (!Number.isSafeInteger(now) || now < 0 || now >= record.ticket.expiresAt)
       return rejected('ticket_expired');
+    // Consumption is the modeled linearization point for this exact step.
+    // A later revocation does not roll back a consumed step; a pre-consumption
+    // revocation is rejected by consume(). This is fixture contract behavior,
+    // not a claim of cross-service atomicity.
     record.dispatchClaimed = true;
     record.state = 'dispatched';
+    this.dispatchClaims.add(jti);
     return { ok: true, fixtureOnly: true };
   }
 
   completeStep(jti, outcome) {
     const record = this.tickets.get(jti);
-    if (!record || !['consumed', 'dispatched'].includes(record.state))
-      return rejected('invalid_transition');
+    if (!record) return rejected('invalid_transition');
     if (outcome === 'unknown') {
+      if (!['consumed', 'dispatched'].includes(record.state)) return rejected('invalid_transition');
       record.state = 'unknown';
       record.operation.status = 'unknown';
       return { ok: true, state: 'unknown' };
     }
+    if (record.state !== 'dispatched' || !record.dispatchClaimed)
+      return rejected('invalid_transition');
     if (outcome !== 'completed' && outcome !== 'failed') return rejected('invalid_transition');
     record.state = outcome;
     if (outcome === 'failed') {
