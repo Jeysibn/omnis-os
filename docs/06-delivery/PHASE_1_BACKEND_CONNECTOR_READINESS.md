@@ -3,7 +3,7 @@
 **Original baseline:** `7bb6e9d3a79e749b5dfaf63561bb442fde188d9`
 **Latest source reassessment:** `3d37b9f0b645e86963b6174de0e3c7ff2771dbcf` (main after PRs #114, #110, and #116)
 **Assessment date:** 2026-11-14
-**Post-merge main CI:** [run 43487487274](https://github.com/Jeysibn/omnis-os/actions/runs/43487487274) is the post-#116 main CI run and remains in progress.
+**Post-merge main CI:** [run 43487487274](https://github.com/Jeysibn/omnis-os/actions/runs/43487487274) passed all ten required jobs after #116 merged.
 **Scope:** Backend readiness and credential-free synthetic protocol harness
 **Decision:** Keep real connector implementation and real inference blocked.
 
