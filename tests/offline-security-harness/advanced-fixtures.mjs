@@ -75,11 +75,16 @@ export class FakeOutcomeLedger {
     let operation = this.operations.get(ticket.operationId);
     if (!operation) {
       if (ticket.stepIndex !== 0 || ticket.stepType !== 'create') return reject('step_order');
-      operation = { nextStep: 0, state: 'active' };
+      operation = { nextStep: 0, state: 'active', activeJti: null };
       this.operations.set(ticket.operationId, operation);
     }
-    if (operation.state !== 'active' || ticket.stepIndex !== operation.nextStep)
+    if (
+      operation.state !== 'active' ||
+      operation.activeJti ||
+      ticket.stepIndex !== operation.nextStep
+    )
       return reject('step_order');
+    operation.activeJti = ticket.jti;
     this.tickets.set(ticket.jti, { ticket: clone(ticket), state: 'RESERVED' });
     return { ok: true, fixtureOnly: true };
   }
@@ -112,13 +117,17 @@ export class FakeOutcomeLedger {
     if (
       !operation ||
       operation.state !== 'active' ||
+      operation.activeJti !== record.ticket.jti ||
       record.ticket.stepIndex !== operation.nextStep
     )
       return reject('step_order');
     if (!this.#transitionAllowed(record.state, body.state)) return reject('outcome_order');
     record.state = body.state;
     if (body.state === 'UNKNOWN') operation.state = 'unknown';
-    if (body.state === 'ACKNOWLEDGED') operation.nextStep++;
+    if (body.state === 'ACKNOWLEDGED') {
+      operation.nextStep++;
+      operation.activeJti = null;
+    }
     this.revision++;
     const receipt = Object.freeze({
       reportId: body.reportId,
@@ -163,7 +172,10 @@ export class FakeOutcomeLedger {
     if (['CONSUMED', 'DISPATCHED'].includes(record.state)) {
       record.state = 'UNKNOWN';
       const operation = this.operations.get(record.ticket.operationId);
-      if (operation) operation.state = 'unknown';
+      if (operation) {
+        operation.state = 'unknown';
+        operation.activeJti = null;
+      }
       this.revision++;
     }
     return { ok: true, state: record.state, revision: this.revision, fixtureOnly: true };

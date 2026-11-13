@@ -86,6 +86,11 @@ test('C-1 accepts only authenticated, correctly bound Gateway outcome reports', 
   const t = ticket();
   const ledger = new FakeOutcomeLedger();
   ledger.register(t);
+  assert.equal(
+    ledger.register({ ...t, jti: 'duplicate-ticket', reservationId: 'duplicate-reservation' })
+      .reason,
+    'step_order',
+  );
   const nextTicket = {
     ...t,
     jti: 'fixture-step-2',
