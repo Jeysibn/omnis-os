@@ -566,3 +566,7 @@ No Phase A experiment, protected runtime activation, live provider inference, ph
 - [P0-R2.1 rootless compatibility harness design](./P0_R2_1_ROOTLESS_COMPATIBILITY_HARNESS_DESIGN.md)
 - [P0-R2 Docker-only proof register](./P0_R2_DOCKER_ONLY_PROOF_REGISTER.md)
 - [Phase 1 Docker-only platform readiness](./PHASE1_DOCKER_ONLY_PLATFORM_READINESS.md)
+
+## Controlling remediation references
+
+The [controlling remediation contract](./P0_R2_1_SECURITY_REVIEW_PACKET.md#controlling-remediation-contract--c-1-c-2-c-3-r-03-and-m-4) supersedes conflicting earlier state, stop, anchor and stage proposals. C-1 defines authenticated Gateway outcome reports and Authorizer ledger ownership; C-2 binds stop leases without a cgroup at admission; C-3 anchors consumption, revocation and lease revisions. Gateway stop/kill is denied; independent termination is verified separately. M-3 remains **BLOCKED — OWNER DECISION** and shared-daemon per-run registration M-4 remains **OPEN — DESIGN**. E7 is Stage C only after E1–E6; host UDS peers use host UID/GID, never container UID translation. No proposed control is implemented or tested.
