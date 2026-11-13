@@ -100,35 +100,39 @@ The fixture contract provides:
 - **F3, Low — fixed:** text item start requires an empty initial text value so unprojected prefix text cannot be silently omitted.
 - **F4, Low — fixed:** malformed, unsupported, identity-invalid, or out-of-order frames latch the nonterminal projector to an unknown state. Later stream events are rejected pending reconciliation. Terminal state is not changed by a late invalid frame.
 - **F5/F6, Low — fixed:** repeated projector cancellation is idempotent and returns the original cancellation or uncertainty event without incrementing its sequence. Both projector and reducer preserve cancellation uncertainty; generic unknown cannot be reconciled as cancelled without cancellation evidence.
-- **F7, Low — limitation tracked:** this fixture accepts one assistant text item and does not define how multiple commentary/final-answer items should be selected or combined. Phase-aware result selection remains a future connector contract decision; the fixture is not a production result parser.
-- **F8, Low — limitation tracked:** `FakeCodexAppServerRuntimeAdapter` retains its own in-process runtime integration parser rather than invoking `OfflineCodexEventProjector`. Its tests exercise the mock adapter path, while projector tests exercise parser rules; passing one suite does not prove parity. Consolidation is tracked in [issue #113](https://github.com/Jeysibn/omnis-os/issues/113) before any real connector is implemented.
+- **F7, Low — resolved in the offline contract:** the projector tracks distinct assistant-message IDs and phases. It streams phase-tagged text deltas, but only completed `final_answer` item text contributes to the run result; multiple final-answer items concatenate in delivery order. Commentary and partial-answer text never becomes a successful result. A completed turn with no final-answer item is rejected. A phase omitted by older synthetic fixtures defaults to `final_answer` for compatibility; future provider-version contracts must define omission semantics explicitly.
+- **F8, Low — resolved in the offline contract:** `FakeCodexAppServerRuntimeAdapter` sends raw synthetic notification frames through `OfflineCodexEventProjector`; the fake no longer has a second assistant-event lifecycle parser. Its in-process JSON-RPC response parser remains limited to fake-generated responses; assistant notification validation and duplicate-key handling use the shared projector. This demonstrates fixture/parser parity only, not compatibility with a live app-server binary.
+
+### Assistant-message phase and result policy
+
+The offline projector allows at most one active assistant text item at a time and requires each item ID to be unique within its turn. Item start, deltas, and completion must match the same thread, turn, item, and phase. Each completed item must match its accumulated deltas. `commentary` and `partial_answer` deltas remain separately labeled for display/contract tests; they are excluded from `output`. Completed `final_answer` items are concatenated in delivery order to form the deterministic run result. A successful terminal event requires at least one completed final-answer item and no unfinished text item. This is a synthetic contract choice, not a claim that every Codex app-server version emits this item sequence.
 
 ### Offline negative-test matrix
 
 The worker fixture test file covers these rows with local objects/strings and no socket or provider:
 
-|   # | Scenario                              | Contract assertion                                                                                |
-| --: | ------------------------------------- | ------------------------------------------------------------------------------------------------- |
-|   1 | Valid text-only request               | Exact bounded text item and no tool fields.                                                       |
-|   2 | Streamed text response                | Correlated deltas project in deterministic local sequence.                                        |
-|   3 | Tool-call attempt                     | Command execution item rejected.                                                                  |
-|   4 | Unsupported method/server request     | Tool-control request and unsupported method rejected.                                             |
-|   5 | Malformed message                     | Invalid JSON and duplicate object keys rejected before schema validation.                         |
-|   6 | Unknown event                         | Unknown notification rejected.                                                                    |
-|   7 | Duplicate event                       | Same synthetic delivery ID/bytes/sequence is idempotent; changed bytes or sequence are rejected.  |
-|   8 | Out-of-order event                    | Sequence gaps/reordering are rejected.                                                            |
-|   9 | Disconnect before terminal            | Outcome becomes unknown.                                                                          |
-|  10 | Lost submission acknowledgement       | Attempt state becomes unknown.                                                                    |
-|  11 | Cancellation before submit            | Operation reaches cancelled without a submission.                                                 |
-|  12 | Cancellation during stream            | Text remains correlated while cancellation is pending.                                            |
-|  13 | Lost cancellation acknowledgement     | State remains unknown, never cancelled by assumption.                                             |
-|  14 | Completion after cancellation request | Provider-reported completion remains completed.                                                   |
-|  15 | Duplicate terminal                    | Same delivery does not emit another terminal event.                                               |
-|  16 | Usage absent                          | Normalizes to unknown.                                                                            |
-|  17 | Malformed/inconsistent usage          | Invalid integers, totals, and extra billing fields rejected.                                      |
-|  18 | Oversized output                      | Frame and aggregate UTF-8 bounds reject excess data.                                              |
-|  19 | Identity mismatch                     | Run operation syntax plus thread/turn/item identities are checked; substituted identities reject. |
-|  20 | Recovery from unknown                 | Terminal reconciliation may resolve; submission transition remains forbidden.                     |
+|   # | Scenario                              | Contract assertion                                                                                              |
+| --: | ------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+|   1 | Valid text-only request               | Exact bounded text item and no tool fields.                                                                     |
+|   2 | Streamed text response                | Correlated deltas project in deterministic local sequence.                                                      |
+|   3 | Tool-call attempt                     | Command execution item rejected.                                                                                |
+|   4 | Unsupported method/server request     | Tool-control request and unsupported method rejected.                                                           |
+|   5 | Malformed message                     | Invalid JSON and duplicate object keys rejected before schema validation.                                       |
+|   6 | Unknown event                         | Unknown notification rejected.                                                                                  |
+|   7 | Duplicate event                       | Same synthetic delivery ID/bytes/sequence is idempotent; changed bytes or sequence are rejected.                |
+|   8 | Out-of-order event                    | Sequence gaps/reordering are rejected.                                                                          |
+|   9 | Disconnect before terminal            | Outcome becomes unknown.                                                                                        |
+|  10 | Lost submission acknowledgement       | Attempt state becomes unknown; the fake confirms the uncertain turn was submitted once and was not resubmitted. |
+|  11 | Cancellation before submit            | Operation reaches cancelled without a submission.                                                               |
+|  12 | Cancellation during stream            | Text remains correlated while cancellation is pending.                                                          |
+|  13 | Lost cancellation acknowledgement     | State remains unknown, never cancelled by assumption.                                                           |
+|  14 | Completion after cancellation request | Provider-reported completion remains completed.                                                                 |
+|  15 | Duplicate terminal                    | Same delivery does not emit another terminal event.                                                             |
+|  16 | Usage absent                          | Normalizes to unknown.                                                                                          |
+|  17 | Malformed/inconsistent usage          | Invalid integers, totals, and extra billing fields rejected.                                                    |
+|  18 | Oversized output                      | Frame and aggregate UTF-8 bounds reject excess data.                                                            |
+|  19 | Identity mismatch                     | Run operation syntax plus thread/turn/item identities are checked; substituted identities reject.               |
+|  20 | Recovery from unknown                 | Terminal reconciliation may resolve; submission transition remains forbidden.                                   |
 
 These tests do not prove a provider call, live protocol conformance, durable deduplication, owner authorization, host no-tool enforcement, provider cancellation, or external event recovery. Existing PostgreSQL mock recovery and persisted SSE tests remain the source-backed behavior for current execution; no database integration change is made here.
 
