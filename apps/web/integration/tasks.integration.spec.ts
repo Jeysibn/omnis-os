@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
-import { expect, test } from '@playwright/test';
+import { setTimeout as delay } from 'node:timers/promises';
+import { expect, request as playwrightRequest, test } from '@playwright/test';
 
 const ownerPassword = process.env.OMNIS_TEST_OWNER_PASSWORD;
 const frontendOrigin = process.env.OMNIS_TEST_FRONTEND_ORIGIN;
@@ -10,6 +11,8 @@ const lostAckRequestId = process.env.OMNIS_TEST_SYNTHETIC_LOST_ACK_REQUEST_ID;
 const cancellationRequestId = process.env.OMNIS_TEST_SYNTHETIC_CANCELLATION_REQUEST_ID;
 const composeJourneyResultPath = process.env.OMNIS_COMPOSE_JOURNEY_RESULT_PATH;
 const composeRecovery = process.env.OMNIS_COMPOSE_RECOVERY === '1';
+const acceptedTaskReconciliationPath = process.env.OMNIS_COMPOSE_ACCEPTED_TASK_RECONCILIATION_PATH;
+const composeAcceptanceReconciliation = process.env.OMNIS_COMPOSE_ACCEPTANCE_RECONCILIATION === '1';
 
 if (!frontendOrigin) throw new Error('The integration frontend Origin is not configured.');
 if (!ownerPassword) throw new Error('The disposable owner password is not configured.');
@@ -891,6 +894,117 @@ test('owner sees an authorized synthetic broker Run, ordered events, result and 
   await expect(
     page.getByRole('region', { name: `Event history for ${lostAckTaskTitle}` }),
   ).toContainText('unknown');
+});
+
+test('Compose reconciles a restored accepted task through the owner API', async ({ page }) => {
+  test.skip(
+    !composeAcceptanceReconciliation || !acceptedTaskReconciliationPath,
+    'Only runs after the disposable harness reopens an accepted task.',
+  );
+  test.setTimeout(120_000);
+  const fixture = JSON.parse(await readFile(acceptedTaskReconciliationPath!, 'utf8'));
+  expect(fixture.taskId).toMatch(/^[a-z0-9][a-z0-9_-]{0,127}$/i);
+  expect(fixture.runId).toMatch(/^[a-z0-9][a-z0-9_-]{0,127}$/i);
+  expect(fixture.staleRunId).toMatch(/^[a-z0-9][a-z0-9_-]{0,127}$/i);
+  expect(fixture.staleRunId).not.toBe(fixture.runId);
+  expect(fixture.receipt).toMatchObject({ runId: fixture.runId, acceptedBy: 'owner' });
+  expect(fixture.initialCounts).toEqual({ receipts: '1', ownerEvents: '1' });
+
+  await signIn(page);
+  const ownerCookie = (await page.context().cookies(frontendOrigin)).find(
+    (cookie) => cookie.name === 'omnis_session',
+  );
+  expect(ownerCookie?.value).toBeTruthy();
+  expect(ownerCookie?.expires).toBeGreaterThan(Date.now() / 1000);
+  const csrfToken = await page.evaluate(async () => {
+    const response = await fetch('/api/v1/auth/csrf', { credentials: 'same-origin' });
+    if (!response.ok) throw new Error('Owner CSRF token could not be refreshed.');
+    return (await response.json()).csrfToken;
+  });
+  const tasksResponse = await ownerRequest(page, '/api/v1/tasks');
+  expect(tasksResponse.status).toBe(200);
+  const restoredTask = tasksResponse.body.find((task) => task.id === fixture.taskId);
+  expect(restoredTask.status).toBe('in_review');
+  expect(restoredTask.resultAcceptance).toEqual(fixture.receipt);
+  expect(restoredTask.resultAcceptance.runId).toBe(fixture.runId);
+
+  const staleRun = await ownerRequest(page, `/api/v1/tasks/${fixture.taskId}/accept-result`, {
+    method: 'POST',
+    idempotencyKey: randomUUID(),
+    body: { runId: fixture.staleRunId },
+  });
+  expect(staleRun.status).toBe(409);
+  const afterStaleRun = await ownerRequest(page, '/api/v1/tasks');
+  const unchangedTask = afterStaleRun.body.find((task) => task.id === fixture.taskId);
+  expect(unchangedTask.status).toBe('in_review');
+  expect(unchangedTask.resultAcceptance).toEqual(fixture.receipt);
+
+  await page.goto(`/#runs/${fixture.runId}`);
+  await page.reload();
+  await expect(page.getByRole('button', { name: 'Reconcile task status' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Accept Result', exact: true })).toHaveCount(0);
+  const confirmation = page.getByRole('group', { name: 'Confirm task status reconciliation' });
+  await page.getByRole('button', { name: 'Reconcile task status' }).click();
+  const reconciliationRequestPromise = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return (
+      url.pathname === `/api/v1/tasks/${fixture.taskId}/accept-result` &&
+      request.method() === 'POST'
+    );
+  });
+  const reconciliationResponsePromise = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return (
+      url.pathname === `/api/v1/tasks/${fixture.taskId}/accept-result` &&
+      response.request().method() === 'POST'
+    );
+  });
+  await confirmation.getByRole('button', { name: 'Confirm reconciliation' }).click();
+  const reconciliationRequest = await reconciliationRequestPromise;
+  const requestHeaders = await reconciliationRequest.allHeaders();
+  expect(requestHeaders['idempotency-key']).toMatch(/^[0-9a-f-]{36}$/i);
+  expect(requestHeaders['x-omnis-csrf']).toBeTruthy();
+  const reconciliationResponse = await reconciliationResponsePromise;
+  expect(reconciliationResponse.status()).toBe(200);
+  expect(await reconciliationResponse.json()).toMatchObject({
+    created: false,
+    task: { status: 'completed' },
+    acceptance: fixture.receipt,
+  });
+  await expect(page.getByRole('heading', { name: 'Result accepted by owner.' })).toBeVisible();
+
+  const reconciledTaskList = await ownerRequest(page, '/api/v1/tasks');
+  expect(reconciledTaskList.status).toBe(200);
+  const reconciledTask = reconciledTaskList.body.find((task) => task.id === fixture.taskId);
+  expect(reconciledTask.status).toBe('completed');
+  expect(reconciledTask.resultAcceptance).toEqual(fixture.receipt);
+  const replay = await ownerRequest(page, `/api/v1/tasks/${fixture.taskId}/accept-result`, {
+    method: 'POST',
+    idempotencyKey: randomUUID(),
+    body: { runId: fixture.runId },
+  });
+  expect(replay.status).toBe(200);
+  expect(replay.body).toMatchObject({ created: false, acceptance: fixture.receipt });
+  expect(replay.body.task.status).toBe('completed');
+
+  await delay(Math.max(0, ownerCookie!.expires * 1000 - Date.now() + 250));
+  const expiredSessionRequest = await playwrightRequest.newContext({ baseURL: frontendOrigin });
+  try {
+    const expiredResponse = await expiredSessionRequest.post(
+      `/api/v1/tasks/${fixture.taskId}/accept-result`,
+      {
+        headers: {
+          cookie: `omnis_session=${ownerCookie!.value}`,
+          'x-omnis-csrf': csrfToken,
+          'idempotency-key': randomUUID(),
+        },
+        data: { runId: fixture.runId },
+      },
+    );
+    expect(expiredResponse.status()).toBe(401);
+  } finally {
+    await expiredSessionRequest.dispose();
+  }
 });
 
 async function signIn(page) {
