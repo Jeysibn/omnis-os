@@ -1,4 +1,6 @@
-# AO-104 Department Management and Profile Write Prerequisites
+# AO-104 Department Management and Profile Write Validation Evidence
+
+**Historical increment:** This document began as the PR #19 department foundation and issue #18 validation prerequisite. Current source evidence is assessed at `3d37b9f0b645e86963b6174de0e3c7ff2771dbcf` (main after #114, #110, and #116); the original implementation and CI SHAs below remain historical unless stated otherwise.
 
 ## Scope
 
@@ -8,12 +10,12 @@ This backend increment adds owner-managed departments and bounded profile-input 
 
 Canonical Zod request and response schemas are in `packages/contracts`.
 
-| Method and path | Contract |
-|---|---|
+| Method and path                                       | Contract                                                                                                                                |
+| ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | `GET /api/v1/departments?includeArchived=true\|false` | Returns a complete `{ departments, total }` response. Defaults to active departments. Fails closed if the 500-record bound is exceeded. |
-| `POST /api/v1/departments` | Accepts `{ slug, name }`; creates a department and returns its stable ID and UTC timestamps. |
-| `PATCH /api/v1/departments/:departmentId` | Accepts the full `{ slug, name }` pair. Archived departments cannot be renamed. |
-| `POST /api/v1/departments/:departmentId/archive` | One-way archive for an unreferenced department. Hard delete and unarchive are not exposed. |
+| `POST /api/v1/departments`                            | Accepts `{ slug, name }`; creates a department and returns its stable ID and UTC timestamps.                                            |
+| `PATCH /api/v1/departments/:departmentId`             | Accepts the full `{ slug, name }` pair. Archived departments cannot be renamed.                                                         |
+| `POST /api/v1/departments/:departmentId/archive`      | One-way archive for an unreferenced department. Hard delete and unarchive are not exposed.                                              |
 
 Mutations require the existing owner session, same-origin check, and session-bound CSRF token. The API forwards fixed department operations over the existing authorizer Unix socket. The authorizer independently validates every request.
 
@@ -31,9 +33,9 @@ Malformed requests return 422; missing owner authentication returns 401; invalid
 
 ## Issue #18 validation prerequisite
 
-`AgentProfileWriteInputSchema` validates every profile field and preserves the existing 16,384-character instructions cap. `validateAgentProfileWriteInput` runs schema bounds before recursive credential scanning and escape normalization. A synthetic near-limit backslash-heavy fixture was processed in approximately 1.3 ms in the local test run. The normalizer uses a fixed number of passes and the scanner uses a fixed pattern set against bounded fields. This is a bounded-input mitigation and performance check, not a formal guarantee of secret detection or a complete secret scanner.
+`AgentProfileWriteInputSchema` validates every profile field and preserves the 16,384-character instructions cap. `validateAgentProfileWriteInput` runs schema validation before recursive credential scanning and escape normalization. On current main, `agent-lifecycle-store.saveDraft` calls this validator before persistence. Merged #22 implements the owner-managed profile lifecycle and draft/publish routes; #76 adds revision-checked identity editing. The focused tests cover 16,384/16,385 characters, nested credential-like fields, and a near-limit backslash-heavy input. The historical local run recorded approximately 1.3 ms for that fixture; the current source-bound test requires bounded completion under one second.
 
-No profile write route calls this validator yet; profile writes remain disabled pending a separate reviewed increment. Department name and slug inputs are also checked with the same heuristic scanner before database work.
+This satisfies issue #18's write-boundary and bounded-input prerequisite for the current profile API. The normalizer uses a fixed number of passes and the scanner uses a fixed pattern set against bounded fields, but the scanner remains heuristic. It does not provide complete secret detection, formal worst-case timing guarantees, or a secret store. Profile contents convey no runtime authority. Department name and slug inputs are also checked with the same heuristic scanner before database work.
 
 ## Verification
 
