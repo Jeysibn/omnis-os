@@ -507,15 +507,22 @@ export class FakeIndependentAnchor {
 }
 
 export class FakeAuthorityLedger {
-  constructor({ anchor = new FakeIndependentAnchor(), available = true } = {}) {
+  constructor({ anchor = new FakeIndependentAnchor(), available = true, snapshot } = {}) {
     this.anchor = anchor;
     this.available = available;
     this.epoch = anchor.epoch;
-    this.authorizations = new Map([['auth-1', { revision: 1, revoked: false }]]);
-    this.leases = new Map([['lease-1', { revision: 1, superseded: false }]]);
-    this.transitions = new Map();
-    anchor.seed('authorization_revocation', 'auth-1', 1);
-    anchor.seed('lease_supersession', 'lease-1', 1);
+    this.authorizations = new Map(
+      snapshot?.authorizations ?? [['auth-1', { revision: 1, revoked: false }]],
+    );
+    this.leases = new Map(snapshot?.leases ?? [['lease-1', { revision: 1, superseded: false }]]);
+    this.transitions = new Map(snapshot?.transitions ?? []);
+    this.requestFences = new Map(snapshot?.requestFences ?? []);
+    if (!snapshot) {
+      if (!anchor.entries.has('authorization_revocation:auth-1'))
+        anchor.seed('authorization_revocation', 'auth-1', 1);
+      if (!anchor.entries.has('lease_supersession:lease-1'))
+        anchor.seed('lease_supersession', 'lease-1', 1);
+    }
   }
 
   reserve({ authorizationRevision = 1, leaseRevision = 1, nonce = 'admission-1' } = {}) {
@@ -529,6 +536,18 @@ export class FakeAuthorityLedger {
       lease.revision !== leaseRevision
     )
       return reject('authority_state');
+    if (
+      [...this.requestFences.values()].some(
+        ({ intent }) =>
+          (intent.kind === 'authorization_revocation' &&
+            intent.subjectId === 'auth-1' &&
+            authorizationRevision === intent.expectedRevision) ||
+          (intent.kind === 'lease_supersession' &&
+            intent.subjectId === 'lease-1' &&
+            leaseRevision === intent.expectedRevision),
+      )
+    )
+      return reject('request_fence_pending');
     const a = this.anchor.admission({
       kind: 'authorization_revocation',
       subjectId: 'auth-1',
@@ -560,7 +579,7 @@ export class FakeAuthorityLedger {
     if (!this.available) return reject('authorizer_unavailable');
     const map = kind === 'authorization_revocation' ? this.authorizations : this.leases;
     const record = map.get(subjectId);
-    if (!record || record.revision !== expectedRevision) return reject('stale_revision');
+    if (!record) return reject('stale_revision');
     this.anchor.available = anchorAvailable;
     const intent = {
       transitionId,
@@ -573,11 +592,31 @@ export class FakeAuthorityLedger {
     let transition = this.transitions.get(transitionId);
     if (transition && stable(transition.intent) !== stable(intent))
       return reject('transition_conflict');
+    if (
+      !transition &&
+      [...this.requestFences.entries()].some(
+        ([pendingId, fence]) =>
+          pendingId !== transitionId &&
+          fence.state === 'REQUESTED' &&
+          fence.intent.kind === kind &&
+          fence.intent.subjectId === subjectId,
+      )
+    )
+      return reject('transition_pending');
+    if (
+      (!transition && record.revision !== expectedRevision) ||
+      (transition && record.revision !== expectedRevision && record.revision !== intent.newRevision)
+    )
+      return reject(transition ? 'database_state_mismatch' : 'stale_revision');
     if (!transition) {
+      transition = { intent, receipt: null, databaseReceipt: null, finalized: false };
+      this.transitions.set(transitionId, transition);
+      this.requestFences.set(transitionId, { intent: clone(intent), state: 'REQUESTED' });
+    }
+    if (!transition.receipt) {
       const preFence = this.anchor.preFence(intent);
       if (!preFence.ok) return { ...preFence, databaseCommitted: false };
-      transition = { intent, receipt: preFence.receipt, databaseReceipt: null, finalized: false };
-      this.transitions.set(transitionId, transition);
+      transition.receipt = preFence.receipt;
       if (!databaseAvailable)
         return {
           ok: true,
@@ -622,6 +661,7 @@ export class FakeAuthorityLedger {
       };
     transition.finalized = true;
     transition.finalReceipt = finalized.receipt;
+    this.requestFences.set(transitionId, { intent: clone(intent), state: 'FINALIZED' });
     return {
       ok: true,
       effective: true,
@@ -634,46 +674,13 @@ export class FakeAuthorityLedger {
   retry(transitionId) {
     const transition = this.transitions.get(transitionId);
     if (!transition) return reject('transition_missing');
-    const record = (
-      transition.intent.kind === 'authorization_revocation' ? this.authorizations : this.leases
-    ).get(transition.intent.subjectId);
-    if (record.revision === transition.intent.expectedRevision && !transition.databaseReceipt) {
-      record.revision = transition.intent.newRevision;
-      if ('revoked' in record) record.revoked = true;
-      if ('superseded' in record) record.superseded = true;
-      transition.databaseReceipt = { transitionId, newRevision: transition.intent.newRevision };
-    }
-    if (record.revision !== transition.intent.newRevision) return reject('database_state_mismatch');
-    if (!this.anchor.available)
-      return {
-        ok: true,
-        effective: true,
-        protection: 'pending',
-        databaseCommitted: true,
-        reason: 'anchor_unavailable',
-      };
-    const finalized = this.anchor.finalize({
+    return this.change({
+      ...transition.intent,
       transitionId,
-      receipt: transition.receipt,
-      databaseReceipt: transition.databaseReceipt,
+      databaseAvailable: true,
+      anchorAvailable: this.anchor.available,
+      finalizeAvailable: this.anchor.available,
     });
-    if (!finalized.ok)
-      return {
-        ok: true,
-        effective: true,
-        protection: 'pending',
-        databaseCommitted: true,
-        reason: finalized.reason,
-      };
-    transition.finalized = true;
-    transition.finalReceipt = finalized.receipt;
-    return {
-      ok: true,
-      effective: true,
-      protection: 'anchored',
-      databaseCommitted: true,
-      receipt: finalized.receipt,
-    };
   }
 
   restore(snapshot, { freshEpoch = false } = {}) {
@@ -745,6 +752,8 @@ export class FakeAuthorityLedger {
       epoch: this.epoch,
       authorizations: [...this.authorizations],
       leases: [...this.leases],
+      transitions: [...this.transitions],
+      requestFences: [...this.requestFences],
     });
   }
 }

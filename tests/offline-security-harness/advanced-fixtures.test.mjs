@@ -582,7 +582,32 @@ test('C-3 revocation is pre-fenced before DB commit and anchor failures fail clo
   const failingAnchor = new FakeIndependentAnchor({ available: false });
   const failingLedger = new FakeAuthorityLedger({ anchor: failingAnchor });
   assert.equal(failingLedger.change({ transitionId: 'revoke-fail' }).reason, 'anchor_unavailable');
-  assert.equal(failingLedger.reserve({ nonce: 'fail-closed' }).reason, 'anchor_unavailable');
+  assert.equal(failingLedger.reserve({ nonce: 'fail-closed' }).reason, 'request_fence_pending');
+  assert.equal(
+    failingLedger.change({ transitionId: 'revoke-fail-duplicate' }).reason,
+    'transition_pending',
+  );
+  const pendingSnapshot = failingLedger.snapshot();
+  failingAnchor.available = true;
+  const restartedLedger = new FakeAuthorityLedger({
+    anchor: failingAnchor,
+    snapshot: pendingSnapshot,
+  });
+  assert.equal(
+    restartedLedger.reserve({ nonce: 'still-fenced-after-restart' }).reason,
+    'request_fence_pending',
+  );
+  assert.equal(restartedLedger.retry('revoke-fail').protection, 'anchored');
+  assert.equal(restartedLedger.reserve({ nonce: 'fenced-after-retry' }).reason, 'authority_state');
+  assert.equal(
+    restartedLedger.change({
+      transitionId: 'revoke-fail',
+      expectedRevision: 1,
+      kind: 'lease_supersession',
+      subjectId: 'lease-1',
+    }).reason,
+    'transition_conflict',
+  );
 
   const pendingAnchor = new FakeIndependentAnchor();
   const pendingLedger = new FakeAuthorityLedger({ anchor: pendingAnchor });
@@ -591,7 +616,7 @@ test('C-3 revocation is pre-fenced before DB commit and anchor failures fail clo
     databaseAvailable: false,
   });
   assert.equal(pending.preFenced, true);
-  assert.equal(pendingLedger.reserve({ nonce: 'blocked-pending' }).reason, 'anchor_fenced');
+  assert.equal(pendingLedger.reserve({ nonce: 'blocked-pending' }).reason, 'request_fence_pending');
   assert.equal(pendingLedger.retry('revoke-pending').protection, 'anchored');
 
   const finalizeAnchor = new FakeIndependentAnchor();
