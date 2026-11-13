@@ -179,7 +179,7 @@ test('fake issuer binds exact payload, revisions, identity and one ordered ticke
     handle: 'opaque-registration-handle',
   });
   assert.equal(registration.ok, true);
-  const stopLease = authority.armStopLease({
+  const stopLeaseInput = {
     runId,
     generation: 1,
     stopLeaseId: 'stop-lease-fixture-1',
@@ -190,8 +190,14 @@ test('fake issuer binds exact payload, revisions, identity and one ordered ticke
     expiresAt: 2200,
     maximumTerminationGraceMs: 100,
     evidenceWindowMs: 100,
-  });
+  };
+  const stopLease = authority.armStopLease(stopLeaseInput);
   assert.equal(stopLease.ok, true);
+  assert.equal(authority.armStopLease(stopLeaseInput).replayed, true);
+  assert.equal(
+    authority.armStopLease({ ...stopLeaseInput, stopLeaseId: 'replacement-stop-lease' }).reason,
+    'stop_lease_conflict',
+  );
 
   const second = authority.reserve({
     peerIdentity: 'uid:61001',

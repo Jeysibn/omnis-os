@@ -521,6 +521,27 @@ export class FakeAuthorizationAuthority {
       armed: true,
       fixtureOnly: true,
     });
+    const current = this.armedStopLeases.get(scope);
+    if (current) {
+      const binding = (entry) =>
+        JSON.stringify([
+          entry.runId,
+          entry.generation,
+          entry.stopLeaseId,
+          entry.registrationId,
+          entry.registrationRevision,
+          entry.registrationDigest,
+          entry.absoluteDeadline,
+          entry.notBefore,
+          entry.expiresAt,
+          entry.maximumTerminationGraceMs,
+          entry.evidenceWindowMs,
+          entry.environmentEpoch,
+        ]);
+      return binding(lease) === binding(current)
+        ? { ok: true, lease: current, replayed: true }
+        : rejected('stop_lease_conflict');
+    }
     this.armedStopLeases.set(scope, lease);
     return { ok: true, lease };
   }
