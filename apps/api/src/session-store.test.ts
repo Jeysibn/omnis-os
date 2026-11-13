@@ -60,6 +60,25 @@ describe('local owner sessions', () => {
     assert.equal(store.resolve(store.cookie(owner), false).session, undefined);
   });
 
+  it('supports a shorter disposable-test lifetime and keeps its cookie lifetime in sync', () => {
+    let now = 10_000;
+    const store = new LocalSessionStore('h'.repeat(64), false, 4, () => now, 5);
+    const anonymous = store.resolve(undefined).session!;
+    const owner = store.rotate(anonymous.id)!;
+
+    assert.equal(owner.expiresAt, now + 5_000);
+    assert.match(store.cookie(owner), /Max-Age=5/);
+    now += 5_000;
+    assert.equal(store.resolve(store.cookie(owner), false).session, undefined);
+  });
+
+  it('does not allow session lifetimes longer than the production default', () => {
+    assert.throws(
+      () => new LocalSessionStore('i'.repeat(64), false, 1024, Date.now, 8 * 60 * 60 + 1),
+      /between one second and eight hours/,
+    );
+  });
+
   it('releases invalidation listeners when their subscriber disconnects', () => {
     const store = new LocalSessionStore('g'.repeat(64), false);
     const anonymous = store.resolve(undefined).session!;
