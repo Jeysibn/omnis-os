@@ -6,6 +6,7 @@ import {
   CreateRunSchema,
 } from '@omnis/contracts';
 import { syntheticTaskRunTestMode } from '@omnis/contracts/synthetic-task-run';
+import { executionModeFromEnvironment } from '@omnis/contracts/execution-mode';
 import {
   isOwnerPasswordValid,
   requireMutationProtection,
@@ -38,13 +39,16 @@ import {
   workerEventStream,
   workerRequest,
   WorkerRequestError,
+  parseRuntimeCapabilities,
 } from './worker-client.ts';
 
 const app = Fastify({
   trustProxy: false,
   logger: { redact: ['req.headers.cookie', 'res.headers.set-cookie', 'req.headers.x-omnis-csrf'] },
 });
-const syntheticBrokerTestMode = syntheticTaskRunTestMode(process.env);
+const apiExecutionMode = executionModeFromEnvironment(process.env.OMNIS_EXECUTION_MODE);
+const syntheticBrokerTestMode =
+  apiExecutionMode === 'mock' && syntheticTaskRunTestMode(process.env);
 // Memory-backed sessions are limited to this single-owner local mock gate. Durable session storage is a later gate.
 const sessions = new LocalSessionStore(
   env.sessionSecret,
@@ -227,6 +231,8 @@ registerConnectorAuthorizationRoutes(app, { requireOwner, requireMutationProtect
 registerRuntimeCapabilityRoutes(app, {
   requireOwner,
   syntheticConnectorEnabled: syntheticBrokerTestMode,
+  getWorkerCapabilities: () =>
+    workerRequest('/internal/v1/runtime-capabilities', {}, parseRuntimeCapabilities),
 });
 registerSyntheticTaskRunRoutes(app, {
   requireOwner,

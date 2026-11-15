@@ -44,8 +44,17 @@ function testCoordinator(
   runtime: RuntimeAdapter,
   heartbeatIntervalMs?: number,
   authorizations: unknown = defaultAuthorizationStore,
+  options: {
+    executionEnabled?: boolean;
+    workerSessionId?: string;
+    requireSessionFence?: boolean;
+  } = {},
 ) {
-  return new RunCoordinator(store, queue, runtime, authorizations as never, heartbeatIntervalMs);
+  return new RunCoordinator(store, queue, runtime, authorizations as never, heartbeatIntervalMs, {
+    executionEnabled: true,
+    requireSessionFence: false,
+    ...options,
+  });
 }
 
 describe('durable mock run coordinator', () => {
@@ -209,6 +218,136 @@ describe('durable mock run coordinator', () => {
     assert.equal(admissions, 0);
   });
 
+  it('rejects disabled execution before authorization, admission, or queue insertion', async () => {
+    let authorizationReads = 0;
+    let admissions = 0;
+    let enqueues = 0;
+    const coordinator = testCoordinator(
+      {
+        admitRun: async () => {
+          admissions += 1;
+        },
+      } as unknown as PostgresRunStore,
+      {
+        send: async () => {
+          enqueues += 1;
+          return 'job';
+        },
+        findJobs: async () => [],
+      },
+      undefined as never,
+      undefined,
+      {
+        get: async () => {
+          authorizationReads += 1;
+          return authorizationRecord;
+        },
+        getForRun: async () => authorizationRecord,
+        recordEnforcementDenied: async () => {
+          throw new Error('must not consume or deny a grant');
+        },
+      },
+      { executionEnabled: false },
+    );
+    await assert.rejects(
+      coordinator.startRun('task-0001', 'idempotency-key-0001', authId),
+      (error: unknown) =>
+        error instanceof CoordinatorError &&
+        error.code === 'execution_disabled' &&
+        error.statusCode === 503,
+    );
+    assert.deepEqual(
+      { authorizationReads, admissions, enqueues },
+      {
+        authorizationReads: 0,
+        admissions: 0,
+        enqueues: 0,
+      },
+    );
+  });
+
+  it('defaults to disabled execution when a coordinator caller omits the mode', async () => {
+    let authorizationReads = 0;
+    const coordinator = new RunCoordinator(
+      {} as PostgresRunStore,
+      { send: async () => null, findJobs: async () => [] },
+      new MockRuntimeAdapter(),
+      {
+        get: async () => {
+          authorizationReads += 1;
+          return authorizationRecord;
+        },
+        getForRun: async () => authorizationRecord,
+      } as never,
+    );
+    await assert.rejects(
+      coordinator.startRun('task-0001', 'idempotency-key-0001', authId),
+      (error: unknown) => error instanceof CoordinatorError && error.code === 'execution_disabled',
+    );
+    assert.equal(authorizationReads, 0);
+  });
+
+  it('does not replay a durable job from a previous worker session', async () => {
+    let interrupted = '';
+    let runReads = 0;
+    const coordinator = testCoordinator(
+      {
+        interruptQueuedRun: async (runId: string) => {
+          interrupted = runId;
+          return { events: [] };
+        },
+        getRun: async () => {
+          runReads += 1;
+          return undefined;
+        },
+      } as unknown as PostgresRunStore,
+      { send: async () => null, findJobs: async () => [] },
+      new MockRuntimeAdapter(),
+      undefined,
+      defaultAuthorizationStore,
+      {
+        executionEnabled: true,
+        workerSessionId: '22222222-2222-4222-8222-222222222222',
+        requireSessionFence: true,
+      },
+    );
+    await coordinator.handleQueueJob({
+      runId: 'run-0001',
+      workerSessionId: '33333333-3333-4333-8333-333333333333',
+    });
+    assert.equal(interrupted, 'run-0001');
+    assert.equal(runReads, 0);
+  });
+
+  it('disabled reconciliation interrupts queued records without consulting the queue or grants', async () => {
+    let queueReads = 0;
+    const interrupted: string[] = [];
+    const coordinator = testCoordinator(
+      {
+        reconcileExpiredRuns: async () => [],
+        listQueuedJobs: async () => [{ runId: 'run-0001', status: 'queued', jobId: 'pending' }],
+        interruptQueuedRun: async (runId: string, message: string) => {
+          interrupted.push(`${runId}:${message}`);
+          return { events: [] };
+        },
+      } as unknown as PostgresRunStore,
+      {
+        send: async () => null,
+        findJobs: async () => {
+          queueReads += 1;
+          return [];
+        },
+      },
+      undefined as never,
+      undefined,
+      emptyAuthorizationStore,
+      { executionEnabled: false },
+    );
+    await coordinator.reconcileDisabledExecution();
+    assert.equal(queueReads, 0);
+    assert.match(interrupted[0] ?? '', /^run-0001:Execution is disabled/);
+  });
+
   it('surfaces admission rejection and lock timeouts as retryable 503 responses', async () => {
     for (const code of ['PML01', 'PML02', '55P03']) {
       const coordinator = testCoordinator(
@@ -304,8 +443,13 @@ describe('durable mock run coordinator', () => {
       },
     } as unknown as PostgresRunStore;
     const queue = {
-      send: async (_name: string, data: { runId: string }, options: unknown) => {
-        assert.deepEqual(data, { runId: run.id });
+      send: async (
+        _name: string,
+        data: { runId: string; workerSessionId?: string },
+        options: unknown,
+      ) => {
+        assert.equal(data.runId, run.id);
+        assert.match(data.workerSessionId ?? '', /^[0-9a-f-]{36}$/);
         capturedOptions = options;
         return 'job-0001';
       },

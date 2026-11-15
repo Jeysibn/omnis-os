@@ -45,6 +45,9 @@ services:
 
   worker:
     image: omnis-worker:ci
+    environment:
+      OMNIS_EXECUTION_MODE: mock
+      OMNIS_SANDBOX_LAUNCHER_SOCKET: /run/omnis-sandbox/launcher.sock
     volumes:
       - type: bind
         source: ${OMNIS_CI_LAUNCHER_SOCKET_DIRECTORY:?CI launcher fixture directory is required}

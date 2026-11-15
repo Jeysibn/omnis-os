@@ -67,4 +67,21 @@ describe('worker sandbox launcher client', () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+
+  it('reports a missing launcher socket as unavailable without fabricating output', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'omnis-missing-launcher-'));
+    try {
+      await assert.rejects(
+        new UnixMockSandboxLauncherClient(path.join(directory, 'missing.sock')).execute({
+          runId: 'run-1234',
+          workerId: '5bd5ca09-8354-4e98-9bce-241fd1076043',
+          generation: 2,
+          signal: new AbortController().signal,
+        }),
+        (error: unknown) => error instanceof SandboxError && error.code === 'unavailable',
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 });

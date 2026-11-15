@@ -1,0 +1,15 @@
+# Explicit opt-in overlay. Use only after the separately authorized host launcher is available.
+services:
+  worker:
+    environment:
+      OMNIS_EXECUTION_MODE: mock
+      OMNIS_SANDBOX_LAUNCHER_SOCKET: /run/omnis-sandbox/launcher.sock
+    group_add:
+      - '${OMNIS_LAUNCHER_SOCKET_GID:-10002}'
+    volumes:
+      - type: bind
+        source: /run/omnis-sandbox
+        target: /run/omnis-sandbox
+        read_only: true
+        bind:
+          create_host_path: false

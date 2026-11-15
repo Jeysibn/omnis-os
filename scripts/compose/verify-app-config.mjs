@@ -23,11 +23,9 @@ try {
   );
   writeFileSync(
     workerEnv,
-    [
-      `OMNIS_INTERNAL_TOKEN=${'i'.repeat(64)}`,
-      `OMNIS_RUNTIME_DB_PASSWORD=${'r'.repeat(48)}`,
-      'OMNIS_SANDBOX_LAUNCHER_SOCKET=/run/omnis-sandbox/launcher.sock',
-    ].join('\n'),
+    [`OMNIS_INTERNAL_TOKEN=${'i'.repeat(64)}`, `OMNIS_RUNTIME_DB_PASSWORD=${'r'.repeat(48)}`].join(
+      '\n',
+    ),
     { mode: 0o600 },
   );
   writeFileSync(
@@ -84,11 +82,12 @@ try {
   assert.deepEqual(api.ports ?? [], []);
   assert.deepEqual(worker.ports ?? [], []);
   assert.equal(api.group_add[0], '10101');
-  assert.equal(worker.group_add[0], '10102');
+  assert.deepEqual(worker.group_add ?? [], []);
   assert.equal(api.environment.OMNIS_API_HOST, '0.0.0.0');
   assert.equal(api.environment.OMNIS_WORKER_HOST, 'worker');
   assert.equal(worker.environment.OMNIS_WORKER_HOST, '0.0.0.0');
   assert.equal(worker.environment.OMNIS_DB_HOST, 'postgres');
+  assert.equal(worker.environment.OMNIS_EXECUTION_MODE, 'disabled');
   assert.equal(web.environment.OMNIS_API_URL, 'http://api:4100');
   assert.equal(api.environment.OMNIS_SECURE_COOKIES, 'true');
   assert.equal(api.environment.OMNIS_ALLOWED_ORIGIN, 'https://omnis.example.invalid');
@@ -108,7 +107,6 @@ try {
   assert.ok(Object.hasOwn(postgres.networks, 'data'));
   for (const [service, source, target] of [
     [api, '/run/omnis-authorizer', '/run/omnis-authorizer'],
-    [worker, '/run/omnis-sandbox', '/run/omnis-sandbox'],
   ]) {
     assert.equal(service.volumes?.length, 1);
     const [volume] = service.volumes;
@@ -122,9 +120,11 @@ try {
         volume.bind.create_host_path === false,
     );
   }
+  assert.deepEqual(worker.volumes ?? [], []);
+  assert.ok(!Object.hasOwn(worker.environment, 'OMNIS_SANDBOX_LAUNCHER_SOCKET'));
 
   const composeSource = readFileSync('infra/compose/docker-compose.app.yml', 'utf8');
-  assert.equal((composeSource.match(/create_host_path:\s*false/g) ?? []).length, 2);
+  assert.equal((composeSource.match(/create_host_path:\s*false/g) ?? []).length, 1);
   assert.ok(!JSON.stringify(config).includes('/var/run/docker.sock'));
   process.stdout.write('Private Compose service topology and privilege settings verified.\n');
 } finally {

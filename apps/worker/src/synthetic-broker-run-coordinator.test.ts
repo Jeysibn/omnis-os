@@ -93,6 +93,8 @@ function coordinator(
     recoveryTimeoutMs?: number;
     taskOverride?: Task;
     profileVersion?: number;
+    workerSessionId?: string;
+    requireSessionFence?: boolean;
   } = {},
 ) {
   const calls: unknown[] = [];
@@ -108,6 +110,10 @@ function coordinator(
     },
     getSyntheticBrokerRun: async () => link,
     getSyntheticBrokerRunByAuthorization: async () => link,
+    interruptQueuedRun: async (runId: string) => {
+      void runId;
+      return undefined;
+    },
     getTask: async () => options.taskOverride ?? task,
     beginSyntheticBrokerRun: async () => ({
       run: { ...run, status: 'running' },
@@ -177,6 +183,8 @@ function coordinator(
     },
     publish: () => {},
     recoveryTimeoutMs: options.recoveryTimeoutMs ?? 50,
+    ...(options.workerSessionId ? { workerSessionId: options.workerSessionId } : {}),
+    requireSessionFence: options.requireSessionFence ?? false,
   });
   return { instance, calls, brokerRequests, resultCalls, executionOrder, store };
 }
@@ -231,7 +239,9 @@ describe('synthetic broker task run coordinator', () => {
       binding,
     });
     assert.equal(admitted.run.id, run.id);
-    assert.deepEqual(fixture.calls, [{ runId: run.id }]);
+    const queued = fixture.calls[0] as { runId: string; workerSessionId?: string };
+    assert.equal(queued.runId, run.id);
+    assert.match(queued.workerSessionId ?? '', /^[0-9a-f-]{36}$/);
 
     await fixture.instance.handleQueueJob({ runId: run.id });
     assert.deepEqual(fixture.executionOrder, ['submission-requested-event', 'broker-execute']);
@@ -246,6 +256,25 @@ describe('synthetic broker task run coordinator', () => {
         responseText: 'Synthetic result',
       },
     });
+  });
+
+  it('interrupts a synthetic queue job from an earlier worker session before broker access', async () => {
+    const fixture = coordinator({
+      workerSessionId: '22222222-2222-4222-8222-222222222222',
+      requireSessionFence: true,
+    });
+    let interrupted = '';
+    fixture.store.interruptQueuedRun = async (runId: string) => {
+      interrupted = runId;
+      return { events: [] } as never;
+    };
+    await fixture.instance.handleQueueJob({
+      runId: run.id,
+      workerSessionId: '33333333-3333-4333-8333-333333333333',
+    });
+    assert.equal(interrupted, run.id);
+    assert.equal(fixture.brokerRequests.length, 0);
+    assert.equal(fixture.resultCalls.length, 0);
   });
 
   it('recovers a lost broker response using the same authorization and request identity', async () => {
