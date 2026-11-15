@@ -147,6 +147,8 @@ type FixtureOptions = {
   stopMutationFailures?: number;
   eventCount?: number;
   eventDisconnects?: boolean;
+  /** The session is revoked as the stream opens: the stream drops and authenticated reads 401. */
+  eventRevoked?: boolean;
   eventOrder?: 'reverse';
   eventDuplicates?: boolean;
   syntheticEnabled?: boolean;
@@ -283,6 +285,7 @@ function createMockApi(page: Page) {
   const connectorRevokeIds: string[] = [];
   let connectorReadFailures = 0;
   const eventRequestCursors: string[] = [];
+  const eventRequestRunIds: string[] = [];
   let scenario: EventScenarioServer | undefined;
   const runDetailGets = new Map<string, number>();
   let createdTaskCount = 0;
@@ -922,7 +925,20 @@ function createMockApi(page: Page) {
         );
         return fulfillError(route, 409, 'conflict', 'This run is no longer the current result.');
       }
-      const replay = acceptReceipts.get(taskId);
+      let replay = acceptReceipts.get(taskId);
+      if (!replay && task.status === 'in_review' && task.resultAcceptance) {
+        // Backend contract (PHASE1_BACKEND_FRONTEND_HANDOFF.md): an owner replay for the same
+        // latest run reconciles the task, keeps the original receipt and returns created: false.
+        const newest = [...currentRuns]
+          .filter((run) => run.taskId === taskId)
+          .sort((x, y) => y.createdAt.localeCompare(x.createdAt) || y.id.localeCompare(x.id))[0];
+        if (newest?.id === parsed.data.runId && task.resultAcceptance.runId === parsed.data.runId) {
+          replay = task.resultAcceptance;
+          currentTasks = currentTasks.map((item) =>
+            item.id === taskId ? { ...item, status: 'completed' } : item,
+          );
+        }
+      }
       let created = false;
       let receipt = replay;
       if (!receipt) {
@@ -970,6 +986,11 @@ function createMockApi(page: Page) {
     const eventMatch = path.match(/^\/api\/v1\/runs\/([^/]+)\/events$/);
     if (eventMatch && method === 'GET') {
       eventRequestCursors.push(headers['last-event-id'] ?? '');
+      eventRequestRunIds.push(eventMatch[1]!);
+      if (options.eventRevoked) {
+        authenticated = false;
+        return route.abort();
+      }
       if (eventDisconnects > 0) {
         eventDisconnects -= 1;
         return route.abort();
@@ -1006,6 +1027,7 @@ function createMockApi(page: Page) {
     }
     const detailMatch = path.match(/^\/api\/v1\/runs\/([^/]+)$/);
     if (detailMatch && method === 'GET') {
+      if (!authenticated) return fulfillError(route, 401, 'unauthorized', 'Sign in to continue.');
       runDetailGets.set(detailMatch[1]!, (runDetailGets.get(detailMatch[1]!) ?? 0) + 1);
       if (detailFailures > 0) {
         detailFailures -= 1;
@@ -1052,6 +1074,7 @@ function createMockApi(page: Page) {
     },
     connectorRevokeIds,
     eventRequestCursors,
+    eventRequestRunIds,
     get scenarioCursors() {
       return scenario?.cursors ?? [];
     },
@@ -2163,6 +2186,22 @@ test('event stream retries with the last delivered event sequence', async ({ pag
   await expect(page.getByRole('heading', { name: 'Task list' })).toBeVisible();
 });
 
+test('a session revoked while streaming returns to sign-in and stops reconnecting', async ({
+  page,
+  api,
+}) => {
+  test.setTimeout(20_000);
+  api.configure({ eventRevoked: true });
+  await openWorkspace(page, '#runs/run-active');
+  await expect(page.getByRole('alert')).toContainText('session expired');
+  await expect(page.getByRole('button', { name: 'Sign in' })).toBeVisible();
+  // No run action survives the expiry, and the stream is not hammered afterwards.
+  await expect(page.getByRole('button', { name: /Stop/ })).toHaveCount(0);
+  const seen = api.eventRequestCursors.length;
+  await page.waitForTimeout(2500);
+  expect(api.eventRequestCursors.length).toBe(seen);
+});
+
 test('native EventSource reconnect after a delivered event sends Last-Event-ID and dedupes the replay', async ({
   page,
   api,
@@ -2983,6 +3022,254 @@ test.describe('R1 owner result acceptance', () => {
     ).toBeVisible();
   });
 
+  test('issue #106: an in_review task with an existing receipt shows the receipt and no Accept Result', async ({
+    page,
+    api,
+  }) => {
+    const restored = {
+      ...reviewTask,
+      resultAcceptance: {
+        runId: 'run-review',
+        acceptedBy: 'owner' as const,
+        acceptedAt: '2026-11-03T10:00:00.000Z',
+        requestId: '00000000-0000-4000-8000-000000000000',
+      },
+    };
+    api.configure({ tasks: [restored], runs: [reviewRun] });
+    await openReview(page);
+    await expect(page.getByRole('heading', { name: 'Owner receipt on record.' })).toBeVisible();
+    await expect(accept(page)).toHaveCount(0);
+    await expect(page.getByText('Awaiting your review.')).toHaveCount(0);
+    expect(api.acceptPosts).toHaveLength(0);
+    await assertNoSeriousAxeViolations(page);
+    const shots = process.env.OMNIS_SHOT_DIR;
+    if (shots) {
+      await page
+        .locator('.accept-result')
+        .screenshot({ path: `${shots}/receipt-in-review-desktop.png` });
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page
+        .locator('.accept-result')
+        .screenshot({ path: `${shots}/receipt-in-review-390.png` });
+      await page.setViewportSize({ width: 1280, height: 720 });
+    }
+    // Command Center no longer lists it as awaiting the owner; the task detail says why.
+    await page.getByRole('link', { name: 'Command Center' }).click();
+    await expect(
+      page.getByRole('button', { name: 'Review result of Review quarterly notes' }),
+    ).toHaveCount(0);
+    await page.getByRole('link', { name: 'Tasks' }).click();
+    await page.getByRole('button', { name: /Review quarterly notes/ }).click();
+    await expect(
+      page
+        .getByRole('status')
+        .filter({ hasText: 'already exists, but the task still reads in review' }),
+    ).toBeVisible();
+  });
+
+  const receiptFor = (runId: string) => ({
+    runId,
+    acceptedBy: 'owner' as const,
+    acceptedAt: '2026-11-03T10:00:00.000Z',
+    requestId: '00000000-0000-4000-8000-000000000000',
+  });
+  const restoredTask = { ...reviewTask, resultAcceptance: receiptFor('run-review') };
+  const reconcile = (page: Page) => page.getByRole('button', { name: 'Reconcile task status' });
+  const confirmReconcile = (page: Page) =>
+    page.getByRole('group', { name: 'Confirm task status reconciliation' });
+
+  test('reconcile: deliberate two-step action reuses the same run, keeps the receipt, shows the server task', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ tasks: [restoredTask], runs: [reviewRun] });
+    await openReview(page);
+    await expect(reconcile(page)).toBeVisible();
+    const shots = process.env.OMNIS_SHOT_DIR;
+    if (shots)
+      await page.locator('.accept-result').screenshot({ path: `${shots}/reconcile-action.png` });
+    await reconcile(page).click();
+    if (shots)
+      await page.locator('.accept-result').screenshot({ path: `${shots}/reconcile-confirm.png` });
+    // Nothing is sent until the owner confirms; Cancel is the safe default focus.
+    expect(api.acceptPosts).toHaveLength(0);
+    await expect(confirmReconcile(page).getByRole('button', { name: 'Cancel' })).toBeFocused();
+    await confirmReconcile(page).getByRole('button', { name: 'Confirm reconciliation' }).click();
+    await expect(page.getByRole('heading', { name: 'Result accepted by owner.' })).toBeFocused();
+    expect(api.acceptPosts).toHaveLength(1);
+    expect(api.acceptPosts[0]!.body).toEqual({ runId: 'run-review' });
+    // The original receipt is unchanged (not re-stamped) and the task now reads Completed.
+    await expect(page.getByText('Nov 3, 2026, 6:00:00 PM PHT')).toBeVisible();
+    await page.getByRole('link', { name: 'Tasks' }).click();
+    await expect(
+      page
+        .getByRole('listitem')
+        .filter({ hasText: 'Review quarterly notes' })
+        .locator('.status-pill'),
+    ).toHaveText('Completed');
+  });
+
+  test('reconcile: cancelling sends nothing and rapid clicks submit once', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ tasks: [restoredTask], runs: [reviewRun], acceptDelayMs: 400 });
+    await openReview(page);
+    await reconcile(page).click();
+    await confirmReconcile(page).getByRole('button', { name: 'Cancel' }).click();
+    await expect(reconcile(page)).toBeFocused();
+    expect(api.acceptPosts).toHaveLength(0);
+    await reconcile(page).click();
+    const confirm = confirmReconcile(page).getByRole('button', {
+      name: /Confirm reconciliation|Reconciling/,
+    });
+    await confirm.evaluate((element) => {
+      for (let i = 0; i < 4; i += 1)
+        element.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await expect(page.getByRole('heading', { name: 'Result accepted by owner.' })).toBeVisible();
+    expect(api.acceptPosts).toHaveLength(1);
+  });
+
+  test('reconcile: a receipt for an older run is never reconciled against a newer run', async ({
+    page,
+    api,
+  }) => {
+    const older = { ...makeRun('run-old', 'task-review', 'Review quarterly notes') };
+    older.createdAt = '2026-11-03T08:00:00.000Z';
+    api.configure({
+      tasks: [{ ...reviewTask, resultAcceptance: receiptFor('run-old') }],
+      runs: [reviewRun, older],
+    });
+    await openReview(page, '#runs/run-old');
+    await expect(reconcile(page)).toHaveCount(0);
+    await expect(page.getByText('A newer run exists for this task.')).toBeVisible();
+    // The newer run has no receipt of its own, so it is a normal review, not a reconciliation.
+    await openReview(page, '#runs/run-review');
+    await expect(reconcile(page)).toHaveCount(0);
+    await expect(accept(page)).toBeVisible();
+    expect(api.acceptPosts).toHaveLength(0);
+  });
+
+  test('reconcile: a 409 refreshes from the server and offers nothing stale', async ({
+    page,
+    api,
+  }) => {
+    api.configure({
+      tasks: [restoredTask],
+      runs: [reviewRun],
+      acceptBehaviors: ['stale-conflict'],
+    });
+    await openReview(page);
+    await reconcile(page).click();
+    await confirmReconcile(page).getByRole('button', { name: 'Confirm reconciliation' }).click();
+    await expect(
+      page.getByRole('alert').filter({ hasText: 'no longer the current result' }),
+    ).toBeVisible();
+    await expect(reconcile(page)).toHaveCount(0);
+    expect(api.acceptPosts).toHaveLength(1);
+  });
+
+  test('reconcile: 403 is shown as a rejection without signing out or retrying', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ tasks: [restoredTask], runs: [reviewRun], acceptBehaviors: ['csrf'] });
+    await openReview(page);
+    await reconcile(page).click();
+    await confirmReconcile(page).getByRole('button', { name: 'Confirm reconciliation' }).click();
+    await expect(page.getByRole('alert').filter({ hasText: 'CSRF' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Sign in' })).toHaveCount(0);
+    expect(api.acceptPosts).toHaveLength(1);
+  });
+
+  test('reconcile: an expired session returns to sign-in and the task is not changed locally', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ tasks: [restoredTask], runs: [reviewRun], acceptBehaviors: ['unauthorized'] });
+    await openReview(page);
+    await reconcile(page).click();
+    await confirmReconcile(page).getByRole('button', { name: 'Confirm reconciliation' }).click();
+    await expect(page.getByRole('alert')).toContainText('session expired');
+    await expect(page.getByRole('heading', { name: 'Result accepted by owner.' })).toHaveCount(0);
+    expect(api.acceptPosts).toHaveLength(1);
+  });
+
+  test('reconcile: an uncertain outcome reads server state first and never auto-retries', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ tasks: [restoredTask], runs: [reviewRun], acceptBehaviors: ['lost-applied'] });
+    await openReview(page);
+    await reconcile(page).click();
+    await confirmReconcile(page).getByRole('button', { name: 'Confirm reconciliation' }).click();
+    // The reconciliation did apply, and the authoritative re-read shows it; no second POST.
+    await expect(page.getByRole('heading', { name: 'Result accepted by owner.' })).toBeVisible();
+    expect(api.acceptPosts).toHaveLength(1);
+  });
+
+  test('reconcile: an ambiguous 503 keeps one idempotency key for the explicit retry', async ({
+    page,
+    api,
+  }) => {
+    api.configure({
+      tasks: [restoredTask],
+      runs: [reviewRun],
+      acceptBehaviors: ['concurrency-limit'],
+    });
+    await openReview(page);
+    await reconcile(page).click();
+    await confirmReconcile(page).getByRole('button', { name: 'Confirm reconciliation' }).click();
+    const retry = confirmReconcile(page).getByRole('button', { name: 'Retry reconciliation' });
+    await expect(retry).toBeVisible();
+    expect(api.acceptPosts).toHaveLength(1);
+    await retry.click();
+    await expect(page.getByRole('heading', { name: 'Result accepted by owner.' })).toBeVisible();
+    expect(api.acceptPosts).toHaveLength(2);
+    expect(new Set(api.acceptPosts.map((entry) => entry.key)).size).toBe(1);
+  });
+
+  test("reconcile: a late response for run A never recreates or corrupts run B's event stream", async ({
+    page,
+    api,
+  }) => {
+    // B is also completed, so the review panel stays mounted while the owner moves from A to B and
+    // A's response can still settle into the same component.
+    const runB = makeRun('run-b', 'task-b', 'Second task', 'completed');
+    api.configure({
+      tasks: [restoredTask, makeTask('task-b', 'Second task', 'completed')],
+      runs: [reviewRun, runB],
+      acceptDelayMs: 1200,
+    });
+    await openReview(page);
+    await reconcile(page).click();
+    await confirmReconcile(page).getByRole('button', { name: 'Confirm reconciliation' }).click();
+    await expect.poll(() => api.acceptPosts.length).toBe(1);
+    // The owner moves to run B before A's response settles.
+    await page.evaluate(() => {
+      window.location.hash = '#runs/run-b';
+    });
+    await expect(page.locator('.event-row')).toHaveCount(3);
+    const streamsFor = (id: string) =>
+      api.eventRequestRunIds.filter((entry) => entry === id).length;
+    expect(streamsFor('run-b')).toBe(1);
+    // Let A's late response land, then give any wrongly scheduled stream refresh time to act.
+    await page.waitForTimeout(2500);
+    expect(api.acceptPosts).toHaveLength(1);
+    // B's stream was opened once and not recreated by A's response; B still shows its own events.
+    expect(streamsFor('run-b')).toBe(1);
+    await expect(page.locator('.event-row')).toHaveCount(3);
+    // The reconciliation of A reached the server once and its task was updated from the response.
+    await page.getByRole('link', { name: 'Tasks' }).click();
+    await expect(
+      page
+        .getByRole('listitem')
+        .filter({ hasText: 'Review quarterly notes' })
+        .locator('.status-pill'),
+    ).toHaveText('Completed');
+  });
+
   test('ineligible results get no action: not latest, still in progress, failed, historical', async ({
     page,
     api,
@@ -3091,6 +3378,25 @@ test.describe('R1 owner result acceptance', () => {
     expect(api.acceptPosts).toHaveLength(1);
   });
 
+  test('keyboard focus stays on Confirm while acceptance is pending, and Escape cannot cancel it', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ tasks: [reviewTask], runs: [reviewRun], acceptDelayMs: 600 });
+    await openReview(page);
+    await accept(page).click();
+    const confirm = confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' });
+    await confirm.focus();
+    await page.keyboard.press('Enter');
+    const pending = confirmGroup(page).getByRole('button', { name: 'Accepting…' });
+    await expect(pending).toBeFocused();
+    await expect(pending).toHaveAttribute('aria-disabled', 'true');
+    await page.keyboard.press('Escape');
+    await expect(confirmGroup(page)).toBeVisible();
+    await expect(page.getByText('Result accepted by owner.')).toBeVisible();
+    expect(api.acceptPosts).toHaveLength(1);
+  });
+
   test('an uncertain response is not reported as success and the retry reuses the same key', async ({
     page,
     api,
@@ -3098,7 +3404,7 @@ test.describe('R1 owner result acceptance', () => {
     api.configure({
       tasks: [reviewTask],
       runs: [reviewRun],
-      acceptBehaviors: ['lost-applied', 'concurrency-limit'],
+      acceptBehaviors: ['concurrency-limit', 'concurrency-limit'],
     });
     await openReview(page);
     await accept(page).click();
@@ -3108,10 +3414,21 @@ test.describe('R1 owner result acceptance', () => {
     await confirmGroup(page).getByRole('button', { name: 'Retry acceptance' }).click();
     await expect(page.getByRole('alert')).toContainText('Mission Lane is busy');
     await confirmGroup(page).getByRole('button', { name: 'Retry acceptance' }).click();
-    // The first attempt applied; the replay returns the original receipt (created: false).
     await expect(page.getByText('Result accepted by owner.')).toBeVisible();
     expect(api.acceptPosts).toHaveLength(3);
     expect(new Set(api.acceptPosts.map((entry) => entry.key)).size).toBe(1);
+  });
+
+  test('a lost response that did apply is learned from an authoritative re-read, not a blind retry', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ tasks: [reviewTask], runs: [reviewRun], acceptBehaviors: ['lost-applied'] });
+    await openReview(page);
+    await accept(page).click();
+    await confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' }).click();
+    await expect(page.getByText('Result accepted by owner.')).toBeVisible();
+    expect(api.acceptPosts).toHaveLength(1);
   });
 
   test('a network failure that never applied can be retried with the same key', async ({

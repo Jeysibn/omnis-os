@@ -340,6 +340,9 @@ importers:
       '@omnis/runtime-adapters':
         specifier: workspace:*
         version: link:../../packages/runtime-adapters
+      '@omnis/runtime-protocol':
+        specifier: workspace:*
+        version: link:../../packages/runtime-protocol
       fastify:
         specifier: 5.12.7
         version: 5.12.7

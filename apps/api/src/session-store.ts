@@ -8,7 +8,7 @@ export interface LocalSession {
 }
 
 const cookieName = 'omnis_session';
-const maxAgeSeconds = 8 * 60 * 60;
+const defaultMaxAgeSeconds = 8 * 60 * 60;
 
 export class LocalSessionStore {
   private readonly maxSessions: number;
@@ -17,20 +17,30 @@ export class LocalSessionStore {
   private readonly invalidationListeners = new Map<string, Set<() => void>>();
   private readonly secret: string;
   private readonly secureCookies: boolean;
+  private readonly maxAgeSeconds: number;
 
   constructor(
     secret: string,
     secureCookies: boolean,
     maxSessions = 1024,
     now: () => number = Date.now,
+    maxAgeSeconds = defaultMaxAgeSeconds,
   ) {
     if (secret.length < 64) throw new Error('Session secret must be at least 64 characters.');
     if (!Number.isInteger(maxSessions) || maxSessions < 1)
       throw new Error('Session capacity must be positive.');
+    if (
+      !Number.isInteger(maxAgeSeconds) ||
+      maxAgeSeconds < 1 ||
+      maxAgeSeconds > defaultMaxAgeSeconds
+    ) {
+      throw new Error('Session lifetime must be between one second and eight hours.');
+    }
     this.secret = secret;
     this.secureCookies = secureCookies;
     this.maxSessions = maxSessions;
     this.now = now;
+    this.maxAgeSeconds = maxAgeSeconds;
   }
 
   get size(): number {
@@ -103,7 +113,7 @@ export class LocalSessionStore {
 
   cookie(session: LocalSession): string {
     const token = `${session.id}.${this.sign(session.id)}`;
-    return `${cookieName}=${token}; Path=/; Max-Age=${maxAgeSeconds}; HttpOnly; SameSite=Strict${this.secureCookies ? '; Secure' : ''}`;
+    return `${cookieName}=${token}; Path=/; Max-Age=${this.maxAgeSeconds}; HttpOnly; SameSite=Strict${this.secureCookies ? '; Secure' : ''}`;
   }
 
   clearCookie(): string {
@@ -122,7 +132,7 @@ export class LocalSessionStore {
       id,
       owner,
       csrfToken: randomBytes(32).toString('base64url'),
-      expiresAt: this.now() + maxAgeSeconds * 1000,
+      expiresAt: this.now() + this.maxAgeSeconds * 1000,
     };
     this.sessions.set(id, session);
     return session;

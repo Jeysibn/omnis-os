@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 import {
   generateKeyPairSync,
   randomBytes,
@@ -13,7 +14,11 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
-import { createPool } from '../../../packages/db/src/index.ts';
+import {
+  PostgresAuthorizationStore,
+  PostgresRunStore,
+  createPool,
+} from '../../../packages/db/src/index.ts';
 
 const scrypt = promisify(scryptCallback);
 const repositoryRoot = fileURLToPath(new URL('../../../', import.meta.url));
@@ -442,6 +447,12 @@ export async function startMockServices({
       syntheticBrokerProcess,
 
       syntheticBrokerCompose,
+      async createAcceptedTaskReconciliationFixture() {
+        return createAcceptedTaskReconciliationFixture({ databaseUrl, authorizerUrl, auditPool });
+      },
+      async assertAcceptedTaskReconciliation(fixture) {
+        return assertAcceptedTaskReconciliation({ auditPool, fixture });
+      },
 
       assertSensitiveValuesAbsentFromLogs: () => {
         assertSensitiveValuesAbsentFromLogs(sensitiveLogCanaries, [
@@ -1114,6 +1125,205 @@ async function startSyntheticBrokerCompose({
     runCompose(['down', '--volumes', '--remove-orphans']);
     throw error;
   }
+}
+
+async function createAcceptedTaskReconciliationFixture({ databaseUrl, authorizerUrl, auditPool }) {
+  if (!auditPool)
+    throw new Error('The disposable acceptance fixture requires its admin audit pool.');
+  const runtime = createPool({
+    connectionString: databaseUrl,
+    max: 2,
+    application_name: 'omnis-test-accepted-task-fixture',
+  });
+  const authorizer = createPool({
+    connectionString: authorizerUrl,
+    max: 1,
+    application_name: 'omnis-test-accepted-task-fixture',
+  });
+  let task;
+  let staleRunId;
+  let runId;
+  let acceptance;
+  try {
+    const store = new PostgresRunStore(runtime);
+    const authorizationStore = new PostgresAuthorizationStore(runtime, authorizer);
+    task = await store.createTask({
+      title: `Synthetic accepted-task reconciliation ${randomUUID()}`,
+      detail: 'Disposable PostgreSQL fixture for owner receipt reconciliation.',
+    });
+    const completeSyntheticRun = async (workerId) => {
+      const request = await authorizationStore.request(task.id, 'owner');
+      const authorization = await authorizationStore.decide(request.id, 'owner', 'approve');
+      const admitted = await store.admitRun(
+        task.id,
+        workerId,
+        authorization.id,
+        async () => `fixture-job-${workerId}`,
+      );
+      const claim = await store.beginExecution(admitted.run.id, workerId, 30);
+      await store.completeRun(
+        admitted.run.id,
+        workerId,
+        claim.generation,
+        `Synthetic completion ${workerId}.`,
+        [],
+      );
+      return admitted.run.id;
+    };
+
+    staleRunId = await completeSyntheticRun(`acceptance-fixture-${randomUUID()}`);
+    await transitionTaskWithRuntime(runtime, task.id, 'in_review', 'in_progress');
+    runId = await completeSyntheticRun(`acceptance-fixture-${randomUUID()}`);
+    acceptance = await new PostgresRunStore(authorizer).acceptTaskResult(
+      task.id,
+      { runId },
+      randomUUID(),
+    );
+    assert.equal(acceptance.created, true);
+    assert.equal(acceptance.acceptance.acceptedBy, 'owner');
+    assert.equal(acceptance.acceptance.runId, runId);
+
+    await transitionTaskWithRuntime(runtime, task.id, 'completed', 'in_progress');
+    await transitionTaskWithRuntime(runtime, task.id, 'in_progress', 'in_review');
+    await assertRuntimeCannotForgeAcceptance(runtime, task.id, runId);
+  } finally {
+    await runtime.end();
+    await authorizer.end();
+  }
+
+  const state = await readAcceptanceFixtureState(auditPool, task.id, runId);
+  assert.equal(state.taskStatus, 'in_review');
+  assert.equal(state.runStatus, 'completed');
+  assert.equal(state.latestRunId, runId);
+  assert.equal(state.receipt?.acceptedBy, 'owner');
+  assert.equal(state.receipt?.runId, runId);
+  assert.deepEqual(
+    state.receipt,
+    acceptance.acceptance,
+    'reopening the accepted task must leave its immutable owner receipt unchanged',
+  );
+  assert.deepEqual(state.counts, { receipts: '1', ownerEvents: '1' });
+  return {
+    taskId: task.id,
+    runId,
+    staleRunId,
+    receipt: state.receipt,
+    initialCounts: state.counts,
+  };
+}
+
+async function transitionTaskWithRuntime(runtime, taskId, from, to) {
+  const client = await runtime.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SELECT omnis.acquire_mission_lane_admission(false, 3000)');
+    const update = await client.query(
+      'UPDATE omnis.tasks SET status=$3 WHERE id=$1 AND status=$2',
+      [taskId, from, to],
+    );
+    assert.equal(update.rowCount, 1, `fixture must transition task ${from} to ${to}`);
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function assertRuntimeCannotForgeAcceptance(runtime, taskId, runId) {
+  const completionClient = await runtime.connect();
+  try {
+    await completionClient.query('BEGIN');
+    await completionClient.query('SELECT omnis.acquire_mission_lane_admission(false, 3000)');
+    await assert.rejects(
+      completionClient.query(
+        `UPDATE omnis.tasks SET status='completed'
+          WHERE id=$1 AND status='in_review'`,
+        [taskId],
+      ),
+      /requires the owner authorizer/,
+      'runtime credentials must not directly complete an accepted task',
+    );
+    await completionClient.query('ROLLBACK');
+  } catch (error) {
+    await completionClient.query('ROLLBACK').catch(() => undefined);
+    throw error;
+  } finally {
+    completionClient.release();
+  }
+
+  await assert.rejects(
+    runtime.query(
+      `INSERT INTO omnis.task_result_acceptances(task_id, run_id, request_id)
+       VALUES ($1, $2, $3)`,
+      [taskId, runId, randomUUID()],
+    ),
+    /permission denied/,
+    'runtime credentials must not insert owner acceptance receipts',
+  );
+}
+
+async function assertAcceptedTaskReconciliation({ auditPool, fixture }) {
+  const { taskId, runId, receipt, initialCounts } = fixture ?? {};
+  if (
+    !auditPool ||
+    !/^[a-z0-9][a-z0-9_-]{0,127}$/i.test(taskId ?? '') ||
+    !/^[a-z0-9][a-z0-9_-]{0,127}$/i.test(runId ?? '') ||
+    !receipt
+  ) {
+    throw new Error('The accepted-task reconciliation verification input is malformed.');
+  }
+  const state = await readAcceptanceFixtureState(auditPool, taskId, runId);
+  assert.equal(state.taskStatus, 'completed', 'owner API reconciliation must complete the task');
+  assert.equal(state.runStatus, 'completed');
+  assert.equal(state.latestRunId, runId);
+  assert.deepEqual(
+    state.receipt,
+    receipt,
+    'owner API reconciliation must preserve the original receipt',
+  );
+  assert.deepEqual(state.counts, {
+    receipts: '1',
+    ownerEvents: String(Number(initialCounts?.ownerEvents) + 1),
+  });
+  return state;
+}
+
+async function readAcceptanceFixtureState(auditPool, taskId, runId) {
+  const { rows } = await auditPool.query(
+    `SELECT task.status AS task_status, run.status AS run_status,
+            receipt.run_id AS receipt_run_id, receipt.accepted_by,
+            to_char(receipt.accepted_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS accepted_at,
+            receipt.request_id,
+            (SELECT latest.id FROM omnis.runs AS latest WHERE latest.task_id=task.id
+              ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1) AS latest_run_id,
+            (SELECT count(*)::text FROM omnis.task_result_acceptances WHERE task_id=task.id) AS receipts,
+            (SELECT count(*)::text FROM omnis.mission_lane_events
+              WHERE task_id=task.id AND event_type='task.status_changed' AND actor='owner') AS owner_events
+       FROM omnis.tasks AS task
+       JOIN omnis.runs AS run ON run.id=$2 AND run.task_id=task.id
+       LEFT JOIN omnis.task_result_acceptances AS receipt
+         ON receipt.task_id=task.id AND receipt.run_id=run.id
+      WHERE task.id=$1`,
+    [taskId, runId],
+  );
+  assert.equal(rows.length, 1, 'fixture task and run must exist and belong together');
+  const row = rows[0];
+  return {
+    taskStatus: row.task_status,
+    runStatus: row.run_status,
+    latestRunId: row.latest_run_id,
+    receipt: row.receipt_run_id
+      ? {
+          runId: row.receipt_run_id,
+          acceptedBy: row.accepted_by,
+          acceptedAt: new Date(row.accepted_at).toISOString(),
+          requestId: row.request_id,
+        }
+      : null,
+    counts: { receipts: row.receipts, ownerEvents: row.owner_events },
+  };
 }
 
 export function appendCapturedLogChunk(child, chunk, values, maxBytes = 262_144) {

@@ -39,7 +39,25 @@ export type AcceptanceView =
   /** The owner accepted exactly this run's result. */
   | { kind: 'accepted'; acceptance: TaskResultAcceptance }
   /** Task is `completed` but has no receipt for this run (history from before R1). */
-  | { kind: 'historical' };
+  | { kind: 'historical' }
+  /**
+   * Issue #106: the task reads `in_review` yet already holds an owner receipt for this run (e.g. a
+   * restored accepted task that the runtime reopened). The receipt is real and immutable; the task
+   * status disagrees with it. Never offered for acceptance and never described as awaiting review.
+   */
+  | { kind: 'receipt-in-review'; acceptance: TaskResultAcceptance };
+
+/** True when an `in_review` task already has an owner receipt for the given run. */
+export function hasReceiptForRun(task: Task | null | undefined, runId: string): boolean {
+  return Boolean(task && task.resultAcceptance && task.resultAcceptance.runId === runId);
+}
+
+/** In review and genuinely awaiting the owner: no receipt already exists for its latest run. */
+export function isAwaitingOwnerReview(task: Task, runs: readonly Run[]): boolean {
+  if (task.status !== 'in_review') return false;
+  const latest = latestRunForTask(runs, task.id);
+  return !(latest && hasReceiptForRun(task, latest.id));
+}
 
 export function acceptanceViewFor(
   task: Task | null | undefined,
@@ -51,7 +69,11 @@ export function acceptanceViewFor(
   const isLatest = latest?.id === run.id;
   if (run.status !== 'completed') return { kind: 'none' };
   if (!isLatest) return { kind: 'superseded' };
-  if (task.status === 'in_review') return { kind: 'eligible' };
+  if (task.status === 'in_review') {
+    return task.resultAcceptance && task.resultAcceptance.runId === run.id
+      ? { kind: 'receipt-in-review', acceptance: task.resultAcceptance }
+      : { kind: 'eligible' };
+  }
   if (task.status === 'completed') {
     // The receipt is shown only for the run it belongs to, never inferred from `run.completed`.
     return task.resultAcceptance && task.resultAcceptance.runId === run.id

@@ -6,6 +6,7 @@ const sessionSecret = process.env.OMNIS_SESSION_SECRET;
 const ownerPasswordHash = process.env.OMNIS_OWNER_PASSWORD_HASH;
 const internalToken = process.env.OMNIS_INTERNAL_TOKEN;
 const authorizerToken = process.env.OMNIS_API_AUTHORIZER_TOKEN;
+const testSessionMaxAgeSeconds = parseTestSessionMaxAgeSeconds(process.env);
 
 if (!sessionSecret || sessionSecret.length < 64) {
   throw new Error('OMNIS_SESSION_SECRET must be generated with `pnpm configure:owner`.');
@@ -43,7 +44,23 @@ export const env = {
   workerUrl: `http://${workerHost}:${workerPort}`,
   authorizerSocket,
   secureCookies: process.env.OMNIS_SECURE_COOKIES === 'true',
+  sessionMaxAgeSeconds: testSessionMaxAgeSeconds,
 };
+
+function parseTestSessionMaxAgeSeconds(environment: NodeJS.ProcessEnv): number | undefined {
+  const value = environment.OMNIS_TEST_SESSION_MAX_AGE_SECONDS;
+  if (value === undefined) return undefined;
+  if (environment.OMNIS_CI_DISPOSABLE !== 'true' || !/^\d+$/.test(value)) {
+    throw new Error(
+      'OMNIS_TEST_SESSION_MAX_AGE_SECONDS is available only in the disposable CI harness.',
+    );
+  }
+  const seconds = Number(value);
+  if (!Number.isSafeInteger(seconds) || seconds < 1 || seconds > 8 * 60 * 60) {
+    throw new Error('OMNIS_TEST_SESSION_MAX_AGE_SECONDS must be between 1 and 28800.');
+  }
+  return seconds;
+}
 
 export function validateAuthorizerSocket(value: string | undefined): string {
   if (

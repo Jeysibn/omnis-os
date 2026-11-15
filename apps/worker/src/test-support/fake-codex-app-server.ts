@@ -2,12 +2,15 @@ import { z } from 'zod';
 import type { RuntimeCapabilities } from '@omnis/contracts';
 import type { RuntimeAdapter } from '@omnis/runtime-adapters';
 import { SandboxError } from '@omnis/runtime-adapters/sandbox-error';
+import {
+  OfflineCodexEventProjector,
+  createOfflineTextTurnRequest,
+} from './codex-app-server-contract.ts';
 
 const MAX_FRAME_BYTES = 16_384;
 const MAX_OUTPUT_CHARS = 2_000;
 const RequestSchema = z
   .object({
-    jsonrpc: z.literal('2.0'),
     id: z.number().int().positive().optional(),
     method: z.string().min(1).max(100),
     params: z.record(z.string(), z.unknown()).optional(),
@@ -15,7 +18,6 @@ const RequestSchema = z
   .strict();
 const ResponseSchema = z
   .object({
-    jsonrpc: z.literal('2.0'),
     id: z.number().int().positive(),
     result: z.record(z.string(), z.unknown()).optional(),
     error: z
@@ -26,7 +28,6 @@ const ResponseSchema = z
   .strict();
 const NotificationSchema = z
   .object({
-    jsonrpc: z.literal('2.0'),
     method: z.string().min(1).max(100),
     params: z.record(z.string(), z.unknown()),
   })
@@ -46,18 +47,24 @@ type FakeMode =
   | 'pending-invalid-terminal'
   | 'pending-disconnect'
   | 'pending-after-ack-disconnect'
+  | 'turn-start-ack-lost'
+  | 'mixed-phases'
+  | 'out-of-order-item'
+  | 'wrong-item-delta'
+  | 'duplicate-terminal'
+  | 'contradictory-terminal'
   | 'malformed-turn-frame'
   | 'failed'
   | 'crashed'
   | 'timeout';
-type Notification = z.infer<typeof NotificationSchema>;
-
+type FakeNotification = z.infer<typeof NotificationSchema>;
 /** In-process protocol fixture. It has no child-process, network, or credential interface. */
 export class FakeCodexAppServerProtocol {
   readonly transport = 'in-process' as const;
   readonly usesCredentials = false as const;
   readonly launchesNativeProcess = false as const;
   readonly methods: string[] = [];
+  turnSubmissionCount = 0;
   private readonly mode: FakeMode;
   private nextId = 0;
   private threadId: string | undefined;
@@ -76,14 +83,11 @@ export class FakeCodexAppServerProtocol {
     params: Record<string, unknown> = {},
   ): Promise<{
     result: Record<string, unknown>;
-    notifications: Notification[];
+    notificationFrames: string[];
   }> {
     const id = ++this.nextId;
-    const frame = JSON.stringify({ jsonrpc: '2.0', id, method, params });
+    const frame = JSON.stringify({ id, method, params });
     const frames = await this.exchange(frame);
-    if (frames.some((candidate) => !parseResponse(candidate) && !parseNotification(candidate))) {
-      throw new Error('Fake protocol returned a malformed frame.');
-    }
     const response = frames.map(parseResponse).find((candidate) => candidate?.id === id);
     if (!response) throw new Error('Fake protocol response did not match request id.');
     if (response.error) throw new Error('Fake app-server rejected the protocol request.');
@@ -94,14 +98,12 @@ export class FakeCodexAppServerProtocol {
     }
     return {
       result: response.result,
-      notifications: frames
-        .map(parseNotification)
-        .filter((value): value is Notification => value !== null),
+      notificationFrames: frames.filter((candidate) => parseResponse(candidate)?.id !== id),
     };
   }
 
   async notify(method: string, params: Record<string, unknown> = {}): Promise<void> {
-    const frame = JSON.stringify({ jsonrpc: '2.0', method, params });
+    const frame = JSON.stringify({ method, params });
     await this.exchange(frame);
   }
 
@@ -109,7 +111,12 @@ export class FakeCodexAppServerProtocol {
     return this.turnStarted;
   }
 
-  async waitForInterruption(signal: AbortSignal, threadId: string, turnId: string): Promise<never> {
+  async waitForInterruption(
+    signal: AbortSignal,
+    threadId: string,
+    turnId: string,
+    onCancellationRequested: () => void,
+  ): Promise<string[]> {
     if (!signal.aborted) {
       await new Promise<void>((resolve, reject) => {
         const onAbort = () => {
@@ -124,22 +131,14 @@ export class FakeCodexAppServerProtocol {
         if (signal.reason instanceof Error) reject(signal.reason);
       });
     }
-    let interrupted: Awaited<ReturnType<FakeCodexAppServerProtocol['request']>>;
+    onCancellationRequested();
     try {
-      interrupted = await this.request('turn/interrupt', { threadId, turnId });
+      const interrupted = await this.request('turn/interrupt', { threadId, turnId });
+      return interrupted.notificationFrames;
     } catch {
       // Failure to parse a response or loss of the fake exchange cannot confirm termination.
       throw new SandboxError('termination_failed');
     }
-    const terminal = interrupted.notifications.find((event) => event.method === 'turn/completed');
-    if (
-      Object.keys(interrupted.result).length !== 0 ||
-      terminal?.params.turnId !== turnId ||
-      terminal.params.status !== 'interrupted'
-    ) {
-      throw new SandboxError('termination_failed');
-    }
-    throw new SandboxError('cancelled');
   }
 
   private async exchange(frame: string): Promise<string[]> {
@@ -161,7 +160,7 @@ export class FakeCodexAppServerProtocol {
     const id = request.data.id;
     const params = request.data.params ?? {};
     let result: Record<string, unknown>;
-    let notifications: Notification[] = [];
+    let notifications: FakeNotification[] = [];
 
     switch (request.data.method) {
       case 'initialize':
@@ -174,12 +173,15 @@ export class FakeCodexAppServerProtocol {
       case 'turn/start':
         if (params.threadId !== this.threadId || !this.threadId)
           return [responseError(id, -32602, 'Unknown synthetic thread.')];
+        this.turnSubmissionCount++;
         this.turnId = 'turn-synthetic-0001';
         this.turnStartedResolve?.();
         this.turnStartedResolve = undefined;
         result = { turn: { id: this.turnId } };
-        if (this.mode === 'malformed-turn-frame') return [response(id, result), '{"jsonrpc":'];
+        if (this.mode === 'malformed-turn-frame') return [response(id, result), '{"method":'];
         notifications = this.turnNotifications();
+        if (this.mode === 'turn-start-ack-lost')
+          throw new Error('Fake lost turn/start acknowledgement after synthetic submission.');
         break;
       case 'turn/interrupt':
         if (params.threadId !== this.threadId || params.turnId !== this.turnId)
@@ -191,39 +193,38 @@ export class FakeCodexAppServerProtocol {
         }
         if (this.mode === 'pending-malformed-ack')
           return [
-            '{"jsonrpc":"2.0",',
+            '{"method":',
             JSON.stringify(
-              notification('turn/completed', { turnId: this.turnId, status: 'interrupted' }),
+              notification('turn/completed', { turn: { id: this.turnId, status: 'interrupted' } }),
             ),
           ];
         if (this.mode === 'pending-invalid-ack')
           return [
-            JSON.stringify({ jsonrpc: '2.0', id }),
+            JSON.stringify({ id }),
             JSON.stringify(
-              notification('turn/completed', { turnId: this.turnId, status: 'interrupted' }),
+              notification('turn/completed', { turn: { id: this.turnId, status: 'interrupted' } }),
             ),
           ];
         if (this.mode === 'pending-wrong-response-id')
           return [
             response(id + 1, {}),
             JSON.stringify(
-              notification('turn/completed', { turnId: this.turnId, status: 'interrupted' }),
+              notification('turn/completed', { turn: { id: this.turnId, status: 'interrupted' } }),
             ),
           ];
-        if (this.mode === 'pending-malformed-terminal') return [response(id, {}), '{"jsonrpc":'];
+        if (this.mode === 'pending-malformed-terminal') return [response(id, {}), '{"method":'];
         if (this.mode === 'pending-invalid-terminal')
-          return [
-            response(id, {}),
-            JSON.stringify({ jsonrpc: '2.0', method: 'turn/completed', params: null }),
-          ];
+          return [response(id, {}), JSON.stringify({ method: 'turn/completed', params: null })];
         result = {};
         notifications =
           this.mode === 'pending-unconfirmed-interrupt'
             ? []
             : [
                 notification('turn/completed', {
-                  turnId: this.mode === 'pending-wrong-turn' ? 'turn-other' : this.turnId,
-                  status: this.mode === 'pending-wrong-status' ? 'completed' : 'interrupted',
+                  turn: {
+                    id: this.mode === 'pending-wrong-turn' ? 'turn-other' : this.turnId,
+                    status: this.mode === 'pending-wrong-status' ? 'completed' : 'interrupted',
+                  },
                 }),
               ];
         break;
@@ -234,28 +235,85 @@ export class FakeCodexAppServerProtocol {
     return [response(id, result), ...notifications.map((event) => JSON.stringify(event))];
   }
 
-  private turnNotifications(): Notification[] {
+  private turnNotifications(): FakeNotification[] {
     if (this.mode.startsWith('pending')) return [];
     if (this.mode === 'crashed') throw new Error('Fake app-server process exited unexpectedly.');
     if (this.mode === 'timeout') throw new SandboxError('timed_out');
     if (this.mode === 'failed')
-      return [notification('turn/completed', { turnId: this.turnId, status: 'failed' })];
+      return [notification('turn/completed', { turn: { id: this.turnId, status: 'failed' } })];
     if (this.mode === 'tool-request')
-      return [notification('item/commandExecution/requestApproval', { turnId: this.turnId })];
-    return [
-      notification('item/agentMessage/delta', {
+      return [
+        notification('item/started', {
+          threadId: this.threadId,
+          turnId: this.turnId,
+          item: { id: 'tool-item', type: 'commandExecution' },
+        }),
+      ];
+    const start = notification('turn/started', {
+      turn: { id: this.turnId, status: 'inProgress' },
+    });
+    const message = (
+      id: string,
+      phase: 'commentary' | 'partial_answer' | 'final_answer',
+      text: string,
+      deltas: readonly string[] = [text],
+    ) => [
+      notification('item/started', {
+        threadId: this.threadId,
         turnId: this.turnId,
-        delta: 'Synthetic app-server delta 1.',
+        item: { id, type: 'agentMessage', text: '', phase },
       }),
-      notification('item/agentMessage/delta', {
+      ...deltas.map((delta) =>
+        notification('item/agentMessage/delta', {
+          threadId: this.threadId,
+          turnId: this.turnId,
+          itemId: id,
+          delta,
+        }),
+      ),
+      notification('item/completed', {
+        threadId: this.threadId,
         turnId: this.turnId,
-        delta: 'Synthetic app-server delta 2.',
+        item: { id, type: 'agentMessage', text, phase },
       }),
-      notification('turn/completed', {
-        turnId: this.turnId,
+    ];
+    if (this.mode === 'out-of-order-item')
+      return [message('message-item', 'final_answer', 'Synthetic app-server result.')[0]!, start];
+    if (this.mode === 'wrong-item-delta')
+      return [
+        start,
+        message('message-item', 'final_answer', 'Synthetic app-server result.')[0]!,
+        notification('item/agentMessage/delta', {
+          threadId: this.threadId,
+          turnId: this.turnId,
+          itemId: 'other-item',
+          delta: 'bad',
+        }),
+      ];
+    const messages =
+      this.mode === 'mixed-phases'
+        ? [
+            ...message('commentary-item', 'commentary', 'synthetic commentary'),
+            ...message('partial-item', 'partial_answer', 'synthetic partial'),
+            ...message('final-item-1', 'final_answer', 'Synthetic '),
+            ...message('final-item-2', 'final_answer', 'app-server result.'),
+          ]
+        : message('message-item', 'final_answer', 'Synthetic app-server result.', [
+            'Synthetic app-server ',
+            'result.',
+          ]);
+    const terminal = notification('turn/completed', {
+      turn: {
+        id: this.turnId,
         status: 'completed',
-        output: 'Synthetic app-server result.',
-      }),
+        ...(this.mode === 'contradictory-terminal' ? { error: { message: 'contradiction' } } : {}),
+      },
+    });
+    return [
+      start,
+      ...messages,
+      terminal,
+      ...(this.mode === 'duplicate-terminal' ? [terminal] : []),
     ];
   }
 }
@@ -294,31 +352,58 @@ export class FakeCodexAppServerRuntimeAdapter implements RuntimeAdapter {
     const threadId = getNestedString(thread.result, 'thread', 'id');
     if (signal.aborted) throw new SandboxError('cancelled');
 
-    const turn = await this.protocol.request('turn/start', {
-      threadId,
-      input: [{ type: 'text', text: 'Synthetic test prompt only.' }],
-    });
+    const turnRequest = createOfflineTextTurnRequest(threadId, 'Synthetic test prompt only.');
+    const turn = await this.protocol.request(turnRequest.method, turnRequest.params);
     const turnId = getNestedString(turn.result, 'turn', 'id');
-    let output: string | undefined;
-    for (const event of turn.notifications) {
-      const params = event.params;
-      if (params.turnId !== turnId) throw new Error('Fake event turn identity did not match.');
-      if (event.method === 'item/agentMessage/delta') {
-        const delta = z.string().min(1).max(MAX_OUTPUT_CHARS).parse(params.delta);
-        emit({ type: 'run.output', message: delta });
-        continue;
+    const projector = new OfflineCodexEventProjector({
+      runId: 'run-synthetic-0001',
+      operationId: '22222222-2222-4222-8222-222222222222',
+      generation: 1,
+      sessionId: threadId,
+      threadId,
+      turnId,
+      maxOutputBytes: MAX_OUTPUT_CHARS,
+    });
+    let deliverySequence = 0;
+    const projectFrames = (frames: readonly string[]) => {
+      for (const frame of frames) {
+        const sequence = ++deliverySequence;
+        const projected = projector.accept({
+          sequence,
+          eventId: `fake-delivery-${sequence}`,
+          frame,
+        }).event;
+        if (
+          projected?.type === 'text_delta' &&
+          projected.phase === 'final_answer' &&
+          projected.message !== undefined
+        )
+          emit({ type: 'run.output', message: projected.message });
       }
-      if (event.method === 'turn/completed') {
-        if (params.status !== 'completed')
-          throw new Error('Fake app-server turn did not complete.');
-        output = z.string().min(1).max(MAX_OUTPUT_CHARS).parse(params.output);
-        continue;
-      }
-      // Tool requests, unknown capabilities, and unsolicited control events are never trusted.
-      throw new Error('Fake app-server emitted a disallowed event.');
+    };
+
+    projectFrames(turn.notificationFrames);
+    if (projector.status === 'completed') {
+      return { output: z.string().min(1).max(MAX_OUTPUT_CHARS).parse(projector.output) };
     }
-    if (output) return { output };
-    return this.protocol.waitForInterruption(signal, threadId, turnId);
+    if (projector.status === 'failed') throw new Error('Fake app-server turn failed.');
+    if (['cancelled'].includes(projector.status)) throw new SandboxError('cancelled');
+    if (projector.status === 'interrupted') throw new SandboxError('termination_failed');
+
+    const interruptionFrames = await this.protocol.waitForInterruption(
+      signal,
+      threadId,
+      turnId,
+      () => projector.requestCancellation(),
+    );
+    try {
+      projectFrames(interruptionFrames);
+    } catch {
+      // A malformed or mismatched terminal frame cannot confirm cancellation.
+      throw new SandboxError('termination_failed');
+    }
+    if (['cancelled'].includes(projector.status)) throw new SandboxError('cancelled');
+    throw new SandboxError('termination_failed');
   }
 }
 
@@ -341,23 +426,14 @@ function parseResponse(frame: string): z.infer<typeof ResponseSchema> | null {
   }
 }
 
-function parseNotification(frame: string): Notification | null {
-  try {
-    const parsed = NotificationSchema.safeParse(JSON.parse(frame));
-    return parsed.success ? parsed.data : null;
-  } catch {
-    return null;
-  }
-}
-
 function response(id: number, result: Record<string, unknown>): string {
-  return JSON.stringify({ jsonrpc: '2.0', id, result });
+  return JSON.stringify({ id, result });
 }
 
 function responseError(id: number, code: number, message: string): string {
-  return JSON.stringify({ jsonrpc: '2.0', id, error: { code, message } });
+  return JSON.stringify({ id, error: { code, message } });
 }
 
-function notification(method: string, params: Record<string, unknown>): Notification {
-  return NotificationSchema.parse({ jsonrpc: '2.0', method, params });
+function notification(method: string, params: Record<string, unknown>): FakeNotification {
+  return NotificationSchema.parse({ method, params });
 }

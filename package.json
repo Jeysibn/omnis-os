@@ -36,7 +36,7 @@
     "lint": "eslint apps packages scripts",
     "format:check": "prettier --check \"apps/**/*.{ts,tsx,mjs,css,html,json}\" \"packages/**/*.ts\" \"scripts/**/*.{ts,mjs}\" \"tests/**/*.mjs\" \"infra/**/*.yml\" \"*.json\" \"*.yaml\" \"*.mjs\"",
     "format": "prettier --write \"apps/**/*.{ts,tsx,mjs,css,html,json}\" \"packages/**/*.ts\" \"scripts/**/*.{ts,mjs}\" \"tests/**/*.mjs\" \"infra/**/*.yml\" \"*.json\" \"*.yaml\" \"*.mjs\"",
-    "test": "pnpm -r test && node --test scripts/db-recovery/*.test.mjs scripts/compose/*.test.mjs scripts/ci/*.test.mjs && node --test scripts/container-images/*.test.mjs",
+    "test": "pnpm -r test && node --test scripts/db-recovery/*.test.mjs scripts/compose/*.test.mjs scripts/ci/*.test.mjs && node --test scripts/container-images/*.test.mjs && node --experimental-strip-types --test tests/offline-security-harness/*.test.mjs",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test"
   },
   "devDependencies": {

@@ -117,6 +117,11 @@ const postgresSuite = describe(
       let criticalClient: PoolClient | undefined;
       let criticalAcquire: Promise<unknown> | undefined;
       const normalAcquires: Array<Promise<{ code: string | undefined }>> = [];
+      // Keep normal waiters' deadline shorter than the critical writer's so
+      // draining them cannot consume the critical writer's entire budget while
+      // this test deliberately holds the cursor lock.
+      const normalDeadlineMs = 1_000;
+      const criticalDeadlineMs = 3_000;
       const connect = async (writerPool: Pool) => {
         const client = await writerPool.connect();
         clients.push(client);
@@ -150,7 +155,7 @@ const postgresSuite = describe(
           normalClients.push(client);
           normalAcquires.push(
             client
-              .query('SELECT omnis.acquire_mission_lane_admission(false, 3000)')
+              .query('SELECT omnis.acquire_mission_lane_admission(false, $1)', [normalDeadlineMs])
               .then(() => ({ code: undefined }))
               .catch((error: { code?: string }) => ({ code: error.code })),
           );
@@ -181,15 +186,36 @@ const postgresSuite = describe(
         await overflow.query('ROLLBACK');
 
         criticalClient = await connect(secondPool);
+        const criticalPid = Number(
+          (await criticalClient.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0]
+            ?.pid,
+        );
         criticalAcquire = criticalClient.query(
-          'SELECT omnis.acquire_mission_lane_admission(true, 3000)',
+          'SELECT omnis.acquire_mission_lane_admission(true, $1)',
+          [criticalDeadlineMs],
+        );
+
+        assert.equal(
+          await waitUntil(async () => {
+            const result = await adminPool!.query<{ registered: boolean }>(
+              `SELECT EXISTS (
+                 SELECT 1 FROM pg_locks WHERE pid=$1 AND locktype='advisory'
+                   AND granted AND objsubid=1
+                   AND ((classid::bigint << 32) | objid::bigint)=70463909136605
+               ) AS registered`,
+              [criticalPid],
+            );
+            return result.rows[0]?.registered === true;
+          }),
+          true,
+          'critical work must register its priority marker before active permits are released',
         );
 
         await Promise.all(activeClients.map((client) => client.query('COMMIT')));
         const normalResults = await Promise.all(normalAcquires);
         assert.ok(
-          normalResults.every((result) => ['PML02', '55P03'].includes(result.code ?? '')),
-          'normal waiters must stop without mutating once critical work is pending',
+          normalResults.every((result) => result.code === 'PML02'),
+          'normal waiters must stop because critical work is pending, not because their deadline elapsed',
         );
         assert.equal(
           await Promise.race([criticalAcquire.then(() => true), delay(25).then(() => false)]),

@@ -46,7 +46,13 @@ const app = Fastify({
 });
 const syntheticBrokerTestMode = syntheticTaskRunTestMode(process.env);
 // Memory-backed sessions are limited to this single-owner local mock gate. Durable session storage is a later gate.
-const sessions = new LocalSessionStore(env.sessionSecret, env.secureCookies);
+const sessions = new LocalSessionStore(
+  env.sessionSecret,
+  env.secureCookies,
+  1024,
+  Date.now,
+  env.sessionMaxAgeSeconds,
+);
 const runEventStreams = new RunEventStreamRegistry({ sessions });
 const authThrottle = new AuthThrottle();
 app.decorateRequest('omnisSession', undefined);

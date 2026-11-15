@@ -1,7 +1,7 @@
 import { type Ref } from 'react';
 import type { Run, Task } from '@omnis/contracts';
 import { NxButton, Panel } from '../design/index.js';
-import { latestRunForTask } from '../acceptResult.js';
+import { isAwaitingOwnerReview, latestRunForTask } from '../acceptResult.js';
 import { RunStatusBadge, isActiveRun } from './status.js';
 import { formatManilaStamp } from './time.js';
 import type { LoadState } from './vitals.js';
@@ -39,7 +39,7 @@ export function AttentionPanel(props: Props) {
   const awaiting = tasks.filter((task) => task.status === 'open' && !taskHasActiveRun.has(task.id));
   // A finished run is not an accepted task: these wait for the owner to review the latest result.
   const inReview = tasks
-    .filter((task) => task.status === 'in_review')
+    .filter((task) => isAwaitingOwnerReview(task, runs))
     .map((task) => ({ task, run: latestRunForTask(runs, task.id) }))
     .filter((entry): entry is { task: Task; run: Run } => entry.run?.status === 'completed');
   const active = runs.filter((run) => isActiveRun(run.status));
