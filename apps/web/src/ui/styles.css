@@ -2552,3 +2552,39 @@ button:disabled {
   opacity: 0.6;
   cursor: not-allowed;
 }
+
+.execution-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.16));
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+}
+.execution-banner > div {
+  flex: 1;
+  min-width: 0;
+}
+.execution-banner p {
+  margin: 4px 0 0;
+}
+.execution-disabled {
+  border-style: dashed;
+}
+.execution-worker_unavailable,
+.execution-authorizer_unavailable,
+.execution-unavailable,
+.execution-mode_mismatch,
+.execution-load_failed {
+  border-color: #d9a441;
+}
+@media (max-width: 640px) {
+  .execution-banner {
+    flex-wrap: wrap;
+  }
+  .execution-banner .secondary-button {
+    width: 100%;
+  }
+}

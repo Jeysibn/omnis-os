@@ -27,7 +27,10 @@ import {
   ConnectorAuthorizationSchema,
   CreateConnectorAuthorizationSchema,
 } from '@omnis/contracts/connector-authorization-schema';
-import { RuntimeCapabilitiesSchema } from '@omnis/contracts/runtime-capabilities';
+import {
+  RuntimeCapabilitiesSchema,
+  runtimeCapabilities,
+} from '@omnis/contracts/runtime-capabilities';
 
 const now = '2026-11-03T10:00:00.000Z';
 const csrfToken = 'csrf-browser-fixture-token';
@@ -152,6 +155,9 @@ type FixtureOptions = {
   eventOrder?: 'reverse';
   eventDuplicates?: boolean;
   syntheticEnabled?: boolean;
+  /** Runtime capability scenario; default is available mock execution. */
+  capability?: 'disabled' | 'worker-down' | 'authorizer-down' | 'error' | 'unauthorized';
+  capabilityDelayMs?: number;
   /** Scripted native-EventSource scenario: deliver event 1, drop, then replay 1 and send 2. */
   eventReconnectScenario?: boolean;
   /** Synthetic connector authorization expiry (defaults to 20 minutes from now). */
@@ -452,6 +458,32 @@ function createMockApi(page: Page) {
       });
     }
     if (path === '/api/v1/runtime-capabilities' && method === 'GET') {
+      if (options.capabilityDelayMs)
+        await new Promise((r) => setTimeout(r, options.capabilityDelayMs));
+      if (options.capability === 'error')
+        return fulfillError(route, 503, 'unavailable', 'Capability service down.');
+      if (options.capability === 'unauthorized')
+        return fulfillError(route, 401, 'unauthorized', 'Sign in to continue.');
+      if (options.capability) {
+        const scenario = options.capability;
+        const worker = {
+          version: 'omnis.worker-execution-status.v1' as const,
+          serviceAvailability: 'healthy' as const,
+          executionMode: scenario === 'disabled' ? ('disabled' as const) : ('mock' as const),
+          queueAvailability:
+            scenario === 'disabled' ? ('not_required' as const) : ('available' as const),
+          launcherAvailability:
+            scenario === 'disabled' ? ('not_required' as const) : ('available' as const),
+        };
+        return route.fulfill({
+          json: runtimeCapabilities({
+            apiExecutionMode: scenario === 'disabled' ? 'disabled' : 'mock',
+            ...(scenario === 'worker-down' ? {} : { workerStatus: worker }),
+            authorizationAvailable: scenario !== 'authorizer-down',
+            syntheticConnectorEnabled: false,
+          }),
+        });
+      }
       return route.fulfill({
         json: RuntimeCapabilitiesSchema.parse({
           version: 'omnis.runtime-capabilities.v3',
@@ -3859,5 +3891,185 @@ test.describe('R1 owner result acceptance', () => {
     await expect(refreshing(page)).toHaveCount(0);
     await expect(accept(page)).toBeVisible();
     expect(api.acceptPosts).toHaveLength(1);
+  });
+});
+
+test.describe('execution capability states', () => {
+  const states = [
+    ['disabled', 'Execution is disabled', 'disabled'],
+    ['worker-down', 'Execution service unavailable', 'worker_unavailable'],
+    ['authorizer-down', 'Approval service unavailable', 'authorizer_unavailable'],
+    ['error', 'Execution capability unknown', 'load_failed'],
+  ] as const;
+  for (const [capability, heading, state] of states) {
+    test(`${capability}: banner shown, run controls disabled, navigation intact`, async ({
+      page,
+      api,
+    }) => {
+      api.configure({ capability });
+      await openWorkspace(page, '#tasks');
+      const banner = page.locator('.execution-banner');
+      await expect(banner).toHaveAttribute('data-execution-state', state);
+      await expect(banner.getByText(heading)).toBeVisible();
+      const buttons = page.getByRole('button', { name: 'Approve & run' });
+      await expect(buttons.first()).toBeDisabled();
+      for (const button of await buttons.all()) await expect(button).toBeDisabled();
+      await expect(page.getByText('Synthetic mock execution available')).toHaveCount(0);
+      await page.getByRole('link', { name: 'Runs' }).click();
+      await expect(page.getByRole('heading', { name: 'Runs' })).toBeVisible();
+      // Historical Runs are not relabelled because execution is disabled.
+      await expect(page.getByText(/execution (is )?disabled/i)).toHaveCount(0);
+      expect(api.runPosts).toHaveLength(0);
+    });
+  }
+
+  test('capability load is pending then mock-capable and enables Run review', async ({
+    page,
+    api,
+  }) => {
+    api.configure({
+      tasks: [makeTask('task-fresh', 'Fresh task')],
+      runs: [],
+      capabilityDelayMs: 400,
+    });
+    await openWorkspace(page, '#tasks');
+    await expect(page.locator('.execution-banner')).toHaveAttribute(
+      'data-execution-state',
+      'loading',
+    );
+    await expect(
+      page
+        .getByRole('listitem')
+        .filter({ hasText: 'Fresh task' })
+        .getByRole('button', { name: 'Approve & run' }),
+    ).toBeDisabled();
+    await expect(page.locator('.execution-banner')).toHaveAttribute(
+      'data-execution-state',
+      'mock_ready',
+    );
+    await expect(page.getByText('Synthetic mock execution available')).toBeVisible();
+    await expect(
+      page
+        .getByRole('listitem')
+        .filter({ hasText: 'Fresh task' })
+        .getByRole('button', { name: 'Approve & run' }),
+    ).toBeEnabled();
+  });
+
+  test('a 401 from the capability endpoint ends the session instead of showing a state', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ capability: 'unauthorized' });
+    await page.goto('/#tasks');
+    await expect(
+      page.getByText('Your owner session expired. Sign in again to continue.'),
+    ).toBeVisible();
+    await expect(page.locator('.execution-banner')).toHaveCount(0);
+  });
+
+  test('execution disabled after page load blocks the run before any POST', async ({
+    page,
+    api,
+  }) => {
+    api.configure();
+    await openWorkspace(page, '#tasks');
+    await openTaskComposer(page);
+    await openApproval(page);
+    api.configure({ capability: 'disabled' });
+    await page.getByRole('dialog').getByRole('button', { name: 'Approve & run' }).click();
+    await expect(page.getByRole('dialog')).toContainText('Execution is not currently available');
+    expect(api.runPosts).toHaveLength(0);
+    expect(api.requests.some((r) => r.path === '/api/v1/authorizations')).toBe(false);
+  });
+
+  test('Check again recovers from a failed capability load', async ({ page, api }) => {
+    api.configure({ capability: 'error' });
+    await openWorkspace(page, '#tasks');
+    await expect(page.locator('.execution-banner')).toHaveAttribute(
+      'data-execution-state',
+      'load_failed',
+    );
+    api.configure();
+    await page.getByRole('button', { name: 'Check again' }).focus();
+    await page.keyboard.press('Enter');
+    await expect(page.locator('.execution-banner')).toHaveAttribute(
+      'data-execution-state',
+      'mock_ready',
+    );
+  });
+
+  test('banner reflows at phone width without horizontal scroll', async ({ page, api }) => {
+    await page.setViewportSize({ width: 360, height: 740 });
+    api.configure({ capability: 'disabled' });
+    await openWorkspace(page, '#tasks');
+    await expect(page.locator('.execution-banner')).toBeVisible();
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+    ).toBe(true);
+  });
+});
+
+test.describe('synthetic connector capability refresh', () => {
+  const connectorTask = () =>
+    TaskSchema.parse({
+      ...makeTask('task-synthetic', 'Summarize policy changes'),
+      projectId: defaultProjects[0]!.id,
+      associationRevision: 1,
+      agentId: 'agent-analyst',
+      profileVersion: 3,
+      runtimeId: 'mock',
+    });
+  const open = async (page: Page) => {
+    await openWorkspace(page, '#tasks');
+    await page.getByRole('button', { name: 'Load available projects' }).click();
+    await page.getByRole('button', { name: 'Summarize policy changes' }).click();
+  };
+  const disableExecution = (api: MockApi, task: Task) =>
+    api.configure({ tasks: [task], runs: [], syntheticEnabled: true, capability: 'disabled' });
+
+  test('execution disabled after load blocks preparation', async ({ page, api }) => {
+    const task = connectorTask();
+    api.configure({ tasks: [task], runs: [], syntheticEnabled: true });
+    await open(page);
+    disableExecution(api, task);
+    await page.getByRole('button', { name: 'Review synthetic operation' }).click();
+    await expect(page.getByRole('alert')).toContainText('no request was sent');
+    await expect(
+      page.getByText('Synthetic connector unavailable: Execution is disabled'),
+    ).toBeVisible();
+    expect(api.requests.some((r) => r.path === '/api/v1/connector-authorizations')).toBe(false);
+  });
+
+  test('execution disabled after preparation blocks approval', async ({ page, api }) => {
+    const task = connectorTask();
+    api.configure({ tasks: [task], runs: [], syntheticEnabled: true });
+    await open(page);
+    await page.getByRole('button', { name: 'Review synthetic operation' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Review synthetic operation' });
+    await expect(dialog).toBeVisible();
+    disableExecution(api, task);
+    await dialog.getByRole('button', { name: 'Approve exact operation' }).click();
+    await expect(dialog).toContainText('no request was sent');
+    expect(
+      api.requests.some((r) => /connector-authorizations\/[^/]+\/decision$/.test(r.path)),
+    ).toBe(false);
+  });
+
+  test('execution disabled after approval blocks the Run submission', async ({ page, api }) => {
+    const task = connectorTask();
+    api.configure({ tasks: [task], runs: [], syntheticEnabled: true });
+    await open(page);
+    await page.getByRole('button', { name: 'Review synthetic operation' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Review synthetic operation' });
+    await dialog.getByRole('button', { name: 'Approve exact operation' }).click();
+    await expect(page.getByText('Exact synthetic operation approved.')).toBeVisible();
+    // Reconfigure resets the fixture's authorization, but the UI guard must stop before any POST.
+    disableExecution(api, task);
+    await dialog.getByRole('button', { name: 'Start authorized synthetic Run' }).click();
+    await expect(dialog).toContainText('no request was sent');
+    expect(api.requests.some((r) => r.path === `/api/v1/tasks/${task.id}/synthetic-runs`)).toBe(
+      false,
+    );
   });
 });

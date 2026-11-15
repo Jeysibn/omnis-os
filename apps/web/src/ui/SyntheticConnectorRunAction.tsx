@@ -22,7 +22,8 @@ import {
 import { SyntheticOperationDialog } from './SyntheticOperationDialog.js';
 import { useConnectorAuthorizationRevoke } from './useConnectorAuthorizationRevoke.js';
 import { renderSyntheticConnectorRequest } from '@omnis/contracts/synthetic-connector-prompt';
-import { RuntimeCapabilitiesSchema } from '@omnis/contracts/runtime-capabilities';
+import type { RuntimeCapabilities } from '@omnis/contracts/runtime-capabilities';
+import { describeExecution, fixtureAllowed, type ExecutionGate } from './executionCapability.js';
 import { ApiRequestError, request } from './api.js';
 
 const limits = {
@@ -33,7 +34,6 @@ const limits = {
   maxUsageUnits: 100,
   maxCostMicrousd: 100,
 };
-type CapabilityState = 'loading' | 'enabled' | 'disabled' | 'failed';
 
 export function SyntheticConnectorRunAction({
   ownerId,
@@ -42,7 +42,13 @@ export function SyntheticConnectorRunAction({
   csrfToken,
   onSessionExpired,
   onRunAdmitted,
+  gate,
+  fixtureEnabled,
+  refreshCapabilities,
 }: {
+  refreshCapabilities: () => Promise<RuntimeCapabilities | null>;
+  gate: ExecutionGate;
+  fixtureEnabled: boolean;
   ownerId: string;
   task: Task;
   project: ProjectSummary | undefined;
@@ -50,7 +56,14 @@ export function SyntheticConnectorRunAction({
   onSessionExpired: (cause: unknown) => boolean;
   onRunAdmitted: (run: Run) => void;
 }) {
-  const [availability, setAvailability] = useState<CapabilityState>('loading');
+  const availability: 'loading' | 'enabled' | 'disabled' | 'failed' =
+    gate.kind === 'loading'
+      ? 'loading'
+      : gate.kind === 'load_failed'
+        ? 'failed'
+        : fixtureEnabled
+          ? 'enabled'
+          : 'disabled';
   const [authorization, setAuthorization] = useState<ConnectorAuthorization | null>(null);
   const [renderedRequest, setRenderedRequest] = useState('');
   const [pendingOperation, setPendingOperation] = useState<PendingOperation | null>(null);
@@ -186,24 +199,6 @@ export function SyntheticConnectorRunAction({
   );
 
   useEffect(() => {
-    let active = true;
-    void request('/api/v1/runtime-capabilities', {}, (value) =>
-      RuntimeCapabilitiesSchema.parse(value),
-    )
-      .then((value) => {
-        if (!active) return;
-        setAvailability(value.syntheticConnectorFixture.enabled ? 'enabled' : 'disabled');
-      })
-      .catch((cause: unknown) => {
-        if (!active || onSessionExpired(cause)) return;
-        setAvailability('failed');
-      });
-    return () => {
-      active = false;
-    };
-  }, [onSessionExpired, task.id]);
-
-  useEffect(() => {
     if (!dialogOpen) return;
     const dialog = dialogRef.current;
     if (dialog && !dialog.open) {
@@ -227,15 +222,21 @@ export function SyntheticConnectorRunAction({
       stored.assignmentRevision === task.assignmentRevision
     ) {
       setPendingOperation(stored);
-      void createOrReadAuthorization(stored).catch((cause: unknown) =>
-        handleError(cause, 'The pending synthetic operation could not be recovered.'),
-      );
+      void refreshCapabilities()
+        .then((fresh) => {
+          if (!fixtureAllowed(fresh)) return undefined;
+          return createOrReadAuthorization(stored);
+        })
+        .catch((cause: unknown) =>
+          handleError(cause, 'The pending synthetic operation could not be recovered.'),
+        );
     }
   }, [
     availability,
     canRun,
     createOrReadAuthorization,
     handleError,
+    refreshCapabilities,
     ownerId,
     pendingOperation,
     project?.id,
@@ -244,10 +245,26 @@ export function SyntheticConnectorRunAction({
     task.profileVersion,
   ]);
 
+  /** Re-reads capabilities now; the returned value, not React state, decides. API stays the authority. */
+  async function ensureAvailable(): Promise<boolean> {
+    const fresh = await refreshCapabilities();
+    if (fixtureAllowed(fresh)) return true;
+    setError(
+      fresh
+        ? `${describeExecution({ status: 'ready', capabilities: fresh }).title}. The synthetic connector fixture is not available, so no request was sent.`
+        : 'Execution availability could not be confirmed, so no request was sent.',
+    );
+    return false;
+  }
+
   async function prepare() {
     if (!canRun || !task.projectId || !task.agentId || !task.profileVersion) return;
     setBusy(true);
     setError('');
+    if (!(await ensureAvailable())) {
+      setBusy(false);
+      return;
+    }
     const operation: PendingOperation = {
       ownerId,
       taskId: task.id,
@@ -274,6 +291,7 @@ export function SyntheticConnectorRunAction({
     setError('');
     clearRevocationMessages();
     try {
+      if (!(await ensureAvailable())) return;
       const decision = ConnectorAuthorizationDecisionSchema.parse({
         decision: 'approve',
         promptDigestConfirmation: authorization.promptDigest,
@@ -317,6 +335,7 @@ export function SyntheticConnectorRunAction({
     setError('');
     clearRevocationMessages();
     try {
+      if (!(await ensureAvailable())) return;
       const requestBinding = ConnectorAuthorizationRequestSchema.parse({
         projectId: authorization.projectId,
         projectRevision: authorization.projectRevision,
@@ -367,7 +386,10 @@ export function SyntheticConnectorRunAction({
     setDialogOpen(false);
   }
 
-  if (availability === 'disabled') return null;
+  // Execution that is disabled/unavailable keeps an explicit message here (and any open dialog)
+  // instead of silently removing the action; a merely absent fixture flag renders nothing.
+  const blocked = !gate.canStartRun && gate.kind !== 'loading' && gate.kind !== 'load_failed';
+  if (availability === 'disabled' && !blocked && !dialogOpen) return null;
   return (
     <section className="synthetic-connector-action" aria-labelledby="synthetic-connector-heading">
       <h4 id="synthetic-connector-heading">Synthetic connector fixture</h4>
@@ -376,6 +398,18 @@ export function SyntheticConnectorRunAction({
         <p role="status">Checking available synthetic runtimes…</p>
       ) : availability === 'failed' ? (
         <p role="status">Runtime availability is unknown. Reload to check again.</p>
+      ) : blocked ? (
+        <>
+          <p role="status">
+            Synthetic connector unavailable: {gate.title}. No operation can be prepared, approved,
+            or started right now.
+          </p>
+          {error && (
+            <p role="alert" className="error-note">
+              {error}
+            </p>
+          )}
+        </>
       ) : (
         <>
           {!canRun && (

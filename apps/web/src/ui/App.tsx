@@ -40,6 +40,10 @@ import {
   type Task,
 } from '@omnis/contracts';
 import { ApiRequestError, request } from './api.js';
+import { describeExecution, type ExecutionGate } from './executionCapability.js';
+import { ExecutionCapabilityBanner } from './ExecutionCapabilityBanner.js';
+import type { RuntimeCapabilities } from '@omnis/contracts/runtime-capabilities';
+import { useRuntimeCapabilities } from './useRuntimeCapabilities.js';
 import { formatDate } from './manilaTime.js';
 import { AcceptResultAction } from './AcceptResultAction.js';
 import { isAwaitingOwnerReview } from './acceptResult.js';
@@ -396,6 +400,13 @@ function App() {
     },
     [refreshCsrf, rotateSession],
   );
+
+  const { load: capabilityLoad, refresh: refreshCapabilities } = useRuntimeCapabilities(
+    // Only the Tasks page shows execution state; other pages never request capabilities.
+    owner !== null && page === 'tasks',
+    expireSessionIfNeeded,
+  );
+  const executionGate = describeExecution(capabilityLoad);
 
   const loadTasks = useCallback(async () => {
     setTasksLoading(true);
@@ -917,7 +928,13 @@ function App() {
     if (pendingTaskCreate) await submitTaskCreate(pendingTaskCreate);
   }
 
-  function openApproval(task: Task, trigger: HTMLButtonElement) {
+  async function openApproval(task: Task, trigger: HTMLButtonElement) {
+    // UI convenience only; the API remains the authority and re-checks execution itself.
+    const fresh = await refreshCapabilities();
+    if (!fresh || !describeExecution({ status: 'ready', capabilities: fresh }).canStartRun) {
+      setError('Execution is not currently available, so no approval was opened.');
+      return;
+    }
     approvalTrigger.current = trigger;
     setApprovalError('');
     setApprovalExpiry('');
@@ -946,6 +963,15 @@ function App() {
 
   async function startRun(task: Task) {
     let operation = approvalOperation;
+    setBusy(true);
+    const fresh = await refreshCapabilities();
+    setBusy(false);
+    if (!fresh || !describeExecution({ status: 'ready', capabilities: fresh }).canStartRun) {
+      setApprovalError(
+        'Execution is not currently available, so no approval or Run was requested. Close this dialog and check the execution status.',
+      );
+      return;
+    }
     if (!operation || operation.taskId !== task.id) {
       setApprovalError('This approval request is no longer available. Close it and start again.');
       return;
@@ -1331,6 +1357,14 @@ function App() {
             onRetryCreate={retryTaskCreate}
             onSelectTask={(task) => setSelectedTaskId(task.id)}
             onStart={(task, trigger) => openApproval(task, trigger)}
+            executionGate={executionGate}
+            syntheticFixtureEnabled={
+              capabilityLoad.status === 'ready' &&
+              executionGate.canStartRun &&
+              capabilityLoad.capabilities.syntheticConnectorFixture.enabled
+            }
+            onRetryCapabilities={() => void refreshCapabilities()}
+            refreshCapabilities={refreshCapabilities}
           />
         )}
         {page === 'runs' && (
@@ -1596,7 +1630,15 @@ function TasksWorkspace({
   onRetryCreate,
   onSelectTask,
   onStart,
+  executionGate,
+  syntheticFixtureEnabled,
+  onRetryCapabilities,
+  refreshCapabilities,
 }: {
+  refreshCapabilities: () => Promise<RuntimeCapabilities | null>;
+  executionGate: ExecutionGate;
+  syntheticFixtureEnabled: boolean;
+  onRetryCapabilities: () => void;
   tasks: Task[];
   runs: Run[];
   projects: ProjectSummary[];
@@ -1634,6 +1676,7 @@ function TasksWorkspace({
   return (
     <div className="tasks-layout">
       <div className="tasks-primary">
+        <ExecutionCapabilityBanner gate={executionGate} onRetry={onRetryCapabilities} />
         <section className="panel composer-panel">
           <div className="section-heading">
             <div>
@@ -1752,11 +1795,13 @@ function TasksWorkspace({
                   const disabledReason =
                     task.status === 'completed'
                       ? 'Completed tasks cannot be run again.'
-                      : activeRun
-                        ? 'An active run already exists for this task.'
-                        : !runsAvailable
-                          ? 'Load current runs before starting another run.'
-                          : '';
+                      : !executionGate.canStartRun
+                        ? `${executionGate.title}. Runs cannot be started right now.`
+                        : activeRun
+                          ? 'An active run already exists for this task.'
+                          : !runsAvailable
+                            ? 'Load current runs before starting another run.'
+                            : '';
                   return (
                     <li
                       key={task.id}
@@ -1867,6 +1912,9 @@ function TasksWorkspace({
               csrfToken={csrfToken}
               onSessionExpired={onSessionExpired}
               onRunAdmitted={onRunAdmitted}
+              gate={executionGate}
+              fixtureEnabled={syntheticFixtureEnabled}
+              refreshCapabilities={refreshCapabilities}
             />
           </>
         ) : (

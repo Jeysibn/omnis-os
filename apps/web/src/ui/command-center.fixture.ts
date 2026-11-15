@@ -1,5 +1,6 @@
 import { expect, type Page, type Route } from '@playwright/test';
 import { RunSchema, TaskSchema, type Run, type Task } from '@omnis/contracts';
+import { capabilityFixtureJson } from './capability.fixture.js';
 
 /**
  * OMNIS NEXUS V2 Stage 1: Command Center. A small self-contained API fixture (owner, CSRF, tasks,
@@ -84,6 +85,8 @@ export function mockApi(page: Page, options: Options = {}) {
         : fail(route, state.runsStatus, 'runs_unavailable', 'Runs are temporarily unavailable.');
     if (/^\/api\/v1\/runs\/[^/]+\/events$/.test(path))
       return route.fulfill({ status: 200, contentType: 'text/event-stream', body: '' });
+    if (path === '/api/v1/runtime-capabilities' && method === 'GET')
+      return route.fulfill({ json: capabilityFixtureJson() });
     unexpected.push(`${method} ${path}`);
     return fail(route, 500, 'fixture_contract_violation', `Unexpected request: ${method} ${path}`);
   });

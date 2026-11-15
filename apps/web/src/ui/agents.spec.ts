@@ -13,6 +13,7 @@ import {
   type AgentProfileWriteInput,
   type AgentSummary,
 } from '@omnis/contracts';
+import { capabilityFixtureJson } from './capability.fixture.js';
 
 /**
  * Browser tests for the Agents & Profiles screens. Every response is a strictly
@@ -405,6 +406,8 @@ function createApi(page: Page) {
       }
       return route.fulfill({ json: { departments, total: departments.length } });
     }
+    if (path === '/api/v1/runtime-capabilities' && method === 'GET')
+      return route.fulfill({ json: capabilityFixtureJson() });
     if (method !== 'GET' || !path.startsWith('/api/v1/agents')) {
       unexpected.push(`${method} ${path}`);
       return error(route, 500, 'fixture_contract_violation', `Unexpected ${method} ${path}`);
