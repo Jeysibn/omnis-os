@@ -7,13 +7,9 @@ export async function startExecutionQueue(
     createQueue: () => Promise<unknown>;
     reconcileEnabled: () => Promise<unknown>;
     consume: () => Promise<unknown>;
-    reconcileDisabled: () => Promise<unknown>;
   },
 ): Promise<boolean> {
-  if (mode === 'disabled') {
-    await actions.reconcileDisabled();
-    return false;
-  }
+  if (mode === 'disabled') return false;
   await actions.startQueue();
   await actions.createQueue();
   await actions.reconcileEnabled();

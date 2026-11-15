@@ -1,5 +1,8 @@
 # Explicit opt-in overlay. Use only after the separately authorized host launcher is available.
 services:
+  api:
+    environment:
+      OMNIS_EXECUTION_MODE: mock
   worker:
     environment:
       OMNIS_EXECUTION_MODE: mock

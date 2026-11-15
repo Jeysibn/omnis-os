@@ -454,9 +454,17 @@ function createMockApi(page: Page) {
     if (path === '/api/v1/runtime-capabilities' && method === 'GET') {
       return route.fulfill({
         json: RuntimeCapabilitiesSchema.parse({
-          version: 'omnis.runtime-capabilities.v2',
-          executionMode: 'mock',
-          mockRuntime: { enabled: true, synthetic: true },
+          version: 'omnis.runtime-capabilities.v3',
+          services: { api: 'healthy', worker: 'healthy' },
+          execution: {
+            configuredMode: 'mock',
+            workerMode: 'mock',
+            capability: 'mock_synthetic',
+            availability: 'available',
+            queueAvailability: 'available',
+            launcherAvailability: 'available',
+          },
+          authorization: { availability: 'available' },
           syntheticConnectorFixture: {
             enabled: options.syntheticEnabled ?? false,
             providerId: 'synthetic',

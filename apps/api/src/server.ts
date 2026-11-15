@@ -1,9 +1,9 @@
 import Fastify from 'fastify';
+import { z } from 'zod';
 import {
   AuthorizationSchema,
   AuthorizationDecisionSchema,
   CreateAuthorizationSchema,
-  CreateRunSchema,
 } from '@omnis/contracts';
 import { syntheticTaskRunTestMode } from '@omnis/contracts/synthetic-task-run';
 import { executionModeFromEnvironment } from '@omnis/contracts/execution-mode';
@@ -32,6 +32,7 @@ import { registerTaskRoutes } from './task-routes.ts';
 import { registerConnectorAuthorizationRoutes } from './connector-authorization-routes.ts';
 import { registerSyntheticTaskRunRoutes } from './synthetic-task-run-routes.ts';
 import { registerRuntimeCapabilityRoutes } from './runtime-capability-routes.ts';
+import { registerRunAdmissionRoute } from './run-admission-route.ts';
 import { registerRunStopRoute } from './run-stop-route.ts';
 import {
   parseRun,
@@ -39,7 +40,7 @@ import {
   workerEventStream,
   workerRequest,
   WorkerRequestError,
-  parseRuntimeCapabilities,
+  parseWorkerExecutionStatus,
 } from './worker-client.ts';
 
 const app = Fastify({
@@ -49,6 +50,24 @@ const app = Fastify({
 const apiExecutionMode = executionModeFromEnvironment(process.env.OMNIS_EXECUTION_MODE);
 const syntheticBrokerTestMode =
   apiExecutionMode === 'mock' && syntheticTaskRunTestMode(process.env);
+const AuthorizerHealthSchema = z
+  .object({
+    status: z.literal('ok'),
+    product: z.literal('Omnis OS'),
+    service: z.literal('authorizer'),
+  })
+  .strict();
+
+async function checkAuthorizerAvailability(): Promise<boolean> {
+  try {
+    await authorizerRequest('/internal/v1/health', {}, (value) =>
+      AuthorizerHealthSchema.parse(value),
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
 // Memory-backed sessions are limited to this single-owner local mock gate. Durable session storage is a later gate.
 const sessions = new LocalSessionStore(
   env.sessionSecret,
@@ -77,7 +96,7 @@ app.addHook('onRequest', async (request, reply) => {
 app.get('/api/v1/health', async () => ({
   status: 'ok',
   product: 'Omnis OS',
-  runtimeMode: 'mock-only',
+  service: 'api',
 }));
 app.get('/api/v1/auth/csrf', async (request) => {
   return { csrfToken: request.omnisSession?.csrfToken ?? '' };
@@ -230,9 +249,11 @@ registerTaskRoutes(app, workerRequest, authorizerRequest);
 registerConnectorAuthorizationRoutes(app, { requireOwner, requireMutationProtection });
 registerRuntimeCapabilityRoutes(app, {
   requireOwner,
+  configuredMode: apiExecutionMode,
   syntheticConnectorEnabled: syntheticBrokerTestMode,
-  getWorkerCapabilities: () =>
-    workerRequest('/internal/v1/runtime-capabilities', {}, parseRuntimeCapabilities),
+  getWorkerStatus: () =>
+    workerRequest('/internal/v1/runtime-capabilities', {}, parseWorkerExecutionStatus),
+  checkAuthorizationDependency: checkAuthorizerAvailability,
 });
 registerSyntheticTaskRunRoutes(app, {
   requireOwner,
@@ -242,37 +263,14 @@ registerSyntheticTaskRunRoutes(app, {
 app.get('/api/v1/runs', { preHandler: requireOwner }, async () =>
   workerRequest('/internal/v1/runs', {}, parseRunList),
 );
-app.post(
-  '/api/v1/runs',
-  { preHandler: [requireOwner, requireMutationProtection] },
-  async (request, reply) => {
-    const parsed = CreateRunSchema.safeParse(request.body);
-    const idempotencyKey = request.headers['idempotency-key'];
-    if (
-      !parsed.success ||
-      typeof idempotencyKey !== 'string' ||
-      idempotencyKey.length < 16 ||
-      idempotencyKey.length > 128
-    ) {
-      return reply.code(400).send({
-        error: {
-          code: 'invalid_input',
-          message: 'A task and valid Idempotency-Key are required.',
-        },
-      });
-    }
-    const run = await workerRequest(
-      '/internal/v1/runs',
-      {
-        method: 'POST',
-        headers: { 'idempotency-key': idempotencyKey },
-        body: JSON.stringify(parsed.data),
-      },
-      parseRun,
-    );
-    return reply.code(run.status === 'queued' ? 201 : 200).send(run);
-  },
-);
+registerRunAdmissionRoute(app, {
+  requireOwner,
+  requireMutationProtection,
+  executionMode: apiExecutionMode,
+  authorizationAvailable: checkAuthorizerAvailability,
+  workerRequest,
+  parseRun,
+});
 app.get<{ Params: { runId: string } }>(
   '/api/v1/runs/:runId',
   { preHandler: requireOwner },

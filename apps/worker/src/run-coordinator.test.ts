@@ -319,22 +319,26 @@ describe('durable mock run coordinator', () => {
     assert.equal(runReads, 0);
   });
 
-  it('disabled reconciliation interrupts queued records without consulting the queue or grants', async () => {
-    let queueReads = 0;
-    const interrupted: string[] = [];
+  it('disabled queue handling preserves pending Run state without consulting the store', async () => {
+    let storeCalls = 0;
     const coordinator = testCoordinator(
       {
-        reconcileExpiredRuns: async () => [],
-        listQueuedJobs: async () => [{ runId: 'run-0001', status: 'queued', jobId: 'pending' }],
-        interruptQueuedRun: async (runId: string, message: string) => {
-          interrupted.push(`${runId}:${message}`);
+        interruptQueuedRun: async () => {
+          storeCalls += 1;
           return { events: [] };
+        },
+        getRun: async () => {
+          storeCalls += 1;
+          return undefined;
         },
       } as unknown as PostgresRunStore,
       {
-        send: async () => null,
+        send: async () => {
+          storeCalls += 1;
+          return null;
+        },
         findJobs: async () => {
-          queueReads += 1;
+          storeCalls += 1;
           return [];
         },
       },
@@ -343,9 +347,8 @@ describe('durable mock run coordinator', () => {
       emptyAuthorizationStore,
       { executionEnabled: false },
     );
-    await coordinator.reconcileDisabledExecution();
-    assert.equal(queueReads, 0);
-    assert.match(interrupted[0] ?? '', /^run-0001:Execution is disabled/);
+    await coordinator.handleQueueJob({ runId: 'run-0001' });
+    assert.equal(storeCalls, 0);
   });
 
   it('surfaces admission rejection and lock timeouts as retryable 503 responses', async () => {

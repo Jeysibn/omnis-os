@@ -71,6 +71,10 @@ describe('worker sandbox launcher client', () => {
   it('reports a missing launcher socket as unavailable without fabricating output', async () => {
     const directory = await mkdtemp(path.join(tmpdir(), 'omnis-missing-launcher-'));
     try {
+      assert.equal(
+        await new UnixMockSandboxLauncherClient(path.join(directory, 'missing.sock')).health(),
+        false,
+      );
       await assert.rejects(
         new UnixMockSandboxLauncherClient(path.join(directory, 'missing.sock')).execute({
           runId: 'run-1234',
@@ -81,6 +85,35 @@ describe('worker sandbox launcher client', () => {
         (error: unknown) => error instanceof SandboxError && error.code === 'unavailable',
       );
     } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('probes launcher health without creating a mock execution', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'omnis-launcher-health-'));
+    const socketPath = path.join(directory, 'launcher.sock');
+    let requestedPath = '';
+    const server = createServer((request, response) => {
+      requestedPath = request.url ?? '';
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(
+        JSON.stringify({
+          status: 'ok',
+          product: 'Omnis OS',
+          service: 'sandbox-launcher',
+          synthetic: true,
+        }),
+      );
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(socketPath, resolve);
+      });
+      assert.equal(await new UnixMockSandboxLauncherClient(socketPath).health(), true);
+      assert.equal(requestedPath, '/health');
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
       await rm(directory, { recursive: true, force: true });
     }
   });

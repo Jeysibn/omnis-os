@@ -8,7 +8,7 @@ import {
   RunSchema,
   TaskSchema,
 } from '@omnis/contracts';
-import { RuntimeCapabilitiesSchema } from '@omnis/contracts/runtime-capabilities';
+import { WorkerExecutionStatusSchema } from '@omnis/contracts/runtime-capabilities';
 import { env } from './env.ts';
 import { WorkerRequestError } from './worker-request-error.ts';
 export { WorkerRequestError } from './worker-request-error.ts';
@@ -59,7 +59,8 @@ export const parseAgentProfile = (value: unknown) => AgentProfileResponseSchema.
 export const parseAgentVersions = (value: unknown) =>
   AgentProfileVersionsResponseSchema.parse(value);
 export const parseAgentVersion = (value: unknown) => AgentProfileVersionResponseSchema.parse(value);
-export const parseRuntimeCapabilities = (value: unknown) => RuntimeCapabilitiesSchema.parse(value);
+export const parseWorkerExecutionStatus = (value: unknown) =>
+  WorkerExecutionStatusSchema.parse(value);
 
 export async function workerEventStream(runId: string, afterSequence: number, signal: AbortSignal) {
   const response = await fetch(

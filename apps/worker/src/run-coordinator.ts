@@ -283,15 +283,11 @@ export class RunCoordinator {
     if (!parsed.success) throw new Error('The durable mock job payload is invalid.');
     const { runId, workerSessionId } = parsed.data;
     if (this.shuttingDown || this.active.has(runId)) return;
-    if (
-      !this.executionEnabled ||
-      (this.requireSessionFence && workerSessionId !== this.workerSessionId)
-    ) {
+    if (!this.executionEnabled) return;
+    if (this.requireSessionFence && workerSessionId !== this.workerSessionId) {
       const interrupted = await this.store.interruptQueuedRun(
         runId,
-        this.executionEnabled
-          ? 'The queued job belongs to a previous worker session. It was not replayed automatically.'
-          : 'Execution is disabled. The queued job was not executed.',
+        'The queued job belongs to a previous worker session. It was not replayed automatically.',
       );
       if (interrupted) this.publish(interrupted.events);
       return;
@@ -339,22 +335,6 @@ export class RunCoordinator {
         this.store.listActiveRunIds(candidateRunIds),
       );
     }
-  }
-
-  /** Disable mode reconciles durable state without consulting or starting the queue. */
-  async reconcileDisabledExecution(): Promise<void> {
-    const events = await this.store.reconcileExpiredRuns();
-    for (const pending of await this.store.listQueuedJobs()) {
-      if (pending.status === 'queued') {
-        const interrupted = await this.store.interruptQueuedRun(
-          pending.runId,
-          'Execution is disabled. Queued work was preserved as non-replayable.',
-        );
-        if (interrupted) events.push(...interrupted.events);
-      }
-      // A stop-requested job stays unresolved until an enabled reconciler can verify queue terminal state.
-    }
-    this.publish(events);
   }
 
   async shutdown(): Promise<void> {

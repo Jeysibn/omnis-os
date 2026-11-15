@@ -1,19 +1,30 @@
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import {
   runtimeCapabilities,
-  type RuntimeCapabilities,
+  type WorkerExecutionStatus,
 } from '@omnis/contracts/runtime-capabilities';
+import type { ExecutionMode } from '@omnis/contracts/execution-mode';
 
 export function registerRuntimeCapabilityRoutes(
   app: FastifyInstance,
   input: {
     requireOwner: preHandlerHookHandler;
+    configuredMode: ExecutionMode;
     syntheticConnectorEnabled: boolean;
-    getWorkerCapabilities: () => Promise<RuntimeCapabilities>;
+    getWorkerStatus: () => Promise<WorkerExecutionStatus>;
+    checkAuthorizationDependency: () => Promise<boolean>;
   },
 ) {
   app.get('/api/v1/runtime-capabilities', { preHandler: input.requireOwner }, async () => {
-    const worker = await input.getWorkerCapabilities();
-    return runtimeCapabilities(input.syntheticConnectorEnabled, worker.executionMode);
+    const [workerStatus, authorizationAvailable] = await Promise.all([
+      input.getWorkerStatus().catch(() => undefined),
+      input.checkAuthorizationDependency().catch(() => false),
+    ]);
+    return runtimeCapabilities({
+      apiExecutionMode: input.configuredMode,
+      ...(workerStatus ? { workerStatus } : {}),
+      authorizationAvailable,
+      syntheticConnectorEnabled: input.syntheticConnectorEnabled,
+    });
   });
 }

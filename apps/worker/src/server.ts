@@ -16,7 +16,7 @@ import {
   executionModeFromEnvironment,
   validateExecutionConfiguration,
 } from '@omnis/contracts/execution-mode';
-import { runtimeCapabilities } from '@omnis/contracts/runtime-capabilities';
+import { WorkerExecutionStatusSchema } from '@omnis/contracts/runtime-capabilities';
 import { PgBoss } from 'pg-boss';
 import {
   createPool,
@@ -36,6 +36,7 @@ import { SyntheticBrokerRunCoordinator } from './synthetic-broker-run-coordinato
 import { registerSyntheticTaskRunRoute } from './synthetic-task-run-routes.ts';
 import { createRuntimeDatabaseUrl, validateWorkerBindHost } from './deployment-config.ts';
 import { startExecutionQueue } from './execution-queue-lifecycle.ts';
+import { resolveWorkerExecutionStatus } from './execution-readiness.ts';
 
 const host = process.env.OMNIS_WORKER_HOST ?? '127.0.0.1';
 const port = Number(process.env.OMNIS_WORKER_PORT ?? 4101);
@@ -79,35 +80,50 @@ const missionLaneWriterPool = createPool({
   application_name: 'omnis-worker-mission-lane-writer',
 });
 
-const boss = new PgBoss({
-  connectionString,
-  schema: 'pgboss',
-  application_name: 'omnis-worker-queue',
-  max: 8,
-  supervise: true,
-  migrate: false,
-  createSchema: false,
-});
+const boss =
+  executionMode === 'mock'
+    ? new PgBoss({
+        connectionString,
+        schema: 'pgboss',
+        application_name: 'omnis-worker-queue',
+        max: 8,
+        supervise: true,
+        migrate: false,
+        createSchema: false,
+      })
+    : undefined;
 const app = Fastify({ logger: { redact: ['req.headers.x-omnis-internal-token'] } });
 const syntheticBrokerTestMode = executionMode === 'mock' && syntheticTaskRunTestMode(process.env);
-boss.on('error', (error) => {
+let queueAvailable = false;
+boss?.on('error', (error) => {
+  queueAvailable = false;
   app.log.error({ errorType: error.name }, 'Durable queue reported an error.');
 });
 const store = new PostgresRunStore(pool, internalToken, missionLaneWriterPool);
 const agentProfiles = new PostgresAgentProfileStore(pool, internalToken);
-const runtime =
-  executionMode === 'mock'
-    ? new SandboxedMockRuntimeAdapter(new UnixMockSandboxLauncherClient(launcherSocket!))
-    : undefined;
+const launcherClient =
+  executionMode === 'mock' ? new UnixMockSandboxLauncherClient(launcherSocket!) : undefined;
+const runtime = launcherClient ? new SandboxedMockRuntimeAdapter(launcherClient) : undefined;
 const authorizationStore = new PostgresRuntimeAuthorizationReader(pool);
 const workerSessionId = randomUUID();
-const coordinator = new RunCoordinator(store, boss, runtime, authorizationStore, undefined, {
+const queue =
+  boss ??
+  ({
+    send: async () => {
+      throw new Error('Execution queue is unavailable while execution is disabled.');
+    },
+    findJobs: async () => {
+      throw new Error('Execution queue is unavailable while execution is disabled.');
+    },
+  } satisfies ConstructorParameters<typeof RunCoordinator>[1]);
+const coordinator = new RunCoordinator(store, queue, runtime, authorizationStore, undefined, {
   executionEnabled: executionMode === 'mock',
   requireSessionFence: true,
   workerSessionId,
 });
 let syntheticBrokerCoordinator: SyntheticBrokerRunCoordinator | undefined;
 if (syntheticBrokerTestMode) {
+  if (!boss) throw new Error('Synthetic broker mode requires the mock execution queue.');
   const brokerSocket = process.env.OMNIS_SYNTHETIC_BROKER_SOCKET;
   const brokerToken = process.env.OMNIS_SYNTHETIC_BROKER_TEST_TOKEN;
   if (!brokerSocket || !brokerToken) {
@@ -136,8 +152,14 @@ if (syntheticBrokerTestMode) {
   });
 }
 const queueStarted = await startExecutionQueue(executionMode, {
-  startQueue: () => boss.start({ attempts: 5 }),
-  createQueue: () => boss.createQueue(queueName, { retryLimit: 0, retryDelay: 0 }),
+  startQueue: async () => {
+    if (!boss) throw new Error('Execution queue is unavailable.');
+    await boss.start({ attempts: 5 });
+  },
+  createQueue: async () => {
+    if (!boss) throw new Error('Execution queue is unavailable.');
+    await boss.createQueue(queueName, { retryLimit: 0, retryDelay: 0 });
+  },
   reconcileEnabled: async () => {
     try {
       await coordinator.reconcileExpiredRuns();
@@ -151,6 +173,7 @@ const queueStarted = await startExecutionQueue(executionMode, {
     }
   },
   consume: async () => {
+    if (!boss) throw new Error('Execution queue is unavailable.');
     await boss.work(queueName, { batchSize: 1, localConcurrency: 1 }, async ([job]) => {
       if (!job) return;
       if (
@@ -163,8 +186,8 @@ const queueStarted = await startExecutionQueue(executionMode, {
       await coordinator.handleQueueJob(job.data, job.signal);
     });
   },
-  reconcileDisabled: () => coordinator.reconcileDisabledExecution(),
 });
+queueAvailable = queueStarted;
 
 const recoveryTimer =
   executionMode === 'mock'
@@ -218,15 +241,20 @@ if (syntheticBrokerTestMode) {
 app.get('/internal/v1/health', async () => ({
   status: 'ok',
   product: 'Omnis OS',
-  runtimeKind: executionMode === 'mock' ? 'mock' : 'disabled',
-  executionMode,
-  executionEnabled: executionMode === 'mock',
-  synthetic: true,
-  persistence: 'postgresql',
-  queue: executionMode === 'mock' ? 'pg-boss' : 'disabled',
-  queueName,
+  service: 'worker',
 }));
-app.get('/internal/v1/runtime-capabilities', async () => runtimeCapabilities(false, executionMode));
+app.get('/internal/v1/runtime-capabilities', async () => {
+  const status = await resolveWorkerExecutionStatus({
+    executionMode,
+    queueAvailability:
+      executionMode === 'disabled' ? 'not_required' : queueAvailable ? 'available' : 'unavailable',
+    checkDatabase: async () => {
+      await pool.query('SELECT 1');
+    },
+    checkLauncher: async () => (await launcherClient?.health()) ?? false,
+  });
+  return WorkerExecutionStatusSchema.parse(status);
+});
 app.get('/internal/v1/tasks', async () => coordinator.listTasks());
 app.get<{ Params: { taskId: string } }>('/internal/v1/tasks/:taskId', async (request, reply) => {
   const taskId = TaskIdSchema.safeParse(request.params.taskId);
@@ -547,7 +575,7 @@ app.setErrorHandler((error, _request, reply) => {
 app.addHook('onClose', async () => {
   if (recoveryTimer) clearInterval(recoveryTimer);
   await coordinator.shutdown();
-  if (queueStarted) await boss.stop();
+  if (queueStarted && boss) await boss.stop();
   await missionLaneWriterPool.end();
   await pool.end();
 });
