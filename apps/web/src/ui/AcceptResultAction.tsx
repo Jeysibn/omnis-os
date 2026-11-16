@@ -104,17 +104,20 @@ export function AcceptResultAction({
   // The trigger is replaced by the confirmation while it is open, so focus returns to it once it
   // is back; otherwise a keyboard user would be dropped at the top of the page.
   const restoreFocus = useRef(false);
+  // The trigger can be hidden for a moment (the freshness gate hides it while a task and run re-read
+  // is refreshing), so restoration waits until it exists instead of being dropped.
   useEffect(() => {
-    if (!open && restoreFocus.current) {
+    if (!open && restoreFocus.current && triggerRef.current) {
       restoreFocus.current = false;
-      triggerRef.current?.focus();
+      triggerRef.current.focus();
     }
-  }, [open]);
+  }, [open, blocked, view.kind]);
 
   // A different run or task starts from a clean state.
   useEffect(() => {
     setConfirming(false);
     setProblem(null);
+    restoreFocus.current = false; // a pending restoration belongs to the previous run or task
   }, [run.id, task?.id]);
 
   async function submit() {

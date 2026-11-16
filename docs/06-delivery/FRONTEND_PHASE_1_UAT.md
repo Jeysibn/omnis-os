@@ -151,8 +151,10 @@ nothing on cancel` (Command Center). Source: `openApproval` re-checks capabiliti
 
 ### U9 — Authorizer-dependent operations unavailable
 
-- **Expected:** with no Authorizer, owner approvals, connector authorization and **result
-  acceptance** cannot succeed in the restricted profile, and the UI says so plainly. When the backend reports the Authorizer
+- **Expected:** in the restricted profile the accept route refuses at its feature guard. Before
+  submission the UI shows the neutral availability advisory (below); after `503 authorizer_unavailable`
+  it reports the approval service as unavailable and asks the owner to review the task's state before
+  trying again, without claiming whether acceptance committed. When the backend reports the Authorizer
   unavailable (`authorization.availability: unavailable`), the Runs page shows an advisory beside
   Accept Result and Reconcile: "A check reports the approval service (Authorizer) as unavailable.
   This request may succeed or be refused; only the server can determine the outcome." The wording is

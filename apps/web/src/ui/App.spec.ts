@@ -3722,6 +3722,8 @@ test.describe('R1 owner result acceptance', () => {
     expect(api.acceptPosts).toHaveLength(1);
     // Task state is read again, as the backend handoff requires for authorizer_unavailable.
     await expect(accept(page)).toBeVisible();
+    // Closing the confirmation while the re-read hid the control must not drop keyboard focus.
+    await expect(accept(page)).toBeFocused();
     // When the service returns, the next explicit attempt reuses the same idempotency key.
     await accept(page).click();
     await confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' }).click();
