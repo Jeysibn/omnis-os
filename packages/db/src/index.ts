@@ -51,3 +51,15 @@ export type {
   SyntheticBrokerRunResult,
 } from './run-store.ts';
 export type { PgBossTransaction, PgTransaction } from './database.ts';
+export {
+  RESTRICTED_COMPOSE_PROJECT,
+  RESTRICTED_DATABASE_NAME,
+  assertNoRestrictedBootstrapOverrides,
+  assertRestrictedDatabaseTarget,
+  loadRestrictedBootstrapConfig,
+  loadRestrictedMigrationConfig,
+} from './restricted-bootstrap.ts';
+export type {
+  RestrictedBootstrapConfig,
+  RestrictedMigrationConfig,
+} from './restricted-bootstrap.ts';

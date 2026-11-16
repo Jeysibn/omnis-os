@@ -150,6 +150,8 @@ jobs:
       - name: Verify disposable Linux service identity boundaries
         run: sudo --preserve-env=CI bash scripts/host-security/test-disposable-identities.sh
       - name: Generate and mask run-scoped PostgreSQL credentials
+        env:
+          OMNIS_CI_DATABASE_SUITE: platform-security
         run: node scripts/ci/create-test-database-environment.mjs
       - name: Start disposable PostgreSQL on loopback
         run: bash scripts/ci/start-test-postgres.sh
@@ -181,7 +183,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [legacy-upgrade, recovery]
+        suite: [legacy-upgrade, recovery, restricted-bootstrap]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -197,19 +199,28 @@ jobs:
       - run: docker pull node@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85
       - run: pnpm install --frozen-lockfile
       - name: Generate and mask run-scoped PostgreSQL credentials
+        env:
+          OMNIS_CI_DATABASE_SUITE: ${{ matrix.suite }}
         run: node scripts/ci/create-test-database-environment.mjs
       - name: Start disposable PostgreSQL on loopback
         run: bash scripts/ci/start-test-postgres.sh
       - name: Provision restricted PostgreSQL roles
+        if: matrix.suite != 'restricted-bootstrap'
         run: |
           source scripts/ci/export-test-database-environment.sh
           node --experimental-strip-types packages/db/src/provision.ts
+      - name: Verify restricted database bootstrap and migrations
+        if: matrix.suite == 'restricted-bootstrap'
+        run: |
+          source scripts/ci/export-restricted-test-database-environment.sh
+          node --experimental-strip-types packages/db/src/restricted-bootstrap-ci.ts
       - name: Run PostgreSQL DB package integration suite
         if: matrix.suite == 'legacy-upgrade'
         run: |
           source scripts/ci/export-test-database-environment.sh
           pnpm --filter @omnis/db test
       - name: Run ${{ matrix.suite }} integration test
+        if: matrix.suite != 'restricted-bootstrap'
         run: |
           source scripts/ci/export-test-database-environment.sh
           pnpm integration:${{ matrix.suite }}
@@ -237,6 +248,8 @@ jobs:
       - name: Install Playwright Chromium and system dependencies
         run: pnpm --filter @omnis/web exec playwright install --with-deps chromium
       - name: Generate and mask run-scoped PostgreSQL credentials
+        env:
+          OMNIS_CI_DATABASE_SUITE: full-stack-browser-integration
         run: node scripts/ci/create-test-database-environment.mjs
       - name: Start disposable PostgreSQL on loopback
         run: bash scripts/ci/start-test-postgres.sh

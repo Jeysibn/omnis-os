@@ -1,4 +1,5 @@
 import type { Pool } from 'pg';
+import { RESTRICTED_DATABASE_NAME } from './restricted-bootstrap.ts';
 
 const databaseRoles = {
   migration: 'omnis_migrator',
@@ -6,6 +7,7 @@ const databaseRoles = {
   authorizer: 'omnis_authorizer',
   launcher: 'omnis_launcher',
 } as const;
+type DatabaseRoleKey = keyof typeof databaseRoles;
 
 const roleTimeoutSettings = {
   runtime: {
@@ -35,29 +37,143 @@ export async function provisionDatabaseRoles(
   admin: Pool,
   passwords: { migration: string; runtime: string; authorizer: string; launcher: string },
 ): Promise<void> {
-  for (const [name, password] of Object.entries(passwords)) {
-    if (password.length < 32)
-      throw new Error(`${name} database password must be at least 32 characters.`);
+  await provisionRolesForTarget(admin, passwords, [
+    'migration',
+    'runtime',
+    'authorizer',
+    'launcher',
+  ]);
+}
+
+export async function provisionRestrictedDatabaseRoles(
+  admin: Pool,
+  passwords: { migration: string; runtime: string },
+  expectedSystemIdentifier: string,
+): Promise<void> {
+  await provisionRolesForTarget(
+    admin,
+    passwords,
+    ['migration', 'runtime'],
+    RESTRICTED_DATABASE_NAME,
+    expectedSystemIdentifier,
+  );
+}
+
+async function provisionRolesForTarget(
+  admin: Pool,
+  passwords: Partial<Record<DatabaseRoleKey, string>>,
+  roleKeys: readonly DatabaseRoleKey[],
+  expectedDatabaseName?: string,
+  expectedSystemIdentifier?: string,
+): Promise<void> {
+  for (const key of roleKeys) {
+    const password = passwords[key];
+    if (!password || password.length < 32) {
+      throw new Error(`${key} database password must be at least 32 characters.`);
+    }
   }
 
-  const { rows } = await admin.query<{ is_superuser: boolean; database_name: string }>(
-    "SELECT current_setting('is_superuser')::boolean AS is_superuser, current_database() AS database_name",
+  const identityResult = await admin.query<{
+    current_user: string;
+    is_superuser: boolean;
+    database_name: string;
+    system_identifier?: string;
+  }>(
+    expectedSystemIdentifier === undefined
+      ? `
+          SELECT current_user,
+                 current_setting('is_superuser')::boolean AS is_superuser,
+                 current_database() AS database_name
+        `
+      : `
+          SELECT current_user,
+                 current_setting('is_superuser')::boolean AS is_superuser,
+                 current_database() AS database_name,
+                 system_identifier::text AS system_identifier
+            FROM pg_catalog.pg_control_system()
+        `,
   );
-  if (!rows[0]?.is_superuser)
-    throw new Error('Database role provisioning requires the administrative role.');
-  const databaseName = rows[0].database_name;
-  if (!/^omnis(?:_[a-z0-9_]+)?$/.test(databaseName)) {
+  const identity = identityResult.rows[0];
+  if (
+    !identity?.is_superuser ||
+    (expectedDatabaseName !== undefined && identity.current_user !== 'omnis')
+  ) {
+    throw new Error(
+      expectedDatabaseName === undefined
+        ? 'Database role provisioning requires an administrative role.'
+        : 'Restricted role provisioning requires the omnis administrative role.',
+    );
+  }
+  const databaseName = identity.database_name;
+  if (expectedDatabaseName) {
+    if (databaseName !== expectedDatabaseName) {
+      throw new Error(`Restricted role provisioning is limited to ${expectedDatabaseName}.`);
+    }
+    if (
+      expectedSystemIdentifier === undefined ||
+      identity.system_identifier !== expectedSystemIdentifier
+    ) {
+      throw new Error(
+        'Restricted role provisioning is limited to the verified PostgreSQL cluster.',
+      );
+    }
+  } else if (!/^omnis(?:_[a-z0-9_]+)?$/.test(databaseName)) {
     throw new Error('Role provisioning is restricted to an Omnis database name.');
   }
 
-  for (const [key, role] of Object.entries(databaseRoles) as [
-    keyof typeof databaseRoles,
-    string,
-  ][]) {
-    const password = passwords[key];
+  const roleNames = roleKeys.map((key) => databaseRoles[key]);
+  const databaseOverrides = await admin.query<{
+    role_name: string;
+    database_name: string;
+    setting: string;
+  }>(
+    `
+    SELECT DISTINCT roles.rolname AS role_name,
+           databases.datname AS database_name,
+           split_part(config, '=', 1) AS setting
+      FROM pg_db_role_setting defaults
+      JOIN pg_roles roles ON defaults.setrole = roles.oid OR defaults.setrole = 0
+      JOIN pg_database databases ON defaults.setdatabase = databases.oid
+      CROSS JOIN LATERAL unnest(defaults.setconfig) AS entry(config)
+     WHERE defaults.setdatabase <> 0
+       AND roles.rolname = ANY($2::text[])
+       AND split_part(config, '=', 1) = ANY($1::text[])
+  `,
+    [[...auditedTimeoutSettings], roleNames],
+  );
+  if (databaseOverrides.rowCount) {
+    throw new Error(
+      'Database-specific PostgreSQL timeout settings are not permitted for Omnis application roles.',
+    );
+  }
+
+  if (expectedDatabaseName !== undefined) {
+    await assertFreshRestrictedTarget(admin);
+  }
+
+  const memberships = await admin.query<{ granted_role: string; member_role: string }>(
+    `
+      SELECT granted.rolname AS granted_role, member.rolname AS member_role
+        FROM pg_auth_members memberships
+        JOIN pg_roles granted ON granted.oid = memberships.roleid
+        JOIN pg_roles member ON member.oid = memberships.member
+       WHERE granted.rolname = ANY($1::text[]) OR member.rolname = ANY($1::text[])
+    `,
+    [roleNames],
+  );
+
+  const quotedPasswords = new Map<DatabaseRoleKey, string>();
+  for (const key of roleKeys) {
     const quoted = await admin.query<{ literal: string }>('SELECT quote_literal($1) AS literal', [
-      password,
+      passwords[key],
     ]);
+    const literal = quoted.rows[0]?.literal;
+    if (!literal) throw new Error('Database role password preparation failed.');
+    quotedPasswords.set(key, literal);
+  }
+
+  for (const key of roleKeys) {
+    const role = databaseRoles[key];
     await admin.query(`
       DO $provision$
       BEGIN
@@ -68,7 +184,7 @@ export async function provisionDatabaseRoles(
       $provision$
     `);
     await admin.query(
-      `ALTER ROLE ${role} WITH LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD ${quoted.rows[0]!.literal}`,
+      `ALTER ROLE ${role} WITH LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD ${quotedPasswords.get(key)!}`,
     );
 
     const timeoutSettings =
@@ -89,39 +205,17 @@ export async function provisionDatabaseRoles(
     }
   }
 
-  const databaseOverrides = await admin.query<{
-    role_name: string;
-    database_name: string;
-    setting: string;
-  }>(
-    `
-    SELECT DISTINCT roles.rolname AS role_name,
-           databases.datname AS database_name,
-           split_part(config, '=', 1) AS setting
-      FROM pg_db_role_setting defaults
-      JOIN pg_roles roles ON defaults.setrole = roles.oid OR defaults.setrole = 0
-      JOIN pg_database databases ON defaults.setdatabase = databases.oid
-      CROSS JOIN LATERAL unnest(defaults.setconfig) AS entry(config)
-     WHERE defaults.setdatabase <> 0
-       AND roles.rolname IN ('omnis_runtime', 'omnis_authorizer', 'omnis_migrator', 'omnis_launcher')
-       AND split_part(config, '=', 1) = ANY($1::text[])
-  `,
-    [[...auditedTimeoutSettings]],
-  );
-  if (databaseOverrides.rowCount) {
-    throw new Error(
-      'Database-specific PostgreSQL timeout settings are not permitted for Omnis application roles.',
-    );
+  if (expectedDatabaseName !== undefined) {
+    // Existing migrations name these principals in ACL statements. In the
+    // restricted profile they are authorization labels only: no password,
+    // LOGIN, or membership is provisioned for either principal.
+    for (const role of ['omnis_authorizer', 'omnis_launcher'] as const) {
+      await admin.query(
+        `CREATE ROLE ${role} WITH NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`,
+      );
+    }
   }
 
-  const memberships = await admin.query<{ granted_role: string; member_role: string }>(`
-    SELECT granted.rolname AS granted_role, member.rolname AS member_role
-      FROM pg_auth_members memberships
-      JOIN pg_roles granted ON granted.oid = memberships.roleid
-      JOIN pg_roles member ON member.oid = memberships.member
-     WHERE granted.rolname IN ('omnis_migrator', 'omnis_runtime', 'omnis_authorizer', 'omnis_launcher')
-        OR member.rolname IN ('omnis_migrator', 'omnis_runtime', 'omnis_authorizer', 'omnis_launcher')
-  `);
   for (const membership of memberships.rows) {
     await admin.query(
       `REVOKE ${quoteIdentifier(membership.granted_role)} FROM ${quoteIdentifier(membership.member_role)}`,
@@ -129,13 +223,17 @@ export async function provisionDatabaseRoles(
   }
 
   await admin.query(
-    `GRANT CONNECT ON DATABASE ${quoteIdentifier(databaseName)} TO omnis_migrator, omnis_runtime, omnis_authorizer, omnis_launcher`,
+    `GRANT CONNECT ON DATABASE ${quoteIdentifier(databaseName)} TO ${roleNames.join(', ')}`,
   );
   await admin.query(`GRANT CREATE ON DATABASE ${quoteIdentifier(databaseName)} TO omnis_migrator`);
   await admin.query('CREATE SCHEMA IF NOT EXISTS omnis AUTHORIZATION omnis_migrator');
   await admin.query('ALTER SCHEMA omnis OWNER TO omnis_migrator');
   await admin.query('CREATE SCHEMA IF NOT EXISTS pgboss AUTHORIZATION omnis_migrator');
   await admin.query('ALTER SCHEMA pgboss OWNER TO omnis_migrator');
+  if (expectedDatabaseName !== undefined) {
+    await admin.query('REVOKE EXECUTE ON FUNCTION pg_catalog.pg_control_system() FROM PUBLIC');
+    await admin.query('GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO omnis_migrator');
+  }
 
   for (const schema of ['omnis', 'pgboss']) {
     const relations = await admin.query<{ name: string; kind: string }>(
@@ -176,9 +274,15 @@ export async function provisionDatabaseRoles(
     }
   }
 
-  await admin.query('GRANT USAGE ON SCHEMA omnis, pgboss TO omnis_runtime');
-  await admin.query('GRANT USAGE ON SCHEMA omnis TO omnis_authorizer');
-  await admin.query('GRANT USAGE ON SCHEMA omnis TO omnis_launcher');
+  if (roleKeys.includes('runtime')) {
+    await admin.query('GRANT USAGE ON SCHEMA omnis, pgboss TO omnis_runtime');
+  }
+  if (roleKeys.includes('authorizer')) {
+    await admin.query('GRANT USAGE ON SCHEMA omnis TO omnis_authorizer');
+  }
+  if (roleKeys.includes('launcher')) {
+    await admin.query('GRANT USAGE ON SCHEMA omnis TO omnis_launcher');
+  }
   await admin.query(
     'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA pgboss TO omnis_runtime',
   );
@@ -189,6 +293,28 @@ export async function provisionDatabaseRoles(
     ALTER DEFAULT PRIVILEGES FOR ROLE omnis_migrator IN SCHEMA pgboss
       GRANT USAGE, SELECT ON SEQUENCES TO omnis_runtime;
   `);
+}
+
+async function assertFreshRestrictedTarget(admin: Pool): Promise<void> {
+  const roles = await admin.query<{ role_name: string }>(
+    `SELECT rolname AS role_name
+       FROM pg_roles
+      WHERE rolname = ANY($1::text[])`,
+    [['omnis_migrator', 'omnis_runtime', 'omnis_authorizer', 'omnis_launcher']],
+  );
+  if (roles.rows.length > 0) {
+    throw new Error('Restricted bootstrap requires a fresh PostgreSQL application role set.');
+  }
+
+  const schemas = await admin.query<{ schema_name: string }>(
+    `SELECT nspname AS schema_name
+       FROM pg_namespace
+      WHERE nspname = ANY($1::text[])`,
+    [['omnis', 'pgboss']],
+  );
+  if (schemas.rows.length > 0) {
+    throw new Error('Restricted bootstrap requires fresh application schemas.');
+  }
 }
 
 function quoteIdentifier(value: string): string {

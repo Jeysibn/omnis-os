@@ -21,6 +21,8 @@
     "compose:restricted-env:check": "node scripts/compose/verify-restricted-env.mjs",
     "compose:preflight": "node scripts/compose/check-host-prerequisites.mjs",
     "db:roles": "node --env-file=.env.worker --env-file=.env.authorizer --env-file=.env.sandbox-launcher --env-file=.env.migration --env-file=.env.db-admin --experimental-strip-types packages/db/src/provision.ts",
+    "db:roles:restricted": "node --experimental-strip-types packages/db/src/provision-restricted.ts",
+    "db:migrate:restricted": "node --experimental-strip-types apps/worker/src/migrate-restricted.ts",
     "db:migrate": "pnpm --filter @omnis/worker db:migrate",
     "sandbox:image:pull": "docker pull node@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85",
     "integration:mock": "node --experimental-strip-types tests/integration/mock-run.mjs",
@@ -37,7 +39,7 @@
     "lint": "eslint apps packages scripts",
     "format:check": "prettier --check \"apps/**/*.{ts,tsx,mjs,css,html,json}\" \"packages/**/*.ts\" \"scripts/**/*.{ts,mjs}\" \"tests/**/*.mjs\" \"infra/**/*.yml\" \"*.json\" \"*.yaml\" \"*.mjs\"",
     "format": "prettier --write \"apps/**/*.{ts,tsx,mjs,css,html,json}\" \"packages/**/*.ts\" \"scripts/**/*.{ts,mjs}\" \"tests/**/*.mjs\" \"infra/**/*.yml\" \"*.json\" \"*.yaml\" \"*.mjs\"",
-    "test": "pnpm -r test && node --test scripts/db-recovery/*.test.mjs scripts/compose/*.test.mjs scripts/ci/*.test.mjs && node --test scripts/container-images/*.test.mjs && node --experimental-strip-types --test tests/offline-security-harness/*.test.mjs",
+    "test": "pnpm -r test && node --test scripts/db/*.test.mjs scripts/db-recovery/*.test.mjs scripts/compose/*.test.mjs scripts/ci/*.test.mjs && node --test scripts/container-images/*.test.mjs && node --experimental-strip-types --test tests/offline-security-harness/*.test.mjs",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test"
   },
   "devDependencies": {

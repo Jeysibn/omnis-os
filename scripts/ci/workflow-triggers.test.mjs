@@ -32,3 +32,25 @@ test('required branch-protection check job IDs and full manual validation remain
   assert.match(triggerBlock, /full_validation:/);
   assert.match(workflow, /^permissions:\n {2}contents: read$/m);
 });
+
+test('restricted database CI receives only its dedicated credential export path', () => {
+  const restrictedStepStart = workflow.indexOf(
+    '- name: Verify restricted database bootstrap and migrations',
+  );
+  const restrictedStepEnd = workflow.indexOf('\n      - name:', restrictedStepStart + 1);
+  const restrictedStep = workflow.slice(restrictedStepStart, restrictedStepEnd);
+
+  assert.match(workflow, /OMNIS_CI_DATABASE_SUITE: \$\{\{ matrix\.suite \}\}/);
+  assert.ok(restrictedStepStart >= 0 && restrictedStepEnd > restrictedStepStart);
+  assert.match(
+    restrictedStep,
+    /source scripts\/ci\/export-restricted-test-database-environment\.sh/,
+  );
+  assert.doesNotMatch(restrictedStep, /export-test-database-environment\.sh/);
+});
+
+test('every PostgreSQL fixture workflow selects its credential suite explicitly', () => {
+  assert.match(workflow, /OMNIS_CI_DATABASE_SUITE: platform-security/);
+  assert.match(workflow, /OMNIS_CI_DATABASE_SUITE: full-stack-browser-integration/);
+  assert.match(workflow, /OMNIS_CI_DATABASE_SUITE: \$\{\{ matrix\.suite \}\}/);
+});

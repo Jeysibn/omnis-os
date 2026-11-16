@@ -1,23 +1,40 @@
 import { appendFileSync, chmodSync, rmSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 
-const passwordNames = [
+const standardPasswordNames = [
   'OMNIS_CI_POSTGRES_ADMIN_PASSWORD',
   'OMNIS_CI_POSTGRES_MIGRATION_PASSWORD',
   'OMNIS_CI_POSTGRES_RUNTIME_PASSWORD',
   'OMNIS_CI_POSTGRES_AUTHORIZER_PASSWORD',
   'OMNIS_CI_POSTGRES_LAUNCHER_PASSWORD',
 ];
+const restrictedPasswordNames = [
+  'OMNIS_CI_POSTGRES_ADMIN_PASSWORD',
+  'OMNIS_CI_POSTGRES_MIGRATION_PASSWORD',
+  'OMNIS_CI_POSTGRES_RUNTIME_PASSWORD',
+];
+const standardDatabaseSuites = [
+  'legacy-upgrade',
+  'recovery',
+  'platform-security',
+  'full-stack-browser-integration',
+];
 
 export function createTestDatabaseEnvironment({
   runId,
   runAttempt,
   job,
+  suite,
   createRandomBytes = randomBytes,
 }) {
   if (!/^\d+$/.test(runId) || !/^\d+$/.test(runAttempt) || !/^[a-z0-9-]+$/.test(job)) {
     throw new Error('CI run identity is not safe for a disposable PostgreSQL container name');
   }
+  if (suite !== 'restricted-bootstrap' && !standardDatabaseSuites.includes(suite)) {
+    throw new Error('CI database suite is not supported for credential preparation');
+  }
+  const passwordNames =
+    suite === 'restricted-bootstrap' ? restrictedPasswordNames : standardPasswordNames;
 
   return {
     OMNIS_CI_POSTGRES_CONTAINER_NAME: `omnis-ci-pg-${runId}-${runAttempt}-${job}`,
@@ -65,6 +82,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     runId: process.env.GITHUB_RUN_ID,
     runAttempt: process.env.GITHUB_RUN_ATTEMPT,
     job: process.env.GITHUB_JOB,
+    suite: process.env.OMNIS_CI_DATABASE_SUITE,
   });
   const runnerTemp = process.env.RUNNER_TEMP;
   if (!runnerTemp) throw new Error('RUNNER_TEMP is required for disposable database credentials');
