@@ -18,7 +18,7 @@ export function createTestDatabaseEnvironment({
   runId,
   runAttempt,
   job,
-  suite = 'legacy-upgrade',
+  suite,
   createRandomBytes = randomBytes,
 }) {
   if (!/^\d+$/.test(runId) || !/^\d+$/.test(runAttempt) || !/^[a-z0-9-]+$/.test(job)) {

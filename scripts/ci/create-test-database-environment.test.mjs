@@ -26,6 +26,7 @@ test('creates isolated per-run PostgreSQL passwords and a scoped container name'
     runId: '12345',
     runAttempt: '2',
     job: 'platform-security',
+    suite: 'legacy-upgrade',
     createRandomBytes: (size) => Buffer.alloc(size, ++call),
   });
 
@@ -118,6 +119,9 @@ test('rejects unsafe run identifiers before deriving a container name', () => {
   );
   assert.throws(() =>
     createTestDatabaseEnvironment({ runId: '123', runAttempt: '1', job: 'api;docker' }),
+  );
+  assert.throws(() =>
+    createTestDatabaseEnvironment({ runId: '123', runAttempt: '1', job: 'api', suite: undefined }),
   );
 });
 
