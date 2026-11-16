@@ -153,15 +153,19 @@ nothing on cancel` (Command Center). Source: `openApproval` re-checks capabiliti
 
 - **Expected:** with no Authorizer, owner approvals, connector authorization and **result
   acceptance** cannot succeed, and the UI says so plainly. When the backend reports the Authorizer
-  unavailable (`authorization.availability: unavailable`, which the restricted profile always does),
-  the Runs page shows an advisory beside Accept Result and Reconcile ("this request is likely to be
-  refused; you can still try; the server decides"). The wording is deliberately neutral so it also
-  fits the reconcile view, where a receipt already exists. The advisory is shown with the control: while
-  the freshness gate hides the control (a task and run re-read is refreshing or failed) neither is
-  shown (source-verified, not separately tested). The control stays usable: the reading is a health probe, not the
-  accept route's answer, so it never blocks anything. If the owner confirms, the API answers `503
-authorizer_unavailable` and the owner is told acceptance is unavailable and the result is **not**
-  accepted, never that the outcome is unknown.
+  unavailable (`authorization.availability: unavailable`), the Runs page shows an advisory beside
+  Accept Result and Reconcile: "A check reports the approval service (Authorizer) as unavailable.
+  This request may succeed or be refused; only the server can determine the outcome." The wording is
+  deliberately neutral: it also fits the reconcile view, where a receipt already exists, and it fits
+  a transient health-probe failure, where the accept route may still work. The control stays usable;
+  the reading is a health probe, not the accept route's answer, so it never blocks anything. The
+  advisory is shown with the control: while the freshness gate hides the control (a task and run
+  re-read is refreshing or failed) neither is shown (source-verified, not separately tested).
+  Outcomes if the owner confirms: in the **restricted profile** the accept route refuses at its
+  feature guard with `503 authorizer_unavailable`, and the owner is told acceptance is unavailable
+  and the result is **not** accepted, never that the outcome is unknown. With a **transient probe
+  failure** outside the restricted profile the accept route decides: it may succeed (the receipt is
+  shown) or return any of its documented errors, each handled as before.
 - **Procedure:** if a historical task is `in_review`, open its completed run on the Runs page; read
   the Owner review section; activate the control and confirm; read the message; use "Check again".
 - **Evidence:** L — `Authorizer advisory on Accept Result` tests (restricted; Authorizer unavailable;

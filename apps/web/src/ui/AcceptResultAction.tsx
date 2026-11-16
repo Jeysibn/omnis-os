@@ -411,15 +411,15 @@ export function AcceptResultAction({
 }
 
 /**
- * Advice only. Omnis OS reads the Authorizer as unavailable, so a refusal is likely, but this is a
- * health reading and not the accept route's answer: the owner can still try and the server decides.
+ * Advice only. A health check reads the Authorizer as unavailable, but that is not the accept route's
+ * answer: the request may succeed or be refused, and only the server determines the outcome.
  */
 function AvailabilityAdvisory({ id, onRecheck }: { id: string; onRecheck: () => void }) {
   return (
     <div className="accept-result-unavailable" role="status">
       <p id={id}>
-        Omnis OS reports the approval service (Authorizer) as unavailable, so this request is likely
-        to be refused. You can still try; the server decides, and nothing changes until it answers.
+        A check reports the approval service (Authorizer) as unavailable. This request may succeed
+        or be refused; only the server can determine the outcome.
       </p>
       <button type="button" className="text-button" onClick={onRecheck}>
         Check again

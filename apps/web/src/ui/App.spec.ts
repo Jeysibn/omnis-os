@@ -3732,8 +3732,8 @@ test.describe('R1 owner result acceptance', () => {
 
   test.describe('Authorizer advisory on Accept Result (advice only; the accept route stays the authority)', () => {
     const advisory = (page: Page) =>
-      page.getByText('as unavailable, so this request is likely to be refused');
-    const releaseAll = (api: MockApi, outcome: 'available' | 'restricted') => {
+      page.getByText('reports the approval service (Authorizer) as unavailable');
+    const releaseAll = (api: MockApi, outcome: 'available' | 'restricted' | 'authorizer-down') => {
       while (api.pendingCapabilities > 0) api.releaseCapability(0, outcome);
     };
 
@@ -3755,7 +3755,7 @@ test.describe('R1 owner result acceptance', () => {
         await expect(advisory(page)).toBeVisible();
         await expect(accept(page)).toBeEnabled();
         await expect(accept(page)).not.toHaveAttribute('aria-disabled', 'true');
-        await expect(accept(page)).toHaveAccessibleDescription(/likely to be refused/);
+        await expect(accept(page)).toHaveAccessibleDescription(/may succeed or be refused/);
         await accept(page).click();
         await expect(confirmGroup(page)).toBeVisible();
         expect(api.acceptPosts).toHaveLength(0); // advice never accepts, and never sends, anything
@@ -3806,7 +3806,8 @@ test.describe('R1 owner result acceptance', () => {
       await expect(advisory(page)).toHaveCount(0); // loading claims nothing
       await accept(page).click();
       await expect(confirmGroup(page)).toBeVisible();
-      releaseAll(api, 'restricted');
+      // A transient probe failure (execution is mock-capable), so a successful acceptance is coherent.
+      releaseAll(api, 'authorizer-down');
       await expect(advisory(page)).toBeVisible();
       await expect(confirmGroup(page)).toBeVisible(); // advice did not close or disable anything
       await confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' }).click();
