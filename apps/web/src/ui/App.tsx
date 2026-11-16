@@ -49,6 +49,15 @@ import {
 } from './executionCapability.js';
 import { ExecutionCapabilityBanner } from './ExecutionCapabilityBanner.js';
 import { useRuntimeCapabilities } from './useRuntimeCapabilities.js';
+import {
+  StaleSessionError,
+  bindExpiryToSession,
+  bindToSession,
+  captureSession,
+  isStaleSession,
+  type SessionScope,
+} from './sessionScope.js';
+import { SessionScopeContext } from './sessionContext.js';
 import { formatDate } from './manilaTime.js';
 import { AcceptResultAction } from './AcceptResultAction.js';
 import { isAwaitingOwnerReview } from './acceptResult.js';
@@ -281,8 +290,12 @@ function App() {
     runId: string | null;
   }>({ phase: 'idle', runId: null });
   const gateSeq = useRef(0);
+  const [sessionEpoch, setSessionEpoch] = useState(0);
+  const bootStarted = useRef(false);
+  const beginSession = useCallback(() => captureSession(sessionGeneration), []);
   const rotateSession = useCallback(() => {
     sessionGeneration.current += 1;
+    setSessionEpoch(sessionGeneration.current);
     // A new session reads fresh data on sign-in; an old refresh must not touch it.
     gateSeq.current += 1;
     setAcceptGate({ phase: 'idle', runId: null });
@@ -337,6 +350,9 @@ function App() {
   );
 
   const refreshCsrf = useCallback(async () => {
+    // Scoped to the session that exists when the request is dispatched: a token (or failure)
+    // that arrives after the session was replaced must not touch the replacement's CSRF state.
+    const live = beginSession();
     setCsrfLoading(true);
     setCsrfBootstrapError('');
     try {
@@ -351,23 +367,34 @@ function App() {
           throw new Error('Secure sign-in setup returned an invalid token.');
         return payload.csrfToken;
       });
+      if (!live()) throw new StaleSessionError();
       setCsrfToken(value);
       return value;
     } catch (cause) {
+      if (!live()) throw new StaleSessionError();
+      if (isStaleSession(cause)) throw cause;
       setCsrfToken('');
       setCsrfBootstrapError(
         'Secure sign-in could not be prepared. Check your connection and retry secure sign-in setup.',
       );
       throw cause;
     } finally {
-      setCsrfLoading(false);
+      if (live()) setCsrfLoading(false);
     }
-  }, []);
+  }, [beginSession]);
 
   const expireSessionIfNeeded = useCallback(
     (cause: unknown) => {
       if (!(cause instanceof ApiRequestError) || cause.status !== 401) return false;
       rotateSession();
+      // The session that owned these operations is gone; their guarded finally blocks will no
+      // longer release them, so release here.
+      setBusy(false);
+      setTasksLoading(false);
+      setRunsLoading(false);
+      setProjectsLoading(false);
+      taskCreateInFlight.current = false;
+      stopInFlight.current.clear();
       setOwner(null);
       setCsrfToken('');
       setTasks([]);
@@ -406,18 +433,51 @@ function App() {
     [refreshCsrf, rotateSession],
   );
 
+  // Child components receive a handler bound to the owner session they rendered in, so a late
+  // 401 from a previous session is inert. Identity changes with each session (`sessionEpoch`).
+  const sessionBoundExpire = useMemo(() => {
+    void sessionEpoch;
+    return bindExpiryToSession(sessionGeneration, expireSessionIfNeeded);
+  }, [expireSessionIfNeeded, sessionEpoch]);
+
+  // Results that children push up are bound to the session they were started in, so a late
+  // result from a replaced session can never enter the replacement session's state.
+  // A page opened under a replaced session must not refresh the replacement session's CSRF token.
+  const sessionBoundRefreshCsrf = useMemo(() => {
+    void sessionEpoch;
+    const live = captureSession(sessionGeneration);
+    return () => (live() ? refreshCsrf() : Promise.reject(new StaleSessionError()));
+  }, [refreshCsrf, sessionEpoch]);
+  const adoptUpdatedTask = useMemo(() => {
+    void sessionEpoch;
+    return bindToSession(sessionGeneration, (updated: Task) => {
+      setTasks((current) => current.map((task) => (task.id === updated.id ? updated : task)));
+    });
+  }, [sessionEpoch]);
+  const adoptAdmittedRun = useMemo(() => {
+    void sessionEpoch;
+    return bindToSession(sessionGeneration, (run: Run) => {
+      setRuns((current) => [run, ...current.filter((item) => item.id !== run.id)]);
+      setSelectedRunId(run.id);
+      navigate('runs', setPage, run.id);
+    });
+  }, [sessionEpoch]);
+
   const { load: capabilityLoad, refresh: refreshCapabilities } = useRuntimeCapabilities(
     // Only the Tasks page shows execution state; other pages never request capabilities.
     owner !== null && page === 'tasks',
     expireSessionIfNeeded,
+    sessionGeneration,
   );
   const executionGate = describeExecution(capabilityLoad);
 
   const loadTasks = useCallback(async () => {
+    const live = beginSession();
     setTasksLoading(true);
     setTasksError('');
     try {
       const taskData = await request('/api/v1/tasks', {}, parseTaskList);
+      if (!live()) return;
       setTasks(taskData);
       setSelectedTaskId((current) =>
         current && taskData.some((task) => task.id === current)
@@ -425,27 +485,31 @@ function App() {
           : (taskData[0]?.id ?? null),
       );
     } catch (cause) {
+      if (!live()) return;
       if (!expireSessionIfNeeded(cause))
         setTasksError(failureMessage(cause, 'Tasks could not be loaded.'));
     } finally {
-      setTasksLoading(false);
+      if (live()) setTasksLoading(false);
     }
-  }, [expireSessionIfNeeded]);
+  }, [beginSession, expireSessionIfNeeded]);
 
   const loadProjects = useCallback(async () => {
+    const live = beginSession();
     setProjectsLoading(true);
     setProjectsError('');
     try {
       const result = await request('/api/v1/projects', {}, parseProjectList);
+      if (!live()) return;
       setProjects(result.projects.filter((project) => project.status === 'active'));
       setProjectsLoaded(true);
     } catch (cause) {
+      if (!live()) return;
       if (!expireSessionIfNeeded(cause))
         setProjectsError(failureMessage(cause, 'Projects could not be loaded.'));
     } finally {
-      setProjectsLoading(false);
+      if (live()) setProjectsLoading(false);
     }
-  }, [expireSessionIfNeeded]);
+  }, [beginSession, expireSessionIfNeeded]);
 
   useEffect(() => {
     if (
@@ -469,10 +533,12 @@ function App() {
   ]);
 
   const loadRuns = useCallback(async () => {
+    const live = beginSession();
     setRunsLoading(true);
     setRunsError('');
     try {
       const runData = await request('/api/v1/runs', {}, parseRunList);
+      if (!live()) return;
       setRuns(runData);
       setSelectedRunId((current) => {
         const requestedRunId = readRunId();
@@ -482,22 +548,25 @@ function App() {
           : (runData[0]?.id ?? null);
       });
     } catch (cause) {
+      if (!live()) return;
       if (!expireSessionIfNeeded(cause))
         setRunsError(failureMessage(cause, 'Runs could not be loaded.'));
     } finally {
-      setRunsLoading(false);
+      if (live()) setRunsLoading(false);
     }
-  }, [expireSessionIfNeeded]);
+  }, [beginSession, expireSessionIfNeeded]);
 
   /** Re-read tasks without the list's loading state; a failed read keeps what is shown. */
   const refreshTasksQuietly = useCallback(async () => {
+    const live = beginSession();
     try {
       const taskData = await request('/api/v1/tasks', {}, parseTaskList);
+      if (!live()) return;
       setTasks(taskData);
     } catch (cause) {
-      expireSessionIfNeeded(cause);
+      if (live()) expireSessionIfNeeded(cause);
     }
-  }, [expireSessionIfNeeded]);
+  }, [beginSession, expireSessionIfNeeded]);
 
   /**
    * Authoritative re-read after a 409 (or an explicit reload). Both reads must succeed, and this
@@ -534,34 +603,43 @@ function App() {
 
   const reconcileRun = useCallback(
     async (runId: string) => {
+      const live = beginSession();
       setReconcileError('');
       try {
         const run = await request(`/api/v1/runs/${encodeURIComponent(runId)}`, {}, (value) =>
           RunSchema.parse(value),
         );
+        if (!live()) return;
         setRuns((current) => current.map((entry) => (entry.id === run.id ? run : entry)));
         // A finished run moves its task on the server (a completed mock run leaves the task in
         // review). The run stream is run-scoped and never carries that, so read the task again.
         if (run.status === 'completed') await refreshTasksQuietly();
       } catch (cause) {
+        if (!live()) return;
         if (!expireSessionIfNeeded(cause)) {
           setReconcileError(failureMessage(cause, 'The final run state could not be confirmed.'));
         }
       }
     },
-    [expireSessionIfNeeded, refreshTasksQuietly],
+    [beginSession, expireSessionIfNeeded, refreshTasksQuietly],
   );
 
   // Authenticated Run read used to tell a dropped network from an ended owner session after a
   // stream error. 401 goes through the existing sign-out flow; 403 and other refusals are shown
   // without signing out; network and server trouble never sign the owner out.
   const probeRunSession = useCallback(
-    async (runId: string, signal: AbortSignal): Promise<SessionProbeResult> => {
+    async (
+      runId: string,
+      signal: AbortSignal,
+      streamLive: SessionScope,
+    ): Promise<SessionProbeResult> => {
       // The session this probe was made for. Every outcome below is checked against it BEFORE any
       // side effect, so a late answer for an old session (for example a 401 for a cookie that was
       // replaced by a new sign-in) can never sign out or alter the session that replaced it.
-      const generation = sessionGeneration.current;
-      const stale = () => signal.aborted || generation !== sessionGeneration.current;
+      // `streamLive` is the scope of the stream that scheduled this probe, NOT of the moment the
+      // probe runs: a retry timer firing after rotation must not probe under the replacement.
+      const stale = () => signal.aborted || !streamLive();
+      if (stale()) return 'stale';
       try {
         const run = await request(
           `/api/v1/runs/${encodeURIComponent(runId)}`,
@@ -603,10 +681,16 @@ function App() {
   }, [page, selectedRunId]);
 
   useEffect(() => {
+    // StrictMode runs effects twice; both would belong to the same session, so bootstrap once.
+    if (bootStarted.current) return;
+    bootStarted.current = true;
+    const live = beginSession();
     void (async () => {
       try {
         await refreshCsrf();
         const currentOwner = await request('/api/v1/me', {}, parseOwner);
+        // A response for a session that was replaced while it was in flight restores nothing.
+        if (!live()) return;
         if (restoredTaskCreate && restoredTaskCreate.ownerId !== currentOwner.id) {
           setPendingTaskCreate(null);
           setPendingTaskCreateOwnerId(null);
@@ -620,14 +704,15 @@ function App() {
         setChecking(false);
         void loadWorkspace();
       } catch (cause) {
+        if (!live() || isStaleSession(cause)) return;
         if (!(cause instanceof ApiRequestError && cause.status === 401)) {
           setError(failureMessage(cause, 'Omnis OS could not open this workspace.'));
         }
       } finally {
-        setChecking(false);
+        if (live()) setChecking(false);
       }
     })();
-  }, [loadWorkspace, refreshCsrf, restoredTaskCreate, rotateSession]);
+  }, [beginSession, loadWorkspace, refreshCsrf, restoredTaskCreate, rotateSession]);
 
   useEffect(() => {
     selectedRunIdRef.current = page === 'runs' ? selectedRunId : null;
@@ -662,14 +747,19 @@ function App() {
     }
     setStreamState('connecting');
     let terminalHandled = false;
+    // Every callback below, including recovery timers, is scoped to the session that opened this
+    // stream: after the session is replaced they change nothing and schedule nothing.
+    const live = beginSession();
     const recovery = createRunStreamRecovery({
       budget,
-      probe: (signal) => probeRunSession(selectedRunId, signal),
+      probe: (signal) => probeRunSession(selectedRunId, signal, live),
       recreate: () => {
+        if (!live()) return;
         recreatingStream.current = true;
         setStreamEpoch((epoch) => epoch + 1);
       },
       onExhausted: () => {
+        if (!live()) return;
         // Closing is what stops the browser's own reconnect loop; stopping our probes would not.
         source.close();
         setStreamState('paused');
@@ -692,11 +782,13 @@ function App() {
       'run.outcome_unknown',
     ];
     source.onopen = () => {
+      if (!live()) return;
       recovery.opened();
       setStreamState('connected');
     };
     const handlers = eventNames.map((name) => {
       const handler = (message: Event) => {
+        if (!live()) return;
         try {
           const eventMessage = message as MessageEvent<string>;
           const parsed = RunEventSchema.parse(JSON.parse(eventMessage.data));
@@ -760,7 +852,7 @@ function App() {
       return [name, handler] as const;
     });
     source.onerror = () => {
-      if (terminalHandled) return;
+      if (terminalHandled || !live()) return;
       const closed = source.readyState === EventSource.CLOSED;
       setStreamState(closed ? 'closed' : 'reconnecting');
       // EventSource hides the HTTP status; ask the authenticated API whether the session is valid.
@@ -771,7 +863,16 @@ function App() {
       handlers.forEach(([name, handler]) => source.removeEventListener(name, handler));
       source.close();
     };
-  }, [owner, page, probeRunSession, reconcileRun, selectedRunExists, selectedRunId, streamEpoch]);
+  }, [
+    beginSession,
+    owner,
+    page,
+    probeRunSession,
+    reconcileRun,
+    selectedRunExists,
+    selectedRunId,
+    streamEpoch,
+  ]);
 
   function retryStream() {
     if (!selectedRunId) return;
@@ -787,6 +888,7 @@ function App() {
     event.preventDefault();
     setBusy(true);
     setError('');
+    let live: SessionScope = beginSession();
     try {
       await request(
         '/api/v1/auth/login',
@@ -798,9 +900,11 @@ function App() {
         (value) => value,
       );
       rotateSession(); // the session cookie just changed: older in-flight work is now stale
+      live = beginSession(); // everything below belongs to the new session
       setPassword('');
       const token = await refreshCsrf();
       const currentOwner = await request('/api/v1/me', {}, parseOwner);
+      if (!live()) return;
       if (
         (restoredTaskCreate && restoredTaskCreate.ownerId !== currentOwner.id) ||
         (pendingTaskCreateOwnerId !== null && pendingTaskCreateOwnerId !== currentOwner.id)
@@ -816,15 +920,18 @@ function App() {
       setCsrfToken(token);
       await loadWorkspace();
     } catch (cause) {
+      if (!live() || isStaleSession(cause)) return;
       setError(failureMessage(cause, 'Sign in could not be completed.'));
     } finally {
-      setBusy(false);
+      // An expiry or newer sign-in that invalidated this one released the flag itself.
+      if (live()) setBusy(false);
     }
   }
 
   async function submitTaskCreate(operation: TaskCreateOperation) {
     if (taskCreateInFlight.current) return;
     taskCreateInFlight.current = true;
+    const live = beginSession();
     setBusy(true);
     setError('');
     try {
@@ -854,6 +961,8 @@ function App() {
           return created;
         },
       );
+      // An outcome that belongs to a replaced owner session is never applied to the new one.
+      if (!live()) return;
       setTasks((current) => [task, ...current]);
       setSelectedTaskId(task.id);
       setTitle('');
@@ -863,6 +972,7 @@ function App() {
       setPendingTaskCreateOwnerId(null);
       storePendingTaskCreate(null, null);
     } catch (cause) {
+      if (!live()) return;
       const sessionExpired = expireSessionIfNeeded(cause);
       if (sessionExpired) {
         // Keep a same-owner uncertain operation for explicit retry after sign-in.
@@ -891,8 +1001,10 @@ function App() {
         );
       }
     } finally {
-      taskCreateInFlight.current = false;
-      setBusy(false);
+      if (live()) {
+        taskCreateInFlight.current = false;
+        setBusy(false);
+      }
     }
   }
 
@@ -935,8 +1047,9 @@ function App() {
 
   async function openApproval(task: Task, trigger: HTMLButtonElement) {
     // UI convenience only; the API remains the authority and re-checks execution itself.
+    const live = beginSession();
     const check = await refreshCapabilities();
-    if (check.status === 'expired') return;
+    if (!live() || check.status === 'expired') return;
     if (!runAllowed(check)) {
       setError(`${checkRefusal(check)}, so no approval was opened.`);
       return;
@@ -969,8 +1082,11 @@ function App() {
 
   async function startRun(task: Task) {
     let operation = approvalOperation;
+    const live = beginSession();
     setBusy(true);
     const check = await refreshCapabilities();
+    // Session replaced while the capability check was in flight: start nothing, touch nothing.
+    if (!live()) return;
     setBusy(false);
     if (check.status === 'expired') return;
     if (!runAllowed(check)) {
@@ -1001,7 +1117,7 @@ function App() {
             (value) => AuthorizationSchema.parse(value),
           );
         } catch (cause) {
-          if (expireSessionIfNeeded(cause)) return;
+          if (!live() || expireSessionIfNeeded(cause)) return;
           if (cause instanceof ApiRequestError && cause.outcome !== 'rejected') {
             operation = { ...operation, authorizationUncertain: true };
             setApprovalOperation(operation);
@@ -1017,6 +1133,7 @@ function App() {
           }
           return;
         }
+        if (!live()) return;
         if (authorization.status !== 'pending' || authorizationScopeError(authorization, task)) {
           operation = { ...operation, authorization, canRetry: false };
           setApprovalOperation(operation);
@@ -1051,7 +1168,7 @@ function App() {
             (value) => AuthorizationSchema.parse(value),
           );
         } catch (cause) {
-          if (expireSessionIfNeeded(cause)) return;
+          if (!live() || expireSessionIfNeeded(cause)) return;
           if (cause instanceof ApiRequestError && cause.outcome !== 'rejected') {
             operation = { ...operation, authorization, decisionUncertain: true };
             setApprovalOperation(operation);
@@ -1065,6 +1182,7 @@ function App() {
           }
           return;
         }
+        if (!live()) return;
         operation = { ...operation, authorization };
         setApprovalOperation(operation);
         setApprovalExpiry(authorization.expiresAt);
@@ -1104,7 +1222,7 @@ function App() {
           (value) => RunSchema.parse(value),
         );
       } catch (cause) {
-        if (expireSessionIfNeeded(cause)) return;
+        if (!live() || expireSessionIfNeeded(cause)) return;
         if (cause instanceof ApiRequestError && cause.outcome !== 'rejected') {
           operation = { ...operation, runUncertain: true };
           setApprovalOperation(operation);
@@ -1133,6 +1251,8 @@ function App() {
               ' Omnis OS could not confirm revocation; review the authorization before another attempt.';
           }
         }
+        // The revoke read above is another await: re-check before writing dialog state.
+        if (!live()) return;
         operation = { ...operation, canRetry: false };
         setApprovalOperation(operation);
         setApprovalError(
@@ -1141,6 +1261,7 @@ function App() {
         return;
       }
 
+      if (!live()) return;
       setRuns((current) => [run, ...current.filter((entry) => entry.id !== run.id)]);
       setSelectedRunId(run.id);
       setEvents([]);
@@ -1152,16 +1273,17 @@ function App() {
       focusRunInspector.current = true;
       void loadRuns();
     } catch (cause) {
-      if (!expireSessionIfNeeded(cause))
+      if (live() && !expireSessionIfNeeded(cause))
         setApprovalError(failureMessage(cause, 'Omnis OS could not start this mock run.'));
     } finally {
-      setBusy(false);
+      if (live()) setBusy(false);
     }
   }
 
   async function stopRun(run: Run) {
     if (stopInFlight.current.has(run.id)) return;
     stopInFlight.current.add(run.id);
+    const live = beginSession();
     setBusy(true);
     setError('');
     try {
@@ -1170,24 +1292,37 @@ function App() {
         { method: 'POST', headers: { 'x-omnis-csrf': csrfToken } },
         (value) => RunSchema.parse(value),
       );
+      if (!live()) return;
       setRuns((current) => current.map((entry) => (entry.id === updated.id ? updated : entry)));
     } catch (cause) {
-      if (!expireSessionIfNeeded(cause))
+      if (live() && !expireSessionIfNeeded(cause))
         setError(failureMessage(cause, 'Omnis OS could not stop this run.'));
     } finally {
-      stopInFlight.current.delete(run.id);
-      setBusy(false);
+      if (live()) {
+        stopInFlight.current.delete(run.id);
+        setBusy(false);
+      }
     }
   }
 
   async function signOut() {
+    // Scoped to the session being signed out: a logout outcome that arrives after that session
+    // was replaced must not clear or expire the replacement.
+    const live = beginSession();
     try {
       await request(
         '/api/v1/auth/logout',
         { method: 'POST', headers: { 'x-omnis-csrf': csrfToken } },
         (value) => value,
       );
+      if (!live()) return;
       rotateSession();
+      setBusy(false);
+      setTasksLoading(false);
+      setRunsLoading(false);
+      setProjectsLoading(false);
+      taskCreateInFlight.current = false;
+      stopInFlight.current.clear();
       setOwner(null);
       setTasks([]);
       setRuns([]);
@@ -1199,6 +1334,7 @@ function App() {
       setEvents([]);
       await refreshCsrf();
     } catch (cause) {
+      if (!live() || isStaleSession(cause)) return;
       if (!expireSessionIfNeeded(cause)) setError(failureMessage(cause, 'Sign out failed.'));
     }
   }
@@ -1335,17 +1471,10 @@ function App() {
             selectedTask={selectedTask}
             ownerId={owner?.id ?? ''}
             csrfToken={csrfToken}
-            onSessionExpired={expireSessionIfNeeded}
-            onTaskUpdated={(updated) => {
-              setTasks((current) =>
-                current.map((task) => (task.id === updated.id ? updated : task)),
-              );
-            }}
-            onRunAdmitted={(run) => {
-              setRuns((current) => [run, ...current.filter((item) => item.id !== run.id)]);
-              setSelectedRunId(run.id);
-              navigate('runs', setPage, run.id);
-            }}
+            onSessionExpired={sessionBoundExpire}
+            onTaskUpdated={adoptUpdatedTask}
+            onRunAdmitted={adoptAdmittedRun}
+            beginSession={beginSession}
             onTitle={setTitle}
             onDetail={setDetail}
             onProjectId={(value) => {
@@ -1413,7 +1542,7 @@ function App() {
                   setStreamEpoch((epoch) => epoch + 1);
                 }
               },
-              onSessionExpired: expireSessionIfNeeded,
+              onSessionExpired: sessionBoundExpire,
               gate: acceptGate,
               onConflict: (runId) => void refreshAfterConflict(runId),
               onReload: (runId) => void refreshAfterConflict(runId),
@@ -1422,24 +1551,30 @@ function App() {
           />
         )}
         {page === 'agents' && (
-          <AgentsWorkspace onUnauthorized={expireSessionIfNeeded} csrfToken={csrfToken} />
+          <SessionScopeContext.Provider value={beginSession}>
+            <AgentsWorkspace onUnauthorized={sessionBoundExpire} csrfToken={csrfToken} />
+          </SessionScopeContext.Provider>
         )}
         {page === 'departments' && (
-          <DepartmentsWorkspace
-            onUnauthorized={expireSessionIfNeeded}
-            csrfToken={csrfToken}
-            refreshCsrf={refreshCsrf}
-            arrivedByNavigation={navigatedInApp.current}
-          />
+          <SessionScopeContext.Provider value={beginSession}>
+            <DepartmentsWorkspace
+              onUnauthorized={sessionBoundExpire}
+              csrfToken={csrfToken}
+              refreshCsrf={sessionBoundRefreshCsrf}
+              arrivedByNavigation={navigatedInApp.current}
+            />
+          </SessionScopeContext.Provider>
         )}
         {page === 'projects' && (
-          <ProjectsWorkspace
-            ownerId={owner.id}
-            onUnauthorized={expireSessionIfNeeded}
-            csrfToken={csrfToken}
-            refreshCsrf={refreshCsrf}
-            arrivedByNavigation={navigatedInApp.current}
-          />
+          <SessionScopeContext.Provider value={beginSession}>
+            <ProjectsWorkspace
+              ownerId={owner.id}
+              onUnauthorized={sessionBoundExpire}
+              csrfToken={csrfToken}
+              refreshCsrf={sessionBoundRefreshCsrf}
+              arrivedByNavigation={navigatedInApp.current}
+            />
+          </SessionScopeContext.Provider>
         )}
         <footer className="page-foot">
           <ShieldCheck size={14} />
@@ -1641,7 +1776,9 @@ function TasksWorkspace({
   syntheticFixtureEnabled,
   onRetryCapabilities,
   refreshCapabilities,
+  beginSession,
 }: {
+  beginSession: () => SessionScope;
   refreshCapabilities: () => Promise<CapabilityCheck>;
   executionGate: ExecutionGate;
   syntheticFixtureEnabled: boolean;
@@ -1911,6 +2048,7 @@ function TasksWorkspace({
               csrfToken={csrfToken}
               onSessionExpired={onSessionExpired}
               onTaskUpdated={onTaskUpdated}
+              beginSession={beginSession}
             />
             <SyntheticConnectorRunAction
               ownerId={ownerId}
@@ -1922,6 +2060,7 @@ function TasksWorkspace({
               gate={executionGate}
               fixtureEnabled={syntheticFixtureEnabled}
               refreshCapabilities={refreshCapabilities}
+              beginSession={beginSession}
             />
           </>
         ) : (

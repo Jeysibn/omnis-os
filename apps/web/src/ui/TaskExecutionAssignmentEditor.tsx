@@ -1,3 +1,4 @@
+import type { SessionScope } from './sessionScope.js';
 import { useEffect, useMemo, useState } from 'react';
 import {
   AgentDirectoryResponseSchema,
@@ -21,7 +22,9 @@ export function TaskExecutionAssignmentEditor({
   csrfToken,
   onTaskUpdated,
   onSessionExpired,
+  beginSession,
 }: {
+  beginSession: () => SessionScope;
   task: Task;
   csrfToken: string;
   onTaskUpdated: (task: Task) => void;
@@ -69,6 +72,8 @@ export function TaskExecutionAssignmentEditor({
     (agentId === '' || selectedProfileVersion === task.profileVersion);
 
   async function save(operation: PendingAssignment) {
+    // The owner session this save belongs to; its outcome is dropped if that session was replaced.
+    const live = beginSession();
     setBusy(true);
     setError('');
     setMessage('');
@@ -89,12 +94,13 @@ export function TaskExecutionAssignmentEditor({
         },
         (value) => TaskSchema.parse(value),
       );
+      if (!live()) return;
       onTaskUpdated(updated);
       setAgentId(updated.agentId ?? '');
       setPending(null);
       setMessage('Synthetic mock assignment saved.');
     } catch (cause) {
-      if (onSessionExpired(cause)) return;
+      if (!live() || onSessionExpired(cause)) return;
       const uncertain = cause instanceof ApiRequestError && cause.outcome !== 'rejected';
       setError(
         uncertain
@@ -105,7 +111,7 @@ export function TaskExecutionAssignmentEditor({
       );
       if (!uncertain) setPending(null);
     } finally {
-      setBusy(false);
+      if (live()) setBusy(false);
     }
   }
 

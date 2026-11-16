@@ -5,6 +5,7 @@ import {
   type AgentProfileWriteInput,
 } from '@omnis/contracts';
 import { ApiRequestError } from '../api.js';
+import { useBeginSession } from '../sessionContext.js';
 import { classifyError, fetchDraft, publishDraft, saveDraft } from './data.js';
 import { AgentProfileFields } from './AgentProfileFields.js';
 
@@ -66,6 +67,7 @@ export function AgentProfileEditor({
   const [form, setForm] = useState<AgentProfileWriteInput>(fromVersion(currentVersion));
   const [pending, setPending] = useState<PendingOperation | null>(null);
   const [busy, setBusy] = useState(false);
+  const beginSession = useBeginSession();
   const [unknown, setUnknown] = useState(false);
   const [message, setMessage] = useState('');
   const unauthorizedRef = useRef(onUnauthorized);
@@ -100,9 +102,12 @@ export function AgentProfileEditor({
     setPending(operation);
     setBusy(true);
     setMessage('');
+    // Outcomes for a replaced owner session change nothing and call no parent callback.
+    const live = beginSession();
     try {
       if (operation.kind === 'save') {
         const receipt = await saveDraft(agent.id, operation.input, csrfToken, operation.requestId);
+        if (!live()) return;
         setDraft({
           agentId: agent.id,
           draftRevision: receipt.draftRevision,
@@ -115,6 +120,7 @@ export function AgentProfileEditor({
         setMessage('The server confirmed that the profile draft was saved.');
       } else {
         await publishDraft(agent.id, operation.input, csrfToken, operation.requestId);
+        if (!live()) return;
         setEditing(false);
         setPending(null);
         setUnknown(false);
@@ -125,6 +131,7 @@ export function AgentProfileEditor({
       setPending(null);
       setUnknown(false);
     } catch (cause) {
+      if (!live()) return;
       if (cause instanceof ApiRequestError && cause.status === 401) {
         onUnauthorized(cause);
       } else if (cause instanceof ApiRequestError && cause.outcome !== 'rejected') {

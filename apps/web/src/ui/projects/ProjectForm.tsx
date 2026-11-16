@@ -29,6 +29,7 @@ import {
 } from './recovery.js';
 import { projectHash } from './route.js';
 import { ApiRequestError } from '../api.js';
+import { useMountedInSession } from '../sessionContext.js';
 
 type Values = { key: string; name: string; objective: string; priority: Project['priority'] };
 type FieldErrors = Partial<Record<'key' | 'name' | 'objective', string>>;
@@ -105,18 +106,11 @@ export function ProjectForm({
   // Identifies the latest recheck. A response for an older one is ignored, so a late answer cannot
   // reopen a recovery state the owner has already left (for example through Edit values).
   const recheckSeq = useRef(0);
-  const mounted = useRef(true);
+  const mounted = useMountedInSession();
   const csrfRef = useRef(csrfToken);
   csrfRef.current = csrfToken;
   const unauthorizedRef = useRef(onUnauthorized);
   unauthorizedRef.current = onUnauthorized;
-
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-    };
-  }, []);
 
   // After a failed validation, move focus to the first invalid control once it is rendered.
   useEffect(() => {
@@ -252,6 +246,8 @@ export function ProjectForm({
       } catch {
         // The notice still tells the owner to retry; the next attempt will surface a new failure.
       }
+      // The refresh is an await: a replaced session must not receive this notice.
+      if (!mounted.current) return;
       error({ key: 'rejected.csrf' });
     } else if (failure.status === 404) error({ key: 'rejected.notFound' });
     else if (failure.status === 422) error({ key: 'rejected.invalidInput' });
