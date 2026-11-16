@@ -49,6 +49,7 @@ import {
 } from './executionCapability.js';
 import { ExecutionCapabilityBanner } from './ExecutionCapabilityBanner.js';
 import { useRuntimeCapabilities } from './useRuntimeCapabilities.js';
+import { bindExpiryToSession, captureSession } from './sessionScope.js';
 import { formatDate } from './manilaTime.js';
 import { AcceptResultAction } from './AcceptResultAction.js';
 import { isAwaitingOwnerReview } from './acceptResult.js';
@@ -281,8 +282,12 @@ function App() {
     runId: string | null;
   }>({ phase: 'idle', runId: null });
   const gateSeq = useRef(0);
+  const [sessionEpoch, setSessionEpoch] = useState(0);
+  const bootSessionStarted = useRef(false);
+  const beginSession = useCallback(() => captureSession(sessionGeneration), []);
   const rotateSession = useCallback(() => {
     sessionGeneration.current += 1;
+    setSessionEpoch(sessionGeneration.current);
     // A new session reads fresh data on sign-in; an old refresh must not touch it.
     gateSeq.current += 1;
     setAcceptGate({ phase: 'idle', runId: null });
@@ -406,6 +411,13 @@ function App() {
     [refreshCsrf, rotateSession],
   );
 
+  // Child components receive a handler bound to the owner session they rendered in, so a late
+  // 401 from a previous session is inert. Identity changes with each session (`sessionEpoch`).
+  const sessionBoundExpire = useMemo(() => {
+    void sessionEpoch;
+    return bindExpiryToSession(sessionGeneration, expireSessionIfNeeded);
+  }, [expireSessionIfNeeded, sessionEpoch]);
+
   const { load: capabilityLoad, refresh: refreshCapabilities } = useRuntimeCapabilities(
     // Only the Tasks page shows execution state; other pages never request capabilities.
     owner !== null && page === 'tasks',
@@ -415,10 +427,12 @@ function App() {
   const executionGate = describeExecution(capabilityLoad);
 
   const loadTasks = useCallback(async () => {
+    const live = beginSession();
     setTasksLoading(true);
     setTasksError('');
     try {
       const taskData = await request('/api/v1/tasks', {}, parseTaskList);
+      if (!live()) return;
       setTasks(taskData);
       setSelectedTaskId((current) =>
         current && taskData.some((task) => task.id === current)
@@ -426,27 +440,31 @@ function App() {
           : (taskData[0]?.id ?? null),
       );
     } catch (cause) {
+      if (!live()) return;
       if (!expireSessionIfNeeded(cause))
         setTasksError(failureMessage(cause, 'Tasks could not be loaded.'));
     } finally {
-      setTasksLoading(false);
+      if (live()) setTasksLoading(false);
     }
-  }, [expireSessionIfNeeded]);
+  }, [beginSession, expireSessionIfNeeded]);
 
   const loadProjects = useCallback(async () => {
+    const live = beginSession();
     setProjectsLoading(true);
     setProjectsError('');
     try {
       const result = await request('/api/v1/projects', {}, parseProjectList);
+      if (!live()) return;
       setProjects(result.projects.filter((project) => project.status === 'active'));
       setProjectsLoaded(true);
     } catch (cause) {
+      if (!live()) return;
       if (!expireSessionIfNeeded(cause))
         setProjectsError(failureMessage(cause, 'Projects could not be loaded.'));
     } finally {
-      setProjectsLoading(false);
+      if (live()) setProjectsLoading(false);
     }
-  }, [expireSessionIfNeeded]);
+  }, [beginSession, expireSessionIfNeeded]);
 
   useEffect(() => {
     if (
@@ -470,10 +488,12 @@ function App() {
   ]);
 
   const loadRuns = useCallback(async () => {
+    const live = beginSession();
     setRunsLoading(true);
     setRunsError('');
     try {
       const runData = await request('/api/v1/runs', {}, parseRunList);
+      if (!live()) return;
       setRuns(runData);
       setSelectedRunId((current) => {
         const requestedRunId = readRunId();
@@ -483,22 +503,25 @@ function App() {
           : (runData[0]?.id ?? null);
       });
     } catch (cause) {
+      if (!live()) return;
       if (!expireSessionIfNeeded(cause))
         setRunsError(failureMessage(cause, 'Runs could not be loaded.'));
     } finally {
-      setRunsLoading(false);
+      if (live()) setRunsLoading(false);
     }
-  }, [expireSessionIfNeeded]);
+  }, [beginSession, expireSessionIfNeeded]);
 
   /** Re-read tasks without the list's loading state; a failed read keeps what is shown. */
   const refreshTasksQuietly = useCallback(async () => {
+    const live = beginSession();
     try {
       const taskData = await request('/api/v1/tasks', {}, parseTaskList);
+      if (!live()) return;
       setTasks(taskData);
     } catch (cause) {
-      expireSessionIfNeeded(cause);
+      if (live()) expireSessionIfNeeded(cause);
     }
-  }, [expireSessionIfNeeded]);
+  }, [beginSession, expireSessionIfNeeded]);
 
   /**
    * Authoritative re-read after a 409 (or an explicit reload). Both reads must succeed, and this
@@ -535,22 +558,25 @@ function App() {
 
   const reconcileRun = useCallback(
     async (runId: string) => {
+      const live = beginSession();
       setReconcileError('');
       try {
         const run = await request(`/api/v1/runs/${encodeURIComponent(runId)}`, {}, (value) =>
           RunSchema.parse(value),
         );
+        if (!live()) return;
         setRuns((current) => current.map((entry) => (entry.id === run.id ? run : entry)));
         // A finished run moves its task on the server (a completed mock run leaves the task in
         // review). The run stream is run-scoped and never carries that, so read the task again.
         if (run.status === 'completed') await refreshTasksQuietly();
       } catch (cause) {
+        if (!live()) return;
         if (!expireSessionIfNeeded(cause)) {
           setReconcileError(failureMessage(cause, 'The final run state could not be confirmed.'));
         }
       }
     },
-    [expireSessionIfNeeded, refreshTasksQuietly],
+    [beginSession, expireSessionIfNeeded, refreshTasksQuietly],
   );
 
   // Authenticated Run read used to tell a dropped network from an ended owner session after a
@@ -616,7 +642,12 @@ function App() {
           setTaskProjectId('');
           storePendingTaskCreate(null, null);
         }
-        rotateSession();
+        // Boot runs twice under StrictMode; both passes belong to the same session, so only the
+        // first starts one. A second rotation would wrongly mark the first pass's reads stale.
+        if (!bootSessionStarted.current) {
+          bootSessionStarted.current = true;
+          rotateSession();
+        }
         setOwner(currentOwner);
         setChecking(false);
         void loadWorkspace();
@@ -826,6 +857,7 @@ function App() {
   async function submitTaskCreate(operation: TaskCreateOperation) {
     if (taskCreateInFlight.current) return;
     taskCreateInFlight.current = true;
+    const live = beginSession();
     setBusy(true);
     setError('');
     try {
@@ -855,6 +887,8 @@ function App() {
           return created;
         },
       );
+      // An outcome that belongs to a replaced owner session is never applied to the new one.
+      if (!live()) return;
       setTasks((current) => [task, ...current]);
       setSelectedTaskId(task.id);
       setTitle('');
@@ -864,6 +898,7 @@ function App() {
       setPendingTaskCreateOwnerId(null);
       storePendingTaskCreate(null, null);
     } catch (cause) {
+      if (!live()) return;
       const sessionExpired = expireSessionIfNeeded(cause);
       if (sessionExpired) {
         // Keep a same-owner uncertain operation for explicit retry after sign-in.
@@ -970,6 +1005,7 @@ function App() {
 
   async function startRun(task: Task) {
     let operation = approvalOperation;
+    const live = beginSession();
     setBusy(true);
     const check = await refreshCapabilities();
     setBusy(false);
@@ -1002,7 +1038,7 @@ function App() {
             (value) => AuthorizationSchema.parse(value),
           );
         } catch (cause) {
-          if (expireSessionIfNeeded(cause)) return;
+          if (!live() || expireSessionIfNeeded(cause)) return;
           if (cause instanceof ApiRequestError && cause.outcome !== 'rejected') {
             operation = { ...operation, authorizationUncertain: true };
             setApprovalOperation(operation);
@@ -1018,6 +1054,7 @@ function App() {
           }
           return;
         }
+        if (!live()) return;
         if (authorization.status !== 'pending' || authorizationScopeError(authorization, task)) {
           operation = { ...operation, authorization, canRetry: false };
           setApprovalOperation(operation);
@@ -1052,7 +1089,7 @@ function App() {
             (value) => AuthorizationSchema.parse(value),
           );
         } catch (cause) {
-          if (expireSessionIfNeeded(cause)) return;
+          if (!live() || expireSessionIfNeeded(cause)) return;
           if (cause instanceof ApiRequestError && cause.outcome !== 'rejected') {
             operation = { ...operation, authorization, decisionUncertain: true };
             setApprovalOperation(operation);
@@ -1066,6 +1103,7 @@ function App() {
           }
           return;
         }
+        if (!live()) return;
         operation = { ...operation, authorization };
         setApprovalOperation(operation);
         setApprovalExpiry(authorization.expiresAt);
@@ -1105,7 +1143,7 @@ function App() {
           (value) => RunSchema.parse(value),
         );
       } catch (cause) {
-        if (expireSessionIfNeeded(cause)) return;
+        if (!live() || expireSessionIfNeeded(cause)) return;
         if (cause instanceof ApiRequestError && cause.outcome !== 'rejected') {
           operation = { ...operation, runUncertain: true };
           setApprovalOperation(operation);
@@ -1142,6 +1180,7 @@ function App() {
         return;
       }
 
+      if (!live()) return;
       setRuns((current) => [run, ...current.filter((entry) => entry.id !== run.id)]);
       setSelectedRunId(run.id);
       setEvents([]);
@@ -1153,7 +1192,7 @@ function App() {
       focusRunInspector.current = true;
       void loadRuns();
     } catch (cause) {
-      if (!expireSessionIfNeeded(cause))
+      if (live() && !expireSessionIfNeeded(cause))
         setApprovalError(failureMessage(cause, 'Omnis OS could not start this mock run.'));
     } finally {
       setBusy(false);
@@ -1163,6 +1202,7 @@ function App() {
   async function stopRun(run: Run) {
     if (stopInFlight.current.has(run.id)) return;
     stopInFlight.current.add(run.id);
+    const live = beginSession();
     setBusy(true);
     setError('');
     try {
@@ -1171,9 +1211,10 @@ function App() {
         { method: 'POST', headers: { 'x-omnis-csrf': csrfToken } },
         (value) => RunSchema.parse(value),
       );
+      if (!live()) return;
       setRuns((current) => current.map((entry) => (entry.id === updated.id ? updated : entry)));
     } catch (cause) {
-      if (!expireSessionIfNeeded(cause))
+      if (live() && !expireSessionIfNeeded(cause))
         setError(failureMessage(cause, 'Omnis OS could not stop this run.'));
     } finally {
       stopInFlight.current.delete(run.id);
@@ -1336,7 +1377,7 @@ function App() {
             selectedTask={selectedTask}
             ownerId={owner?.id ?? ''}
             csrfToken={csrfToken}
-            onSessionExpired={expireSessionIfNeeded}
+            onSessionExpired={sessionBoundExpire}
             onTaskUpdated={(updated) => {
               setTasks((current) =>
                 current.map((task) => (task.id === updated.id ? updated : task)),
@@ -1414,7 +1455,7 @@ function App() {
                   setStreamEpoch((epoch) => epoch + 1);
                 }
               },
-              onSessionExpired: expireSessionIfNeeded,
+              onSessionExpired: sessionBoundExpire,
               gate: acceptGate,
               onConflict: (runId) => void refreshAfterConflict(runId),
               onReload: (runId) => void refreshAfterConflict(runId),
@@ -1423,11 +1464,11 @@ function App() {
           />
         )}
         {page === 'agents' && (
-          <AgentsWorkspace onUnauthorized={expireSessionIfNeeded} csrfToken={csrfToken} />
+          <AgentsWorkspace onUnauthorized={sessionBoundExpire} csrfToken={csrfToken} />
         )}
         {page === 'departments' && (
           <DepartmentsWorkspace
-            onUnauthorized={expireSessionIfNeeded}
+            onUnauthorized={sessionBoundExpire}
             csrfToken={csrfToken}
             refreshCsrf={refreshCsrf}
             arrivedByNavigation={navigatedInApp.current}
@@ -1436,7 +1477,7 @@ function App() {
         {page === 'projects' && (
           <ProjectsWorkspace
             ownerId={owner.id}
-            onUnauthorized={expireSessionIfNeeded}
+            onUnauthorized={sessionBoundExpire}
             csrfToken={csrfToken}
             refreshCsrf={refreshCsrf}
             arrivedByNavigation={navigatedInApp.current}

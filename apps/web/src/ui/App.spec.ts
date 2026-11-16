@@ -250,6 +250,8 @@ const test = base.extend<{ api: MockApi }>({
 function createMockApi(page: Page) {
   let options: FixtureOptions = {};
   let capabilityHold = false;
+  const heldGets = new Set<string>();
+  const heldQueue: Array<{ path: string; resolve: (outcome: 'ok' | 'unauthorized') => void }> = [];
   let capabilityRequests = 0;
   const capabilityPending: Array<(outcome: CapabilityOutcome) => void> = [];
   let currentTasks = [...defaultTasks];
@@ -440,6 +442,15 @@ function createMockApi(page: Page) {
     const headers = request.headers();
     const body = request.postDataJSON?.() ?? null;
     requests.push({ method, path, headers, body });
+
+    if (method === 'GET' && heldGets.has(path)) {
+      // Deterministic ordering: a held GET settles only when the test releases it.
+      const outcome = await new Promise<'ok' | 'unauthorized'>((resolve) =>
+        heldQueue.push({ path, resolve }),
+      );
+      if (outcome === 'unauthorized')
+        return fulfillError(route, 401, 'unauthorized', 'Sign in to continue.');
+    }
 
     if (
       ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method) &&
@@ -1140,11 +1151,24 @@ function createMockApi(page: Page) {
     releaseReconnect: () => scenario?.release(),
     dispose: async () => {
       capabilityHold = false;
+      heldGets.clear();
+      for (const held of heldQueue.splice(0)) held.resolve('unauthorized');
       for (const resolve of capabilityPending.splice(0)) resolve('error');
       await scenario?.close();
     },
     runDetailGets,
     assignmentWrites,
+    holdGet: (path: string) => {
+      heldGets.add(path);
+    },
+    pendingGets: (path: string) => heldQueue.filter((item) => item.path === path).length,
+    /** Settle the n-th still-held GET of a path. 'ok' falls through to the normal fixture. */
+    releaseGet: (path: string, index: number, outcome: 'ok' | 'unauthorized') => {
+      const held = heldQueue.filter((item) => item.path === path)[index];
+      if (!held) throw new Error(`no held GET ${path} at ${index}`);
+      heldQueue.splice(heldQueue.indexOf(held), 1);
+      held.resolve(outcome);
+    },
     holdCapabilities: () => {
       capabilityHold = true;
     },
@@ -4360,6 +4384,104 @@ test.describe('capability refresh ordering', () => {
     await expect(page.getByText(sessionExpiredText)).toHaveCount(0);
     await expect(page.getByRole('heading', { name: 'Runs' })).toBeVisible();
     expect(executionPosts(api)).toHaveLength(0);
+  });
+
+  const signOutAndBackIn = async (page: Page, api: MockApi, path: string) => {
+    await page.getByRole('button', { name: 'Sign out' }).click();
+    await expect(page.getByRole('heading', { name: 'Welcome back.' })).toBeVisible();
+    // Everything still pending now belongs to the session that just ended. (StrictMode's double
+    // boot may have dispatched more than one read, so the count is measured, not assumed.)
+    const old = api.pendingGets(path);
+    await page.getByLabel('Owner password').fill('fixture-owner-password');
+    await page.getByRole('button', { name: 'Sign in' }).click();
+    await expect(page.getByRole('navigation', { name: 'Primary navigation' })).toBeVisible();
+    await expect.poll(() => api.pendingGets(path)).toBeGreaterThan(old); // session 2's own read
+    return old;
+  };
+  const releaseOld = (api: MockApi, path: string, old: number, outcome: 'ok' | 'unauthorized') => {
+    for (let i = 0; i < old; i += 1) api.releaseGet(path, 0, outcome);
+  };
+  const stillSignedIn = async (page: Page) => {
+    await expect(page.getByText(sessionExpiredText)).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: 'Welcome back.' })).toHaveCount(0);
+    await expect(page.getByRole('navigation', { name: 'Primary navigation' })).toBeVisible();
+  };
+  const bootHeld = async (page: Page, api: MockApi, path: string, hash: string) => {
+    api.configure();
+    api.holdGet(path);
+    await page.goto(`/${hash}`);
+    await expect.poll(() => api.pendingGets(path)).toBeGreaterThanOrEqual(1);
+    await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
+  };
+
+  for (const [label, path, hash] of [
+    ['Tasks', '/api/v1/tasks', '#tasks'],
+    ['Runs', '/api/v1/runs', '#runs'],
+  ] as const) {
+    test(`stale ${label} 401 from a previous session cannot expire the replacement session`, async ({
+      page,
+      api,
+    }) => {
+      await bootHeld(page, api, path, hash);
+      const old = await signOutAndBackIn(page, api, path);
+      releaseOld(api, path, old, 'unauthorized'); // old session's 401s arrive late
+      await stillSignedIn(page);
+      api.releaseGet(path, 0, 'ok'); // session 2's own read still applies
+      await stillSignedIn(page);
+      await expect(page.getByText(/Loading (tasks|runs)…/)).toHaveCount(0);
+    });
+
+    test(`${label}: out-of-order completion (new session first, stale 401 last) keeps session 2 intact`, async ({
+      page,
+      api,
+    }) => {
+      await bootHeld(page, api, path, hash);
+      const old = await signOutAndBackIn(page, api, path);
+      api.releaseGet(path, old, 'ok'); // session 2 completes first
+      await expect(page.getByText(/Loading (tasks|runs)…/)).toHaveCount(0);
+      releaseOld(api, path, old, 'unauthorized'); // stale 401s last
+      await stillSignedIn(page);
+      await expect(page.getByText(/Loading (tasks|runs)…/)).toHaveCount(0);
+    });
+  }
+
+  test('a stale successful Tasks response from a previous session is not applied', async ({
+    page,
+    api,
+  }) => {
+    await bootHeld(page, api, '/api/v1/tasks', '#tasks');
+    const old = await signOutAndBackIn(page, api, '/api/v1/tasks');
+    releaseOld(api, '/api/v1/tasks', old, 'ok'); // session 1 succeeds late
+    await expect(page.getByText('Loading tasks…')).toBeVisible(); // session 2 is still loading
+    await expect(page.getByText('Review launch checklist')).toHaveCount(0);
+    api.releaseGet('/api/v1/tasks', 0, 'ok');
+    await expect(page.getByRole('button', { name: /Review launch checklist/ })).toBeVisible();
+    await expect(page.getByText('Loading tasks…')).toHaveCount(0);
+  });
+
+  test('a stale Projects 401 from a previous session cannot expire the replacement session', async ({
+    page,
+    api,
+  }) => {
+    api.configure();
+    await openWorkspace(page, '#tasks');
+    api.holdGet('/api/v1/projects');
+    await page.getByRole('button', { name: 'Load available projects' }).click();
+    await expect.poll(() => api.pendingGets('/api/v1/projects')).toBe(1);
+    await page.getByRole('button', { name: 'Sign out' }).click();
+    await expect(page.getByRole('heading', { name: 'Welcome back.' })).toBeVisible();
+    await page.getByLabel('Owner password').fill('fixture-owner-password');
+    await page.getByRole('button', { name: 'Sign in' }).click();
+    await expect(page.getByRole('navigation', { name: 'Primary navigation' })).toBeVisible();
+    api.releaseGet('/api/v1/projects', 0, 'unauthorized');
+    await stillSignedIn(page);
+  });
+
+  test('a current-session 401 on Tasks still expires the session', async ({ page, api }) => {
+    await bootHeld(page, api, '/api/v1/tasks', '#tasks');
+    const pending = api.pendingGets('/api/v1/tasks');
+    for (let i = 0; i < pending; i += 1) api.releaseGet('/api/v1/tasks', 0, 'unauthorized');
+    await expect(page.getByText(sessionExpiredText)).toBeVisible();
   });
 
   test('pages other than Tasks never request capabilities', async ({ page, api }) => {
