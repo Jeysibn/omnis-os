@@ -116,6 +116,7 @@ type AcceptBehavior =
   | 'hold-ok'
   | 'hold-401'
   | 'unauthorized'
+  | 'authorizer-unavailable'
   | 'csrf';
 
 type FixtureOptions = {
@@ -1100,6 +1101,13 @@ function createMockApi(page: Page) {
         return fulfillError(route, 403, 'csrf', 'The request origin or CSRF token is invalid.');
       if (behavior === 'concurrency-limit')
         return fulfillError(route, 503, 'concurrency_limit', 'Mission Lane is busy. Retry.');
+      if (behavior === 'authorizer-unavailable')
+        return fulfillError(
+          route,
+          503,
+          'authorizer_unavailable',
+          'Authorizer-backed functionality is unavailable in this configuration.',
+        );
       if (behavior === 'lost-not-applied') return route.abort();
       const task = currentTasks.find((item) => item.id === taskId);
       if (!task) return fulfillError(route, 404, 'not_found', 'Task not found.');
@@ -3668,6 +3676,35 @@ test.describe('R1 owner result acceptance', () => {
     await confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' }).click();
     await expect(page.getByText('Result accepted by owner.')).toBeVisible();
     expect(api.acceptPosts).toHaveLength(1);
+  });
+
+  test('a definitive authorizer_unavailable is reported as unavailable, never as an unknown outcome', async ({
+    page,
+    api,
+  }) => {
+    api.configure({
+      tasks: [reviewTask],
+      runs: [reviewRun],
+      acceptBehaviors: ['authorizer-unavailable'],
+    });
+    await openReview(page);
+    await accept(page).click();
+    await confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' }).click();
+    const problem = page.getByRole('alert').filter({ hasText: 'Authorizer-backed functionality' });
+    await expect(problem).toContainText('the result is not shown as accepted');
+    await expect(problem).not.toContainText('may or may not have been accepted');
+    // No retry loop is offered inside the confirmation; the owner reloads and tries again later.
+    await expect(page.getByRole('button', { name: 'Retry acceptance' })).toHaveCount(0);
+    await expect(page.getByText('Result accepted by owner.')).toHaveCount(0);
+    expect(api.acceptPosts).toHaveLength(1);
+    // Task state is read again, as the backend handoff requires for authorizer_unavailable.
+    await expect(accept(page)).toBeVisible();
+    // When the service returns, the next explicit attempt reuses the same idempotency key.
+    await accept(page).click();
+    await confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' }).click();
+    await expect(page.getByText('Result accepted by owner.')).toBeVisible();
+    expect(api.acceptPosts).toHaveLength(2);
+    expect(api.acceptPosts[1]?.key).toBe(api.acceptPosts[0]?.key);
   });
 
   test('a network failure that never applied can be retried with the same key', async ({

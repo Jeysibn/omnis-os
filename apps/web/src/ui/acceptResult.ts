@@ -119,6 +119,12 @@ export type AcceptanceFailure =
   | { kind: 'conflict'; message: string }
   /** The outcome is unknown; the same key may be retried. */
   | { kind: 'uncertain'; message: string }
+  /**
+   * The backend definitively reports that the approval service (Authorizer) is unavailable, for
+   * example in the restricted Authorizer-free profile. This is NOT an unknown outcome: nothing is
+   * claimed either way except that acceptance cannot be requested right now.
+   */
+  | { kind: 'unavailable'; message: string }
   | { kind: 'rejected'; message: string };
 
 export function classifyAcceptanceFailure(cause: unknown): AcceptanceFailure {
@@ -126,6 +132,8 @@ export function classifyAcceptanceFailure(cause: unknown): AcceptanceFailure {
     return { kind: 'uncertain', message: 'Omnis OS could not confirm the acceptance.' };
   if (cause.status === 401) return { kind: 'unauthorized' };
   if (cause.status === 409) return { kind: 'conflict', message: cause.message };
+  if (cause.status === 503 && cause.code === 'authorizer_unavailable')
+    return { kind: 'unavailable', message: cause.message };
   // 503 concurrency_limit, other 5xx, network loss and unverifiable responses may have applied.
   if (cause.outcome === 'uncertain' || cause.outcome === 'invalid-response')
     return { kind: 'uncertain', message: cause.message };
