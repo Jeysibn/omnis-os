@@ -97,6 +97,7 @@ export function SyntheticConnectorRunAction({
     blocked: busy,
     onSessionExpired,
     onAuthorization: applyAuthorization,
+    beginSession,
   });
   const { clearMessages: clearRevocationMessages } = revocation;
 

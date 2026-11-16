@@ -40,7 +40,9 @@ Rules applied everywhere:
 | `PUT execution-assignment`               | dispatch                | not applied                      | not shown                     | yes                     | stale assignment test                              |
 | `GET runtime-capabilities`               | per request + session   | superseded result fails closed   | cannot expire replacement     | yes                     | capability ordering tests (A–E)                    |
 | Run SSE messages / `onerror`             | stream open             | ignored                          | ignored                       | n/a                     | stream revocation / reconnect tests; see note B    |
-| Stop, approve, revoke, accept            | dispatch                | not applied                      | not shown                     | yes                     | existing revoke / accept / stop tests              |
+| Stop, approve, revoke, accept            | dispatch                | not applied                      | not shown                     | yes                     | revoke: stale-revoke test; others existing tests   |
+| Agents / Departments / Projects pages    | n/a (unmount + abort)   | writes only to unmounted state   | `sessionBoundExpire` is inert | n/a                     | existing page specs; see note C                    |
+| `AcceptResultAction` (accept result)     | generation at submit    | not applied                      | cannot expire replacement     | yes                     | accept-result stale-session tests                  |
 
 Note A — `/me` and CSRF staleness are guarded in code but **cannot be driven through the UI**:
 the sign-in control is disabled while CSRF loads and sign-out is unreachable while sign-in is in
@@ -53,7 +55,16 @@ rotation and the stream's teardown cannot be forced deterministically. The same 
 connector authorization lookup that returns 404 for a replaced session (the follow-up create is
 guarded): session 2 legitimately re-recovers the same stored operation, so a stale POST cannot be
 told apart from it. Both were found by independent review of 0d8b81b and are guarded but untested.
+Independent review of cb12deb found two more: the stream recovery probe now carries the stream's own
+session scope (a retry timer firing after rotation no longer probes under the replacement; guarded,
+untested for the same timing reason), and the connector revoke hook is session-scoped (covered by
+`a late revoke success from a replaced session cannot clear the replacement operation`, verified to
+fail with the guard removed).
 The existing revocation and reconnect tests continue to pass.
+
+Note C — these pages push no results into App state; their requests abort on unmount, and their
+only App-level hook is `sessionBoundExpire`. A stale page calling the shared `refreshCsrf` late would
+fetch the live session's own token, which is harmless. Reviewed by reading, not by a dedicated test.
 
 Backend dependency for Codex #1: none found. The frontend assumes only that a replaced session's
 cookie is rejected with 401 and that mutations remain idempotent under the documented keys.

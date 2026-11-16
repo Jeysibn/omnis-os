@@ -4586,6 +4586,50 @@ test.describe('capability refresh ordering', () => {
     await stillSignedIn(page);
   });
 
+  test('a late revoke success from a replaced session cannot clear the replacement operation', async ({
+    page,
+    api,
+  }) => {
+    const task = TaskSchema.parse({
+      ...makeTask('task-synthetic', 'Summarize policy changes'),
+      projectId: defaultProjects[0]!.id,
+      associationRevision: 1,
+      agentId: 'agent-analyst',
+      profileVersion: 3,
+      runtimeId: 'mock',
+    });
+    const revokePath = `/api/v1/connector-authorizations/${connectorAuthorizationId}/revoke`;
+    const storedOperations = () =>
+      page.evaluate(
+        () =>
+          Object.keys(sessionStorage).filter((key) =>
+            key.startsWith('omnis.synthetic-connector-operation'),
+          ).length,
+      );
+    api.configure({ tasks: [task], runs: [], syntheticEnabled: true });
+    api.holdGet('/api/v1/runs');
+    api.holdRequest('POST', revokePath);
+    await page.goto('/#tasks');
+    await page.getByRole('button', { name: 'Load available projects' }).click();
+    await page.getByRole('button', { name: 'Summarize policy changes' }).click();
+    await page.getByRole('button', { name: 'Review synthetic operation' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Review synthetic operation' });
+    await dialog.getByRole('button', { name: 'Approve exact operation' }).click();
+    await expect(page.getByText('Exact synthetic operation approved.')).toBeVisible();
+    await dialog.getByRole('button', { name: 'Revoke approval' }).click();
+    await dialog.getByRole('button', { name: 'Confirm revoke' }).click();
+    await expect.poll(() => api.pendingRequests('POST', revokePath)).toBe(1);
+    expect(await storedOperations()).toBe(1);
+    await expireViaRuns(page, api);
+    await signInAgain(page);
+    expect(await storedOperations()).toBe(1); // session 2 inherits the persisted operation
+    api.releaseRequest('POST', revokePath, 0, 'ok'); // session 1's revoke succeeds late
+    await expect.poll(() => api.connectorRevokeIds.length).toBe(1);
+    await settleClient(page);
+    expect(await storedOperations()).toBe(1); // the late result must not clear it
+    await stillSignedIn(page);
+  });
+
   test('a stale task assignment result is not applied to the replacement session', async ({
     page,
     api,

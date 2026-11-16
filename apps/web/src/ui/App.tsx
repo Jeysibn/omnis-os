@@ -621,12 +621,18 @@ function App() {
   // stream error. 401 goes through the existing sign-out flow; 403 and other refusals are shown
   // without signing out; network and server trouble never sign the owner out.
   const probeRunSession = useCallback(
-    async (runId: string, signal: AbortSignal): Promise<SessionProbeResult> => {
+    async (
+      runId: string,
+      signal: AbortSignal,
+      streamLive: SessionScope,
+    ): Promise<SessionProbeResult> => {
       // The session this probe was made for. Every outcome below is checked against it BEFORE any
       // side effect, so a late answer for an old session (for example a 401 for a cookie that was
       // replaced by a new sign-in) can never sign out or alter the session that replaced it.
-      const generation = sessionGeneration.current;
-      const stale = () => signal.aborted || generation !== sessionGeneration.current;
+      // `streamLive` is the scope of the stream that scheduled this probe, NOT of the moment the
+      // probe runs: a retry timer firing after rotation must not probe under the replacement.
+      const stale = () => signal.aborted || !streamLive();
+      if (stale()) return 'stale';
       try {
         const run = await request(
           `/api/v1/runs/${encodeURIComponent(runId)}`,
@@ -739,7 +745,7 @@ function App() {
     const live = beginSession();
     const recovery = createRunStreamRecovery({
       budget,
-      probe: (signal) => probeRunSession(selectedRunId, signal),
+      probe: (signal) => probeRunSession(selectedRunId, signal, live),
       recreate: () => {
         if (!live()) return;
         recreatingStream.current = true;
