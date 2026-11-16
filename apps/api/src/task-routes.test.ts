@@ -146,6 +146,21 @@ describe('owner task routes', () => {
         payload: { runId },
       });
       assert.equal(unauthorized.statusCode, 401);
+      for (const headers of [
+        {},
+        { origin: 'https://attacker.example', 'x-omnis-csrf': protectedHeaders['x-omnis-csrf'] },
+        { origin: protectedHeaders.origin, 'x-omnis-csrf': 'wrong-csrf-token' },
+      ]) {
+        const csrfRejected = await owner.inject({
+          method: 'POST',
+          url: `/api/v1/tasks/${task.id}/accept-result`,
+          headers,
+          payload: { runId },
+        });
+        assert.equal(csrfRejected.statusCode, 403);
+        assert.equal(csrfRejected.json().error.code, 'csrf_rejected');
+      }
+      assert.equal(authorizerCalls.length, 0, 'rejected requests must not reach the Authorizer');
       const missingKey = await owner.inject({
         method: 'POST',
         url: `/api/v1/tasks/${task.id}/accept-result`,
@@ -156,6 +171,7 @@ describe('owner task routes', () => {
         payload: { runId },
       });
       assert.equal(missingKey.statusCode, 400);
+      assert.equal(authorizerCalls.length, 0, 'invalid input must not reach the Authorizer');
       const accepted = await owner.inject({
         method: 'POST',
         url: `/api/v1/tasks/${task.id}/accept-result`,
