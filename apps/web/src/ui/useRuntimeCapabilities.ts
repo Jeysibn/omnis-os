@@ -21,11 +21,6 @@ export function useRuntimeCapabilities(
   const generation = useRef(0);
   const expired = useRef(onSessionExpired);
   expired.current = onSessionExpired;
-  const refreshRef = useRef<() => Promise<CapabilityCheck>>(() =>
-    Promise.resolve({ status: 'failed' }),
-  );
-  const enabledRef = useRef(enabled);
-  enabledRef.current = enabled;
 
   const refresh = useCallback(async (): Promise<CapabilityCheck> => {
     // One counter per App-owned hook instance; every consumer receives this same `refresh` by
@@ -33,13 +28,10 @@ export function useRuntimeCapabilities(
     const mine = ++generation.current;
     const session = sessionGeneration.current;
     const valid = () => mine === generation.current && session === sessionGeneration.current;
-    // Invalidated only by a session rotation (no newer request exists): the owner session this
-    // request used was replaced while the hook is still active (e.g. StrictMode's second boot).
-    // Fail this caller closed, but re-read under the current session so state cannot stay stuck.
-    const supersede = (): CapabilityCheck => {
-      if (mine === generation.current && enabledRef.current) void refreshRef.current();
-      return { status: 'superseded' };
-    };
+    // Invalidated by a newer request, a session rotation or unmount/disable. Fail this caller
+    // closed and do nothing else: a stale continuation must not send a request of its own. After a
+    // rotation the hook's effect re-runs (the owner changes, so `enabled` toggles) and reads again.
+    const supersede = (): CapabilityCheck => ({ status: 'superseded' });
     try {
       const value = await request('/api/v1/runtime-capabilities', {}, (raw) =>
         RuntimeCapabilitiesSchema.parse(raw),
@@ -64,7 +56,6 @@ export function useRuntimeCapabilities(
       return { status: 'failed' };
     }
   }, [sessionGeneration]);
-  refreshRef.current = refresh;
 
   useEffect(() => {
     if (!enabled) {

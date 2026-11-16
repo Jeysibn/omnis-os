@@ -86,6 +86,19 @@ after the session generation has rotated, and a continuation can run in between 
   `checkCreate` read-backs in `RecordEditor`, `ArchiveDialog` and `TaskEpicDialog`.
 - The `refreshCsrf` given to Departments and Projects rejects for a replaced session.
 
+- Deliberately NOT session-scoped: read effects that use an abort signal or a local `active` flag
+  (agent directory, history and draft reads, department list and choices, project reads and task
+  lists, planning paged lists, the assignment editor's agent list, synthetic audit history). Between
+  session rotation and React's cleanup of the old tree they can still write state into that retiring
+  component instance. A replacement session gets fresh instances, so nothing observable reaches it,
+  and these reads send no request, touch no storage or hash and call no parent callback. This is a
+  recorded decision, not an oversight; it was raised by independent review (finding 2 of 451e50d)
+  and answered on consequences. If the owner wants a purely mechanical guard there, it is a
+  contained follow-up.
+- A stale runtime-capabilities check no longer re-reads on its own; the hook's effect re-reads when
+  the owner changes. The project form and project detail 403 paths re-check the session after the
+  CSRF refresh before writing a notice.
+
 Regression tests exist for: late revoke success, late agent create (each verified to fail with its
 guard removed). Everything else in this note is guarded in code but NOT separately tested, because
 the needed flows (planning create, agent archive, project and department writes, profile editors)

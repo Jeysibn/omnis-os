@@ -246,6 +246,8 @@ export function ProjectForm({
       } catch {
         // The notice still tells the owner to retry; the next attempt will surface a new failure.
       }
+      // The refresh is an await: a replaced session must not receive this notice.
+      if (!mounted.current) return;
       error({ key: 'rejected.csrf' });
     } else if (failure.status === 404) error({ key: 'rejected.notFound' });
     else if (failure.status === 422) error({ key: 'rejected.invalidInput' });
