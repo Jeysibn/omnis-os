@@ -9,10 +9,18 @@ import {
   AgentDirectoryResponseSchema,
   CreateAuthorizationSchema,
   CreateRunSchema,
+  CreateAgentInputSchema,
+  CreateProjectSchema,
   CreateTaskSchema,
+  DepartmentListResponseSchema,
   RunEventSchema,
+  ProjectSchema,
   RunSchema,
+  AgentMutationReceiptSchema,
+  AgentProfileDraftResponseSchema,
+  AgentProfileResponseSchema,
   AgentProfileVersionResponseSchema,
+  AgentProfileVersionsResponseSchema,
   SetTaskExecutionAssignmentSchema,
   TaskSchema,
   type Authorization,
@@ -483,12 +491,19 @@ function createMockApi(page: Page) {
       });
     }
     if (path === '/api/v1/departments' && method === 'GET')
-      return route.fulfill({ json: { departments: [], total: 0 } });
+      return route.fulfill({
+        json: DepartmentListResponseSchema.parse({ departments: [], total: 0 }),
+      });
     if (path === '/api/v1/agents' && method === 'POST') {
-      const key = request.headers()['idempotency-key'] ?? '';
+      const key = request.headers()['idempotency-key'];
+      if (!key || !request.headers()['x-omnis-csrf'])
+        return fulfillError(route, 403, 'invalid_csrf', 'Mutation protection failed.');
+      const input = CreateAgentInputSchema.safeParse(request.postDataJSON());
+      if (!input.success)
+        return fulfillError(route, 400, 'invalid_input', 'Agent payload is invalid.');
       return route.fulfill({
         status: 201,
-        json: {
+        json: AgentMutationReceiptSchema.parse({
           requestId: key,
           operation: 'agent.created',
           agentId: 'agent-created',
@@ -497,7 +512,7 @@ function createMockApi(page: Page) {
           versionNo: null,
           draftRevision: 0,
           occurredAt: new Date().toISOString(),
-        },
+        }),
       });
     }
     if (path === '/api/v1/runtime-capabilities' && method === 'GET') {
@@ -556,6 +571,75 @@ function createMockApi(page: Page) {
         }),
       });
     }
+    const analystVersionFor = (agentId: string, versionNo: number) => ({
+      versionId: 'profile-version-3',
+      agentId,
+      versionNo,
+      profession: 'Research Analyst',
+      seniority: 'senior',
+      specialties: ['research'],
+      personality: { traits: ['careful'], tone: 'clear', principles: ['cite evidence'] },
+      behavior: { autonomy: 'low', escalation: 'ask owner' },
+      instructions: 'Summarize the supplied task.',
+      createdBy: { id: 'owner', displayName: 'Director' },
+      createdAt: now,
+    });
+    if (method === 'GET' && path === '/api/v1/agents/agent-analyst') {
+      return route.fulfill({
+        json: AgentProfileResponseSchema.parse({
+          agent: fixtureAgent,
+          currentVersion: analystVersionFor('agent-analyst', 3),
+        }),
+      });
+    }
+    if (method === 'GET' && path === '/api/v1/agents/agent-analyst/versions') {
+      const v = analystVersionFor('agent-analyst', 3);
+      return route.fulfill({
+        json: AgentProfileVersionsResponseSchema.parse({
+          agent: fixtureAgent,
+          versions: [
+            {
+              versionId: v.versionId,
+              versionNo: v.versionNo,
+              profession: v.profession,
+              seniority: v.seniority,
+              createdAt: v.createdAt,
+              createdBy: v.createdBy,
+              isCurrent: true,
+            },
+          ],
+          page: { total: 1, complete: true, nextCursor: null },
+        }),
+      });
+    }
+    if (method === 'GET' && path === '/api/v1/agents/agent-analyst/draft-profile') {
+      return route.fulfill({
+        json: AgentProfileDraftResponseSchema.parse({
+          agentId: 'agent-analyst',
+          draftRevision: 0,
+          baseVersionNo: null,
+          profile: null,
+          updatedAt: null,
+        }),
+      });
+    }
+    if (method === 'POST' && path === '/api/v1/agents/agent-analyst/archive') {
+      const key = request.headers()['idempotency-key'];
+      if (!key || !request.headers()['x-omnis-csrf'])
+        return fulfillError(route, 403, 'invalid_csrf', 'Mutation protection failed.');
+      return route.fulfill({
+        json: AgentMutationReceiptSchema.parse({
+          requestId: key,
+          operation: 'agent.archived',
+          agentId: 'agent-analyst',
+          lifecycle: 'archived',
+          versionId: null,
+          versionNo: null,
+          draftRevision: 0,
+          occurredAt: now,
+        }),
+      });
+    }
     const profileMatch = path.match(/^\/api\/v1\/agents\/([^/]+)\/versions\/(\d+)$/);
     if (profileMatch && method === 'GET') {
       const version = {
@@ -586,6 +670,21 @@ function createMockApi(page: Page) {
     if (path === '/api/v1/auth/logout' && method === 'POST') {
       authenticated = false;
       return route.fulfill({ status: 204, body: '' });
+    }
+    if (path === '/api/v1/projects' && method === 'POST') {
+      if (!request.headers()['idempotency-key'] || !request.headers()['x-omnis-csrf'])
+        return fulfillError(route, 403, 'invalid_csrf', 'Mutation protection failed.');
+      const input = CreateProjectSchema.safeParse(request.postDataJSON());
+      if (!input.success)
+        return fulfillError(route, 400, 'invalid_input', 'Project payload is invalid.');
+      return route.fulfill({
+        status: 201,
+        json: ProjectSchema.parse({
+          ...makeProject(`prj_${'c'.repeat(32)}`, input.data.key, input.data.name),
+          objective: input.data.objective,
+          priority: input.data.priority,
+        }),
+      });
     }
     if (path === '/api/v1/projects' && method === 'GET') {
       if (projectGetFailures > 0) {
@@ -4749,6 +4848,291 @@ test.describe('capability refresh ordering', () => {
     expect(count('/api/v1/me')).toBe(1);
     expect(count('/api/v1/auth/csrf')).toBe(1);
     expect(count('/api/v1/runs')).toBe(1); // no duplicate boot reads, no retry loop
+  });
+
+  const signInClick = async (page: Page) => {
+    await page.getByLabel('Owner password').fill('fixture-owner-password');
+    await expect(page.getByRole('button', { name: 'Sign in' })).toBeEnabled();
+    await page.getByRole('button', { name: 'Sign in' }).click();
+  };
+  const loginCsrf = (api: MockApi) =>
+    api.requests.filter((r) => r.method === 'POST' && r.path === '/api/v1/auth/login').at(-1)
+      ?.headers['x-omnis-csrf'];
+
+  test.describe('session guards: bootstrap and CSRF', () => {
+    test('boot: a held /me shows no sign-in and no error, then a 401 reaches sign-in cleanly', async ({
+      page,
+      api,
+    }) => {
+      api.configure();
+      api.holdGet('/api/v1/me');
+      await page.goto('/#tasks');
+      await expect.poll(() => api.pendingGets('/api/v1/me')).toBe(1); // StrictMode: one boot read
+      await expect(page.getByRole('heading', { name: 'Welcome back.' })).toHaveCount(0);
+      await expect(page.getByRole('button', { name: 'Sign out' })).toHaveCount(0);
+      api.releaseGet('/api/v1/me', 0, 'unauthorized');
+      await expect(page.getByRole('heading', { name: 'Welcome back.' })).toBeVisible();
+      await expect(page.getByText(sessionExpiredText)).toHaveCount(0);
+      const count = (path: string) => api.requests.filter((r) => r.path === path).length;
+      expect(count('/api/v1/me')).toBe(1);
+      expect(count('/api/v1/auth/csrf')).toBe(1);
+      // The sign-in that follows works with the CSRF token the single bootstrap fetched.
+      await signInClick(page);
+      await expect.poll(() => api.pendingGets('/api/v1/me')).toBe(1); // the sign-in's own read
+      api.releaseGet('/api/v1/me', 0, 'ok');
+      await expect(page.getByRole('navigation', { name: 'Primary navigation' })).toBeVisible();
+      expect(loginCsrf(api)).toBe(csrfToken);
+    });
+
+    test('boot: a held /me that succeeds restores the owner exactly once', async ({
+      page,
+      api,
+    }) => {
+      api.configure();
+      api.holdGet('/api/v1/me');
+      await page.goto('/#tasks');
+      await expect.poll(() => api.pendingGets('/api/v1/me')).toBe(1);
+      api.releaseGet('/api/v1/me', 0, 'ok');
+      await expect(page.getByRole('navigation', { name: 'Primary navigation' })).toBeVisible();
+      expect(api.requests.filter((r) => r.path === '/api/v1/me')).toHaveLength(1);
+    });
+
+    test('a stale 401 from the ended session cannot interrupt the replacement sign-in while /me is pending', async ({
+      page,
+      api,
+    }) => {
+      api.configure({ runs: [] });
+      api.holdGet('/api/v1/runs');
+      api.holdGet('/api/v1/tasks');
+      await page.goto('/#tasks');
+      await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
+      await expireViaRuns(page, api); // session 1 ends; its Tasks read is still held
+      const old = api.pendingGets('/api/v1/tasks');
+      expect(old).toBeGreaterThanOrEqual(1);
+      api.holdGet('/api/v1/me');
+      await signInClick(page); // session 2: login ok, CSRF ok, /me held
+      await expect.poll(() => api.pendingGets('/api/v1/me')).toBe(1);
+      for (let i = 0; i < old; i += 1) api.releaseGet('/api/v1/tasks', 0, 'unauthorized');
+      await settleClient(page); // the stale 401s are processed while sign-in is mid-flight
+      api.releaseGet('/api/v1/me', 0, 'ok');
+      await expect(page.getByRole('navigation', { name: 'Primary navigation' })).toBeVisible();
+      await stillSignedIn(page);
+    });
+
+    test('a stale 401 while the replacement CSRF refresh is pending leaves CSRF and sign-in intact', async ({
+      page,
+      api,
+    }) => {
+      api.configure({ runs: [] });
+      api.holdGet('/api/v1/runs');
+      api.holdGet('/api/v1/tasks');
+      await page.goto('/#tasks');
+      await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
+      api.holdGet('/api/v1/auth/csrf');
+      await expireViaRuns(page, api); // expiry starts a CSRF refresh for the signed-out state
+      await expect.poll(() => api.pendingGets('/api/v1/auth/csrf')).toBe(1);
+      const old = api.pendingGets('/api/v1/tasks');
+      for (let i = 0; i < old; i += 1) api.releaseGet('/api/v1/tasks', 0, 'unauthorized');
+      await settleClient(page);
+      // Sign-in stays unavailable until the pending refresh settles, and is then usable.
+      await expect(page.getByRole('button', { name: 'Sign in' })).toBeDisabled();
+      api.releaseGet('/api/v1/auth/csrf', 0, 'ok');
+      await expect(page.getByRole('button', { name: 'Sign in' })).toBeEnabled();
+      await page.getByLabel('Owner password').fill('fixture-owner-password');
+      await page.getByRole('button', { name: 'Sign in' }).click();
+      // The sign-in refetches CSRF for the new session; that read is held as well.
+      await expect.poll(() => api.pendingGets('/api/v1/auth/csrf')).toBe(1);
+      api.releaseGet('/api/v1/auth/csrf', 0, 'ok');
+      await expect(page.getByRole('navigation', { name: 'Primary navigation' })).toBeVisible();
+      expect(loginCsrf(api)).toBe(csrfToken);
+    });
+  });
+
+  test.describe('session guards: authorization follow-up and management reads', () => {
+    test('a 404 authorization lookup for a replaced session sends no follow-up create', async ({
+      page,
+      api,
+    }) => {
+      const task = TaskSchema.parse({
+        ...makeTask('task-synthetic', 'Summarize policy changes'),
+        projectId: defaultProjects[0]!.id,
+        associationRevision: 1,
+        agentId: 'agent-analyst',
+        profileVersion: 3,
+        runtimeId: 'mock',
+      });
+      const missingId = 'a7cece2c-2e6f-4b3b-92da-f0352c24debb';
+      const lookup = `/api/v1/connector-authorizations/${missingId}`;
+      // A pending operation owned by "owner" whose authorization the server does not know.
+      await page.addInitScript(
+        ([storageKey, value]) => sessionStorage.setItem(storageKey!, value!),
+        [
+          `omnis.synthetic-connector-operation.v1:owner:${task.id}`,
+          JSON.stringify({
+            version: 1,
+            ownerId: 'owner',
+            taskId: task.id,
+            projectId: task.projectId,
+            profileVersion: task.profileVersion,
+            assignmentRevision: task.assignmentRevision,
+            idempotencyKey: '5b1f2f66-0f4c-4b9e-9d8e-3c7f0c1a2b3d',
+            authorizationId: missingId,
+          }),
+        ],
+      );
+      api.configure({ tasks: [task], runs: [], syntheticEnabled: true });
+      api.holdGet('/api/v1/runs');
+      api.holdGet(lookup);
+      await page.goto('/#tasks');
+      await page.getByRole('button', { name: 'Load available projects' }).click();
+      await page.getByRole('button', { name: 'Summarize policy changes' }).click();
+      await expect.poll(() => api.pendingGets(lookup)).toBe(1); // session 1 recovery lookup, held
+      await expireViaRuns(page, api);
+      // Session 2 is a DIFFERENT owner, so it recovers nothing and any create is session 1's.
+      api.setOwnerId('owner-2');
+      await signInAgain(page);
+      api.releaseGet(lookup, 0, 'ok'); // the lookup settles late as a 404
+      await settleClient(page);
+      const creates = api.requests.filter(
+        (r) => r.method === 'POST' && r.path === '/api/v1/connector-authorizations',
+      );
+      expect(creates).toHaveLength(0);
+      await stillSignedIn(page);
+    });
+
+    test('a late agent archive from a replaced session cannot clear the shared pending archive', async ({
+      page,
+      api,
+    }) => {
+      const pendingKey = 'omnis.agent-archive.pending.v1:agent-analyst';
+      const stored = () =>
+        page.evaluate((key) => (sessionStorage.getItem(key) === null ? 0 : 1), pendingKey);
+      const archivePath = '/api/v1/agents/agent-analyst/archive';
+      api.configure({ runs: [] });
+      api.holdGet('/api/v1/runs');
+      api.holdRequest('POST', archivePath);
+      await page.goto('/#agents/agent-analyst');
+      await page.getByRole('button', { name: 'Archive agent' }).click();
+      await page
+        .getByRole('dialog', { name: 'Archive this agent?' })
+        .getByRole('button', { name: 'Archive agent' })
+        .click();
+      await expect.poll(() => api.pendingRequests('POST', archivePath)).toBe(1);
+      expect(await stored()).toBe(1);
+      await expireViaRuns(page, api);
+      await signInAgain(page);
+      expect(await stored()).toBe(1);
+      api.releaseRequest('POST', archivePath, 0, 'ok'); // session 1's archive succeeds late
+      await expect
+        .poll(
+          () => api.requests.filter((r) => r.method === 'POST' && r.path === archivePath).length,
+        )
+        .toBe(1);
+      await settleClient(page);
+      expect(await stored()).toBe(1); // the late result must not clear the shared pending archive
+      await stillSignedIn(page);
+    });
+
+    // Proves the mounted-in-session gate as a whole (removing it fails this test). It does NOT isolate
+    // the session-generation half: by the time the response lands the old form is already unmounted.
+    test('a late project create from a replaced session cannot navigate the replacement session', async ({
+      page,
+      api,
+    }) => {
+      const createdHash = `prj_${'c'.repeat(32)}`;
+      api.configure({ runs: [] });
+      api.holdGet('/api/v1/runs');
+      api.holdRequest('POST', '/api/v1/projects');
+      await page.goto('/#projects/new');
+      await page.getByLabel('Key').fill('NEWKEY');
+      await page.getByLabel('Name').fill('Late project');
+      await page.getByLabel('Objective').fill('Created in session 1.');
+      await page.getByRole('button', { name: 'Create project' }).click();
+      await expect.poll(() => api.pendingRequests('POST', '/api/v1/projects')).toBe(1);
+      await expireViaRuns(page, api);
+      await signInAgain(page);
+      api.releaseRequest('POST', '/api/v1/projects', 0, 'ok'); // session 1's create succeeds late
+      await expect
+        .poll(
+          () =>
+            api.requests.filter((r) => r.method === 'POST' && r.path === '/api/v1/projects').length,
+        )
+        .toBe(1);
+      await settleClient(page);
+      expect(page.url()).not.toContain(createdHash); // the replacement session is not navigated
+      await stillSignedIn(page);
+    });
+
+    for (const [label, hash, path] of [
+      ['Agents', '#agents', '/api/v1/agents'],
+      ['Departments', '#departments', '/api/v1/departments'],
+    ] as const) {
+      test(`a stale ${label} read 401 from a replaced session cannot expire the replacement`, async ({
+        page,
+        api,
+      }) => {
+        api.configure({ runs: [] });
+        api.holdGet('/api/v1/runs');
+        api.holdGet(path);
+        await page.goto(`/${hash}`);
+        await expect.poll(() => api.pendingGets(path)).toBeGreaterThanOrEqual(1);
+        await expireViaRuns(page, api);
+        const old = api.pendingGets(path);
+        await signInAgain(page); // session 2 mounts a fresh workspace and reads again
+        await expect.poll(() => api.pendingGets(path)).toBeGreaterThan(old);
+        for (let i = 0; i < old; i += 1) api.releaseGet(path, 0, 'unauthorized');
+        await settleClient(page);
+        await stillSignedIn(page);
+        api.releaseGet(path, 0, 'ok'); // session 2's own read still applies
+        await stillSignedIn(page);
+      });
+    }
+  });
+
+  // End-to-end invariants for the stream. Teardown closes the old EventSource, so these cannot prove
+  // the individual `live()` checks (they guard the instant between rotation and cleanup); they pin
+  // the observable result: nothing from session 1 reaches session 2, and session 2's stream works.
+  test.describe('session guards: SSE and recovery (invariants)', () => {
+    const eventsPath = '/api/v1/runs/run-active/events';
+
+    test('events held for the ended session never enter the replacement session', async ({
+      page,
+      api,
+    }) => {
+      api.configure();
+      api.holdGet(eventsPath);
+      await page.goto('/#runs/run-active');
+      await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
+      await expect.poll(() => api.pendingGets(eventsPath)).toBeGreaterThanOrEqual(1);
+      const old = await signOutAndBackIn(page, api, eventsPath); // session 2 opens its own stream
+      releaseOld(api, eventsPath, old, 'ok'); // session 1's event data arrives late
+      await settleClient(page);
+      await expect(page.getByText('Synthetic queued event 1.')).toHaveCount(0);
+      api.releaseGet(eventsPath, 0, 'ok'); // session 2's own stream still delivers
+      await expect(page.getByText('Synthetic queued event 1.')).toBeVisible();
+      await stillSignedIn(page);
+    });
+
+    test('a recovery probe in flight when the session is replaced cannot expire or change the replacement', async ({
+      page,
+      api,
+    }) => {
+      const probePath = '/api/v1/runs/run-active';
+      api.configure({ eventDisconnects: true }); // the first stream connection drops
+      api.holdGet(probePath);
+      await page.goto('/#runs/run-active');
+      await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
+      await expect.poll(() => api.pendingGets(probePath)).toBeGreaterThanOrEqual(1); // probing
+      await page.getByRole('button', { name: 'Sign out' }).click();
+      await expect(page.getByRole('heading', { name: 'Welcome back.' })).toBeVisible();
+      const old = api.pendingGets(probePath);
+      await signInAgain(page);
+      releaseOld(api, probePath, old, 'unauthorized'); // the old probe settles late as a 401
+      await settleClient(page);
+      await stillSignedIn(page);
+      // Session 2's stream (the drop was already consumed) still delivers its events.
+      await expect(page.getByText('Synthetic queued event 1.')).toBeVisible();
+    });
   });
 
   test('pages other than Tasks never request capabilities', async ({ page, api }) => {
