@@ -8,7 +8,7 @@ const PROJECT = 'omnis-os-restricted-dev';
 const POSTGRES_IMAGE =
   'postgres:17.6-alpine@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94';
 const APP_ROLES = ['omnis_migrator', 'omnis_runtime', 'omnis_authorizer', 'omnis_launcher'];
-let failureStage = 'runner identity and credential validation';
+let failureStage = 'GitHub Actions runner and fixture identity';
 
 async function main(): Promise<void> {
   const runId = process.env.GITHUB_RUN_ID ?? '';
@@ -28,9 +28,13 @@ async function main(): Promise<void> {
     );
   }
 
+  failureStage = 'administrator credential availability';
   const adminPassword = required('OMNIS_CI_POSTGRES_ADMIN_PASSWORD');
+  failureStage = 'migration credential availability';
   const migratorPassword = required('OMNIS_CI_POSTGRES_MIGRATION_PASSWORD');
+  failureStage = 'runtime credential availability';
   const runtimePassword = required('OMNIS_CI_POSTGRES_RUNTIME_PASSWORD');
+  failureStage = 'restricted credential format validation';
   for (const password of [adminPassword, migratorPassword, runtimePassword]) {
     if (!/^[a-f\d]{64}$/i.test(password)) {
       throw new Error('Restricted CI database credentials failed format validation.');
