@@ -896,6 +896,7 @@ async function startRestrictedWorker(launcherSocket) {
       ...workerEnvironment(),
       NODE_ENV: 'test',
       OMNIS_DATABASE_URL: databaseUrl,
+      OMNIS_EXECUTION_MODE: 'mock',
       OMNIS_INTERNAL_TOKEN: internalToken,
       OMNIS_WORKER_HOST: '127.0.0.1',
       OMNIS_WORKER_PORT: String(port),
