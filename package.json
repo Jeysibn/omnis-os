@@ -18,6 +18,7 @@
     "db:up": "docker compose --env-file .env.db-admin -f infra/compose/docker-compose.yml up -d postgres",
     "db:down": "docker compose --env-file .env.db-admin -f infra/compose/docker-compose.yml down",
     "compose:config:test": "node scripts/compose/verify-app-config.mjs",
+    "compose:restricted-env:check": "node scripts/compose/verify-restricted-env.mjs",
     "compose:preflight": "node scripts/compose/check-host-prerequisites.mjs",
     "db:roles": "node --env-file=.env.worker --env-file=.env.authorizer --env-file=.env.sandbox-launcher --env-file=.env.migration --env-file=.env.db-admin --experimental-strip-types packages/db/src/provision.ts",
     "db:migrate": "pnpm --filter @omnis/worker db:migrate",

@@ -16,7 +16,7 @@ services:
       OMNIS_API_HOST: 0.0.0.0
       OMNIS_AUTHORIZER_SOCKET: /run/omnis-authorizer/authorizer.sock
       OMNIS_COMPOSE_PRIVATE: 'true'
-      OMNIS_EXECUTION_MODE: ${OMNIS_EXECUTION_MODE:-disabled}
+      OMNIS_EXECUTION_MODE: disabled
       OMNIS_WORKER_HOST: worker
     group_add:
       - '${OMNIS_AUTHORIZER_SOCKET_GID:-10001}'
@@ -69,7 +69,8 @@ services:
     environment:
       OMNIS_COMPOSE_PRIVATE: 'true'
       OMNIS_DB_HOST: postgres
-      OMNIS_EXECUTION_MODE: ${OMNIS_EXECUTION_MODE:-disabled}
+      OMNIS_EXECUTION_MODE: disabled
+      OMNIS_SANDBOX_LAUNCHER_SOCKET: ''
       OMNIS_WORKER_HOST: 0.0.0.0
     networks:
       - data

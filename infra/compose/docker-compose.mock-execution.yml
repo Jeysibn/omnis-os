@@ -1,11 +1,15 @@
-# Explicit opt-in overlay. Use only after the separately authorized host launcher is available.
+# Explicit opt-in overlay. Include this file and enable its profile only after separate owner authorization.
 services:
+  postgres:
+    profiles: [mock-execution]
   api:
+    profiles: [mock-execution]
     environment:
-      OMNIS_EXECUTION_MODE: mock
+      OMNIS_EXECUTION_MODE: ${OMNIS_MOCK_EXECUTION_MODE:?Set OMNIS_MOCK_EXECUTION_MODE=mock to opt in}
   worker:
+    profiles: [mock-execution]
     environment:
-      OMNIS_EXECUTION_MODE: mock
+      OMNIS_EXECUTION_MODE: ${OMNIS_MOCK_EXECUTION_MODE:?Set OMNIS_MOCK_EXECUTION_MODE=mock to opt in}
       OMNIS_SANDBOX_LAUNCHER_SOCKET: /run/omnis-sandbox/launcher.sock
     group_add:
       - '${OMNIS_LAUNCHER_SOCKET_GID:-10002}'
@@ -16,3 +20,5 @@ services:
         read_only: true
         bind:
           create_host_path: false
+  web:
+    profiles: [mock-execution]

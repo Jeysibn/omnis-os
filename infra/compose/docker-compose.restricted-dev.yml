@@ -1,0 +1,55 @@
+# Deterministic identity overlay for the execution-disabled local profile.
+# Use only with a fresh project-scoped volume and a database name unique among
+# launcher-managed Omnis databases; the launcher currently hashes DB pathname only.
+name: omnis-os-restricted-dev
+
+services:
+  api:
+    env_file: !override
+      - ${OMNIS_RESTRICTED_API_ENV_FILE:?Set an approved restricted API env-file path}
+    environment:
+      OMNIS_RESTRICTED_DEVELOPMENT: 'true'
+      OMNIS_EXECUTION_MODE: disabled
+      OMNIS_API_AUTHORIZER_TOKEN: ''
+      OMNIS_AUTHORIZER_SOCKET: ''
+      OMNIS_AUTHORIZER_DB_PASSWORD: ''
+      OMNIS_AUTHORIZER_DATABASE_URL: ''
+      OMNIS_AGENT_IDEMPOTENCY_KEY: ''
+      OMNIS_CONNECTOR_DECISION_KEY_FILE: ''
+      OMNIS_BROKER_AUTHORIZER_TOKEN: ''
+      OMNIS_SANDBOX_LAUNCHER_SOCKET: ''
+      OMNIS_LAUNCHER_DATABASE_URL: ''
+      OMNIS_LAUNCHER_DB_PASSWORD: ''
+    group_add: !override []
+    volumes: !override []
+
+  worker:
+    env_file: !override
+      - ${OMNIS_RESTRICTED_WORKER_ENV_FILE:?Set an approved restricted Worker env-file path}
+    environment:
+      OMNIS_RESTRICTED_DEVELOPMENT: 'true'
+      OMNIS_EXECUTION_MODE: disabled
+      OMNIS_API_AUTHORIZER_TOKEN: ''
+      OMNIS_AUTHORIZER_SOCKET: ''
+      OMNIS_AUTHORIZER_DB_PASSWORD: ''
+      OMNIS_AUTHORIZER_DATABASE_URL: ''
+      OMNIS_AGENT_IDEMPOTENCY_KEY: ''
+      OMNIS_CONNECTOR_DECISION_KEY_FILE: ''
+      OMNIS_BROKER_AUTHORIZER_TOKEN: ''
+      OMNIS_SANDBOX_LAUNCHER_SOCKET: ''
+      OMNIS_LAUNCHER_DATABASE_URL: ''
+      OMNIS_LAUNCHER_DB_PASSWORD: ''
+      OMNIS_DATABASE_URL: ''
+      OMNIS_DB_HOST: postgres
+      OMNIS_DB_NAME: ${OMNIS_RESTRICTED_DB_NAME:?Set a unique restricted development database name}
+      OMNIS_DB_PORT: '5432'
+
+  postgres:
+    environment:
+      POSTGRES_DB: ${OMNIS_RESTRICTED_DB_NAME:?Set a unique restricted development database name}
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'pg_isready -U omnis -d ${OMNIS_RESTRICTED_DB_NAME:?Set a unique restricted development database name}',
+        ]
