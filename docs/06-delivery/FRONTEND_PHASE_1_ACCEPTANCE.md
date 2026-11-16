@@ -10,8 +10,8 @@ The OMNIS NEXUS V2 specification was absent from the reviewed commit; only
 
 ## 1. Session-lifecycle design
 
-`sessionScope.ts` holds a synchronously bumped generation counter (`rotateSession` on boot,
-sign-in, sign-out and expiry). Owner-session operations that send requests, write shared state,
+`App.tsx` owns a synchronously bumped generation counter (`rotateSession` on boot, sign-in,
+sign-out and expiry); `sessionScope.ts` provides the session-scope helpers that capture and check it. Owner-session operations that send requests, write shared state,
 write storage, change the URL hash or call parent callbacks capture the generation (directly, or via
 the session context or `useMountedInSession`) when dispatched and re-check it before every such
 side effect: success, failure and `finally`. The deliberate exception is the set of abort-only read
@@ -96,7 +96,7 @@ after the session generation has rotated, and a continuation can run in between 
   component instance. A replacement session gets fresh instances, so nothing observable reaches it,
   and these reads send no request, touch no storage or hash and call no parent callback (a stale 401
   may reach the old session-bound expiry handler, which is inert after rotation). This is a
-  recorded decision, not an oversight; it was raised by independent review (finding 2 of 451e50d)
+  recorded decision, not an oversight; it was raised by the sixth independent review of the session-security branch (finding 2)
   and answered on consequences. If the owner wants a purely mechanical guard there, it is a
   contained follow-up.
 - A stale runtime-capabilities check no longer re-reads on its own; the hook's effect re-reads when
