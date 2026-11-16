@@ -734,14 +734,19 @@ function App() {
     }
     setStreamState('connecting');
     let terminalHandled = false;
+    // Every callback below, including recovery timers, is scoped to the session that opened this
+    // stream: after the session is replaced they change nothing and schedule nothing.
+    const live = beginSession();
     const recovery = createRunStreamRecovery({
       budget,
       probe: (signal) => probeRunSession(selectedRunId, signal),
       recreate: () => {
+        if (!live()) return;
         recreatingStream.current = true;
         setStreamEpoch((epoch) => epoch + 1);
       },
       onExhausted: () => {
+        if (!live()) return;
         // Closing is what stops the browser's own reconnect loop; stopping our probes would not.
         source.close();
         setStreamState('paused');
@@ -750,8 +755,6 @@ function App() {
         );
       },
     });
-    // A message or error delivered after the owner session was replaced must change nothing.
-    const live = beginSession();
     const source = new EventSource(`/api/v1/runs/${encodeURIComponent(selectedRunId)}/events`);
     const eventNames = [
       'run.queued',
@@ -766,6 +769,7 @@ function App() {
       'run.outcome_unknown',
     ];
     source.onopen = () => {
+      if (!live()) return;
       recovery.opened();
       setStreamState('connected');
     };

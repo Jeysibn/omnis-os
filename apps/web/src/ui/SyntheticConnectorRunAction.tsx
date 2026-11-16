@@ -171,6 +171,8 @@ export function SyntheticConnectorRunAction({
           );
         } catch (cause) {
           if (!(cause instanceof ApiRequestError) || cause.status !== 404) throw cause;
+          // The session was replaced while the lookup was pending: send no follow-up request.
+          if (!live()) throw new StaleSessionError();
           grant = await createAuthorization(operation, input, csrfToken);
         }
       } else {

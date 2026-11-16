@@ -47,9 +47,13 @@ the sign-in control is disabled while CSRF loads and sign-out is unreachable whi
 flight, so no second session can start while those requests are pending. They are therefore not
 covered by a UI regression test and should not be read as one.
 
-Note B — the SSE session guard added in this milestone has no dedicated test: an event delivered
-in the instant between session rotation and the stream's teardown cannot be forced
-deterministically. The existing revocation and reconnect tests continue to pass.
+Note B — the SSE session guards (message, `onopen`, `onerror`, and the recovery `recreate` and
+`onExhausted` callbacks) have no dedicated test: a callback delivered in the instant between session
+rotation and the stream's teardown cannot be forced deterministically. The same applies to the
+connector authorization lookup that returns 404 for a replaced session (the follow-up create is
+guarded): session 2 legitimately re-recovers the same stored operation, so a stale POST cannot be
+told apart from it. Both were found by independent review of 0d8b81b and are guarded but untested.
+The existing revocation and reconnect tests continue to pass.
 
 Backend dependency for Codex #1: none found. The frontend assumes only that a replaced session's
 cookie is rejected with 401 and that mutations remain idempotent under the documented keys.
