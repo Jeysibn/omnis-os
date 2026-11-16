@@ -49,7 +49,14 @@ import {
 } from './executionCapability.js';
 import { ExecutionCapabilityBanner } from './ExecutionCapabilityBanner.js';
 import { useRuntimeCapabilities } from './useRuntimeCapabilities.js';
-import { bindExpiryToSession, captureSession } from './sessionScope.js';
+import {
+  StaleSessionError,
+  bindExpiryToSession,
+  bindToSession,
+  captureSession,
+  isStaleSession,
+  type SessionScope,
+} from './sessionScope.js';
 import { formatDate } from './manilaTime.js';
 import { AcceptResultAction } from './AcceptResultAction.js';
 import { isAwaitingOwnerReview } from './acceptResult.js';
@@ -283,7 +290,7 @@ function App() {
   }>({ phase: 'idle', runId: null });
   const gateSeq = useRef(0);
   const [sessionEpoch, setSessionEpoch] = useState(0);
-  const bootSessionStarted = useRef(false);
+  const bootStarted = useRef(false);
   const beginSession = useCallback(() => captureSession(sessionGeneration), []);
   const rotateSession = useCallback(() => {
     sessionGeneration.current += 1;
@@ -342,6 +349,9 @@ function App() {
   );
 
   const refreshCsrf = useCallback(async () => {
+    // Scoped to the session that exists when the request is dispatched: a token (or failure)
+    // that arrives after the session was replaced must not touch the replacement's CSRF state.
+    const live = beginSession();
     setCsrfLoading(true);
     setCsrfBootstrapError('');
     try {
@@ -356,23 +366,34 @@ function App() {
           throw new Error('Secure sign-in setup returned an invalid token.');
         return payload.csrfToken;
       });
+      if (!live()) throw new StaleSessionError();
       setCsrfToken(value);
       return value;
     } catch (cause) {
+      if (!live()) throw new StaleSessionError();
+      if (isStaleSession(cause)) throw cause;
       setCsrfToken('');
       setCsrfBootstrapError(
         'Secure sign-in could not be prepared. Check your connection and retry secure sign-in setup.',
       );
       throw cause;
     } finally {
-      setCsrfLoading(false);
+      if (live()) setCsrfLoading(false);
     }
-  }, []);
+  }, [beginSession]);
 
   const expireSessionIfNeeded = useCallback(
     (cause: unknown) => {
       if (!(cause instanceof ApiRequestError) || cause.status !== 401) return false;
       rotateSession();
+      // The session that owned these operations is gone; their guarded finally blocks will no
+      // longer release them, so release here.
+      setBusy(false);
+      setTasksLoading(false);
+      setRunsLoading(false);
+      setProjectsLoading(false);
+      taskCreateInFlight.current = false;
+      stopInFlight.current.clear();
       setOwner(null);
       setCsrfToken('');
       setTasks([]);
@@ -417,6 +438,23 @@ function App() {
     void sessionEpoch;
     return bindExpiryToSession(sessionGeneration, expireSessionIfNeeded);
   }, [expireSessionIfNeeded, sessionEpoch]);
+
+  // Results that children push up are bound to the session they were started in, so a late
+  // result from a replaced session can never enter the replacement session's state.
+  const adoptUpdatedTask = useMemo(() => {
+    void sessionEpoch;
+    return bindToSession(sessionGeneration, (updated: Task) => {
+      setTasks((current) => current.map((task) => (task.id === updated.id ? updated : task)));
+    });
+  }, [sessionEpoch]);
+  const adoptAdmittedRun = useMemo(() => {
+    void sessionEpoch;
+    return bindToSession(sessionGeneration, (run: Run) => {
+      setRuns((current) => [run, ...current.filter((item) => item.id !== run.id)]);
+      setSelectedRunId(run.id);
+      navigate('runs', setPage, run.id);
+    });
+  }, [sessionEpoch]);
 
   const { load: capabilityLoad, refresh: refreshCapabilities } = useRuntimeCapabilities(
     // Only the Tasks page shows execution state; other pages never request capabilities.
@@ -630,10 +668,16 @@ function App() {
   }, [page, selectedRunId]);
 
   useEffect(() => {
+    // StrictMode runs effects twice; both would belong to the same session, so bootstrap once.
+    if (bootStarted.current) return;
+    bootStarted.current = true;
+    const live = beginSession();
     void (async () => {
       try {
         await refreshCsrf();
         const currentOwner = await request('/api/v1/me', {}, parseOwner);
+        // A response for a session that was replaced while it was in flight restores nothing.
+        if (!live()) return;
         if (restoredTaskCreate && restoredTaskCreate.ownerId !== currentOwner.id) {
           setPendingTaskCreate(null);
           setPendingTaskCreateOwnerId(null);
@@ -642,24 +686,20 @@ function App() {
           setTaskProjectId('');
           storePendingTaskCreate(null, null);
         }
-        // Boot runs twice under StrictMode; both passes belong to the same session, so only the
-        // first starts one. A second rotation would wrongly mark the first pass's reads stale.
-        if (!bootSessionStarted.current) {
-          bootSessionStarted.current = true;
-          rotateSession();
-        }
+        rotateSession();
         setOwner(currentOwner);
         setChecking(false);
         void loadWorkspace();
       } catch (cause) {
+        if (!live() || isStaleSession(cause)) return;
         if (!(cause instanceof ApiRequestError && cause.status === 401)) {
           setError(failureMessage(cause, 'Omnis OS could not open this workspace.'));
         }
       } finally {
-        setChecking(false);
+        if (live()) setChecking(false);
       }
     })();
-  }, [loadWorkspace, refreshCsrf, restoredTaskCreate, rotateSession]);
+  }, [beginSession, loadWorkspace, refreshCsrf, restoredTaskCreate, rotateSession]);
 
   useEffect(() => {
     selectedRunIdRef.current = page === 'runs' ? selectedRunId : null;
@@ -710,6 +750,8 @@ function App() {
         );
       },
     });
+    // A message or error delivered after the owner session was replaced must change nothing.
+    const live = beginSession();
     const source = new EventSource(`/api/v1/runs/${encodeURIComponent(selectedRunId)}/events`);
     const eventNames = [
       'run.queued',
@@ -729,6 +771,7 @@ function App() {
     };
     const handlers = eventNames.map((name) => {
       const handler = (message: Event) => {
+        if (!live()) return;
         try {
           const eventMessage = message as MessageEvent<string>;
           const parsed = RunEventSchema.parse(JSON.parse(eventMessage.data));
@@ -792,7 +835,7 @@ function App() {
       return [name, handler] as const;
     });
     source.onerror = () => {
-      if (terminalHandled) return;
+      if (terminalHandled || !live()) return;
       const closed = source.readyState === EventSource.CLOSED;
       setStreamState(closed ? 'closed' : 'reconnecting');
       // EventSource hides the HTTP status; ask the authenticated API whether the session is valid.
@@ -803,7 +846,16 @@ function App() {
       handlers.forEach(([name, handler]) => source.removeEventListener(name, handler));
       source.close();
     };
-  }, [owner, page, probeRunSession, reconcileRun, selectedRunExists, selectedRunId, streamEpoch]);
+  }, [
+    beginSession,
+    owner,
+    page,
+    probeRunSession,
+    reconcileRun,
+    selectedRunExists,
+    selectedRunId,
+    streamEpoch,
+  ]);
 
   function retryStream() {
     if (!selectedRunId) return;
@@ -819,6 +871,7 @@ function App() {
     event.preventDefault();
     setBusy(true);
     setError('');
+    let live: SessionScope = beginSession();
     try {
       await request(
         '/api/v1/auth/login',
@@ -830,9 +883,11 @@ function App() {
         (value) => value,
       );
       rotateSession(); // the session cookie just changed: older in-flight work is now stale
+      live = beginSession(); // everything below belongs to the new session
       setPassword('');
       const token = await refreshCsrf();
       const currentOwner = await request('/api/v1/me', {}, parseOwner);
+      if (!live()) return;
       if (
         (restoredTaskCreate && restoredTaskCreate.ownerId !== currentOwner.id) ||
         (pendingTaskCreateOwnerId !== null && pendingTaskCreateOwnerId !== currentOwner.id)
@@ -848,9 +903,11 @@ function App() {
       setCsrfToken(token);
       await loadWorkspace();
     } catch (cause) {
+      if (!live() || isStaleSession(cause)) return;
       setError(failureMessage(cause, 'Sign in could not be completed.'));
     } finally {
-      setBusy(false);
+      // An expiry or newer sign-in that invalidated this one released the flag itself.
+      if (live()) setBusy(false);
     }
   }
 
@@ -927,8 +984,10 @@ function App() {
         );
       }
     } finally {
-      taskCreateInFlight.current = false;
-      setBusy(false);
+      if (live()) {
+        taskCreateInFlight.current = false;
+        setBusy(false);
+      }
     }
   }
 
@@ -971,8 +1030,9 @@ function App() {
 
   async function openApproval(task: Task, trigger: HTMLButtonElement) {
     // UI convenience only; the API remains the authority and re-checks execution itself.
+    const live = beginSession();
     const check = await refreshCapabilities();
-    if (check.status === 'expired') return;
+    if (!live() || check.status === 'expired') return;
     if (!runAllowed(check)) {
       setError(`${checkRefusal(check)}, so no approval was opened.`);
       return;
@@ -1008,6 +1068,8 @@ function App() {
     const live = beginSession();
     setBusy(true);
     const check = await refreshCapabilities();
+    // Session replaced while the capability check was in flight: start nothing, touch nothing.
+    if (!live()) return;
     setBusy(false);
     if (check.status === 'expired') return;
     if (!runAllowed(check)) {
@@ -1172,6 +1234,8 @@ function App() {
               ' Omnis OS could not confirm revocation; review the authorization before another attempt.';
           }
         }
+        // The revoke read above is another await: re-check before writing dialog state.
+        if (!live()) return;
         operation = { ...operation, canRetry: false };
         setApprovalOperation(operation);
         setApprovalError(
@@ -1195,7 +1259,7 @@ function App() {
       if (live() && !expireSessionIfNeeded(cause))
         setApprovalError(failureMessage(cause, 'Omnis OS could not start this mock run.'));
     } finally {
-      setBusy(false);
+      if (live()) setBusy(false);
     }
   }
 
@@ -1217,19 +1281,31 @@ function App() {
       if (live() && !expireSessionIfNeeded(cause))
         setError(failureMessage(cause, 'Omnis OS could not stop this run.'));
     } finally {
-      stopInFlight.current.delete(run.id);
-      setBusy(false);
+      if (live()) {
+        stopInFlight.current.delete(run.id);
+        setBusy(false);
+      }
     }
   }
 
   async function signOut() {
+    // Scoped to the session being signed out: a logout outcome that arrives after that session
+    // was replaced must not clear or expire the replacement.
+    const live = beginSession();
     try {
       await request(
         '/api/v1/auth/logout',
         { method: 'POST', headers: { 'x-omnis-csrf': csrfToken } },
         (value) => value,
       );
+      if (!live()) return;
       rotateSession();
+      setBusy(false);
+      setTasksLoading(false);
+      setRunsLoading(false);
+      setProjectsLoading(false);
+      taskCreateInFlight.current = false;
+      stopInFlight.current.clear();
       setOwner(null);
       setTasks([]);
       setRuns([]);
@@ -1241,6 +1317,7 @@ function App() {
       setEvents([]);
       await refreshCsrf();
     } catch (cause) {
+      if (!live() || isStaleSession(cause)) return;
       if (!expireSessionIfNeeded(cause)) setError(failureMessage(cause, 'Sign out failed.'));
     }
   }
@@ -1378,16 +1455,9 @@ function App() {
             ownerId={owner?.id ?? ''}
             csrfToken={csrfToken}
             onSessionExpired={sessionBoundExpire}
-            onTaskUpdated={(updated) => {
-              setTasks((current) =>
-                current.map((task) => (task.id === updated.id ? updated : task)),
-              );
-            }}
-            onRunAdmitted={(run) => {
-              setRuns((current) => [run, ...current.filter((item) => item.id !== run.id)]);
-              setSelectedRunId(run.id);
-              navigate('runs', setPage, run.id);
-            }}
+            onTaskUpdated={adoptUpdatedTask}
+            onRunAdmitted={adoptAdmittedRun}
+            beginSession={beginSession}
             onTitle={setTitle}
             onDetail={setDetail}
             onProjectId={(value) => {
@@ -1683,7 +1753,9 @@ function TasksWorkspace({
   syntheticFixtureEnabled,
   onRetryCapabilities,
   refreshCapabilities,
+  beginSession,
 }: {
+  beginSession: () => SessionScope;
   refreshCapabilities: () => Promise<CapabilityCheck>;
   executionGate: ExecutionGate;
   syntheticFixtureEnabled: boolean;
@@ -1953,6 +2025,7 @@ function TasksWorkspace({
               csrfToken={csrfToken}
               onSessionExpired={onSessionExpired}
               onTaskUpdated={onTaskUpdated}
+              beginSession={beginSession}
             />
             <SyntheticConnectorRunAction
               ownerId={ownerId}
@@ -1964,6 +2037,7 @@ function TasksWorkspace({
               gate={executionGate}
               fixtureEnabled={syntheticFixtureEnabled}
               refreshCapabilities={refreshCapabilities}
+              beginSession={beginSession}
             />
           </>
         ) : (

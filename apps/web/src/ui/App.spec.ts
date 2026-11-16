@@ -250,8 +250,8 @@ const test = base.extend<{ api: MockApi }>({
 function createMockApi(page: Page) {
   let options: FixtureOptions = {};
   let capabilityHold = false;
-  const heldGets = new Set<string>();
-  const heldQueue: Array<{ path: string; resolve: (outcome: 'ok' | 'unauthorized') => void }> = [];
+  const heldRequests = new Set<string>();
+  const heldQueue: Array<{ key: string; resolve: (outcome: 'ok' | 'unauthorized') => void }> = [];
   let capabilityRequests = 0;
   const capabilityPending: Array<(outcome: CapabilityOutcome) => void> = [];
   let currentTasks = [...defaultTasks];
@@ -443,13 +443,16 @@ function createMockApi(page: Page) {
     const body = request.postDataJSON?.() ?? null;
     requests.push({ method, path, headers, body });
 
-    if (method === 'GET' && heldGets.has(path)) {
-      // Deterministic ordering: a held GET settles only when the test releases it.
+    if (heldRequests.has(`${method} ${path}`)) {
+      // Deterministic ordering: a held request settles only when the test releases it.
       const outcome = await new Promise<'ok' | 'unauthorized'>((resolve) =>
-        heldQueue.push({ path, resolve }),
+        heldQueue.push({ key: `${method} ${path}`, resolve }),
       );
       if (outcome === 'unauthorized')
         return fulfillError(route, 401, 'unauthorized', 'Sign in to continue.');
+      // A released logout only answers; it must not flip the fixture's server-side session.
+      if (outcome === 'ok' && method === 'POST' && path === '/api/v1/auth/logout')
+        return route.fulfill({ status: 204, body: '' });
     }
 
     if (
@@ -1151,20 +1154,36 @@ function createMockApi(page: Page) {
     releaseReconnect: () => scenario?.release(),
     dispose: async () => {
       capabilityHold = false;
-      heldGets.clear();
+      heldRequests.clear();
       for (const held of heldQueue.splice(0)) held.resolve('unauthorized');
       for (const resolve of capabilityPending.splice(0)) resolve('error');
       await scenario?.close();
     },
     runDetailGets,
     assignmentWrites,
-    holdGet: (path: string) => {
-      heldGets.add(path);
+    holdRequest: (method: string, path: string) => {
+      heldRequests.add(`${method} ${path}`);
     },
-    pendingGets: (path: string) => heldQueue.filter((item) => item.path === path).length,
-    /** Settle the n-th still-held GET of a path. 'ok' falls through to the normal fixture. */
+    pendingRequests: (method: string, path: string) =>
+      heldQueue.filter((item) => item.key === `${method} ${path}`).length,
+    /** Settle the n-th still-held request. 'ok' falls through to the normal fixture. */
+    releaseRequest: (
+      method: string,
+      path: string,
+      index: number,
+      outcome: 'ok' | 'unauthorized',
+    ) => {
+      const held = heldQueue.filter((item) => item.key === `${method} ${path}`)[index];
+      if (!held) throw new Error(`no held ${method} ${path} at ${index}`);
+      heldQueue.splice(heldQueue.indexOf(held), 1);
+      held.resolve(outcome);
+    },
+    holdGet: (path: string) => {
+      heldRequests.add(`GET ${path}`);
+    },
+    pendingGets: (path: string) => heldQueue.filter((item) => item.key === `GET ${path}`).length,
     releaseGet: (path: string, index: number, outcome: 'ok' | 'unauthorized') => {
-      const held = heldQueue.filter((item) => item.path === path)[index];
+      const held = heldQueue.filter((item) => item.key === `GET ${path}`)[index];
       if (!held) throw new Error(`no held GET ${path} at ${index}`);
       heldQueue.splice(heldQueue.indexOf(held), 1);
       held.resolve(outcome);
@@ -1454,7 +1473,9 @@ test('loads tasks and runs independently and retries without false empty states'
   await page.getByRole('link', { name: 'Tasks' }).click();
   await expect(page.getByText('Tasks unavailable').first()).toBeVisible();
   await expect(page.getByText('No tasks yet')).toHaveCount(0);
-  await expect(page.getByRole('heading', { name: 'Review launch checklist' })).toBeVisible();
+  // Boot reads once (no duplicate StrictMode read), so the failure stays final and no task data
+  // is shown until the owner explicitly retries.
+  await expect(page.getByRole('heading', { name: 'Review launch checklist' })).toHaveCount(0);
   await page.getByRole('button', { name: 'Retry tasks' }).first().click();
   await expect(page.getByRole('heading', { name: 'Review launch checklist' })).toBeVisible();
 });
@@ -4406,6 +4427,18 @@ test.describe('capability refresh ordering', () => {
     await expect(page.getByRole('heading', { name: 'Welcome back.' })).toHaveCount(0);
     await expect(page.getByRole('navigation', { name: 'Primary navigation' })).toBeVisible();
   };
+  /**
+   * Barrier for "the browser has processed the response that was just released". Negative
+   * assertions (disabled, absent) pass instantly otherwise, before a late response is handled, and
+   * would let a missing guard go unnoticed. Ordering-based: two frames plus a macrotask.
+   */
+  const settleClient = (page: Page) =>
+    page.evaluate(
+      () =>
+        new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 0))),
+        ),
+    );
   const bootHeld = async (page: Page, api: MockApi, path: string, hash: string) => {
     api.configure();
     api.holdGet(path);
@@ -4482,6 +4515,146 @@ test.describe('capability refresh ordering', () => {
     const pending = api.pendingGets('/api/v1/tasks');
     for (let i = 0; i < pending; i += 1) api.releaseGet('/api/v1/tasks', 0, 'unauthorized');
     await expect(page.getByText(sessionExpiredText)).toBeVisible();
+  });
+
+  /** Expire the session with a genuine current-session 401 (the held boot-time Runs read). */
+  const expireViaRuns = async (page: Page, api: MockApi) => {
+    await expect.poll(() => api.pendingGets('/api/v1/runs')).toBeGreaterThanOrEqual(1);
+    api.releaseGet('/api/v1/runs', 0, 'unauthorized');
+    await expect(page.getByText(sessionExpiredText)).toBeVisible();
+  };
+  const signInAgain = async (page: Page) => {
+    await page.getByLabel('Owner password').fill('fixture-owner-password');
+    await expect(page.getByRole('button', { name: 'Sign in' })).toBeEnabled();
+    await page.getByRole('button', { name: 'Sign in' }).click();
+    await expect(page.getByRole('navigation', { name: 'Primary navigation' })).toBeVisible();
+  };
+
+  for (const outcome of ['ok', 'unauthorized'] as const) {
+    test(`a stale logout (${outcome}) cannot clear or expire the replacement session`, async ({
+      page,
+      api,
+    }) => {
+      api.configure();
+      api.holdGet('/api/v1/runs');
+      api.holdRequest('POST', '/api/v1/auth/logout');
+      await page.goto('/#tasks');
+      await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
+      await page.getByRole('button', { name: 'Sign out' }).click(); // session 1 logout, held
+      await expect.poll(() => api.pendingRequests('POST', '/api/v1/auth/logout')).toBe(1);
+      await expireViaRuns(page, api); // session 1 ends by a genuine 401
+      await signInAgain(page); // session 2
+      api.releaseRequest('POST', '/api/v1/auth/logout', 0, outcome); // the old logout settles late
+      await stillSignedIn(page);
+      await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
+    });
+  }
+
+  test('a stale synthetic Run response never reaches the replacement session', async ({
+    page,
+    api,
+  }) => {
+    const task = TaskSchema.parse({
+      ...makeTask('task-synthetic', 'Summarize policy changes'),
+      projectId: defaultProjects[0]!.id,
+      associationRevision: 1,
+      agentId: 'agent-analyst',
+      profileVersion: 3,
+      runtimeId: 'mock',
+    });
+    const runPath = `/api/v1/tasks/${task.id}/synthetic-runs`;
+    api.configure({ tasks: [task], runs: [], syntheticEnabled: true });
+    api.holdGet('/api/v1/runs');
+    api.holdRequest('POST', runPath);
+    await page.goto('/#tasks');
+    await page.getByRole('button', { name: 'Load available projects' }).click();
+    await page.getByRole('button', { name: 'Summarize policy changes' }).click();
+    await page.getByRole('button', { name: 'Review synthetic operation' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Review synthetic operation' });
+    await dialog.getByRole('button', { name: 'Approve exact operation' }).click();
+    await expect(page.getByText('Exact synthetic operation approved.')).toBeVisible();
+    await dialog.getByRole('button', { name: 'Start authorized synthetic Run' }).click();
+    await expect.poll(() => api.pendingRequests('POST', runPath)).toBe(1);
+    await expireViaRuns(page, api);
+    await signInAgain(page);
+    api.releaseRequest('POST', runPath, 0, 'ok'); // session 1's Run response arrives late
+    await expect.poll(() => api.runs.some((run) => run.id === connectorCorrelationId)).toBe(true);
+    await settleClient(page);
+    // The server admitted it, but session 2's UI must not adopt it or navigate to it.
+    await expect(page.getByRole('heading', { name: 'Runs', exact: true })).toHaveCount(0);
+    await expect(page.getByText(connectorCorrelationId)).toHaveCount(0);
+    await stillSignedIn(page);
+  });
+
+  test('a stale task assignment result is not applied to the replacement session', async ({
+    page,
+    api,
+  }) => {
+    const path = '/api/v1/tasks/task-open/execution-assignment';
+    api.configure({ runs: [] });
+    api.holdGet('/api/v1/runs');
+    api.holdRequest('PUT', path);
+    await page.goto('/#tasks');
+    await expect(page.getByLabel('Agent profile')).toBeVisible();
+    await page.getByLabel('Agent profile').selectOption('agent-analyst');
+    await page.getByRole('button', { name: 'Save assignment' }).click();
+    await expect.poll(() => api.pendingRequests('PUT', path)).toBe(1);
+    await expireViaRuns(page, api);
+    await signInAgain(page);
+    await expect(page.getByLabel('Agent profile')).toBeVisible();
+    api.releaseRequest('PUT', path, 0, 'ok'); // session 1's save settles late
+    await expect.poll(() => api.assignmentWrites.length).toBe(1);
+    await settleClient(page);
+    await expect(page.getByText('Synthetic mock assignment saved.')).toHaveCount(0);
+    await expect(page.getByLabel('Agent profile')).toHaveValue(''); // session 2 state unchanged
+    await stillSignedIn(page);
+  });
+
+  test('an old operation finishing late cannot release or overwrite session 2 busy state', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ runs: [], tasks: [] });
+    api.holdGet('/api/v1/runs');
+    api.holdRequest('POST', '/api/v1/tasks');
+    await page.goto('/#tasks');
+    await page.getByLabel('Task title').fill('Old session task');
+    await page.getByLabel('Task detail').fill('Created in session 1.');
+    await page.getByRole('button', { name: 'Create task' }).click();
+    await expect.poll(() => api.pendingRequests('POST', '/api/v1/tasks')).toBe(1);
+    await expireViaRuns(page, api);
+    await signInAgain(page);
+    // Sign-in stays busy until its own workspace load settles; release session 2's Runs read.
+    await expect.poll(() => api.pendingGets('/api/v1/runs')).toBeGreaterThanOrEqual(1);
+    api.releaseGet('/api/v1/runs', 0, 'ok');
+    await expect(page.getByLabel('Task title')).toBeEnabled();
+    await page.getByLabel('Task title').fill('New session task');
+    await page.getByLabel('Task detail').fill('Created in session 2.');
+    await page.getByRole('button', { name: 'Create task' }).click(); // session 2 work, busy
+    await expect.poll(() => api.pendingRequests('POST', '/api/v1/tasks')).toBe(2);
+    api.releaseRequest('POST', '/api/v1/tasks', 0, 'ok'); // the OLD create settles
+    await expect.poll(() => api.tasks.length).toBe(1);
+    await settleClient(page);
+    // Session 2's own create is still in flight: its busy state must not have been released.
+    await expect(page.getByRole('button', { name: 'Create task' })).toBeDisabled();
+    await expect(page.getByRole('heading', { name: 'Old session task' })).toHaveCount(0);
+    api.releaseRequest('POST', '/api/v1/tasks', 0, 'ok'); // session 2's create completes
+    await expect(page.getByRole('heading', { name: 'New session task' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Create task' })).toBeEnabled();
+    await expect(page.getByRole('heading', { name: 'Old session task' })).toHaveCount(0);
+  });
+
+  test('bootstrap runs once under StrictMode and a valid failure stays visible', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ runGetFailures: 1 });
+    await openWorkspace(page);
+    await expect(page.getByText('Runs unavailable')).toBeVisible();
+    const count = (path: string) => api.requests.filter((r) => r.path === path).length;
+    expect(count('/api/v1/me')).toBe(1);
+    expect(count('/api/v1/auth/csrf')).toBe(1);
+    expect(count('/api/v1/runs')).toBe(1); // no duplicate boot reads, no retry loop
   });
 
   test('pages other than Tasks never request capabilities', async ({ page, api }) => {
