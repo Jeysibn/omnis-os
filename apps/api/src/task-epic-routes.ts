@@ -5,7 +5,7 @@ import {
   TaskEpicResponseSchema,
   TaskIdSchema,
 } from '@omnis/contracts';
-import { requireMutationProtection, requireOwner } from './auth.ts';
+import { requireAuthorizerFeature, requireMutationProtection, requireOwner } from './auth.ts';
 import { authorizerRequest, AuthorizerRequestError } from './authorizer-client.ts';
 
 type AuthorizerRequest = typeof authorizerRequest;
@@ -45,7 +45,7 @@ export function registerTaskEpicRoutes(
 ) {
   app.get<{ Params: { taskId: string } }>(
     '/api/v1/tasks/:taskId/epic',
-    { preHandler: requireOwner, errorHandler: taskEpicErrorHandler },
+    { preHandler: [requireOwner, requireAuthorizerFeature], errorHandler: taskEpicErrorHandler },
     async (httpRequest, reply) => {
       const taskId = TaskIdSchema.safeParse(httpRequest.params.taskId);
       if (!taskId.success)
@@ -61,7 +61,7 @@ export function registerTaskEpicRoutes(
   app.put<{ Params: { taskId: string } }>(
     '/api/v1/tasks/:taskId/epic',
     {
-      preHandler: [requireOwner, requireMutationProtection],
+      preHandler: [requireOwner, requireMutationProtection, requireAuthorizerFeature],
       bodyLimit: 4 * 1024,
       errorHandler: taskEpicErrorHandler,
     },

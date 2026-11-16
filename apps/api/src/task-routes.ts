@@ -8,7 +8,7 @@ import {
   AcceptTaskResultRequestSchema,
   TaskResultAcceptanceResponseSchema,
 } from '@omnis/contracts';
-import { requireMutationProtection, requireOwner } from './auth.ts';
+import { requireAuthorizerFeature, requireMutationProtection, requireOwner } from './auth.ts';
 import { parseTaskList, workerRequest } from './worker-client.ts';
 import { authorizerRequest } from './authorizer-client.ts';
 
@@ -26,7 +26,7 @@ export function registerTaskRoutes(
 
   app.post(
     '/api/v1/tasks',
-    { preHandler: [requireOwner, requireMutationProtection] },
+    { preHandler: [requireOwner, requireMutationProtection, requireAuthorizerFeature] },
     async (httpRequest, reply) => {
       const parsed = CreateTaskSchema.safeParse(httpRequest.body);
       const requestId = parseIdempotencyKey(httpRequest.headers['idempotency-key']);
@@ -58,7 +58,7 @@ export function registerTaskRoutes(
 
   app.put<{ Params: { taskId: string } }>(
     '/api/v1/tasks/:taskId/project',
-    { preHandler: [requireOwner, requireMutationProtection] },
+    { preHandler: [requireOwner, requireMutationProtection, requireAuthorizerFeature] },
     async (httpRequest, reply) => {
       const taskId = TaskIdSchema.safeParse(httpRequest.params.taskId);
       const body = SetTaskProjectSchema.safeParse(httpRequest.body);
@@ -83,7 +83,7 @@ export function registerTaskRoutes(
 
   app.put<{ Params: { taskId: string } }>(
     '/api/v1/tasks/:taskId/execution-assignment',
-    { preHandler: [requireOwner, requireMutationProtection] },
+    { preHandler: [requireOwner, requireMutationProtection, requireAuthorizerFeature] },
     async (httpRequest, reply) => {
       const taskId = TaskIdSchema.safeParse(httpRequest.params.taskId);
       const body = SetTaskExecutionAssignmentSchema.safeParse(httpRequest.body);
@@ -108,7 +108,7 @@ export function registerTaskRoutes(
 
   app.post<{ Params: { taskId: string } }>(
     '/api/v1/tasks/:taskId/accept-result',
-    { preHandler: [requireOwner, requireMutationProtection] },
+    { preHandler: [requireOwner, requireMutationProtection, requireAuthorizerFeature] },
     async (httpRequest, reply) => {
       const taskId = TaskIdSchema.safeParse(httpRequest.params.taskId);
       const body = AcceptTaskResultRequestSchema.safeParse(httpRequest.body);

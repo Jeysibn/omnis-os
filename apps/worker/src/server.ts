@@ -1,4 +1,4 @@
-import { timingSafeEqual } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import Fastify, { type FastifyReply } from 'fastify';
 import {
   AgentDirectoryQuerySchema,
@@ -12,6 +12,13 @@ import {
   TaskIdSchema,
 } from '@omnis/contracts';
 import { syntheticTaskRunTestMode } from '@omnis/contracts/synthetic-task-run';
+import {
+  executionModeFromEnvironment,
+  restrictedDevelopmentFromEnvironment,
+  validateExecutionConfiguration,
+  validateRestrictedDevelopmentConfiguration,
+} from '@omnis/contracts/execution-mode';
+import { WorkerExecutionStatusSchema } from '@omnis/contracts/runtime-capabilities';
 import { PgBoss } from 'pg-boss';
 import {
   createPool,
@@ -30,6 +37,8 @@ import { SyntheticBrokerClient } from './synthetic-broker-client.ts';
 import { SyntheticBrokerRunCoordinator } from './synthetic-broker-run-coordinator.ts';
 import { registerSyntheticTaskRunRoute } from './synthetic-task-run-routes.ts';
 import { createRuntimeDatabaseUrl, validateWorkerBindHost } from './deployment-config.ts';
+import { startExecutionQueue } from './execution-queue-lifecycle.ts';
+import { resolveWorkerExecutionStatus } from './execution-readiness.ts';
 
 const host = process.env.OMNIS_WORKER_HOST ?? '127.0.0.1';
 const port = Number(process.env.OMNIS_WORKER_PORT ?? 4101);
@@ -42,6 +51,27 @@ const internalToken = process.env.OMNIS_INTERNAL_TOKEN;
 if (!internalToken || internalToken.length < 64) {
   throw new Error('OMNIS_INTERNAL_TOKEN must be generated with `pnpm configure:owner`.');
 }
+const executionMode = executionModeFromEnvironment(process.env.OMNIS_EXECUTION_MODE);
+const restrictedDevelopment = restrictedDevelopmentFromEnvironment(
+  process.env.OMNIS_RESTRICTED_DEVELOPMENT,
+);
+const launcherSocket = process.env.OMNIS_SANDBOX_LAUNCHER_SOCKET;
+validateRestrictedDevelopmentConfiguration({
+  restrictedDevelopment,
+  configuredMode: executionMode,
+  rawMode: process.env.OMNIS_EXECUTION_MODE,
+  launcherSocket,
+  authorizerToken: process.env.OMNIS_API_AUTHORIZER_TOKEN,
+  authorizerSocket: process.env.OMNIS_AUTHORIZER_SOCKET,
+  authorizerSecrets: [
+    process.env.OMNIS_AUTHORIZER_DB_PASSWORD,
+    process.env.OMNIS_AUTHORIZER_DATABASE_URL,
+    process.env.OMNIS_AGENT_IDEMPOTENCY_KEY,
+    process.env.OMNIS_CONNECTOR_DECISION_KEY_FILE,
+    process.env.OMNIS_BROKER_AUTHORIZER_TOKEN,
+  ],
+});
+validateExecutionConfiguration(executionMode, launcherSocket);
 for (const forbiddenSecret of [
   'OMNIS_AUTHORIZER_DB_PASSWORD',
   'OMNIS_AUTHORIZER_DATABASE_URL',
@@ -70,34 +100,50 @@ const missionLaneWriterPool = createPool({
   application_name: 'omnis-worker-mission-lane-writer',
 });
 
-const boss = new PgBoss({
-  connectionString,
-  schema: 'pgboss',
-  application_name: 'omnis-worker-queue',
-  max: 8,
-  supervise: true,
-  migrate: false,
-  createSchema: false,
-});
+const boss =
+  executionMode === 'mock'
+    ? new PgBoss({
+        connectionString,
+        schema: 'pgboss',
+        application_name: 'omnis-worker-queue',
+        max: 8,
+        supervise: true,
+        migrate: false,
+        createSchema: false,
+      })
+    : undefined;
 const app = Fastify({ logger: { redact: ['req.headers.x-omnis-internal-token'] } });
-const syntheticBrokerTestMode = syntheticTaskRunTestMode(process.env);
-boss.on('error', (error) => {
+const syntheticBrokerTestMode = executionMode === 'mock' && syntheticTaskRunTestMode(process.env);
+let queueAvailable = false;
+boss?.on('error', (error) => {
+  queueAvailable = false;
   app.log.error({ errorType: error.name }, 'Durable queue reported an error.');
 });
-await boss.start({ attempts: 5 });
-await boss.createQueue(queueName, { retryLimit: 0, retryDelay: 0 });
-
 const store = new PostgresRunStore(pool, internalToken, missionLaneWriterPool);
 const agentProfiles = new PostgresAgentProfileStore(pool, internalToken);
-const launcherSocket = process.env.OMNIS_SANDBOX_LAUNCHER_SOCKET;
-if (!launcherSocket || !launcherSocket.startsWith('/')) {
-  throw new Error('OMNIS_SANDBOX_LAUNCHER_SOCKET must point to the provisioned private socket.');
-}
-const runtime = new SandboxedMockRuntimeAdapter(new UnixMockSandboxLauncherClient(launcherSocket));
+const launcherClient =
+  executionMode === 'mock' ? new UnixMockSandboxLauncherClient(launcherSocket!) : undefined;
+const runtime = launcherClient ? new SandboxedMockRuntimeAdapter(launcherClient) : undefined;
 const authorizationStore = new PostgresRuntimeAuthorizationReader(pool);
-const coordinator = new RunCoordinator(store, boss, runtime, authorizationStore);
+const workerSessionId = randomUUID();
+const queue =
+  boss ??
+  ({
+    send: async () => {
+      throw new Error('Execution queue is unavailable while execution is disabled.');
+    },
+    findJobs: async () => {
+      throw new Error('Execution queue is unavailable while execution is disabled.');
+    },
+  } satisfies ConstructorParameters<typeof RunCoordinator>[1]);
+const coordinator = new RunCoordinator(store, queue, runtime, authorizationStore, undefined, {
+  executionEnabled: executionMode === 'mock',
+  requireSessionFence: true,
+  workerSessionId,
+});
 let syntheticBrokerCoordinator: SyntheticBrokerRunCoordinator | undefined;
 if (syntheticBrokerTestMode) {
+  if (!boss) throw new Error('Synthetic broker mode requires the mock execution queue.');
   const brokerSocket = process.env.OMNIS_SYNTHETIC_BROKER_SOCKET;
   const brokerToken = process.env.OMNIS_SYNTHETIC_BROKER_TEST_TOKEN;
   if (!brokerSocket || !brokerToken) {
@@ -106,6 +152,8 @@ if (syntheticBrokerTestMode) {
   syntheticBrokerCoordinator = new SyntheticBrokerRunCoordinator({
     store,
     profiles: agentProfiles,
+    workerSessionId,
+    requireSessionFence: true,
     broker: new SyntheticBrokerClient(brokerSocket, brokerToken),
     enqueue: (db, data) =>
       boss.send(queueName, data, {
@@ -123,40 +171,62 @@ if (syntheticBrokerTestMode) {
       ),
   });
 }
-try {
-  await coordinator.reconcileExpiredRuns();
-} catch (error) {
-  const code = (error as { code?: string })?.code;
-  if (!['PML01', 'PML02', '55P03'].includes(code ?? '')) throw error;
-  app.log.warn(
-    { errorCode: code },
-    'Run reconciliation was deferred by bounded Mission Lane admission and will retry.',
-  );
-}
-await boss.work(queueName, { batchSize: 1, localConcurrency: 1 }, async ([job]) => {
-  if (!job) return;
-  if (syntheticBrokerCoordinator && (await syntheticBrokerCoordinator.isSyntheticJob(job.data))) {
-    await syntheticBrokerCoordinator.handleQueueJob(job.data, job.signal);
-    return;
-  }
-  await coordinator.handleQueueJob(job.data, job.signal);
+const queueStarted = await startExecutionQueue(executionMode, {
+  startQueue: async () => {
+    if (!boss) throw new Error('Execution queue is unavailable.');
+    await boss.start({ attempts: 5 });
+  },
+  createQueue: async () => {
+    if (!boss) throw new Error('Execution queue is unavailable.');
+    await boss.createQueue(queueName, { retryLimit: 0, retryDelay: 0 });
+  },
+  reconcileEnabled: async () => {
+    try {
+      await coordinator.reconcileExpiredRuns();
+    } catch (error) {
+      const code = (error as { code?: string })?.code;
+      if (!['PML01', 'PML02', '55P03'].includes(code ?? '')) throw error;
+      app.log.warn(
+        { errorCode: code },
+        'Run reconciliation was deferred by bounded Mission Lane admission and will retry.',
+      );
+    }
+  },
+  consume: async () => {
+    if (!boss) throw new Error('Execution queue is unavailable.');
+    await boss.work(queueName, { batchSize: 1, localConcurrency: 1 }, async ([job]) => {
+      if (!job) return;
+      if (
+        syntheticBrokerCoordinator &&
+        (await syntheticBrokerCoordinator.isSyntheticJob(job.data))
+      ) {
+        await syntheticBrokerCoordinator.handleQueueJob(job.data, job.signal);
+        return;
+      }
+      await coordinator.handleQueueJob(job.data, job.signal);
+    });
+  },
 });
+queueAvailable = queueStarted;
 
-const recoveryTimer = setInterval(() => {
-  void syntheticBrokerCoordinator?.reconcileUnknownRuns().catch((error: unknown) => {
-    app.log.warn(
-      { errorType: error instanceof Error ? error.name : 'unknown' },
-      'Synthetic Run projection discovery failed.',
-    );
-  });
-  void coordinator.reconcileExpiredRuns().catch((error: unknown) => {
-    app.log.error(
-      { errorType: error instanceof Error ? error.name : 'unknown' },
-      'Run lease reconciliation failed.',
-    );
-  });
-}, 5_000);
-recoveryTimer.unref();
+const recoveryTimer =
+  executionMode === 'mock'
+    ? setInterval(() => {
+        void syntheticBrokerCoordinator?.reconcileUnknownRuns().catch((error: unknown) => {
+          app.log.warn(
+            { errorType: error instanceof Error ? error.name : 'unknown' },
+            'Synthetic Run projection discovery failed.',
+          );
+        });
+        void coordinator.reconcileExpiredRuns().catch((error: unknown) => {
+          app.log.error(
+            { errorType: error instanceof Error ? error.name : 'unknown' },
+            'Run lease reconciliation failed.',
+          );
+        });
+      }, 5_000)
+    : undefined;
+recoveryTimer?.unref();
 
 function sendAgentProfileStoreError(error: unknown, reply: FastifyReply): boolean {
   if (!(error instanceof AgentProfileStoreError)) return false;
@@ -191,12 +261,20 @@ if (syntheticBrokerTestMode) {
 app.get('/internal/v1/health', async () => ({
   status: 'ok',
   product: 'Omnis OS',
-  runtimeKind: 'mock',
-  synthetic: true,
-  persistence: 'postgresql',
-  queue: 'pg-boss',
-  queueName,
+  service: 'worker',
 }));
+app.get('/internal/v1/runtime-capabilities', async () => {
+  const status = await resolveWorkerExecutionStatus({
+    executionMode,
+    queueAvailability:
+      executionMode === 'disabled' ? 'not_required' : queueAvailable ? 'available' : 'unavailable',
+    checkDatabase: async () => {
+      await pool.query('SELECT 1');
+    },
+    checkLauncher: async () => (await launcherClient?.health()) ?? false,
+  });
+  return WorkerExecutionStatusSchema.parse(status);
+});
 app.get('/internal/v1/tasks', async () => coordinator.listTasks());
 app.get<{ Params: { taskId: string } }>('/internal/v1/tasks/:taskId', async (request, reply) => {
   const taskId = TaskIdSchema.safeParse(request.params.taskId);
@@ -515,16 +593,22 @@ app.setErrorHandler((error, _request, reply) => {
 });
 
 app.addHook('onClose', async () => {
-  clearInterval(recoveryTimer);
+  if (recoveryTimer) clearInterval(recoveryTimer);
   await coordinator.shutdown();
-  await boss.stop();
+  if (queueStarted && boss) await boss.stop();
   await missionLaneWriterPool.end();
   await pool.end();
 });
 
 await app.listen({ host, port });
 app.log.info(
-  { host, port, runtimeKind: 'mock', persistence: 'postgresql' },
+  {
+    host,
+    port,
+    runtimeKind: executionMode === 'mock' ? 'mock' : 'disabled',
+    executionMode,
+    persistence: 'postgresql',
+  },
   'Omnis OS worker ready on loopback',
 );
 

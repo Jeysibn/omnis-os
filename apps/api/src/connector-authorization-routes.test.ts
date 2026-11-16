@@ -4,7 +4,15 @@ import { describe, it } from 'node:test';
 import Fastify from 'fastify';
 import { createRenderedRequestDigest } from '@omnis/contracts/connector-authorization';
 import { renderSyntheticConnectorRequest } from '@omnis/contracts/synthetic-connector-prompt';
-import { registerConnectorAuthorizationRoutes } from './connector-authorization-routes.ts';
+
+process.env.OMNIS_SESSION_SECRET = 'connector-route-session-'.padEnd(64, 'x');
+process.env.OMNIS_OWNER_PASSWORD_HASH = `${'a'.repeat(32)}:${'b'.repeat(128)}`;
+process.env.OMNIS_INTERNAL_TOKEN = 'connector-route-worker-'.padEnd(64, 'x');
+process.env.OMNIS_API_AUTHORIZER_TOKEN = 'connector-route-authorizer-'.padEnd(64, 'x');
+process.env.OMNIS_AUTHORIZER_SOCKET = '/run/omnis-authorizer/authorizer.sock';
+
+const { registerConnectorAuthorizationRoutes } =
+  await import('./connector-authorization-routes.ts');
 
 const ownerId = 'prj_0123456789abcdef0123456789abcdef';
 const task = {

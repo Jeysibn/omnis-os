@@ -9,7 +9,7 @@ import {
   ProjectIdSchema,
   UpdateMilestoneSchema,
 } from '@omnis/contracts';
-import { requireMutationProtection, requireOwner } from './auth.ts';
+import { requireAuthorizerFeature, requireMutationProtection, requireOwner } from './auth.ts';
 import { authorizerRequest, AuthorizerRequestError } from './authorizer-client.ts';
 
 type AuthorizerRequest = typeof authorizerRequest;
@@ -52,7 +52,7 @@ export function registerProjectMilestoneRoutes(
     Querystring: { cursor?: string; limit?: string };
   }>(
     '/api/v1/projects/:projectId/milestones',
-    { preHandler: requireOwner },
+    { preHandler: [requireOwner, requireAuthorizerFeature] },
     async (httpRequest, reply) => {
       const projectId = ProjectIdSchema.safeParse(httpRequest.params.projectId);
       const query = MilestoneListQuerySchema.safeParse(httpRequest.query);
@@ -75,7 +75,7 @@ export function registerProjectMilestoneRoutes(
   app.post<{ Params: { projectId: string } }>(
     '/api/v1/projects/:projectId/milestones',
     {
-      preHandler: [requireOwner, requireMutationProtection],
+      preHandler: [requireOwner, requireMutationProtection, requireAuthorizerFeature],
       bodyLimit: 16 * 1024,
       errorHandler: milestoneErrorHandler,
     },
@@ -110,7 +110,7 @@ export function registerProjectMilestoneRoutes(
 
   app.get<{ Params: { projectId: string; milestoneId: string } }>(
     '/api/v1/projects/:projectId/milestones/:milestoneId',
-    { preHandler: requireOwner },
+    { preHandler: [requireOwner, requireAuthorizerFeature] },
     async (httpRequest, reply) => {
       const projectId = ProjectIdSchema.safeParse(httpRequest.params.projectId);
       const milestoneId = MilestoneIdSchema.safeParse(httpRequest.params.milestoneId);
@@ -129,7 +129,7 @@ export function registerProjectMilestoneRoutes(
   app.patch<{ Params: { projectId: string; milestoneId: string } }>(
     '/api/v1/projects/:projectId/milestones/:milestoneId',
     {
-      preHandler: [requireOwner, requireMutationProtection],
+      preHandler: [requireOwner, requireMutationProtection, requireAuthorizerFeature],
       bodyLimit: 16 * 1024,
       errorHandler: milestoneErrorHandler,
     },
@@ -166,7 +166,7 @@ export function registerProjectMilestoneRoutes(
   app.post<{ Params: { projectId: string; milestoneId: string } }>(
     '/api/v1/projects/:projectId/milestones/:milestoneId/archive',
     {
-      preHandler: [requireOwner, requireMutationProtection],
+      preHandler: [requireOwner, requireMutationProtection, requireAuthorizerFeature],
       bodyLimit: 16 * 1024,
       errorHandler: milestoneErrorHandler,
     },

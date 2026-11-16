@@ -19,6 +19,14 @@ export async function authorizerRequest<T>(
   init: RequestInit = {},
   parse: (value: unknown) => T,
 ): Promise<T> {
+  if (env.restrictedDevelopment || !env.authorizerToken || !env.authorizerSocket) {
+    throw new AuthorizerRequestError(503, {
+      error: {
+        code: 'authorizer_unavailable',
+        message: 'Authorizer-backed functionality is unavailable in this configuration.',
+      },
+    });
+  }
   const headers = new Headers(init.headers);
   headers.set('x-omnis-authorizer-token', env.authorizerToken);
   if (init.body) headers.set('content-type', 'application/json');

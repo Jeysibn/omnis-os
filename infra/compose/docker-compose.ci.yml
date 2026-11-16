@@ -35,6 +35,8 @@ services:
 
   api:
     image: omnis-api:ci
+    environment:
+      OMNIS_EXECUTION_MODE: mock
     volumes:
       - type: bind
         source: ${OMNIS_CI_AUTHORIZER_SOCKET_DIRECTORY:?CI authorizer fixture directory is required}
@@ -45,6 +47,11 @@ services:
 
   worker:
     image: omnis-worker:ci
+    environment:
+      OMNIS_EXECUTION_MODE: mock
+      OMNIS_SANDBOX_LAUNCHER_SOCKET: /run/omnis-sandbox/launcher.sock
+    group_add:
+      - '${OMNIS_LAUNCHER_SOCKET_GID:?CI launcher socket group is required}'
     volumes:
       - type: bind
         source: ${OMNIS_CI_LAUNCHER_SOCKET_DIRECTORY:?CI launcher fixture directory is required}

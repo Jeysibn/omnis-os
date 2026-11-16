@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:net';
 import { request as httpRequest } from 'node:http';
@@ -532,20 +532,19 @@ try {
   const authorizationStore = new PostgresAuthorizationStore(runtimePool, authorizerPool);
   const request = await authorizationStore.request(newTask.id, 'owner');
   const authorization = await authorizationStore.decide(request.id, 'owner', 'approve');
-  const newRun = await migratedStore.admitRun(
-    newTask.id,
-    `current-upgrade-${suffix}`,
-    authorization.id,
-    (db, data) =>
-      runtimeBoss.send('omnis-mock-run', data, {
-        retryLimit: 0,
-        retryDelay: 0,
-        expireInSeconds: 60,
-        heartbeatSeconds: 10,
-        db,
-      }),
-  );
-  await waitForRun(migratedStore, newRun.run.id, 'completed');
+  const postUpgradeRunResponse = await fetch(`${worker.baseUrl}/internal/v1/runs`, {
+    method: 'POST',
+    headers: {
+      'x-omnis-internal-token': worker.internalToken,
+      'idempotency-key': randomUUID(),
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ taskId: newTask.id, authorizationId: authorization.id }),
+  });
+  assert.equal(postUpgradeRunResponse.status, 201);
+  const postUpgradeRun = await postUpgradeRunResponse.json();
+  assert.equal(postUpgradeRun.taskId, newTask.id);
+  await waitForRun(migratedStore, postUpgradeRun.id, 'completed');
 
   process.stdout.write(
     `Legacy upgrade passed from ${legacyRevision}: pre-migration records preserved; staged 0001–0007 provenance classified only the pre-0005 run; runtime timestamp backdating was denied; grantless legacy cancellation/interruption/failure succeeded without synthetic grants; repeated revoke attempts returned 503 without committing and succeeded on retry; admission lock contention returned a truthful 503 then succeeded on retry; role ownership, migration checksums, restricted pg-boss, worker execution, and post-upgrade task/run creation passed in ${databaseName}.\n`,
@@ -896,6 +895,7 @@ async function startRestrictedWorker(launcherSocket) {
       ...workerEnvironment(),
       NODE_ENV: 'test',
       OMNIS_DATABASE_URL: databaseUrl,
+      OMNIS_EXECUTION_MODE: 'mock',
       OMNIS_INTERNAL_TOKEN: internalToken,
       OMNIS_WORKER_HOST: '127.0.0.1',
       OMNIS_WORKER_PORT: String(port),
@@ -909,25 +909,42 @@ async function startRestrictedWorker(launcherSocket) {
     });
   }
   const healthUrl = `http://127.0.0.1:${port}/internal/v1/health`;
+  const capabilitiesUrl = `http://127.0.0.1:${port}/internal/v1/runtime-capabilities`;
   for (let attempt = 0; attempt < 120; attempt += 1) {
     if (child.exitCode !== null) {
       throw new Error(
         `Restricted worker exited during legacy upgrade (${child.exitCode}). ${sanitize(workerLogs)}`,
       );
     }
+    const headers = { 'x-omnis-internal-token': internalToken };
+    let response;
     try {
-      const response = await fetch(healthUrl, {
-        headers: { 'x-omnis-internal-token': internalToken },
-      });
-      if (response.ok) {
-        const health = await response.json();
-        assert.equal(health.runtimeKind, 'mock');
-        assert.equal(health.synthetic, true);
-        assert.equal(health.persistence, 'postgresql');
-        return { child, baseUrl: `http://127.0.0.1:${port}`, internalToken };
-      }
+      response = await fetch(healthUrl, { headers });
     } catch {
       // Startup is asynchronous; retry until the bounded deadline.
+      await delay(250);
+      continue;
+    }
+    if (response.ok) {
+      const health = await response.json();
+      assert.deepEqual(health, { status: 'ok', product: 'Omnis OS', service: 'worker' });
+
+      let capabilitiesResponse;
+      try {
+        capabilitiesResponse = await fetch(capabilitiesUrl, { headers });
+      } catch {
+        await delay(250);
+        continue;
+      }
+      if (capabilitiesResponse.ok) {
+        const capabilities = await capabilitiesResponse.json();
+        assert.equal(capabilities.version, 'omnis.worker-execution-status.v1');
+        assert.equal(capabilities.serviceAvailability, 'healthy');
+        assert.equal(capabilities.executionMode, 'mock');
+        assert.equal(capabilities.queueAvailability, 'available');
+        assert.equal(capabilities.launcherAvailability, 'available');
+        return { child, baseUrl: `http://127.0.0.1:${port}`, internalToken };
+      }
     }
     await delay(250);
   }

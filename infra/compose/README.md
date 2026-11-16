@@ -1,57 +1,110 @@
-# Private Docker Compose application topology
+# Omnis OS Compose profiles
 
-This is the existing **hybrid** topology. It does not satisfy Docker-only WSL2 deployment acceptance. See the [gap assessment, acceptance matrix and read-only evidence preflight](../../docs/06-delivery/DOCKER_ONLY_WSL2_ACCEPTANCE.md). ADR-0012 ingress provenance remains BLOCKED; do not use the startup instructions below as approval for the proposed architecture.
+The default restricted development configuration is execution-disabled and has been integrated in source against backend commit `14399b4ed0e663d0d51e7d6822b9ec5bee1fee30`. API and Worker run without an Authorizer service or socket dependency in this profile; this is source-level configuration only. It does not authorize image builds, database changes, or container lifecycle operations. See the [Option A integration record](./OPTION_A_INTEGRATION_READINESS.md). Preserve the existing Authorizer design for separately authorized mock execution. ADR-0012 ingress provenance remains BLOCKED. Phase 1 R1 remains BLOCKED / NOT ACCEPTED. This work does not establish production readiness, Stage B or Mission 9D acceptance, or permit real-provider access.
 
-The application overlay runs PostgreSQL, API, worker, and the Omnis OS web gateway with Docker Compose. The existing host systemd authorizer and restricted sandbox launcher remain host-managed because the launcher has tightly constrained access to the Docker daemon. The API and worker receive only their respective read-only Unix socket mounts; neither receives the Docker socket. Docker-group access remains host-root-equivalent and is confined to the launcher.
+The restricted profile uses exactly `docker-compose.yml`, `docker-compose.app.yml`, and `docker-compose.restricted-dev.yml`, with default project `omnis-os-restricted-dev` and database `omnis_restricted_dev`. The restricted overlay sets the top-level project name. Both API and Worker explicitly set `OMNIS_RESTRICTED_DEVELOPMENT=true` and `OMNIS_EXECUTION_MODE=disabled`. Sensitive Authorizer and launcher environment values from an env file are overridden to empty strings so the backend receives no configured credentials or IPC endpoints; API mount and socket-group inheritance are removed. The profile includes no Authorizer/launcher service, launcher mount, or Docker socket. API and Worker retain non-root identities, limits, owner authentication and API-to-Worker internal-token configuration. PostgreSQL keeps the project-scoped named volume and existing role/migration contracts.
 
-The `edge` and `data` networks are Docker internal networks. Web is attached only to `edge`; the worker and database are attached only to `data`; API bridges both so the browser gateway can reach the API and the API can reach the worker. API and worker have no published ports. Web and PostgreSQL publish only to host loopback. The web gateway serves the built SPA and proxies `/api/*` requests, including SSE streams, to the internal API while preserving browser origin, cookies, CSRF, and idempotency headers.
+The top-level name is a default, not a security boundary: `-p` / `--project-name` and `COMPOSE_PROJECT_NAME` can select another identity. All documented operational commands retain the explicit `--project-name omnis-os-restricted-dev` as an additional safeguard. The static verifier checks the default name, the explicit intended name, and rejects a wrong CLI or environment-selected name. Before any future startup, separately inventory the exact project resources on the daemon; static rendering cannot establish whether a named volume or network already exists.
 
-## First startup
+Compose gives exported shell variables precedence over `--env-file` values. Therefore, future restricted Compose commands must run through `scripts/compose/restricted-compose.sh`. It validates the supplied env files, removes exported `OMNIS_*` and `COMPOSE_*` variables, fixes the explicit project name and exact file list, and rejects unapproved command or flag combinations. It does not select or verify the Docker daemon: immediately before each separately authorized invocation, the owner must read-only verify `DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_CONFIG`, the active context, and the endpoint in the same shell, confirming they identify the intended local WSL2 Docker Engine. Do not invoke these restricted Compose commands directly from an environment containing Omnis or Compose overrides; env-file preflight alone does not prevent shell overrides.
 
-This topology is for a private Linux deployment, not a command to run on an unreviewed host. Run these provisioning commands from a root shell so Docker can access its daemon and the tools can read owner-only environment files. Start PostgreSQL first so roles and migrations can be provisioned before the API and worker processes are launched:
+Restricted API and Worker env files are separate from the Compose interpolation env file. The restricted overlay replaces the base API/Worker `env_file` entries with required `OMNIS_RESTRICTED_API_ENV_FILE` and `OMNIS_RESTRICTED_WORKER_ENV_FILE` paths. This preserves the base and mock profile env-file behavior while ensuring the restricted profile selects purpose-built files.
 
-```sh
-sudo docker compose --env-file .env.db-admin -f infra/compose/docker-compose.yml up -d postgres
-pnpm db:roles
-pnpm db:migrate
-```
+| File | Exact allowed variables |
+| --- | --- |
+| Restricted Compose interpolation | `OMNIS_RESTRICTED_DB_NAME`, `OMNIS_DB_PASSWORD`, `OMNIS_WEB_PORT` (optional), `OMNIS_RESTRICTED_API_ENV_FILE`, `OMNIS_RESTRICTED_WORKER_ENV_FILE` |
+| Restricted API | `OMNIS_OWNER_PASSWORD_HASH`, `OMNIS_SESSION_SECRET`, `OMNIS_INTERNAL_TOKEN`, `OMNIS_ALLOWED_ORIGIN`, `OMNIS_SECURE_COOKIES` |
+| Restricted Worker | `OMNIS_INTERNAL_TOKEN`, `OMNIS_RUNTIME_DB_PASSWORD` |
 
-## Host prerequisites
-
-After PostgreSQL is healthy and migrations are applied, install and review the existing service identities, secret files, and systemd units using the approved host procedure. Start only the authorizer and restricted launcher as host services; Compose owns the web, API, worker, and PostgreSQL processes.
-
-1. Generate owner secrets and install the service-specific files using the existing reviewed host procedure. Keep `.env.db-admin`, `/etc/omnis/api.env`, and `/etc/omnis/worker.env` owner-only. Docker Compose and the database provisioning tools must run as root because Docker control is root-equivalent and the service env files are deliberately not readable by an ordinary account.
-2. Set `OMNIS_ALLOWED_ORIGIN` in `/etc/omnis/api.env` to the exact HTTPS origin served by the private reverse proxy and set `OMNIS_SECURE_COOKIES=true`. Configure the proxy to forward requests to `127.0.0.1:8080`; it must preserve `Origin`, `Cookie`, and `Set-Cookie` and support long-lived SSE responses. The proxy, TLS certificate, DNS, and private ingress are outside this Compose file.
-3. Copy `.env.compose.example` to `.env.compose`. Set the authorizer and launcher socket group IDs to the numeric IDs of `omnis-authorizer-socket` and `omnis-launcher-socket` on that host. The file contains topology values only, no credentials.
-4. Verify that the host authorizer and restricted launcher are active, their Unix sockets have the expected group access, the secret files are private, and their socket group IDs match the Compose settings:
-
-   ```sh
-   sudo node scripts/compose/check-host-prerequisites.mjs
-   ```
-
-The preflight is read-only. It does not install host identities, modify systemd, alter firewall rules, change Docker, or start services.
-
-Then start the application overlay:
+The offline preflight rejects unknown keys, provider credentials, Authorizer/launcher settings, administrative or migration database credentials, duplicates, malformed lines, missing values, non-loopback origins, mismatched internal tokens, and env files that are not private regular files owned by the current user. Restricted API/Worker env-file paths must be absolute literal paths without `$`, so Compose cannot interpolate them to a different file after preflight. It reports variable names and generic validation details, never values. Example invocation after owner-created files are separately authorized:
 
 ```sh
-sudo docker compose --env-file .env.db-admin --env-file .env.compose \
-  -f infra/compose/docker-compose.yml \
-  -f infra/compose/docker-compose.app.yml up -d --build
+node scripts/compose/verify-restricted-env.mjs \
+  --compose-env "$OMNIS_RESTRICTED_COMPOSE_ENV" \
+  --api-env "$OMNIS_RESTRICTED_API_ENV_FILE" \
+  --worker-env "$OMNIS_RESTRICTED_WORKER_ENV_FILE"
 ```
 
-The database's only host-published port is `127.0.0.1:5432` for the host-managed authorizer, launcher, and migration tools. The API and worker listen on their private Docker networks. The web gateway listens on `127.0.0.1:${OMNIS_WEB_PORT:-8080}` for a separate private HTTPS proxy. No internet-facing ingress or database port is configured here.
+Use owner-approved `restricted-compose.env`, `restricted-api.env`, and `restricted-worker.env` files with mode `0600` (or stricter), placed in an owner-selected private directory and owned by the current WSL user. The Compose file's `OMNIS_DB_PASSWORD` is passed to PostgreSQL only; admin/migration credentials are not permitted in API or Worker files. Do not use `.env` or `.env.worker` produced by `pnpm configure:owner` directly; they contain Authorizer or other settings outside this profile's allowlist. Prepare the restricted files through the owner's approved secret-handling process. No credentials were created or inspected for this integration.
 
-## Health, persistence, and recovery
+`docker-compose.mock-execution.yml` is a separate opt-in. It marks every service with the `mock-execution` profile and requires `OMNIS_MOCK_EXECUTION_MODE` to be set; the intended value is exactly `mock`. This catches an omitted explicit setting, and the profile makes ordinary selection clearer, but Compose profiles are not authorization controls: explicitly targeting a profiled service can select it. The overlay sets API and Worker to `mock` and gives Worker the existing read-only launcher socket mount. Do not put it in `COMPOSE_FILE` or treat it as ordinary restricted development. Use only after a separately scoped owner authorization; mock execution is synthetic and each Run still requires its valid persisted grant.
 
-- Compose waits for PostgreSQL health before starting worker, then waits for worker and API health before starting web. Host socket readiness is checked separately by the preflight.
-- PostgreSQL state lives in the existing named `omnis-postgres-data` volume. API, worker, and web containers are read-only, non-root, capability-free, bounded by CPU/memory/PID limits, and restart under Compose. Their durable task, assignment, authorization, Run, and event state remains in PostgreSQL.
-- Worker startup reconciles expired leases and uncertain submissions through the existing durable lifecycle. Compose restart does not authorize replay of uncertain external work. The runtime remains mock-only.
-- Use the existing `pnpm db:backup` and `pnpm db:restore:verify` flows against the private database. Backup data, encryption keys, owner secrets, and host service credentials require separate protected storage. A passing disposable backup test is not a backup schedule or a target-host restore drill.
-- To stop app containers while keeping PostgreSQL, use `sudo docker compose` with both files and `stop web api worker`. Preserve the database volume. Do not use `down --volumes` for an operational deployment.
+## Network and service boundaries
 
-## Verification boundary
+The `edge` and `data` networks are Docker internal networks. Web is attached only to `edge`; Worker and PostgreSQL are attached only to `data`; API bridges both. API and Worker have no host-published ports. Web and PostgreSQL publish only to `127.0.0.1`. This is a local binding request, not proof of Windows-origin enforcement or LAN isolation.
 
-`pnpm compose:config:test` validates the rendered service topology, internal networks, published-port bindings, resource bounds, service identities, and socket mount allowlist using disposable environment files. Container CI builds the web gateway and probes static delivery, API proxying, cookies, SSE, and path traversal with a local fake API. These checks do not prove compatibility with a particular Linux kernel or Docker daemon, actual host systemd socket permissions, private TLS ingress, scheduled backup, target-host restore, or host restart recovery. Those checks remain required before treating a private deployment as operational. Do not run deployment commands against the owner's machine without separate authorization.
+API, Worker, and web run as UID/GID `10001:10001`, with read-only root filesystems, all capabilities dropped, `no-new-privileges`, bounded PIDs/CPU/memory, and only their declared temporary filesystems. The PostgreSQL image retains its existing entrypoint and role setup; changing its runtime identity or adding unverified restrictions needs separate compatibility review.
+
+## Liveness, capability, and startup ordering
+
+Compose health checks are process liveness checks. API `/api/v1/health` and Worker `/internal/v1/health` do not claim execution readiness. The owner-protected capabilities endpoint uses `omnis.runtime-capabilities.v3`; when modes agree it reports execution disabled, authorization unavailable, and queue/launcher not required. A liveness result is not a claim that execution is available.
+
+Compose starts PostgreSQL before Worker, API after PostgreSQL and Worker, and web after API. Restricted-mode Run admission and stop return `503 execution_disabled`; Authorizer-backed operations return `503 authorizer_unavailable` after their required security checks. Historical reads and SSE remain available where supported by the backend. Do not interpret green Compose health as successful end-to-end application verification.
+
+## Persistence and isolated project scope
+
+The logical database volume is `omnis-postgres-data`; with the required project name it renders as `omnis-os-restricted-dev_omnis-postgres-data`. The restricted overlay requires `OMNIS_RESTRICTED_DB_NAME`; use a fresh, unique name such as `omnis_restricted_dev`, and ensure Worker and any future Authorizer/migration connection target that same database. The launcher currently hashes only the database URL pathname for its scope ID, so this name must also be unique among launcher-managed Omnis databases. The project-scoped volume is separate from existing Omnis, QA, backup, and MoniKey volumes. This Compose model declares no external resources, fixed container names, or additional volumes. Do not use `down --volumes`, `prune`, or broad cleanup; an authorized `down` without volume removal only applies to the exact project and still requires a resource inventory first.
+
+`pnpm db:roles` requires an administrative database connection and changes PostgreSQL roles, ownership, schema privileges, and grants for the established `omnis_migrator`, `omnis_runtime`, `omnis_authorizer`, and `omnis_launcher` identities. `pnpm db:migrate` applies application migrations and creates the pg-boss schema/queue and runtime grants. Neither operation runs as part of the Compose service command. Both are database mutations and require a separate owner authorization scoped to the new project volume, exact database name, and connection target. Do not point them at existing Omnis/QA/backup data. No new database role or migration is introduced by these static checks.
+
+The application build context is the repository root. Node `24.22.1` is digest-pinned; the manifest and frozen lockfile pin `pnpm@12.16.1`. Each Dockerfile runs `pnpm install --frozen-lockfile` and checks the expected runtime artifacts. The Dockerfile-specific context allowlists now exclude env files, npm auth config, common private-key formats, and secrets/credentials directories after source allowlists. Static checks reject sensitive Dockerfile `ARG`/`ENV` declarations and unexpected direct download/install commands. They cannot inspect dependency lifecycle scripts or prove offline behavior: Dockerfiles install pnpm and locked dependencies during build, which may need registry access and uncached base images. Build artifact presence is not claimed until images are actually built under separate authorization.
+
+## PostgreSQL runtime safety assessment
+
+The service uses `postgres:17.6-alpine@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94`. Compose sets no `user`, so the configured identity comes from the pinned image metadata. The repository's disposable smoke harness expects that metadata to resolve to a positive numeric UID, but this source review did not inspect the image or run a container. The expected steady-state database process identity is the image's non-root `postgres` account; startup ownership initialization may require entrypoint privilege. Confirm both phases against the exact digest before changing identity or capabilities.
+
+`privileged` is omitted and therefore defaults to false, but Compose does not explicitly set it. PostgreSQL also has no explicit capability drop, `no-new-privileges`, read-only root filesystem, PID limit, CPU limit, or memory limit. The current service has a single project-scoped data volume and loopback-only port publication. Do not force a numeric user, drop capabilities, or set a read-only root filesystem without image-specific validation: the entrypoint may need ownership repair and initialization writes. PostgreSQL resource bounds must be selected and approved before startup; this source does not invent numeric limits.
+
+Future owner-authorized runtime evidence must record the image digest and image `Config.User`; container `Config.User`, `HostConfig.Privileged`, capabilities, security options, read-only state, PID/CPU/memory limits, process UID after initialization, exact project volume ID/mount, network memberships, loopback port bindings, and health state. Compare the effective volume and project identity to a pre-start inventory. Missing or ambiguous evidence blocks acceptance; do not change the database identity or volume to make a check pass.
+
+## Mode transition and process fencing
+
+Changing Compose configuration does not stop an already running mock-enabled Worker. Before any authorized transition from mock to disabled:
+
+1. Inventory the exact Compose project, Worker container IDs, labels, effective environment mode, and any other execution consumers.
+2. Establish the mapping from exact Compose project to PostgreSQL instance/database identity to the launcher's configured database pathname and derived scope ID. The current launcher hashes only the database URL pathname, so identical database names on separate instances collide; require a unique pathname among relevant launcher environments or treat the mapping as ambiguous. Sandbox workloads carry labels `com.omnis.os.sandbox=true`, `com.omnis.os.scope=<observed scope ID>`, and `com.omnis.os.run-id=<exact Run ID>`; they do not carry Compose project labels. Inventory them by the verified scope and exact Run IDs. If project-to-scope mapping is missing or ambiguous, stop; never guess the scope ID or broaden cleanup to all containers.
+3. Stop every previously enabled Worker using separately authorized, exact-resource operations. Confirm container exit and that no Worker process or descendant remains. Separately prove every inventoried sandbox workload is stopped or absent using authoritative daemon state. A changed file, stopped launcher, or `--rm` request alone is insufficient evidence.
+4. Treat any unknown or surviving workload as a stop condition. Do not broadly remove it; quarantine and recovery require separately reviewed exact-resource authority. Preserve database state. Do not globally revoke grants, rewrite pending Runs, or delete queue/database rows as a shortcut.
+5. Record uncertain and in-flight Runs as unresolved. A persisted `running` status does not prove the former process or daemon-managed workload terminated. Do not start another enabled consumer to “recover” them.
+6. Start only the disabled configuration after exact owner authorization. Verify API/Worker effective mode, Worker service readiness, `queueAvailability=not_required`, `launcherAvailability=not_required`, and capability=`disabled` from the owner-protected capability endpoint. Confirm no old enabled consumer or synthetic workload remains.
+
+At `14399b4ed0e663d0d51e7d6822b9ec5bee1fee30`, restricted Worker startup does not initialize PgBoss consumers, launcher execution, or recovery. This source contract does not establish runtime behavior or global revocation; existing mock-enabled Worker processes must be independently inventoried and confirmed stopped before a mode transition.
+
+## Option A source integration and remaining gates
+
+The restricted overlay clears inherited Authorizer and launcher values and removes API's Authorizer mount and group. This matches the backend's restricted startup contract in the named commit. The secure Authorizer path remains in the separate mock overlay for future, separately authorized mock execution. Integration still requires independent platform review, safe static checks, and a separate owner authorization for any build, database operation, or startup.
+
+## Owner authorization required before first local startup
+
+No startup is approved by this profile work. A future request must separately authorize:
+
+- Exact Compose project `omnis-os-restricted-dev` and files `docker-compose.yml`, `docker-compose.app.yml`, and `docker-compose.restricted-dev.yml` (exclude both mock and CI overlays).
+- The three image builds and any registry access required by pinned Node/pnpm dependencies.
+- The new project-scoped PostgreSQL volume, one-time role provisioning/migration plan, and data-retention/backup choice.
+- Exact owner/API/Worker environment-file sources and secret custody. This preparation did not inspect or create credentials.
+- Exact backend commit `14399b4ed0e663d0d51e7d6822b9ec5bee1fee30`, independent platform review evidence, and this platform delta. No authorization bypass is allowed.
+- Exact loopback ports, startup/stop commands, evidence collection, and project-scoped cleanup. Do not touch existing Omnis/MoniKey resources.
+
+### Gated sequence for a future authorized run
+
+This sequence is a planning reference only; no command below was run. Before proceeding, the exact Option A implementation must pass the relevant offline checks and independent review, all existing enabled Workers and daemon-managed sandbox containers must be accounted for, and the owner must authorize each database/build/lifecycle operation.
+
+1. Run `node scripts/compose/verify-restricted-env.mjs` against the owner-approved restricted API and Worker env files. Select the explicit `-p omnis-os-restricted-dev` and the three restricted profile files above. Set `OMNIS_RESTRICTED_DB_NAME=omnis_restricted_dev` in the protected Compose interpolation environment and verify the administrative, Worker, migration, and any separately approved future service connections identify that exact fresh database. Do not expose rendered Compose output because it can contain environment values.
+2. Start only this project's PostgreSQL container, then—under separate DB authorization—run role provisioning and migrations against this new project volume. `db:roles` can change ownership and grants; `db:migrate` changes schema and pg-boss state. Do not run either against an existing Omnis, QA, backup, or MoniKey database.
+3. Under separate build authorization, build only `api`, `worker`, and `web` from their pinned Dockerfiles. Registry access may be required for pinned base images, pnpm, or locked packages.
+4. Before starting API, verify the exact Option A commit, backend/static test evidence, restricted environment lock, and that `COMPOSE_PROJECT_NAME` is unset or matches the explicit project. Confirm the API has no usable Authorizer startup token or socket dependency. Do not replace Authorizer with a fake endpoint or network trust.
+5. Start only `api`, `worker`, and `web` in disabled mode. Confirm API/Worker mode agreement and all capability fields exactly as specified by the reviewed contract. Confirm disabled Worker has no queue consumer, recovery, or launcher. A green Compose health check is liveness only. Collect only bounded, sanitized logs and non-secret capability fields.
+6. Stop only `web api worker postgres` in project `omnis-os-restricted-dev`. This preserves the project's named database volume. Any later project teardown needs separate approval and an exact resource inventory; never remove volumes or use broad cleanup.
+
+The project/DB identity must not be inferred from a familiar name. The static check validates Compose's project prefix, the generated volume/network identities, and the explicit restricted DB name; it does not inspect the Docker daemon or existing volume inventory.
+
+## Static verification boundary
+
+`pnpm compose:config:test` renders the restricted and explicit mock configurations using sanitized synthetic env files. It tests that preflight accepts the allowlists and rejects prohibited/unknown variables without printing values, and checks project-name selection, restricted locks, cleared sensitive settings, API mount/group removal, mock-overlay separation, loopback-only ports, privilege settings, networks, identities, and scoped database volume. Rendering Compose configuration does not contact the Docker daemon or start services. Static rendering cannot prove effective runtime identity, WSL ingress provenance, process termination, database migration safety, or target-host recovery. No such runtime claims are made.
+
+After the owner prepares the three private restricted env files, run `pnpm compose:restricted-env:check -- --compose-env <path> --api-env <path> --worker-env <path>`. This checks the real file names and values in memory and prints only generic results or variable names; do not capture or publish env-file contents. Static tests use synthetic values only.
+
+PostgreSQL limits remain unresolved source configuration: before startup, the owner must select numeric CPU, memory, and PID bounds based on the intended local workload and approve them. Do not infer adequate limits from the API/Worker/Web limits. Until selected and verified against the pinned image, database startup acceptance remains gated.
 
 ## Disposable full-stack Compose CI test
 

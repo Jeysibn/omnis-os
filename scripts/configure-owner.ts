@@ -68,15 +68,16 @@ try {
     'OMNIS_API_PORT=4100',
     `OMNIS_AUTHORIZER_SOCKET=${localAuthorizerSocket}`,
     'OMNIS_SECURE_COOKIES=false',
+    'OMNIS_EXECUTION_MODE=disabled',
   ];
   const files = [
     sharedLines,
     [
       `OMNIS_INTERNAL_TOKEN=${workerToken}`,
       `OMNIS_RUNTIME_DB_PASSWORD=${randomBytes(32).toString('hex')}`,
+      'OMNIS_EXECUTION_MODE=disabled',
       'OMNIS_WORKER_HOST=127.0.0.1',
       'OMNIS_WORKER_PORT=4101',
-      `OMNIS_SANDBOX_LAUNCHER_SOCKET=${localLauncherSocket}`,
       'OMNIS_QUEUE_NAME=omnis-mock-run',
     ],
     [

@@ -28,3 +28,17 @@
 !scripts/ci/verify-stage2a-artifact.mjs
 scripts/mission9d/stage2a-simulated/
 !scripts/configure-hooks.ts
+**/.env
+**/.env.*
+**/.npmrc
+**/*.env
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/id_rsa*
+**/id_ed25519*
+**/secrets
+**/secrets/**
+**/credentials
+**/credentials/**

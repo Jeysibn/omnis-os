@@ -389,7 +389,20 @@ export function createPlanningApi(page: Page) {
         }),
       });
     if (path === '/api/v1/runtime-capabilities' && method === 'GET')
-      return route.fulfill({ json: runtimeCapabilities(false) });
+      return route.fulfill({
+        json: runtimeCapabilities({
+          apiExecutionMode: 'mock',
+          workerStatus: {
+            version: 'omnis.worker-execution-status.v1',
+            serviceAvailability: 'healthy',
+            executionMode: 'mock',
+            queueAvailability: 'available',
+            launcherAvailability: 'available',
+          },
+          authorizationAvailable: true,
+          syntheticConnectorEnabled: false,
+        }),
+      });
     if (path === '/api/v1/projects' && method === 'GET')
       return route.fulfill({
         json: {

@@ -181,6 +181,7 @@ export async function startMockServices({
       apiEnvPath,
       `${[
         ...sharedEnvLines,
+        'OMNIS_EXECUTION_MODE=mock',
         ...(enableSyntheticBrokerTestMode ? ['OMNIS_SYNTHETIC_BROKER_TEST_MODE=1'] : []),
       ].join('\n')}\n`,
       { mode: 0o600 },
@@ -194,6 +195,7 @@ export async function startMockServices({
               line,
             ),
         ),
+        'OMNIS_EXECUTION_MODE=mock',
         `OMNIS_DATABASE_URL=${databaseUrl}`,
         `OMNIS_SANDBOX_LAUNCHER_SOCKET=${composeManagedApplication ? '/run/omnis-sandbox/launcher.sock' : launcherSocket}`,
         ...(enableSyntheticBrokerTestMode

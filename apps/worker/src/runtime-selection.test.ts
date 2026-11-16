@@ -5,11 +5,19 @@ import { describe, it } from 'node:test';
 const productionWorker = await readFile(new URL('./server.ts', import.meta.url), 'utf8');
 
 describe('production runtime selection boundary', () => {
-  it('keeps worker startup hard-wired to the sandboxed mock adapter', () => {
+  it('constructs the launcher only for explicit mock mode and fences restarted jobs', () => {
     assert.match(
       productionWorker,
-      /const runtime = new SandboxedMockRuntimeAdapter\(new UnixMockSandboxLauncherClient\(launcherSocket\)\)/,
+      /const launcherClient =\s*executionMode === 'mock' \? new UnixMockSandboxLauncherClient\(launcherSocket!\) : undefined;\s*const runtime = launcherClient \? new SandboxedMockRuntimeAdapter\(launcherClient\) : undefined;/,
     );
+    assert.match(
+      productionWorker,
+      /executionModeFromEnvironment\(process\.env\.OMNIS_EXECUTION_MODE\)/,
+    );
+    assert.match(productionWorker, /executionMode === 'mock'[\s\S]*?new PgBoss\(/);
+    assert.match(productionWorker, /requireSessionFence: true/);
+    assert.match(productionWorker, /startExecutionQueue\(executionMode/);
+    assert.doesNotMatch(productionWorker, /reconcileDisabledExecution/);
     assert.doesNotMatch(productionWorker, /FakeCodexAppServerRuntimeAdapter/);
     assert.doesNotMatch(
       productionWorker,

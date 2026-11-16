@@ -7,7 +7,7 @@ import {
   DepartmentSchema,
   UpdateDepartmentSchema,
 } from '@omnis/contracts';
-import { requireMutationProtection, requireOwner } from './auth.ts';
+import { requireAuthorizerFeature, requireMutationProtection, requireOwner } from './auth.ts';
 import { authorizerRequest } from './authorizer-client.ts';
 
 type AuthorizerRequest = typeof authorizerRequest;
@@ -16,22 +16,26 @@ export function registerDepartmentRoutes(
   app: FastifyInstance,
   request: AuthorizerRequest = authorizerRequest,
 ) {
-  app.get('/api/v1/departments', { preHandler: requireOwner }, async (httpRequest, reply) => {
-    const query = DepartmentListQuerySchema.safeParse(httpRequest.query);
-    if (!query.success) {
-      return reply.code(422).send({
-        error: { code: 'invalid_input', message: 'Department query parameters are invalid.' },
-      });
-    }
-    const suffix = query.data.includeArchived === 'true' ? '?includeArchived=true' : '';
-    return request(`/internal/v1/departments${suffix}`, {}, (value) =>
-      DepartmentListResponseSchema.parse(value),
-    );
-  });
+  app.get(
+    '/api/v1/departments',
+    { preHandler: [requireOwner, requireAuthorizerFeature] },
+    async (httpRequest, reply) => {
+      const query = DepartmentListQuerySchema.safeParse(httpRequest.query);
+      if (!query.success) {
+        return reply.code(422).send({
+          error: { code: 'invalid_input', message: 'Department query parameters are invalid.' },
+        });
+      }
+      const suffix = query.data.includeArchived === 'true' ? '?includeArchived=true' : '';
+      return request(`/internal/v1/departments${suffix}`, {}, (value) =>
+        DepartmentListResponseSchema.parse(value),
+      );
+    },
+  );
 
   app.post(
     '/api/v1/departments',
-    { preHandler: [requireOwner, requireMutationProtection] },
+    { preHandler: [requireOwner, requireMutationProtection, requireAuthorizerFeature] },
     async (httpRequest, reply) => {
       const body = CreateDepartmentSchema.safeParse(httpRequest.body);
       if (!body.success) {
@@ -50,7 +54,7 @@ export function registerDepartmentRoutes(
 
   app.patch<{ Params: { departmentId: string } }>(
     '/api/v1/departments/:departmentId',
-    { preHandler: [requireOwner, requireMutationProtection] },
+    { preHandler: [requireOwner, requireMutationProtection, requireAuthorizerFeature] },
     async (httpRequest, reply) => {
       const id = DepartmentIdSchema.safeParse(httpRequest.params.departmentId);
       const body = UpdateDepartmentSchema.safeParse(httpRequest.body);
@@ -70,7 +74,7 @@ export function registerDepartmentRoutes(
 
   app.post<{ Params: { departmentId: string } }>(
     '/api/v1/departments/:departmentId/archive',
-    { preHandler: [requireOwner, requireMutationProtection] },
+    { preHandler: [requireOwner, requireMutationProtection, requireAuthorizerFeature] },
     async (httpRequest, reply) => {
       const id = DepartmentIdSchema.safeParse(httpRequest.params.departmentId);
       if (!id.success) {

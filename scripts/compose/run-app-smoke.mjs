@@ -11,6 +11,7 @@ import {
   testOwnerPassword,
 } from '../../tests/integration/support/mock-services.mjs';
 import { canRemoveBrowserBridgeGuard } from './firewall-guard-policy.mjs';
+import { safeLauncherFailureSignals } from './safe-launcher-diagnostics.mjs';
 
 const scrypt = promisify(scryptCallback);
 const root = process.cwd();
@@ -373,6 +374,11 @@ try {
 
   const renderedConfig = JSON.parse(compose(['config', '--format', 'json']).stdout);
   assert.deepEqual(
+    renderedConfig.services.worker.group_add,
+    [gid],
+    'CI Worker must receive only the synthetic launcher fixture group',
+  );
+  assert.deepEqual(
     renderedConfig.services.postgres.ports ?? [],
     [],
     'disposable PostgreSQL must remain unpublished outside its internal data network',
@@ -689,6 +695,8 @@ try {
       redact(status.stdout || status.stderr || 'unavailable'),
       'Compose logs:',
       redact(logs.stdout || logs.stderr || 'unavailable'),
+      'Host launcher safe diagnostics:',
+      JSON.stringify(safeLauncherFailureSignals(fixtures?.launcher?.capturedLogs ?? '')),
     ].join('\n');
     process.stderr.write(`${diagnostics}\n`);
     if (process.env.OMNIS_COMPOSE_DIAGNOSTICS_PATH) {

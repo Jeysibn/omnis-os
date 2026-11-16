@@ -15,6 +15,7 @@ import {
   type Project,
   type ProjectWorkspaceTaskSummary,
 } from '@omnis/contracts';
+import { capabilityFixtureJson } from './capability.fixture.js';
 
 /**
  * Contract-backed fixture for the Project Workspace browser tests. Every response is parsed with
@@ -363,6 +364,8 @@ export function createApi(page: Page) {
     if (detail && method === 'PATCH') return mutate('update', detail[1] ?? '');
     if (archive && method === 'POST') return mutate('archive', archive[1] ?? '');
 
+    if (path === '/api/v1/runtime-capabilities' && method === 'GET')
+      return route.fulfill({ json: capabilityFixtureJson() });
     unexpected.push(`${method} ${path}`);
     return error(route, 500, 'fixture_contract_violation', `Unexpected ${method} ${path}`);
   };

@@ -10,6 +10,7 @@ process.env.OMNIS_AUTHORIZER_SOCKET ??= '/run/omnis-authorizer/authorizer.sock';
 process.env.OMNIS_ALLOWED_ORIGIN ??= 'http://127.0.0.1:5173';
 
 const { registerTaskRoutes } = await import('./task-routes.ts');
+const { env } = await import('./env.ts');
 const task = {
   id: 'task-0001',
   title: 'Review project policy',
@@ -69,6 +70,46 @@ const protectedHeaders = {
 };
 
 describe('owner task routes', () => {
+  it('keeps task mutations unavailable with owner and CSRF checks intact in restricted mode', async () => {
+    const previousRestrictedMode = env.restrictedDevelopment;
+    env.restrictedDevelopment = true;
+    const calls: Array<{ path: string; init?: RequestInit }> = [];
+    const app = createApp(true, calls);
+    const anonymousApp = createApp(false, calls);
+    try {
+      const anonymous = await anonymousApp.inject({ method: 'POST', url: '/api/v1/tasks' });
+      assert.equal(anonymous.statusCode, 401);
+
+      const missingCsrf = await app.inject({
+        method: 'POST',
+        url: '/api/v1/tasks',
+        headers: { origin: protectedHeaders.origin },
+        payload: { title: task.title, detail: task.detail },
+      });
+      assert.equal(missingCsrf.statusCode, 403);
+
+      for (const [method, url, payload] of [
+        ['POST', '/api/v1/tasks', { title: task.title, detail: task.detail }],
+        ['PUT', '/api/v1/tasks/task-0001/project', { projectId }],
+        ['PUT', '/api/v1/tasks/task-0001/execution-assignment', { agentId: 'agent-0001' }],
+      ] as const) {
+        const response = await app.inject({
+          method,
+          url,
+          headers: protectedHeaders,
+          payload,
+        });
+        assert.equal(response.statusCode, 503);
+        assert.equal(response.json().error.code, 'authorizer_unavailable');
+      }
+      assert.equal(calls.length, 0);
+    } finally {
+      env.restrictedDevelopment = previousRestrictedMode;
+      await app.close();
+      await anonymousApp.close();
+    }
+  });
+
   it('keeps the read contract and legacy unassigned task creation compatible', async () => {
     const calls: Array<{ path: string; init?: RequestInit }> = [];
     const app = createApp(true, calls);

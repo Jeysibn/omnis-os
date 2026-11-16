@@ -1,11 +1,36 @@
 import path from 'node:path';
 import { lstatSync, realpathSync } from 'node:fs';
-import { validateApiNetwork } from './deployment-config.ts';
+import { validateApiAuthorizerConfiguration, validateApiNetwork } from './deployment-config.ts';
+import {
+  executionModeFromEnvironment,
+  restrictedDevelopmentFromEnvironment,
+  validateRestrictedDevelopmentConfiguration,
+} from '@omnis/contracts/execution-mode';
 
 const sessionSecret = process.env.OMNIS_SESSION_SECRET;
 const ownerPasswordHash = process.env.OMNIS_OWNER_PASSWORD_HASH;
 const internalToken = process.env.OMNIS_INTERNAL_TOKEN;
 const authorizerToken = process.env.OMNIS_API_AUTHORIZER_TOKEN;
+const authorizerSocketValue = process.env.OMNIS_AUTHORIZER_SOCKET;
+const restrictedDevelopment = restrictedDevelopmentFromEnvironment(
+  process.env.OMNIS_RESTRICTED_DEVELOPMENT,
+);
+const executionMode = executionModeFromEnvironment(process.env.OMNIS_EXECUTION_MODE);
+validateRestrictedDevelopmentConfiguration({
+  restrictedDevelopment,
+  configuredMode: executionMode,
+  rawMode: process.env.OMNIS_EXECUTION_MODE,
+  authorizerToken,
+  authorizerSocket: authorizerSocketValue,
+  launcherSocket: process.env.OMNIS_SANDBOX_LAUNCHER_SOCKET,
+  authorizerSecrets: [
+    process.env.OMNIS_AUTHORIZER_DB_PASSWORD,
+    process.env.OMNIS_AUTHORIZER_DATABASE_URL,
+    process.env.OMNIS_AGENT_IDEMPOTENCY_KEY,
+    process.env.OMNIS_CONNECTOR_DECISION_KEY_FILE,
+    process.env.OMNIS_BROKER_AUTHORIZER_TOKEN,
+  ],
+});
 const testSessionMaxAgeSeconds = parseTestSessionMaxAgeSeconds(process.env);
 
 if (!sessionSecret || sessionSecret.length < 64) {
@@ -17,17 +42,20 @@ if (!ownerPasswordHash || !/^[a-f0-9]{32}:[a-f0-9]{128}$/i.test(ownerPasswordHas
 if (!internalToken || internalToken.length < 64) {
   throw new Error('OMNIS_INTERNAL_TOKEN must be generated with `pnpm configure:owner`.');
 }
-if (!authorizerToken || authorizerToken.length < 64 || authorizerToken === internalToken) {
-  throw new Error(
-    'A separate OMNIS_API_AUTHORIZER_TOKEN must be generated with `pnpm configure:owner`.',
-  );
-}
+validateApiAuthorizerConfiguration({
+  restrictedDevelopment,
+  token: authorizerToken,
+  internalToken,
+  socket: authorizerSocketValue,
+});
 
 const apiPort = Number(process.env.OMNIS_API_PORT ?? 4100);
 const workerPort = Number(process.env.OMNIS_WORKER_PORT ?? 4101);
 const workerHost = process.env.OMNIS_WORKER_HOST ?? '127.0.0.1';
 const privateCompose = process.env.OMNIS_COMPOSE_PRIVATE === 'true';
-const authorizerSocket = validateAuthorizerSocket(process.env.OMNIS_AUTHORIZER_SOCKET);
+const authorizerSocket = restrictedDevelopment
+  ? undefined
+  : validateAuthorizerSocket(authorizerSocketValue);
 if (!Number.isInteger(apiPort) || apiPort < 1 || apiPort > 65535)
   throw new Error('OMNIS_API_PORT is invalid.');
 if (!Number.isInteger(workerPort) || workerPort < 1 || workerPort > 65535)
@@ -41,6 +69,8 @@ export const env = {
   ownerPasswordHash,
   internalToken,
   authorizerToken,
+  restrictedDevelopment,
+  executionMode,
   workerUrl: `http://${workerHost}:${workerPort}`,
   authorizerSocket,
   secureCookies: process.env.OMNIS_SECURE_COOKIES === 'true',

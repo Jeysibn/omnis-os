@@ -82,6 +82,7 @@ describe('standard owner Run stop route', () => {
           if (denied === 'csrf') return reply.code(403).send({ error: { code: 'csrf_rejected' } });
         },
         syntheticBrokerEnabled: true,
+        executionMode: 'mock',
         forwardWorker: async <TResult>(
           _path: string,
           _init: RequestInit,
@@ -113,6 +114,7 @@ describe('standard owner Run stop route', () => {
       requireOwner: async () => {},
       requireMutationProtection: async () => {},
       syntheticBrokerEnabled: true,
+      executionMode: 'mock',
       forwardWorker: async <TResult>(
         path: string,
         _init: RequestInit,
@@ -152,6 +154,7 @@ describe('standard owner Run stop route', () => {
       requireOwner: async () => {},
       requireMutationProtection: async () => {},
       syntheticBrokerEnabled: true,
+      executionMode: 'mock',
       forwardWorker: async (path, _init, parse) => {
         calls.push(path);
         if (path.endsWith('/synthetic-binding')) {
@@ -182,6 +185,7 @@ describe('standard owner Run stop route', () => {
       requireOwner: async () => {},
       requireMutationProtection: async () => {},
       syntheticBrokerEnabled: false,
+      executionMode: 'mock',
       forwardWorker: async <TResult>(
         path: string,
         _init: RequestInit,
@@ -197,6 +201,34 @@ describe('standard owner Run stop route', () => {
     const response = await app.inject({ method: 'POST', url: `/api/v1/runs/${runId}/stop` });
     assert.equal(response.statusCode, 200);
     assert.deepEqual(calls, [`/internal/v1/runs/${runId}/stop`]);
+    await app.close();
+  });
+
+  it('rejects Run stop in disabled mode before touching Worker or Authorizer state', async () => {
+    const app = Fastify();
+    let forwarded = false;
+    registerRunStopRoute(app, {
+      requireOwner: async () => {},
+      requireMutationProtection: async () => {},
+      syntheticBrokerEnabled: false,
+      executionMode: 'disabled',
+      forwardWorker: async <TResult>(
+        _path: string,
+        _init: RequestInit,
+        parse: (value: unknown) => TResult,
+      ) => {
+        forwarded = true;
+        return parse(run);
+      },
+      forwardAuthorizer: async () => {
+        forwarded = true;
+        throw new Error('Disabled Run stop must not contact the Authorizer.');
+      },
+    });
+    const response = await app.inject({ method: 'POST', url: `/api/v1/runs/${runId}/stop` });
+    assert.equal(response.statusCode, 503);
+    assert.equal(response.json().error.code, 'execution_disabled');
+    assert.equal(forwarded, false);
     await app.close();
   });
 });

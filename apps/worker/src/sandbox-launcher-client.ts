@@ -17,6 +17,14 @@ const ResponseSchema = z.discriminatedUnion('ok', [
     ]),
   }),
 ]);
+const HealthResponseSchema = z
+  .object({
+    status: z.literal('ok'),
+    product: z.literal('Omnis OS'),
+    service: z.literal('sandbox-launcher'),
+    synthetic: z.literal(true),
+  })
+  .strict();
 
 export interface MockSandboxLauncherClient {
   execute(input: {
@@ -34,6 +42,35 @@ export class UnixMockSandboxLauncherClient implements MockSandboxLauncherClient 
     this.socketPath = socketPath;
     if (!socketPath.startsWith('/'))
       throw new Error('Sandbox launcher socket path must be absolute.');
+  }
+
+  health(): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      let data = '';
+      const req = request(
+        { socketPath: this.socketPath, path: '/health', method: 'GET' },
+        (response) => {
+          response.setEncoding('utf8');
+          response.on('data', (chunk: string) => {
+            data += chunk;
+            if (data.length > 4096) req.destroy(new Error('launcher_health_too_large'));
+          });
+          response.once('end', () => {
+            try {
+              resolve(
+                response.statusCode === 200 &&
+                  HealthResponseSchema.safeParse(JSON.parse(data)).success,
+              );
+            } catch {
+              resolve(false);
+            }
+          });
+        },
+      );
+      req.once('error', () => resolve(false));
+      req.setTimeout(2_000, () => req.destroy(new Error('launcher_health_timeout')));
+      req.end();
+    }).catch(() => false);
   }
 
   execute(input: {

@@ -15,6 +15,32 @@ const { authorizerRequest, AuthorizerRequestError } = await import('./authorizer
 const { env, validateAuthorizerSocket } = await import('./env.ts');
 
 describe('authorizer transport outcome handling', () => {
+  it('fails locally with explicit unavailable status when the restricted profile omits the Authorizer', async () => {
+    const original = {
+      restrictedDevelopment: env.restrictedDevelopment,
+      authorizerToken: env.authorizerToken,
+      authorizerSocket: env.authorizerSocket,
+    };
+    try {
+      env.restrictedDevelopment = true;
+      env.authorizerToken = undefined;
+      env.authorizerSocket = undefined;
+      await assert.rejects(
+        authorizerRequest('/internal/v1/authorizations', {}, (value) => value),
+        (error: unknown) => {
+          assert.ok(error instanceof AuthorizerRequestError);
+          assert.equal(error.statusCode, 503);
+          assert.equal(error.body.error.code, 'authorizer_unavailable');
+          return true;
+        },
+      );
+    } finally {
+      env.restrictedDevelopment = original.restrictedDevelopment;
+      env.authorizerToken = original.authorizerToken;
+      env.authorizerSocket = original.authorizerSocket;
+    }
+  });
+
   it('requires an explicit private authorizer socket and rejects unsafe paths', async () => {
     assert.throws(() => validateAuthorizerSocket(undefined), /must be configured/);
     assert.throws(() => validateAuthorizerSocket('relative/authorizer.sock'), /must be configured/);

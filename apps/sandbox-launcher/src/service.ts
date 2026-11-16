@@ -73,6 +73,7 @@ export function createSandboxLauncherApp(input: {
       return { ok: true, ...result };
     } catch (error) {
       const code = error instanceof SandboxError ? error.code : 'unavailable';
+      request.log.warn({ sandboxErrorCode: code }, 'Mock sandbox execution failed.');
       return reply.code(code === 'cancelled' ? 409 : 503).send({ ok: false, error: code });
     }
   });

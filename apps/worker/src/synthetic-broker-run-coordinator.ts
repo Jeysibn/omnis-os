@@ -33,6 +33,7 @@ const QueueJobSchema = z
       .regex(
         /^(?:run-[0-9]{4,}|[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i,
       ),
+    workerSessionId: z.string().uuid().optional(),
   })
   .strict();
 
@@ -45,6 +46,8 @@ export class SyntheticBrokerRunCoordinator {
   private readonly recoveryTimeoutMs: number;
   private readonly onProjectionError: (error: unknown) => void;
   private readonly workerId = randomUUID();
+  private readonly workerSessionId: string;
+  private readonly requireSessionFence: boolean;
 
   constructor(input: {
     store: PostgresRunStore;
@@ -53,6 +56,8 @@ export class SyntheticBrokerRunCoordinator {
     enqueue: EnqueueRun;
     publish: (events: DurableEvent[]) => void;
     recoveryTimeoutMs?: number;
+    workerSessionId?: string;
+    requireSessionFence?: boolean;
     onProjectionError?: (error: unknown) => void;
   }) {
     this.onProjectionError = input.onProjectionError ?? (() => undefined);
@@ -60,6 +65,8 @@ export class SyntheticBrokerRunCoordinator {
     this.profiles = input.profiles;
     this.broker = input.broker;
     this.enqueue = input.enqueue;
+    this.workerSessionId = input.workerSessionId ?? randomUUID();
+    this.requireSessionFence = input.requireSessionFence ?? true;
     this.publish = input.publish;
     // Exceeds the broker's 30-second lease plus the fake provider's delayed event fixture.
     this.recoveryTimeoutMs = input.recoveryTimeoutMs ?? 45_000;
@@ -103,9 +110,13 @@ export class SyntheticBrokerRunCoordinator {
     correlationId: string;
     binding: ConnectorAuthorizationRequest;
   }): Promise<{ run: Run; created: boolean }> {
+    const enqueue: EnqueueRun = (transaction, data) => {
+      const fencedData = { ...data, workerSessionId: this.workerSessionId };
+      return this.enqueue(transaction, fencedData);
+    };
     const result = await this.store.admitSyntheticBrokerRun(
       { ...input, runId: input.correlationId },
-      this.enqueue,
+      enqueue,
     );
     this.publish(result.events);
     return { run: result.run, created: result.created };
@@ -120,6 +131,14 @@ export class SyntheticBrokerRunCoordinator {
   async handleQueueJob(value: unknown, jobSignal?: AbortSignal): Promise<void> {
     const parsed = QueueJobSchema.safeParse(value);
     if (!parsed.success) throw new Error('The durable task job payload is invalid.');
+    if (this.requireSessionFence && parsed.data.workerSessionId !== this.workerSessionId) {
+      const interrupted = await this.store.interruptQueuedRun(
+        parsed.data.runId,
+        'The queued synthetic job belongs to a previous worker session. It was not replayed automatically.',
+      );
+      if (interrupted) this.publish(interrupted.events);
+      return;
+    }
     const link = await this.store.getSyntheticBrokerRun(parsed.data.runId);
     if (!link) throw new Error('The synthetic broker Run binding is unavailable.');
     const begun = await this.store.beginSyntheticBrokerRun(

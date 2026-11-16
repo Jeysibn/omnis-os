@@ -31,6 +31,7 @@ export class CoordinatorError extends Error {
     | 'project_archived'
     | 'concurrency_limit'
     | 'admission_busy'
+    | 'execution_disabled'
     | 'conflict'
     | 'invalid_cursor';
   readonly statusCode: 400 | 404 | 409 | 422 | 503;
@@ -43,6 +44,7 @@ export class CoordinatorError extends Error {
       | 'project_archived'
       | 'concurrency_limit'
       | 'admission_busy'
+      | 'execution_disabled'
       | 'conflict'
       | 'invalid_cursor',
     message: string,
@@ -54,7 +56,10 @@ export class CoordinatorError extends Error {
   }
 }
 
-const QueueRunSchema = z.object({ runId: z.string().regex(/^run-[0-9]{4,}$/) });
+const QueueRunSchema = z.object({
+  runId: z.string().regex(/^run-[0-9]{4,}$/),
+  workerSessionId: z.string().uuid().optional(),
+});
 export const queueName = z
   .string()
   .regex(/^[a-z][a-z0-9_-]{2,63}$/)
@@ -68,7 +73,10 @@ export class RunCoordinator {
   private readonly emitter = new EventEmitter();
   private readonly workerId = randomUUID();
   private readonly active = new Map<string, ActiveExecution>();
-  private readonly runtime: RuntimeAdapter;
+  private readonly runtime: RuntimeAdapter | undefined;
+  private readonly executionEnabled: boolean;
+  private readonly workerSessionId: string;
+  private readonly requireSessionFence: boolean;
   private readonly authorizations: RuntimeAuthorizationReader;
   private shuttingDown = false;
   private readonly store: PostgresRunStore;
@@ -84,14 +92,22 @@ export class RunCoordinator {
   constructor(
     store: PostgresRunStore,
     queue: RunCoordinator['queue'],
-    runtime: RuntimeAdapter,
+    runtime: RuntimeAdapter | undefined,
     authorizations: RuntimeAuthorizationReader,
     heartbeatIntervalMs = leaseHeartbeatMs,
+    options: {
+      executionEnabled?: boolean;
+      workerSessionId?: string;
+      requireSessionFence?: boolean;
+    } = {},
   ) {
     this.store = store;
     this.queue = queue;
     this.heartbeatIntervalMs = heartbeatIntervalMs;
     this.runtime = runtime;
+    this.executionEnabled = options.executionEnabled ?? false;
+    this.workerSessionId = options.workerSessionId ?? randomUUID();
+    this.requireSessionFence = options.requireSessionFence ?? true;
     this.authorizations = authorizations;
   }
 
@@ -148,6 +164,13 @@ export class RunCoordinator {
     idempotencyKey: string,
     authorizationId: string,
   ): Promise<{ run: Run; created: boolean }> {
+    if (!this.executionEnabled || !this.runtime) {
+      throw new CoordinatorError(
+        'execution_disabled',
+        'Execution is disabled in this worker configuration.',
+        503,
+      );
+    }
     const authorization = await this.authorizations.get(authorizationId);
     if (
       !authorization ||
@@ -172,7 +195,7 @@ export class RunCoordinator {
       );
     }
     if (
-      !evaluateAllowedUse(this.runtime.discoverCapabilities().allowedUse, 'interactive').allowed
+      !evaluateAllowedUse(this.runtime!.discoverCapabilities().allowedUse, 'interactive').allowed
     ) {
       throw new CoordinatorError(
         'invalid_transition',
@@ -184,13 +207,17 @@ export class RunCoordinator {
     try {
       result = await translateStoreError(() =>
         this.store.admitRun(taskId, idempotencyKey, authorizationId, (db, data) =>
-          this.queue.send(queueName, data, {
-            retryLimit: 0,
-            retryDelay: 0,
-            expireInSeconds: 60,
-            heartbeatSeconds: 10,
-            db,
-          }),
+          this.queue.send(
+            queueName,
+            { ...data, workerSessionId: this.workerSessionId },
+            {
+              retryLimit: 0,
+              retryDelay: 0,
+              expireInSeconds: 60,
+              heartbeatSeconds: 10,
+              db,
+            },
+          ),
         ),
       );
     } catch (error) {
@@ -244,6 +271,13 @@ export class RunCoordinator {
   }
 
   async stopRun(runId: string): Promise<Run> {
+    if (!this.executionEnabled || !this.runtime) {
+      throw new CoordinatorError(
+        'execution_disabled',
+        'Run stop is unavailable while execution is disabled.',
+        503,
+      );
+    }
     const result = await translateStoreError(() => this.store.requestStop(runId));
     this.publish(result.events);
     const active = this.active.get(runId);
@@ -254,8 +288,17 @@ export class RunCoordinator {
   async handleQueueJob(data: unknown, jobSignal?: AbortSignal): Promise<void> {
     const parsed = QueueRunSchema.safeParse(data);
     if (!parsed.success) throw new Error('The durable mock job payload is invalid.');
-    const { runId } = parsed.data;
+    const { runId, workerSessionId } = parsed.data;
     if (this.shuttingDown || this.active.has(runId)) return;
+    if (!this.executionEnabled) return;
+    if (this.requireSessionFence && workerSessionId !== this.workerSessionId) {
+      const interrupted = await this.store.interruptQueuedRun(
+        runId,
+        'The queued job belongs to a previous worker session. It was not replayed automatically.',
+      );
+      if (interrupted) this.publish(interrupted.events);
+      return;
+    }
 
     const controller = new AbortController();
     let claimWasLost = false;
@@ -294,7 +337,7 @@ export class RunCoordinator {
       }
     }
     this.publish(events);
-    if (this.runtime.cleanupOrphanedExecutions) {
+    if (this.runtime?.cleanupOrphanedExecutions) {
       await this.runtime.cleanupOrphanedExecutions((candidateRunIds) =>
         this.store.listActiveRunIds(candidateRunIds),
       );
@@ -316,6 +359,7 @@ export class RunCoordinator {
     controller: AbortController,
     claimWasLost: () => boolean,
   ): Promise<void> {
+    if (!this.executionEnabled || !this.runtime) return;
     const queued = await this.store.getRun(runId);
     if (!queued) throw new CoordinatorError('not_found', 'Run was not found.', 404);
     const authorization = await this.authorizations.getForRun(runId);

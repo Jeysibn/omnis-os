@@ -1,14 +1,15 @@
 import Fastify from 'fastify';
+import { z } from 'zod';
 import {
   AuthorizationSchema,
   AuthorizationDecisionSchema,
   CreateAuthorizationSchema,
-  CreateRunSchema,
 } from '@omnis/contracts';
 import { syntheticTaskRunTestMode } from '@omnis/contracts/synthetic-task-run';
 import {
   isOwnerPasswordValid,
   requireMutationProtection,
+  requireAuthorizerFeature,
   requireOwner,
   verifyOrigin,
   verifyCsrf,
@@ -31,6 +32,7 @@ import { registerTaskRoutes } from './task-routes.ts';
 import { registerConnectorAuthorizationRoutes } from './connector-authorization-routes.ts';
 import { registerSyntheticTaskRunRoutes } from './synthetic-task-run-routes.ts';
 import { registerRuntimeCapabilityRoutes } from './runtime-capability-routes.ts';
+import { registerRunAdmissionRoute } from './run-admission-route.ts';
 import { registerRunStopRoute } from './run-stop-route.ts';
 import {
   parseRun,
@@ -38,13 +40,35 @@ import {
   workerEventStream,
   workerRequest,
   WorkerRequestError,
+  parseWorkerExecutionStatus,
 } from './worker-client.ts';
 
 const app = Fastify({
   trustProxy: false,
   logger: { redact: ['req.headers.cookie', 'res.headers.set-cookie', 'req.headers.x-omnis-csrf'] },
 });
-const syntheticBrokerTestMode = syntheticTaskRunTestMode(process.env);
+const apiExecutionMode = env.executionMode;
+const syntheticBrokerTestMode =
+  apiExecutionMode === 'mock' && syntheticTaskRunTestMode(process.env);
+const AuthorizerHealthSchema = z
+  .object({
+    status: z.literal('ok'),
+    product: z.literal('Omnis OS'),
+    service: z.literal('authorizer'),
+  })
+  .strict();
+
+async function checkAuthorizerAvailability(): Promise<boolean> {
+  if (env.restrictedDevelopment) return false;
+  try {
+    await authorizerRequest('/internal/v1/health', {}, (value) =>
+      AuthorizerHealthSchema.parse(value),
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
 // Memory-backed sessions are limited to this single-owner local mock gate. Durable session storage is a later gate.
 const sessions = new LocalSessionStore(
   env.sessionSecret,
@@ -73,7 +97,7 @@ app.addHook('onRequest', async (request, reply) => {
 app.get('/api/v1/health', async () => ({
   status: 'ok',
   product: 'Omnis OS',
-  runtimeMode: 'mock-only',
+  service: 'api',
 }));
 app.get('/api/v1/auth/csrf', async (request) => {
   return { csrfToken: request.omnisSession?.csrfToken ?? '' };
@@ -128,7 +152,7 @@ app.post(
 );
 app.get<{ Params: { authorizationId: string } }>(
   '/api/v1/authorizations/:authorizationId',
-  { preHandler: requireOwner },
+  { preHandler: [requireOwner, requireAuthorizerFeature] },
   async (request, reply) => {
     if (!/^[0-9a-f-]{36}$/i.test(request.params.authorizationId)) {
       return reply
@@ -144,7 +168,7 @@ app.get<{ Params: { authorizationId: string } }>(
 );
 app.post(
   '/api/v1/authorizations',
-  { preHandler: [requireOwner, requireMutationProtection] },
+  { preHandler: [requireOwner, requireMutationProtection, requireAuthorizerFeature] },
   async (request, reply) => {
     const parsed = CreateAuthorizationSchema.safeParse(request.body);
     const idempotencyKey = request.headers['idempotency-key'];
@@ -173,7 +197,7 @@ app.post(
 );
 app.post<{ Params: { authorizationId: string } }>(
   '/api/v1/authorizations/:authorizationId/decision',
-  { preHandler: [requireOwner, requireMutationProtection] },
+  { preHandler: [requireOwner, requireMutationProtection, requireAuthorizerFeature] },
   async (request, reply) => {
     const parsed = AuthorizationDecisionSchema.safeParse(request.body);
     if (!parsed.success || !/^[0-9a-f-]{36}$/i.test(request.params.authorizationId))
@@ -193,7 +217,7 @@ app.post<{ Params: { authorizationId: string } }>(
 );
 app.post<{ Params: { authorizationId: string } }>(
   '/api/v1/authorizations/:authorizationId/revoke',
-  { preHandler: [requireOwner, requireMutationProtection] },
+  { preHandler: [requireOwner, requireMutationProtection, requireAuthorizerFeature] },
   async (request, reply) => {
     if (!/^[0-9a-f-]{36}$/i.test(request.params.authorizationId))
       return reply
@@ -226,7 +250,11 @@ registerTaskRoutes(app, workerRequest, authorizerRequest);
 registerConnectorAuthorizationRoutes(app, { requireOwner, requireMutationProtection });
 registerRuntimeCapabilityRoutes(app, {
   requireOwner,
+  configuredMode: apiExecutionMode,
   syntheticConnectorEnabled: syntheticBrokerTestMode,
+  getWorkerStatus: () =>
+    workerRequest('/internal/v1/runtime-capabilities', {}, parseWorkerExecutionStatus),
+  checkAuthorizationDependency: checkAuthorizerAvailability,
 });
 registerSyntheticTaskRunRoutes(app, {
   requireOwner,
@@ -236,37 +264,14 @@ registerSyntheticTaskRunRoutes(app, {
 app.get('/api/v1/runs', { preHandler: requireOwner }, async () =>
   workerRequest('/internal/v1/runs', {}, parseRunList),
 );
-app.post(
-  '/api/v1/runs',
-  { preHandler: [requireOwner, requireMutationProtection] },
-  async (request, reply) => {
-    const parsed = CreateRunSchema.safeParse(request.body);
-    const idempotencyKey = request.headers['idempotency-key'];
-    if (
-      !parsed.success ||
-      typeof idempotencyKey !== 'string' ||
-      idempotencyKey.length < 16 ||
-      idempotencyKey.length > 128
-    ) {
-      return reply.code(400).send({
-        error: {
-          code: 'invalid_input',
-          message: 'A task and valid Idempotency-Key are required.',
-        },
-      });
-    }
-    const run = await workerRequest(
-      '/internal/v1/runs',
-      {
-        method: 'POST',
-        headers: { 'idempotency-key': idempotencyKey },
-        body: JSON.stringify(parsed.data),
-      },
-      parseRun,
-    );
-    return reply.code(run.status === 'queued' ? 201 : 200).send(run);
-  },
-);
+registerRunAdmissionRoute(app, {
+  requireOwner,
+  requireMutationProtection,
+  executionMode: apiExecutionMode,
+  authorizationAvailable: checkAuthorizerAvailability,
+  workerRequest,
+  parseRun,
+});
 app.get<{ Params: { runId: string } }>(
   '/api/v1/runs/:runId',
   { preHandler: requireOwner },
@@ -277,6 +282,7 @@ registerRunStopRoute(app, {
   requireOwner,
   requireMutationProtection,
   syntheticBrokerEnabled: syntheticBrokerTestMode,
+  executionMode: apiExecutionMode,
 });
 registerRunEventsRoute(app, {
   sessions,

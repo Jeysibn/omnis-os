@@ -4,6 +4,7 @@ import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type Page, type Route } from '@playwright/test';
 import { RunEventSchema, RunSchema, type RunEvent } from '@omnis/contracts';
 import { MAX_STREAM_FAILURES } from './runStreamRecovery.js';
+import { capabilityFixtureJson } from './capability.fixture.js';
 
 /**
  * Run event stream versus owner session (PR #87 ends streams when a session is revoked).
@@ -138,6 +139,8 @@ function mockApi(page: Page, streamUrl: () => string) {
         return fail(route, 503, 'run_unavailable', 'Run is temporarily unavailable.');
       return route.fulfill({ json: run });
     }
+    if (path === '/api/v1/runtime-capabilities' && method === 'GET')
+      return route.fulfill({ json: capabilityFixtureJson() });
     unexpected.push(`${method} ${path}`);
     return fail(route, 500, 'fixture_contract_violation', `Unexpected API request: ${path}`);
   });
