@@ -297,6 +297,7 @@ describe('restricted database target preflight', () => {
       /CREATE ROLE omnis_launcher WITH NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS/,
     );
     assert.doesNotMatch(sql, /ALTER ROLE omnis_(?:authorizer|launcher)/);
+    assert.match(sql, /REVOKE EXECUTE ON FUNCTION pg_catalog\.pg_control_system\(\) FROM PUBLIC/);
     assert.match(
       sql,
       /GRANT EXECUTE ON FUNCTION pg_catalog\.pg_control_system\(\) TO omnis_migrator/,

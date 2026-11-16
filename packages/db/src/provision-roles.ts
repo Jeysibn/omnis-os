@@ -231,6 +231,7 @@ async function provisionRolesForTarget(
   await admin.query('CREATE SCHEMA IF NOT EXISTS pgboss AUTHORIZATION omnis_migrator');
   await admin.query('ALTER SCHEMA pgboss OWNER TO omnis_migrator');
   if (expectedDatabaseName !== undefined) {
+    await admin.query('REVOKE EXECUTE ON FUNCTION pg_catalog.pg_control_system() FROM PUBLIC');
     await admin.query('GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO omnis_migrator');
   }
 
