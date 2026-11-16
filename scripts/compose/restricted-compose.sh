@@ -6,11 +6,13 @@ fail() {
   exit 2
 }
 
-[[ $# -ge 5 ]] || fail
-compose_env_file=$1
-api_env_file=$2
-worker_env_file=$3
-shift 3
+[[ $# -ge 7 ]] || fail
+docker_context=$1
+docker_endpoint=$2
+compose_env_file=$3
+api_env_file=$4
+worker_env_file=$5
+shift 5
 [[ -f "$compose_env_file" && -f "$api_env_file" && -f "$worker_env_file" ]] || fail
 
 case "$*" in
@@ -24,6 +26,8 @@ node scripts/compose/verify-restricted-env.mjs \
   --api-env "$api_env_file" \
   --worker-env "$worker_env_file"
 
+bash scripts/compose/verify-docker-context.sh "$docker_context" "$docker_endpoint" || fail
+
 # Exported shell variables override --env-file interpolation. Remove all
 # Omnis and Compose controls so the validated file and fixed CLI options win.
 while IFS= read -r name; do
@@ -32,7 +36,7 @@ while IFS= read -r name; do
   esac
 done < <(compgen -e)
 
-exec docker compose --project-name omnis-os-restricted-dev \
+exec docker --context "$docker_context" compose --project-name omnis-os-restricted-dev \
   --env-file "$compose_env_file" \
   -f infra/compose/docker-compose.yml \
   -f infra/compose/docker-compose.app.yml \

@@ -192,11 +192,19 @@ try {
 
   const fakeDocker = join(directory, 'docker');
   const fakeDockerCapture = join(directory, 'docker-capture.json');
+  const fakeContextCapture = join(directory, 'docker-context-capture.json');
   writeFileSync(
     fakeDocker,
     [
       '#!/usr/bin/env node',
-      "require('node:fs').writeFileSync(process.env.VERIFY_DOCKER_CAPTURE_FILE, JSON.stringify({ args: process.argv.slice(2), keys: Object.keys(process.env) }));",
+      "const fs = require('node:fs');",
+      'const args = process.argv.slice(2);',
+      "if (args[0] === 'context' && args[1] === 'inspect') {",
+      "  fs.writeFileSync(process.env.VERIFY_DOCKER_CONTEXT_CAPTURE_FILE, JSON.stringify({ context: args.at(-1), endpoint: process.env.VERIFY_DOCKER_ENDPOINT || 'unix:///var/run/docker.sock' }));",
+      "  process.stdout.write(process.env.VERIFY_DOCKER_ENDPOINT || 'unix:///var/run/docker.sock');",
+      '} else {',
+      "  fs.writeFileSync(process.env.VERIFY_DOCKER_CAPTURE_FILE, JSON.stringify({ args, keys: Object.keys(process.env), contextInspection: JSON.parse(fs.readFileSync(process.env.VERIFY_DOCKER_CONTEXT_CAPTURE_FILE, 'utf8')) }));",
+      '}',
     ].join('\n'),
     { mode: 0o700 },
   );
@@ -205,6 +213,7 @@ try {
     ...process.env,
     PATH: `${directory}:${process.env.PATH ?? ''}`,
     VERIFY_DOCKER_CAPTURE_FILE: fakeDockerCapture,
+    VERIFY_DOCKER_CONTEXT_CAPTURE_FILE: fakeContextCapture,
     OMNIS_RESTRICTED_DB_NAME: 'omnis_wrong_project',
     OMNIS_RESTRICTED_API_ENV_FILE: overrideApiEnv,
     OMNIS_RESTRICTED_WORKER_ENV_FILE: overrideWorkerEnv,
@@ -216,6 +225,8 @@ try {
     'bash',
     [
       'scripts/compose/restricted-compose.sh',
+      'default',
+      'unix:///var/run/docker.sock',
       restrictedComposeEnv,
       restrictedApiEnv,
       restrictedWorkerEnv,
@@ -225,7 +236,13 @@ try {
     { encoding: 'utf8', env: fakeDockerEnvironment },
   );
   const wrapperCapture = JSON.parse(readFileSync(fakeDockerCapture, 'utf8'));
+  assert.deepEqual(wrapperCapture.contextInspection, {
+    context: 'default',
+    endpoint: 'unix:///var/run/docker.sock',
+  });
   assert.deepEqual(wrapperCapture.args, [
+    '--context',
+    'default',
     'compose',
     '--project-name',
     'omnis-os-restricted-dev',
@@ -250,6 +267,8 @@ try {
     'bash',
     [
       'scripts/compose/restricted-compose.sh',
+      'default',
+      'unix:///var/run/docker.sock',
       restrictedComposeEnv,
       restrictedApiEnv,
       restrictedWorkerEnv,
@@ -268,6 +287,76 @@ try {
   );
   assert.ok(!wrapperInjection.stdout.includes('omnis_wrong_project'));
   assert.ok(!wrapperInjection.stderr.includes('omnis_wrong_project'));
+
+  const wrapperContextMismatch = spawnSync(
+    'bash',
+    [
+      'scripts/compose/restricted-compose.sh',
+      'default',
+      'unix:///tmp/other-docker.sock',
+      restrictedComposeEnv,
+      restrictedApiEnv,
+      restrictedWorkerEnv,
+      'config',
+      '--quiet',
+    ],
+    { encoding: 'utf8', env: fakeDockerEnvironment },
+  );
+  assert.notEqual(wrapperContextMismatch.status, 0);
+  assert.equal(
+    existsSync(fakeDockerCapture),
+    false,
+    'endpoint mismatch must stop before Compose is invoked',
+  );
+  assert.ok(!wrapperContextMismatch.stdout.includes('omnis_wrong_project'));
+  assert.ok(!wrapperContextMismatch.stderr.includes('omnis_wrong_project'));
+
+  for (const selector of ['DOCKER_HOST', 'DOCKER_CONTEXT']) {
+    const wrapperAmbiguousDockerTarget = spawnSync(
+      'bash',
+      [
+        'scripts/compose/restricted-compose.sh',
+        'default',
+        'unix:///var/run/docker.sock',
+        restrictedComposeEnv,
+        restrictedApiEnv,
+        restrictedWorkerEnv,
+        'config',
+        '--quiet',
+      ],
+      {
+        encoding: 'utf8',
+        env: { ...fakeDockerEnvironment, [selector]: 'remote' },
+      },
+    );
+    assert.notEqual(wrapperAmbiguousDockerTarget.status, 0);
+    assert.equal(
+      existsSync(fakeDockerCapture),
+      false,
+      `${selector} override must stop before Compose is invoked`,
+    );
+  }
+
+  const wrapperRemoteEndpoint = spawnSync(
+    'bash',
+    [
+      'scripts/compose/restricted-compose.sh',
+      'default',
+      'tcp://remote.example.invalid:2375',
+      restrictedComposeEnv,
+      restrictedApiEnv,
+      restrictedWorkerEnv,
+      'config',
+      '--quiet',
+    ],
+    { encoding: 'utf8', env: fakeDockerEnvironment },
+  );
+  assert.notEqual(wrapperRemoteEndpoint.status, 0);
+  assert.equal(
+    existsSync(fakeDockerCapture),
+    false,
+    'non-local Docker endpoints must stop before Compose is invoked',
+  );
 
   for (const invalidEnvCase of [
     { service: 'api', name: 'OPENAI_API_KEY', value: 'provider-sentinel' },

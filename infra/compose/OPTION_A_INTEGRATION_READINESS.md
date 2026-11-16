@@ -88,6 +88,10 @@ Use only these files, in this order, and the exact project name:
 : "${OMNIS_RESTRICTED_COMPOSE_ENV:?Set the owner-approved restricted Compose env-file path}"
 : "${OMNIS_RESTRICTED_API_ENV_FILE:?Set the owner-approved restricted API env-file path}"
 : "${OMNIS_RESTRICTED_WORKER_ENV_FILE:?Set the owner-approved restricted Worker env-file path}"
+: "${OMNIS_EXPECTED_DOCKER_CONTEXT:?Set the owner-verified Docker context name}"
+: "${OMNIS_EXPECTED_DOCKER_ENDPOINT:?Set the exact owner-verified local Unix socket endpoint}"
+# These values must come from owner-reviewed local Docker CLI context metadata.
+# The wrapper repeats the endpoint comparison immediately before Compose.
 node scripts/compose/verify-restricted-env.mjs \
   --compose-env "$OMNIS_RESTRICTED_COMPOSE_ENV" \
   --api-env "$OMNIS_RESTRICTED_API_ENV_FILE" \
@@ -96,16 +100,18 @@ restricted_compose_env_file=$OMNIS_RESTRICTED_COMPOSE_ENV
 restricted_api_env_file=$OMNIS_RESTRICTED_API_ENV_FILE
 restricted_worker_env_file=$OMNIS_RESTRICTED_WORKER_ENV_FILE
 scripts/compose/restricted-compose.sh \
+  "$OMNIS_EXPECTED_DOCKER_CONTEXT" "$OMNIS_EXPECTED_DOCKER_ENDPOINT" \
   "$restricted_compose_env_file" "$restricted_api_env_file" "$restricted_worker_env_file" \
   config --quiet
 ```
 
-Use `scripts/compose/restricted-compose.sh` for every restricted Compose command below. Pass the exact Compose, API, and Worker env-file paths each time; the wrapper reruns the value-free allowlist preflight immediately before every Compose invocation, clears exported `OMNIS_*` and `COMPOSE_*` variables, fixes the explicit project name and exact file list, and rejects every command/argument sequence outside the documented allowlist. The explicit project name remains an additional safeguard. The verifier tests the wrapper with a stub `docker` executable and confirms hostile flags are rejected before any Docker invocation. The wrapper does not choose or verify the Docker daemon: it inherits `DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_CONFIG`, and active Docker CLI context selection. Immediately before each separately authorized invocation, in the same shell, the owner must read-only verify and record those values, the active context, and its endpoint, and confirm they identify the intended local WSL2 Docker Engine. If any value or context can change between verification and invocation, stop and reverify; no remote or Windows host is authorized by this plan. Expected: configuration validation exits successfully, with no output containing secrets. The mock and CI overlays are excluded. Before proceeding, owner-authorized resource inventory must confirm that the exact project, volume, database name, and loopback ports do not select or conflict with existing workloads.
+Use `scripts/compose/restricted-compose.sh` for every restricted Compose command below. Before assigning the two expected-Docker variables, review `DOCKER_CONFIG`, confirm `DOCKER_HOST` and `DOCKER_CONTEXT` are unset, and inspect the selected context name and its `Endpoints.docker.Host` from local CLI metadata. Supply only the exact owner-approved context and local Unix-socket endpoint. Pass those values and the Compose/API/Worker env-file paths each time. The wrapper reruns the value-free allowlist preflight, checks that the named local context metadata resolves to the expected endpoint, rejects non-empty `DOCKER_HOST` and `DOCKER_CONTEXT`, clears exported `OMNIS_*` and `COMPOSE_*`, fixes the Docker context, explicit project name, and exact Compose file list, then rejects commands outside the documented allowlist. Context inspection reads local Docker CLI metadata and does not connect to the daemon; this check does not prove daemon provenance or WSL/Windows ingress behavior. Verify daemon identity separately before any lifecycle operation. The verifier tests endpoint mismatch and Docker selector overrides with a stub CLI and confirms Compose is not invoked. The mock and CI overlays are excluded. Before proceeding, owner-authorized resource inventory must confirm that the exact project, volume, database name, and loopback ports do not select or conflict with existing workloads.
 
 After separate database and image-build authorizations, the proposed sequence is:
 
 ```sh
 scripts/compose/restricted-compose.sh \
+  "$OMNIS_EXPECTED_DOCKER_CONTEXT" "$OMNIS_EXPECTED_DOCKER_ENDPOINT" \
   "$restricted_compose_env_file" "$restricted_api_env_file" "$restricted_worker_env_file" \
   up --no-build --pull never -d postgres
 
@@ -124,11 +130,13 @@ OMNIS_MIGRATION_DATABASE_URL="$OMNIS_RESTRICTED_MIGRATION_DATABASE_URL" \
 
 # Image builds require separate authorization and may use registries.
 scripts/compose/restricted-compose.sh \
+  "$OMNIS_EXPECTED_DOCKER_CONTEXT" "$OMNIS_EXPECTED_DOCKER_ENDPOINT" \
   "$restricted_compose_env_file" "$restricted_api_env_file" "$restricted_worker_env_file" \
   build api worker web
 
 # Start only after all backend, database, and owner gates above pass.
 scripts/compose/restricted-compose.sh \
+  "$OMNIS_EXPECTED_DOCKER_CONTEXT" "$OMNIS_EXPECTED_DOCKER_ENDPOINT" \
   "$restricted_compose_env_file" "$restricted_api_env_file" "$restricted_worker_env_file" \
   up --no-build --pull never -d api worker web
 ```
@@ -139,7 +147,7 @@ Expected verification, after startup is separately authorized:
 
 | Area | Evidence and expected result |
 | --- | --- |
-| Infrastructure | `scripts/compose/restricted-compose.sh "$restricted_compose_env_file" "$restricted_api_env_file" "$restricted_worker_env_file" ps --all` lists only `postgres`, `api`, `worker`, `web` under the exact project. Separately inventory daemon-managed sandbox workloads only by an independently verified database-derived scope and exact fixture IDs. API and Worker are UID/GID `10001:10001`; verify PostgreSQL process identity against the pinned image and actual runtime. No Authorizer, launcher, socket bind, Docker socket, unexpected mount, public port, or external resource exists in the restricted model. |
+| Infrastructure | `scripts/compose/restricted-compose.sh "$OMNIS_EXPECTED_DOCKER_CONTEXT" "$OMNIS_EXPECTED_DOCKER_ENDPOINT" "$restricted_compose_env_file" "$restricted_api_env_file" "$restricted_worker_env_file" ps --all` lists only `postgres`, `api`, `worker`, `web` under the exact project. Separately inventory daemon-managed sandbox workloads only by an independently verified database-derived scope and exact fixture IDs. API and Worker are UID/GID `10001:10001`; verify PostgreSQL process identity against the pinned image and actual runtime. No Authorizer, launcher, socket bind, Docker socket, unexpected mount, public port, or external resource exists in the restricted model. |
 | Database | PostgreSQL readiness succeeds for `omnis_restricted_dev`; role and migration connections report the exact database and intended role. Existing project volumes remain untouched. |
 | Backend | API starts without usable Authorizer environment/socket dependencies under the exact backend contract. Worker reports disabled and healthy. No queue consumer, queue recovery, launcher client, or automatic Run replay starts. API and Worker capability fields match the reviewed contract; liveness alone is insufficient. |
 | Frontend | Owner login succeeds. Only contract-permitted read-only/history features work. UI visibly reports execution disabled. Approval and Run controls are blocked, and no response or UI state implies a successful execution. |
@@ -160,7 +168,7 @@ Capture only bounded, sanitized logs, non-secret capability fields, service iden
 | Restricted default project identity | Top-level overlay name added and statically checked with no `-p`; wrong `-p` and `COMPOSE_PROJECT_NAME` are rejected by verifier assertions |
 | PostgreSQL numeric resource limits | Not selected in source; owner must approve bounded CPU/memory/PID values before startup |
 | Independent platform/security review | Prior Compose snapshot `bce82513b683c285bb64e5873fbcd0eefd367725ddce02d0d702e5dc6fc59124` was approved for owner source review; each later snapshot requires its own exact-revision review, recorded in the corresponding milestone report |
-| Docker daemon selection | `DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_CONFIG`, and active context are not inspected or pinned by this source-only work; owner must verify them and the endpoint in the same shell immediately before each separately authorized wrapper invocation |
+| Docker daemon selection | Wrapper rejects non-empty `DOCKER_HOST`/`DOCKER_CONTEXT`, compares the named context's local endpoint metadata with the owner-supplied Unix socket, and passes that context explicitly. `DOCKER_CONFIG` and runtime daemon provenance remain owner-verified; local metadata comparison is not runtime identity evidence. |
 | Image builds, registry access, DB provisioning/migration, startup/shutdown | Require separate scoped owner authorization |
 | Owner login, read-only UI, API/Worker runtime mode agreement, loopback behavior | Require future runtime verification after authorization |
 | Stage B, Mission 9D, Stage C/D, provider use, deployment | Excluded; separately gated; R1 remains blocked |
