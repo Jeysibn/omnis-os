@@ -1,9 +1,11 @@
 # Phase 1 (R1) Completion Matrix
 
-**Assessment date:** 2026-11-14
+**Historical AO assessment date:** 2026-11-14
 
-**Implementation baseline:** `3d37b9f0b645e86963b6174de0e3c7ff2771dbcf` (PRs #114, #110, and #116 merged).
-**Current main:** `9017a34d2e5f06fb0e2eb4559949f186f97495ef` (PRs #117 and #118 changed this matrix only; implementation source remains at the baseline above).
+**Historical implementation baseline:** `3d37b9f0b645e86963b6174de0e3c7ff2771dbcf` (PRs #114, #110, and #116 merged).
+**Current main at latest security reconciliation:** `5f8094cb07c2300d9d1d820e07ffee265ca18728` (PR #125; PR #126 is included in its history).
+
+> **Assessment scope:** The AO-101–AO-113 rows below remain the historical assessment at `3d37b9f0b645e86963b6174de0e3c7ff2771dbcf`; they have not been fully reassessed against current main. For current Docker-only runtime decisions, R1 security blockers, and Codex #3 restricted-bootstrap review status, use the [Phase 1 security owner decision package](./PHASE1_SECURITY_OWNER_DECISION_PACKAGE.md). PR #124's owner journey is synthetic disposable-CI evidence, not target WSL2 acceptance.
 
 **CI evidence:** PR #110 exact reviewed head passed all ten Ready-for-Review jobs in [43481350456](https://github.com/Jeysibn/omnis-os/actions/runs/43481350456); its post-merge main at `c8a168bfd12801f8b5ab374af2d79d91ea4bfee5` passed all ten jobs in [43483785571](https://github.com/Jeysibn/omnis-os/actions/runs/43483785571). PR #116 exact head passed all ten Ready-for-Review jobs in [43485619671](https://github.com/Jeysibn/omnis-os/actions/runs/43485619671); post-merge main at `3d37b9f0b645e86963b6174de0e3c7ff2771dbcf` passed all ten jobs in [43487487274](https://github.com/Jeysibn/omnis-os/actions/runs/43487487274). PR #117 exact head passed all ten jobs in [43490252088](https://github.com/Jeysibn/omnis-os/actions/runs/43490252088); post-merge main at `bc351f8020d339415c7ef1415e063cf214037244` passed all ten jobs in [43492706495](https://github.com/Jeysibn/omnis-os/actions/runs/43492706495). PR #118 exact head `3a920fbcc62dd9bcfffdaccb769739cd15ae9529` passed all ten Ready-for-Review jobs in [43495550189](https://github.com/Jeysibn/omnis-os/actions/runs/43495550189); its post-merge main `9017a34d2e5f06fb0e2eb4559949f186f97495ef` passed all ten jobs in [43497983105](https://github.com/Jeysibn/omnis-os/actions/runs/43497983105). Earlier #114/#115 main runs [43478834756](https://github.com/Jeysibn/omnis-os/actions/runs/43478834756) and [43339848847](https://github.com/Jeysibn/omnis-os/actions/runs/43339848847) also passed their required jobs.
 
