@@ -1,4 +1,4 @@
-import { chmodSync, lstatSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, fchmodSync, openSync, unlinkSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { createPool } from './database.ts';
@@ -42,6 +42,7 @@ async function main(): Promise<void> {
   let bootstrapPath: string | undefined;
   let workerPath: string | undefined;
   let migrationPath: string | undefined;
+  const createdCredentialFiles: string[] = [];
   try {
     const identity = await rootAdmin.query<{
       current_user: string;
@@ -96,8 +97,13 @@ async function main(): Promise<void> {
         `OMNIS_RESTRICTED_MIGRATOR_PASSWORD=${migratorPassword}`,
         `OMNIS_RESTRICTED_RUNTIME_PASSWORD=${runtimePassword}`,
       ].join('\n') + '\n',
+      createdCredentialFiles,
     );
-    writePrivateFile(workerPath, `OMNIS_RUNTIME_DB_PASSWORD=${runtimePassword}\n`);
+    writePrivateFile(
+      workerPath,
+      `OMNIS_RUNTIME_DB_PASSWORD=${runtimePassword}\n`,
+      createdCredentialFiles,
+    );
     writePrivateFile(
       migrationPath,
       [
@@ -108,6 +114,7 @@ async function main(): Promise<void> {
         `OMNIS_RESTRICTED_PG_SYSTEM_IDENTIFIER=${systemIdentifier}`,
         `OMNIS_RESTRICTED_MIGRATION_DATABASE_URL=${databaseUrl('omnis_migrator', migratorPassword, DATABASE_NAME)}`,
       ].join('\n') + '\n',
+      createdCredentialFiles,
     );
 
     runRestrictedCli(
@@ -128,9 +135,10 @@ async function main(): Promise<void> {
       'Restricted bootstrap CI fixture passed target, role-isolation, and migration verification.\n',
     );
   } finally {
-    await rootAdmin.end();
-    for (const filePath of [bootstrapPath, workerPath, migrationPath]) {
-      if (filePath) unlinkSync(filePath);
+    try {
+      await rootAdmin.end();
+    } finally {
+      for (const filePath of createdCredentialFiles) unlinkSync(filePath);
     }
   }
 }
@@ -377,20 +385,15 @@ function databaseUrl(role: string, password: string, database: string): string {
   return `postgresql://${role}:${encodeURIComponent(password)}@127.0.0.1:5432/${database}`;
 }
 
-function writePrivateFile(filePath: string, contents: string): void {
+function writePrivateFile(filePath: string, contents: string, createdFiles: string[]): void {
+  const descriptor = openSync(filePath, 'wx', 0o600);
+  createdFiles.push(filePath);
   try {
-    lstatSync(filePath);
-    throw new Error('Restricted CI credential path already exists.');
-  } catch (error) {
-    if (
-      error instanceof Error &&
-      error.message === 'Restricted CI credential path already exists.'
-    ) {
-      throw error;
-    }
+    writeFileSync(descriptor, contents);
+    fchmodSync(descriptor, 0o600);
+  } finally {
+    closeSync(descriptor);
   }
-  writeFileSync(filePath, contents, { flag: 'wx', mode: 0o600 });
-  chmodSync(filePath, 0o600);
 }
 
 function required(name: string): string {
