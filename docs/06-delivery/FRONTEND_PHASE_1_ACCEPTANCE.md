@@ -11,8 +11,12 @@ The OMNIS NEXUS V2 specification was absent from the reviewed commit; only
 ## 1. Session-lifecycle design
 
 `sessionScope.ts` holds a synchronously bumped generation counter (`rotateSession` on boot,
-sign-in, sign-out and expiry). Every asynchronous operation captures the generation when it is
-dispatched and re-checks it before **every** side effect: success, failure and `finally`.
+sign-in, sign-out and expiry). Owner-session operations that send requests, write shared state,
+write storage, change the URL hash or call parent callbacks capture the generation (directly, or via
+the session context or `useMountedInSession`) when dispatched and re-check it before every such
+side effect: success, failure and `finally`. The deliberate exception is the set of abort-only read
+effects (see "Abort-only read effects" below), which rely on an abort signal or a local `active`
+flag and can only write state into a component instance that is being unmounted.
 
 Rules applied everywhere:
 
@@ -25,26 +29,26 @@ Rules applied everywhere:
 
 ## 2. Authenticated request coverage matrix
 
-| Request / path                       | Session captured at     | Stale success                  | Stale failure / 401        | Cleanup guarded | Regression test                                       |
-| ------------------------------------ | ----------------------- | ------------------------------ | -------------------------- | --------------- | ----------------------------------------------------- |
-| `GET /me` (boot)                     | boot (once, StrictMode) | ignored                        | ignored                    | yes             | StrictMode boot test; see note A                      |
-| `GET /me` (sign-in)                  | after login rotation    | ignored                        | ignored                    | yes             | sign-in tests; see note A                             |
-| `GET /auth/csrf`                     | dispatch                | token not stored               | no error state, no clear   | yes             | see note A                                            |
-| `POST /auth/login`                   | dispatch                | n/a                            | shown only if live         | yes             | login / expiry tests                                  |
-| `POST /auth/logout`                  | dispatch                | cannot clear replacement       | cannot expire replacement  | yes             | stale logout (ok, 401)                                |
-| `GET /tasks`, `/runs`, `/projects`   | dispatch                | not applied                    | cannot expire replacement  | yes             | stale Tasks / Runs / Projects tests                   |
-| quiet task refresh, 409 refresh      | dispatch (+ sequence)   | not applied                    | cannot expire replacement  | yes             | refresh-held-across-session test                      |
-| `GET /runs/:id` (reconcile, probe)   | dispatch / abort signal | not applied                    | cannot expire replacement  | yes             | stream-session and reconcile tests                    |
-| `POST /tasks`                        | dispatch                | not applied                    | not shown                  | yes             | old-operation busy-state test                         |
-| `POST synthetic-runs`                | dispatch                | not admitted into new session  | not shown                  | yes             | stale synthetic Run test                              |
-| `PUT execution-assignment`           | dispatch                | not applied                    | not shown                  | yes             | stale assignment test                                 |
-| `GET runtime-capabilities`           | per request + session   | superseded result fails closed | cannot expire replacement  | yes             | capability ordering tests (A–E)                       |
-| Run SSE messages / `onerror`         | stream open             | ignored                        | ignored                    | n/a             | stream revocation / reconnect tests; see note B       |
-| Stop, approve, revoke, accept        | dispatch                | not applied                    | not shown                  | yes             | revoke: stale-revoke test; others existing tests      |
-| Agent create / archive               | dispatch (context)      | not applied, storage kept      | not applied                | n/a             | create: stale-create test; archive: guarded, untested |
-| Planning writers (`useWriter`)       | dispatch (context)      | distinct `stale` outcome       | same, no CSRF refresh      | n/a             | guarded, untested; see note C                         |
-| Departments / Projects forms         | unmount + bound CSRF    | unmounted-only writes          | `sessionBoundExpire` inert | n/a             | guarded by unmount; see note C                        |
-| `AcceptResultAction` (accept result) | generation at submit    | not applied                    | cannot expire replacement  | yes             | accept-result stale-session tests                     |
+| Request / path                       | Session captured at                | Stale success                  | Stale failure / 401        | Cleanup guarded | Regression test                                                                          |
+| ------------------------------------ | ---------------------------------- | ------------------------------ | -------------------------- | --------------- | ---------------------------------------------------------------------------------------- |
+| `GET /me` (boot)                     | boot (once, StrictMode)            | ignored                        | ignored                    | yes             | StrictMode boot test; held-`/me` boot tests (invariant); see note A                      |
+| `GET /me` (sign-in)                  | after login rotation               | ignored                        | ignored                    | yes             | stale-401-during-sign-in test (guard-proving); see note A                                |
+| `GET /auth/csrf`                     | dispatch                           | token not stored               | no error state, no clear   | yes             | pending-CSRF test (invariant); see note A                                                |
+| `POST /auth/login`                   | dispatch                           | n/a                            | shown only if live         | yes             | login / expiry tests                                                                     |
+| `POST /auth/logout`                  | dispatch                           | cannot clear replacement       | cannot expire replacement  | yes             | stale logout (ok, 401)                                                                   |
+| `GET /tasks`, `/runs`, `/projects`   | dispatch                           | not applied                    | cannot expire replacement  | yes             | stale Tasks / Runs / Projects tests                                                      |
+| quiet task refresh, 409 refresh      | dispatch (+ sequence)              | not applied                    | cannot expire replacement  | yes             | refresh-held-across-session test                                                         |
+| `GET /runs/:id` (reconcile, probe)   | dispatch / abort signal            | not applied                    | cannot expire replacement  | yes             | stream-session and reconcile tests                                                       |
+| `POST /tasks`                        | dispatch                           | not applied                    | not shown                  | yes             | old-operation busy-state test                                                            |
+| `POST synthetic-runs`                | dispatch                           | not admitted into new session  | not shown                  | yes             | stale synthetic Run test                                                                 |
+| `PUT execution-assignment`           | dispatch                           | not applied                    | not shown                  | yes             | stale assignment test                                                                    |
+| `GET runtime-capabilities`           | per request + session              | superseded result fails closed | cannot expire replacement  | yes             | capability ordering tests (A–E)                                                          |
+| Run SSE messages / `onerror`         | stream open                        | ignored                        | ignored                    | n/a             | stream revocation / reconnect tests; held-events and probe tests (invariant); see note B |
+| Stop, approve, revoke, accept        | dispatch                           | not applied                    | not shown                  | yes             | revoke: stale-revoke test; others existing tests                                         |
+| Agent create / archive               | dispatch (context)                 | not applied, storage kept      | not applied                | n/a             | stale-create and late-archive tests (guard-proving)                                      |
+| Planning writers (`useWriter`)       | dispatch (context)                 | distinct `stale` outcome       | same, no CSRF refresh      | n/a             | guarded, untested; see note C                                                            |
+| Departments / Projects forms         | `useMountedInSession` + bound CSRF | gated by mounted-in-session    | `sessionBoundExpire` inert | n/a             | project create: invariant test; department writes untested; see note C                   |
+| `AcceptResultAction` (accept result) | generation at submit               | not applied                    | cannot expire replacement  | yes             | accept-result stale-session tests                                                        |
 
 Note A — the in-code `/me` and CSRF staleness guards still **cannot be driven through the UI**: the
 sign-in control is disabled while CSRF loads and sign-out is unreachable while sign-in is in flight,
