@@ -87,8 +87,72 @@ test('launcher diagnostics bind safe signals to exact launcher requests and comp
 
   const diagnostics = safeLauncherFailureSignals(logs);
   assert.deepEqual(diagnostics, {
-    failureCodes: ['launch_failed', 'unavailable'],
-    responseStatusCodes: [200, 409, 503],
+    failureCodes: [],
+    responseStatusCodes: [200],
   });
   assert.equal(JSON.stringify(diagnostics).includes(secret), false);
+});
+
+test('launcher diagnostics accept numeric request IDs and ignore any reused ID', () => {
+  const logs = [
+    JSON.stringify({
+      reqId: 17,
+      req: { method: 'POST', url: '/internal/v1/mock-executions' },
+      msg: 'incoming request',
+    }),
+    JSON.stringify({
+      reqId: 17,
+      msg: 'Mock sandbox execution failed.',
+      sandboxErrorCode: 'crashed',
+    }),
+    JSON.stringify({ reqId: 17, res: { statusCode: 503 }, msg: 'request completed' }),
+    JSON.stringify({
+      reqId: 17,
+      req: { method: 'POST', url: '/internal/v1/mock-executions' },
+      msg: 'incoming request',
+    }),
+    JSON.stringify({
+      reqId: 17,
+      msg: 'Mock sandbox execution failed.',
+      sandboxErrorCode: 'launch_failed',
+    }),
+    JSON.stringify({ reqId: 17, res: { statusCode: 409 }, msg: 'request completed' }),
+  ].join('\n');
+
+  assert.deepEqual(safeLauncherFailureSignals(logs), {
+    failureCodes: [],
+    responseStatusCodes: [],
+  });
+});
+
+test('launcher diagnostics emit allowlisted signals for distinct numeric and string IDs', () => {
+  const logs = [
+    JSON.stringify({
+      reqId: 18,
+      req: { method: 'POST', url: '/internal/v1/mock-executions' },
+      msg: 'incoming request',
+    }),
+    JSON.stringify({
+      reqId: 18,
+      msg: 'Mock sandbox execution failed.',
+      sandboxErrorCode: 'crashed',
+    }),
+    JSON.stringify({ reqId: 18, res: { statusCode: 503 }, msg: 'request completed' }),
+    JSON.stringify({
+      reqId: '18',
+      req: { method: 'POST', url: '/internal/v1/mock-executions' },
+      msg: 'incoming request',
+    }),
+    JSON.stringify({
+      reqId: '18',
+      msg: 'Mock sandbox execution failed.',
+      sandboxErrorCode: 'launch_failed',
+    }),
+    JSON.stringify({ reqId: '18', res: { statusCode: 409 }, msg: 'request completed' }),
+  ].join('\n');
+
+  assert.deepEqual(safeLauncherFailureSignals(logs), {
+    failureCodes: ['crashed', 'launch_failed'],
+    responseStatusCodes: [409, 503],
+  });
 });

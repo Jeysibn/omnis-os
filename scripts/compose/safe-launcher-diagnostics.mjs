@@ -9,23 +9,24 @@ const safeSandboxErrorCodes = new Set([
 ]);
 
 export function safeLauncherFailureSignals(logText) {
-  const codes = new Set();
-  const responseStatusCodes = new Set();
   const activeRequests = new Map();
   const ambiguousRequestIds = new Set();
+  const completedRequests = new Map();
+  const seenRequestIds = new Set();
   for (const line of logText.split(/\r?\n/)) {
     try {
       const entry = JSON.parse(line);
-      const requestId = typeof entry.reqId === 'string' ? entry.reqId : undefined;
+      const requestId = safeRequestIdKey(entry.reqId);
       if (entry.msg === 'incoming request' && requestId) {
-        if (activeRequests.has(requestId) || ambiguousRequestIds.has(requestId)) {
+        if (seenRequestIds.has(requestId)) {
           activeRequests.delete(requestId);
+          completedRequests.delete(requestId);
           ambiguousRequestIds.add(requestId);
-        } else if (
-          entry.req?.method === 'POST' &&
-          entry.req.url === '/internal/v1/mock-executions'
-        ) {
-          activeRequests.set(requestId, new Set());
+        } else {
+          seenRequestIds.add(requestId);
+          if (entry.req?.method === 'POST' && entry.req.url === '/internal/v1/mock-executions') {
+            activeRequests.set(requestId, new Set());
+          }
         }
       }
       if (
@@ -39,25 +40,41 @@ export function safeLauncherFailureSignals(logText) {
       if (
         entry.msg === 'request completed' &&
         requestId &&
+        !ambiguousRequestIds.has(requestId) &&
         [200, 409, 503].includes(entry.res?.statusCode)
       ) {
-        if (ambiguousRequestIds.has(requestId)) {
-          ambiguousRequestIds.delete(requestId);
-        } else {
-          const requestCodes = activeRequests.get(requestId);
-          if (requestCodes) {
-            responseStatusCodes.add(entry.res.statusCode);
-            for (const code of requestCodes) codes.add(code);
-            activeRequests.delete(requestId);
-          }
+        const requestCodes = activeRequests.get(requestId);
+        if (requestCodes) {
+          completedRequests.set(requestId, {
+            failureCodes: requestCodes,
+            responseStatusCode: entry.res.statusCode,
+          });
+          activeRequests.delete(requestId);
         }
       }
     } catch {
       // Ignore non-JSON output and never copy it into diagnostics.
     }
   }
+  const codes = new Set();
+  const responseStatusCodes = new Set();
+  for (const [requestId, signals] of completedRequests) {
+    if (ambiguousRequestIds.has(requestId)) continue;
+    for (const code of signals.failureCodes) codes.add(code);
+    responseStatusCodes.add(signals.responseStatusCode);
+  }
   return {
     failureCodes: [...codes].sort(),
     responseStatusCodes: [...responseStatusCodes].sort((left, right) => left - right),
   };
+}
+
+function safeRequestIdKey(requestId) {
+  if (typeof requestId === 'string' && requestId.length > 0 && requestId.length <= 128) {
+    return `string:${requestId}`;
+  }
+  if (typeof requestId === 'number' && Number.isSafeInteger(requestId)) {
+    return `number:${requestId}`;
+  }
+  return undefined;
 }

@@ -22,7 +22,7 @@ Inspection of the exact backend commit found:
 - API restricted startup accepts absent/empty Authorizer token and socket. Run admission and stop respond `503 execution_disabled` after owner/CSRF checks and before mutation. Authorizer-backed operations respond `503 authorizer_unavailable` after their required security checks.
 - Worker disabled startup does not initialize PgBoss consumers, launcher execution, or recovery. Process-local mode locking does not stop older mock-enabled Workers globally.
 - Runtime capabilities use `omnis.runtime-capabilities.v3`; consistent disabled mode reports execution disabled, authorization unavailable, and queue/launcher `not_required`. Mismatched API/Worker modes cannot report execution available.
-- Backend unit tests exist for execution-mode validation, API environment, Authorizer route guards, Run admission/stop, runtime capabilities, and Worker execution readiness. They have not been run as part of this source inspection.
+- Backend unit tests exist for execution-mode validation, API environment, Authorizer route guards, Run admission/stop, runtime capabilities, and Worker execution readiness. They passed in the repository's normal pre-commit check at platform revision `ea547466f1364c369a9c8b05af038ad99a87e9b6` and in the hosted `checks-core` job recorded below.
 
 ## Integrated platform delta
 
@@ -41,6 +41,28 @@ The required file names are `restricted-compose.env`, `restricted-api.env`, and 
 `scripts/compose/verify-app-config.mjs` renders the restricted and mock configurations separately and inspects effective Compose JSON. Synthetic allowlisted Compose/API/Worker env files pass the restricted preflight; synthetic provider, Authorizer, launcher, admin/migration database, unknown, and malformed settings fail without value disclosure. A mismatched internal token and group/world-readable env file also fail. Rendering checks the restricted lock/mode, empty sensitive settings, empty API volumes/groups, absent launcher/Docker mounts, exact four services, non-root identities, resource limits, ports, project/network/volume/database scope, and owner/internal-token configuration. It verifies project selection with no CLI flag, the intended flag, an incorrect `-p`, and an incorrect `COMPOSE_PROJECT_NAME`. Ambient execution-mode overrides and hostile `COMPOSE_FILE`/profile values are also set during rendering. Mock rendering verifies the base project default and separate Authorizer/launcher socket mounts remain.
 
 This validation establishes static configuration only. It does not contact the Docker daemon, start services, provision a database, or prove runtime identity, host ingress, process termination, migration safety, or recovery.
+
+## Hosted CI evidence and journey coverage
+
+The pull-request run [43800489386](https://github.com/Jeysibn/omnis-os/actions/runs/43800489386) tested platform revision `ea547466f1364c369a9c8b05af038ad99a87e9b6` with event `pull_request` and completed successfully. `checks`, `checks-core`, `frontend-browser`, `platform-security`, both database integration jobs, `backup-restore`, `full-stack-browser-integration`, and `container-images` passed. This is GitHub-hosted CI evidence; it is not a WSL2 startup or restricted-profile runtime result.
+
+A prior container job failure was traced to a fixture permission gap: the non-root Worker could not traverse the synthetic launcher socket directory because the CI overlay omitted its supplemental fixture group. `docker-compose.ci.yml` now adds only `OMNIS_LAUNCHER_SOCKET_GID` to that CI Worker, and the smoke asserts the effective group list from rendered Compose configuration. The exact change passed independent platform review and the `container-images` job in the run above. The restricted development profile and mock-execution overlay are unchanged by this CI-only permission.
+
+The hosted tests cover related stages through two separate synthetic paths:
+
+| Journey stage | Evidence | Result |
+| --- | --- | --- |
+| Create and assign a Task | Compose browser smoke creates the Task and assignment in `apps/web/integration/tasks.integration.spec.ts` | Verified in CI |
+| Execute a mock agent Run | The same Compose smoke approves the mock Run and verifies completion plus ordered `synthetic=true`, `source=mock` events | Verified in CI |
+| Await owner review | The full-stack synthetic-broker browser journey verifies the completed Task enters `in_review` and shows the owner review state | Verified in CI |
+| Accept the result | That separate synthetic-broker journey records explicit owner acceptance and checks the durable receipt and replay | Verified in CI |
+| Complete the accepted Task | The synthetic-broker journey verifies the accepted Task is `completed` and the receipt survives reload | Verified in CI |
+| Complete one sandbox-launcher Run through owner acceptance | The launcher mock path and synthetic-broker acceptance path are separate tests and do not prove this one combined journey | Partial / not established |
+| Run the restricted execution-disabled profile | No restricted-profile services were started; the CI Compose smoke uses the separately gated mock profile | Blocked pending separate owner authorization and runtime evidence |
+| Accept the target WSL2 runtime | No WSL2 startup, ingress, or runtime verification occurred | Blocked pending separate owner authorization and runtime evidence |
+| Exercise a real provider | No provider credentials or services were used | Excluded; requires a later separate owner authorization |
+
+These results are test evidence, not Phase 1 acceptance. The canonical [Phase 1 completion matrix](../../docs/06-delivery/PHASE_1_COMPLETION_MATRIX.md) remains authoritative for acceptance status; this readiness document does not modify its AO rows, mark Stage B authorized, or change R1 from **BLOCKED / NOT ACCEPTED**. The subsequent request-ID diagnostic hardening is separately covered by focused local tests and review; it is not represented as part of run `43800489386`.
 
 ## PostgreSQL initialization plan — not executed
 
@@ -131,7 +153,7 @@ Capture only bounded, sanitized logs, non-secret capability fields, service iden
 | Restricted Compose lock/mode and Authorizer/launcher removal | Implemented in this worktree; static configuration only |
 | Mock overlay and its Authorizer/launcher requirements | Preserved separately; no mock execution authorized |
 | Static Compose verifier | Updated; latest run passed offline |
-| Backend source behavior | Source-confirmed against the exact SHA; no backend unit suite run yet |
+| Backend source behavior | Source-confirmed against the exact SHA; relevant tests passed in the normal pre-commit suite and hosted `checks-core` job |
 | Restricted API/Worker environment allowlist | Preflight added and tested only against synthetic values; owner must prepare and approve private restricted env files |
 | Restricted default project identity | Top-level overlay name added and statically checked with no `-p`; wrong `-p` and `COMPOSE_PROJECT_NAME` are rejected by verifier assertions |
 | PostgreSQL numeric resource limits | Not selected in source; owner must approve bounded CPU/memory/PID values before startup |
