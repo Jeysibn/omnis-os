@@ -1124,13 +1124,15 @@ function createMockApi(page: Page) {
         return fulfillError(route, 403, 'csrf', 'The request origin or CSRF token is invalid.');
       if (behavior === 'concurrency-limit')
         return fulfillError(route, 503, 'concurrency_limit', 'Mission Lane is busy. Retry.');
-      if (behavior === 'authorizer-unavailable')
+      if (behavior === 'authorizer-unavailable') {
+        afterConflict = true; // lets a test hold the follow-up re-read (conflictReadsManual)
         return fulfillError(
           route,
           503,
           'authorizer_unavailable',
           'Authorizer-backed functionality is unavailable in this configuration.',
         );
+      }
       if (behavior === 'lost-not-applied') return route.abort();
       const task = currentTasks.find((item) => item.id === taskId);
       if (!task) return fulfillError(route, 404, 'not_found', 'Task not found.');
@@ -4248,6 +4250,30 @@ test.describe('R1 owner result acceptance', () => {
     api.releaseReads();
     await expect(refreshed(page)).toBeVisible();
     await expect(accept(page)).toBeVisible();
+    expect(api.acceptPosts).toHaveLength(1);
+  });
+
+  test('a pending focus restoration never moves keyboard focus to another run', async ({
+    page,
+    api,
+  }) => {
+    api.configure({
+      tasks: [reviewTask, otherTask],
+      runs: [reviewRun, otherRun],
+      acceptBehaviors: ['authorizer-unavailable'],
+      conflictReadsManual: true,
+    });
+    await openReview(page);
+    await confirmAccept(page);
+    // The refusal closes the confirmation and starts a re-read that hides the control.
+    await expect(refreshing(page)).toBeVisible();
+    await expect(accept(page)).toHaveCount(0);
+    await pick(page, 'Draft vendor summary'); // the owner moves to another run meanwhile
+    await expect(page.getByText('Owner review')).toBeVisible();
+    api.releaseReads();
+    await expect(accept(page)).toBeVisible(); // the re-read finished and the control is back
+    // The restoration belonged to the first run: it must not focus this run's control.
+    await expect(accept(page)).not.toBeFocused();
     expect(api.acceptPosts).toHaveLength(1);
   });
 

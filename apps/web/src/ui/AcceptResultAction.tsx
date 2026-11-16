@@ -103,21 +103,26 @@ export function AcceptResultAction({
 
   // The trigger is replaced by the confirmation while it is open, so focus returns to it once it
   // is back; otherwise a keyboard user would be dropped at the top of the page.
-  const restoreFocus = useRef(false);
+  // The run and task that asked for focus to come back to the trigger. Restoration happens only for
+  // that same scope, so a pending request can never move focus to another run's control.
+  const scopeKey = `${run.id}\u0000${task?.id ?? ''}`;
+  const restoreFocus = useRef<string | null>(null);
   // The trigger can be hidden for a moment (the freshness gate hides it while a task and run re-read
   // is refreshing), so restoration waits until it exists instead of being dropped.
   useEffect(() => {
-    if (!open && restoreFocus.current && triggerRef.current) {
-      restoreFocus.current = false;
+    if (restoreFocus.current !== null && restoreFocus.current !== scopeKey) {
+      restoreFocus.current = null; // asked for by a different run or task: drop it
+    } else if (!open && restoreFocus.current === scopeKey && triggerRef.current) {
+      restoreFocus.current = null;
       triggerRef.current.focus();
     }
-  }, [open, blocked, view.kind]);
+  }, [open, blocked, view.kind, scopeKey]);
 
   // A different run or task starts from a clean state.
   useEffect(() => {
     setConfirming(false);
     setProblem(null);
-    restoreFocus.current = false; // a pending restoration belongs to the previous run or task
+    restoreFocus.current = null; // a pending restoration belongs to the previous run or task
   }, [run.id, task?.id]);
 
   async function submit() {
@@ -154,13 +159,13 @@ export function AcceptResultAction({
         // alone do not prove nothing was committed, so no outcome is claimed either way: keep the
         // key for a later explicit attempt, close the confirmation, and re-read the task as the
         // backend handoff says to do before deciding whether to retry.
-        restoreFocus.current = true;
+        restoreFocus.current = scopeKey;
         setConfirming(false);
         setProblem({ kind: 'unavailable', message: failure.message });
         onReload(run.id);
       } else {
         acceptanceAttempts.settle(ownerId, task.id, run.id);
-        restoreFocus.current = true;
+        restoreFocus.current = scopeKey;
         setConfirming(false);
         setProblem({ kind: failure.kind, message: failure.message });
         if (failure.kind === 'conflict') onConflict(run.id);
@@ -173,7 +178,7 @@ export function AcceptResultAction({
 
   function cancel() {
     if (busy) return;
-    restoreFocus.current = true;
+    restoreFocus.current = scopeKey;
     setConfirming(false);
   }
 
