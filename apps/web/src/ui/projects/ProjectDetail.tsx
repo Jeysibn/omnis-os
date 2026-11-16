@@ -39,6 +39,7 @@ import { PlanningRegion } from './planning/PlanningRegion.js';
 import { TaskEpicDialog } from './planning/TaskEpicDialog.js';
 import { taskHash, type EpicTaskRef } from './planning/EpicTasks.js';
 import { useFocusReturn } from './planning/records.js';
+import { useMountedInSession } from '../sessionContext.js';
 
 type Props = {
   projectId: string;
@@ -82,20 +83,13 @@ export function ProjectDetail({
   const epicFocus = useFocusReturn();
   const intent = useRef(new IdempotentIntent());
   const inflight = useRef(false);
-  const mounted = useRef(true);
+  const mounted = useMountedInSession();
   const csrfRef = useRef(csrfToken);
   csrfRef.current = csrfToken;
   const unauthorizedRef = useRef(onUnauthorized);
   unauthorizedRef.current = onUnauthorized;
   const replaceRef = useRef(project.replace);
   replaceRef.current = project.replace;
-
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-    };
-  }, []);
 
   // The archive action vanishes once it succeeds, so focus would otherwise fall to the document.
   const [moveFocusToStatus, setMoveFocusToStatus] = useState(0);

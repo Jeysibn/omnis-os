@@ -6,6 +6,7 @@ import { Notice } from '../parts.js';
 import { PlanningDialog } from './PlanningDialog.js';
 import { judgeEdit, type Observation } from './recovery.js';
 import { useWriter } from './write.js';
+import { useBeginSession } from '../../sessionContext.js';
 
 type Rec = Epic | Milestone;
 type Action = 'retry' | 'check' | 'show' | 'closeAndReload' | 'close';
@@ -45,6 +46,7 @@ export function ArchiveDialog<T extends Rec>({
 }: Props<T>) {
   const [problem, setProblem] = useState<Problem | null>(null);
   const [checking, setChecking] = useState(false);
+  const beginSession = useBeginSession();
   const writer = useWriter({ csrfToken, refreshCsrf, onUnauthorized });
   useEffect(() => setProblem(null), [record?.id, record?.revision]);
 
@@ -61,7 +63,10 @@ export function ArchiveDialog<T extends Rec>({
 
   async function inspect(target: T) {
     setChecking(true);
+    // A read-back that settles for a replaced owner session changes nothing and calls no callback.
+    const live = beginSession();
     const observation = await readLatest(target);
+    if (!live()) return;
     setChecking(false);
     const verdict = judgeEdit(target.revision, observation, (value) => value.status === 'archived');
     const latest = observation.kind === 'record' ? observation.value : undefined;

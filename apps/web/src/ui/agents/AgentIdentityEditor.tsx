@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react';
 import { ApiRequestError } from '../api.js';
 import type { AgentProfileResponse } from '@omnis/contracts';
 import { updateAgentIdentity } from './data.js';
+import { useBeginSession } from '../sessionContext.js';
 
 export function AgentIdentityEditor({
   profile,
@@ -22,6 +23,7 @@ export function AgentIdentityEditor({
     input: { expectedIdentityRevision: number; name: string; slug: string };
   } | null>(null);
   const [busy, setBusy] = useState(false);
+  const beginSession = useBeginSession();
   const [message, setMessage] = useState('');
 
   if (agent.lifecycle === 'archived') return null;
@@ -31,12 +33,16 @@ export function AgentIdentityEditor({
     if (busy) return;
     setBusy(true);
     setMessage('');
+    // Outcomes for a replaced owner session change nothing and call no parent callback.
+    const live = beginSession();
     try {
       await updateAgentIdentity(agent.id, operation.input, csrfToken, operation.requestId);
+      if (!live()) return;
       setPending(null);
       setMessage('The server confirmed that the agent identity was updated.');
       onSaved();
     } catch (cause) {
+      if (!live()) return;
       if (cause instanceof ApiRequestError && cause.status === 401) {
         onUnauthorized(cause);
       } else if (cause instanceof ApiRequestError && cause.outcome !== 'rejected') {

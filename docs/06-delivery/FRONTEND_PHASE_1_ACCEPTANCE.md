@@ -64,17 +64,32 @@ untested for the same timing reason), and the connector revoke hook is session-s
 fail with the guard removed).
 The existing revocation and reconnect tests continue to pass.
 
-Note C — correction: an earlier version of this record said the Agents, Departments and Projects pages
-needed no session guard because they unmount and abort. Independent review of 8e79dc8 showed that is
-not enough: a late completion can still clear shared `sessionStorage`, navigate, or refresh CSRF. Now:
-a `SessionScopeContext` lets nested writers capture the session at dispatch; `AgentCreateForm`,
-`AgentArchiveAction` and the shared planning `useWriter` drop outcomes for a replaced session (a stale
-`useWriter` result is a distinct `stale` outcome that every caller handles by doing nothing; an earlier
-revision reused `unauthorized`, which let a first-attempt epic or milestone create clear its persisted
-pending record - found by independent review of 07ddb80 and fixed); the `refreshCsrf` given to Departments and Projects rejects for a replaced session.
-Departments and Projects form state is protected by unmount (the workspace is always unmounted between
-sessions). Only agent create has a regression test (verified to fail with its guard removed); agent
-archive, `useWriter` and the department/project continuations are guarded but not separately tested.
+Note C — correction history. An earlier version of this record said the Agents, Departments and
+Projects pages needed no session guard because they unmount and abort. Independent review (five
+rounds on this branch) showed that "unmount" is not a synchronous session gate: React's cleanup runs
+after the session generation has rotated, and a continuation can run in between or can touch shared
+`sessionStorage`, the URL hash, a parent callback or a follow-up request. Final design:
+
+- `SessionScopeContext` / `useBeginSession` (sessionContext.ts): nested writers capture the owner
+  session at dispatch and check it after every await.
+- `useMountedInSession`: replaces the plain `mounted` ref in `ProjectForm`, `ProjectDetail`,
+  `DepartmentsWorkspace` and the planning `useWriter`. It is true only while mounted AND the session
+  the component mounted under is still live, so every existing `mounted.current` gate is now also a
+  synchronous session gate.
+- `useWriter` returns a distinct `stale` outcome for a replaced session. Every caller (the two
+  `RecordEditor` paths, `ArchiveDialog`, `TaskEpicDialog`) does nothing for it. It never retires the
+  idempotency key (the key is retired only after the CSRF refresh and a live check) and never
+  refreshes CSRF for a replaced session. An earlier revision reused `unauthorized`, which let a
+  first-attempt epic or milestone create clear its persisted pending record.
+- Scoped at dispatch: `AgentCreateForm`, `AgentArchiveAction`, `AgentProfileEditor`,
+  `AgentIdentityEditor`, the revoke hook, and the `inspect` / `explainInvalidTransition` /
+  `checkCreate` read-backs in `RecordEditor`, `ArchiveDialog` and `TaskEpicDialog`.
+- The `refreshCsrf` given to Departments and Projects rejects for a replaced session.
+
+Regression tests exist for: late revoke success, late agent create (each verified to fail with its
+guard removed). Everything else in this note is guarded in code but NOT separately tested, because
+the needed flows (planning create, agent archive, project and department writes, profile editors)
+have no session-replacement mock and the timing windows cannot be forced deterministically.
 
 Backend dependency for Codex #1: none found. The frontend assumes only that a replaced session's
 cookie is rejected with 401 and that mutations remain idempotent under the documented keys.

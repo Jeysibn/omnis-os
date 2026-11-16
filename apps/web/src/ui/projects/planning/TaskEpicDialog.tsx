@@ -9,6 +9,7 @@ import { judgeAssociation, type Observation } from './recovery.js';
 import { usePagedList } from './usePagedList.js';
 import { useWriter } from './write.js';
 import type { EpicTaskRef } from './EpicTasks.js';
+import { useBeginSession } from '../../sessionContext.js';
 
 type Action = 'retry' | 'check' | 'useLatest' | 'close';
 type Problem = {
@@ -54,6 +55,7 @@ export function TaskEpicDialog({
   const [checking, setChecking] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const target = useRef<string | null>(null);
+  const beginSession = useBeginSession();
   const writer = useWriter({ csrfToken, refreshCsrf, onUnauthorized });
   const epics = usePagedList<Epic>(
     `task-epics:${projectId}`,
@@ -121,7 +123,10 @@ export function TaskEpicDialog({
   async function inspect(afterConflict: boolean) {
     if (!task || current.status !== 'ready') return;
     setChecking(true);
+    // A read-back that settles for a replaced owner session changes nothing and calls no callback.
+    const live = beginSession();
     const observation = await readLatest();
+    if (!live()) return;
     setChecking(false);
     const verdict = judgeAssociation(rev, target.current, observation);
     const latest = observation.kind === 'record' ? observation.value : undefined;

@@ -29,6 +29,7 @@ import type { PendingCreateApi } from './usePendingCreate.js';
 import type { ScanResult } from './unresolved.js';
 import { useWriter } from './write.js';
 import { PlanningDialog } from './PlanningDialog.js';
+import { useBeginSession } from '../../sessionContext.js';
 
 type Record_ = Epic | Milestone;
 type Kind = 'epic' | 'milestone';
@@ -135,6 +136,7 @@ export function RecordEditor<T extends Record_>({
   const [recoveryView, setRecoveryView] = useState<RecoveryView | null>(null);
   const [beforeDiscard, setBeforeDiscard] = useState<RecoveryView | null>(null);
   const [checking, setChecking] = useState(false);
+  const beginSession = useBeginSession();
   const writer = useWriter({ csrfToken, refreshCsrf, onUnauthorized });
   const lastRequest = useRef<Changes | null>(null);
 
@@ -366,7 +368,10 @@ export function RecordEditor<T extends Record_>({
   async function inspect(afterConflict: boolean) {
     if (!baseline) return;
     setChecking(true);
+    // A read-back that settles for a replaced owner session changes nothing.
+    const live = beginSession();
     const observation = await readLatest();
+    if (!live()) return;
     setChecking(false);
     const verdict = judgeEdit(baseline.revision, observation, matchesRequest);
     const latest = observation.kind === 'record' ? observation.value : undefined;
@@ -419,7 +424,10 @@ export function RecordEditor<T extends Record_>({
     setProblem({ tone: 'error', text: refusal, actions: [] });
     if (!baseline) return;
     setChecking(true);
+    // A read-back that settles for a replaced owner session changes nothing.
+    const live = beginSession();
     const observation = await readLatest();
+    if (!live()) return;
     setChecking(false);
     if (observation.kind !== 'record') return;
     const latest = observation.value;
@@ -490,7 +498,10 @@ export function RecordEditor<T extends Record_>({
   async function checkCreate() {
     if (stored.status !== 'pending') return;
     setChecking(true);
+    // A read-back that settles for a replaced owner session changes nothing.
+    const live = beginSession();
     const result = await scan(stored.envelope);
+    if (!live()) return;
     setChecking(false);
     const seen = viewAfterScan(result);
     if (result.kind === 'found')

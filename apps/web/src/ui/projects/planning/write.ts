@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { classifyMutationFailure } from '../data.js';
 import { IdempotentIntent } from '../intent.js';
-import { useBeginSession } from '../../sessionContext.js';
+import { useBeginSession, useMountedInSession } from '../../sessionContext.js';
 
 export type WriteOutcome<T> =
   | { kind: 'saved'; value: T }
@@ -46,13 +46,7 @@ export function useWriter({ csrfToken, refreshCsrf, onUnauthorized }: Input) {
   const refresh = useRef(refreshCsrf);
   refresh.current = refreshCsrf;
   const beginSession = useBeginSession();
-  const mounted = useRef(true);
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-    };
-  }, []);
+  const mounted = useMountedInSession();
 
   const run = useCallback(
     async <T>(
@@ -92,15 +86,17 @@ export function useWriter({ csrfToken, refreshCsrf, onUnauthorized }: Input) {
           if (!owned) intent.current.markUncertain();
           return { kind: 'unknown' };
         }
-        settle();
         if (failure.status === 403) {
           try {
             csrf.current = await refresh.current();
           } catch {
             // The message still asks the owner to try again.
           }
-          if (!live()) return { kind: 'stale' };
         }
+        // Retire the key only for a live session: a stale result must keep it, so an identical
+        // write in this instance is not given a new key and does not lose idempotency.
+        if (!live()) return { kind: 'stale' };
+        settle();
         const message = cause instanceof Error ? cause.message : '';
         return { kind: 'rejected', status: failure.status, code: failure.code, message };
       } finally {
