@@ -635,6 +635,60 @@ describe('durable mock run coordinator', () => {
     assert.equal(cancellationAcknowledged, true);
   });
 
+  it('aborts an active runtime and records interruption when durable lease renewal is denied', async () => {
+    let runtimeStarted!: () => void;
+    let runtimeAborted = false;
+    let interrupted = false;
+    let completed = false;
+    const started = new Promise<void>((resolve) => {
+      runtimeStarted = resolve;
+    });
+    const runtime: RuntimeAdapter = {
+      kind: 'mock',
+      discoverCapabilities: () => new MockRuntimeAdapter().discoverCapabilities(),
+      execute: ({ signal }) =>
+        new Promise((_resolve, reject) => {
+          runtimeStarted();
+          signal.addEventListener(
+            'abort',
+            () => {
+              runtimeAborted = true;
+              reject(new SandboxError('cancelled'));
+            },
+            { once: true },
+          );
+        }),
+    };
+    const store = {
+      getRun: async () => ({ ...lifecycleRun, status: 'queued' as const }),
+      beginExecution: async () => ({ run: lifecycleRun, started: true, generation: 1, events: [] }),
+      getTask: async () => lifecycleTask,
+      renewLease: async () => false,
+      interruptRun: async () => {
+        interrupted = true;
+        return { run: { ...lifecycleRun, status: 'interrupted' as const }, events: [] };
+      },
+      completeRun: async () => {
+        completed = true;
+        return { run: { ...lifecycleRun, status: 'completed' as const }, events: [] };
+      },
+    } as unknown as PostgresRunStore;
+    const coordinator = testCoordinator(
+      store,
+      { send: async () => null, findJobs: async () => [] },
+      runtime,
+      1,
+    );
+
+    const execution = coordinator.handleQueueJob({ runId: lifecycleRun.id });
+    await started;
+    await execution;
+
+    assert.equal(runtimeAborted, true);
+    assert.equal(interrupted, true);
+    assert.equal(completed, false);
+  });
+
   it('uses the injected sandbox runtime and persists its successful output', async () => {
     let taskSeen: Task | undefined;
     const { coordinator, state } = lifecycleHarness({

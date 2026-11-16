@@ -1,4 +1,4 @@
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import Fastify, { type FastifyReply } from 'fastify';
 import {
   AgentDirectoryQuerySchema,
@@ -28,7 +28,7 @@ import {
   PostgresAgentProfileStore,
   StoreError,
 } from '@omnis/db';
-import { CreateRunSchema, CreateTaskSchema } from '@omnis/contracts';
+import { CreateTaskSchema } from '@omnis/contracts';
 import { CoordinatorError, queueName, RunCoordinator } from './run-coordinator.ts';
 import { SandboxedMockRuntimeAdapter } from './sandboxed-mock-runtime.ts';
 import { UnixMockSandboxLauncherClient } from './sandbox-launcher-client.ts';
@@ -39,6 +39,8 @@ import { registerSyntheticTaskRunRoute } from './synthetic-task-run-routes.ts';
 import { createRuntimeDatabaseUrl, validateWorkerBindHost } from './deployment-config.ts';
 import { startExecutionQueue } from './execution-queue-lifecycle.ts';
 import { resolveWorkerExecutionStatus } from './execution-readiness.ts';
+import { registerWorkerInternalAuthentication } from './internal-auth.ts';
+import { registerRunExecutionRoutes } from './run-execution-routes.ts';
 
 const host = process.env.OMNIS_WORKER_HOST ?? '127.0.0.1';
 const port = Number(process.env.OMNIS_WORKER_PORT ?? 4101);
@@ -234,16 +236,7 @@ function sendAgentProfileStoreError(error: unknown, reply: FastifyReply): boolea
   return true;
 }
 
-app.addHook('preHandler', async (request, reply) => {
-  const supplied = request.headers['x-omnis-internal-token'];
-  const candidate = typeof supplied === 'string' ? Buffer.from(supplied) : Buffer.alloc(0);
-  const expected = Buffer.from(internalToken);
-  const matches = candidate.length === expected.length && timingSafeEqual(candidate, expected);
-  if (!matches)
-    return reply
-      .code(401)
-      .send({ error: { code: 'unauthorized', message: 'Internal worker authentication failed.' } });
-});
+registerWorkerInternalAuthentication(app, internalToken);
 
 if (syntheticBrokerTestMode) {
   if (!syntheticBrokerCoordinator)
@@ -458,42 +451,7 @@ app.put<{ Params: { taskId: string } }>(
   },
 );
 app.get('/internal/v1/runs', async () => coordinator.listRuns());
-app.post('/internal/v1/runs', async (request, reply) => {
-  const parsed = await parseRunInput(request.body);
-  const idempotencyKey = request.headers['idempotency-key'];
-  if (
-    !parsed.success ||
-    typeof idempotencyKey !== 'string' ||
-    idempotencyKey.length < 16 ||
-    idempotencyKey.length > 128
-  ) {
-    return reply.code(400).send({
-      error: { code: 'invalid_input', message: 'Run input or Idempotency-Key is invalid.' },
-    });
-  }
-  try {
-    if (!parsed.data.authorizationId)
-      return reply.code(403).send({
-        error: {
-          code: 'authorization_denied',
-          message: 'A persisted owner-approved authorization is required.',
-        },
-      });
-    const result = await coordinator.startRun(
-      parsed.data.taskId,
-      idempotencyKey,
-      parsed.data.authorizationId,
-    );
-    return reply.code(result.created ? 201 : 200).send(result.run);
-  } catch (error) {
-    if (error instanceof CoordinatorError) {
-      return reply
-        .code(error.statusCode)
-        .send({ error: { code: error.code, message: error.message } });
-    }
-    throw error;
-  }
-});
+registerRunExecutionRoutes(app, coordinator);
 app.get<{ Params: { runId: string } }>('/internal/v1/runs/:runId', async (request, reply) => {
   const run = await coordinator.getRun(request.params.runId);
   return run
@@ -569,18 +527,6 @@ app.get<{ Params: { runId: string }; Querystring: { after?: string } }>(
     }
   },
 );
-app.post<{ Params: { runId: string } }>('/internal/v1/runs/:runId/stop', async (request, reply) => {
-  try {
-    return await coordinator.stopRun(request.params.runId);
-  } catch (error) {
-    if (error instanceof CoordinatorError) {
-      return reply
-        .code(error.statusCode)
-        .send({ error: { code: error.code, message: error.message } });
-    }
-    throw error;
-  }
-});
 
 app.setErrorHandler((error, _request, reply) => {
   app.log.error(
@@ -640,8 +586,4 @@ function taskIdempotencyKey(value: string | string[] | undefined): string | unde
     return undefined;
   }
   return value;
-}
-
-function parseRunInput(body: unknown) {
-  return CreateRunSchema.safeParse(body);
 }

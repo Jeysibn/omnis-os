@@ -93,6 +93,50 @@ describe('persisted SSE replay and live delivery', () => {
     stop();
   });
 
+  it('does not redeliver persisted events when the same notification is published twice', async () => {
+    const source = new MemoryEventSource();
+    const first = event(1);
+    source.events.push(first);
+    const delivered: number[] = [];
+    const stop = streamPersistedRunEvents({
+      source,
+      runId: 'run-0001',
+      afterSequence: 0,
+      send: (item) => delivered.push(item.sequence),
+      end: () => {},
+      fail: (error) => assert.fail(String(error)),
+    });
+    await settle();
+
+    source.publish(first);
+    await settle();
+
+    assert.deepEqual(delivered, [1]);
+    stop();
+  });
+
+  it('closes replay when persisted events contain a sequence gap', async () => {
+    const source = new MemoryEventSource();
+    source.events.push(event(2));
+    const delivered: number[] = [];
+    const failures: unknown[] = [];
+    const stop = streamPersistedRunEvents({
+      source,
+      runId: 'run-0001',
+      afterSequence: 0,
+      send: (item) => delivered.push(item.sequence),
+      end: () => assert.fail('a non-contiguous replay must not be reported as complete'),
+      fail: (error) => failures.push(error),
+    });
+    await settle();
+
+    assert.deepEqual(delivered, []);
+    assert.equal(failures.length, 1);
+    assert.match(String(failures[0]), /sequence contains a gap/);
+    assert.equal(source.listeners.size, 0);
+    stop();
+  });
+
   it('reconstructs full persisted history on reconnect from Last-Event-ID', async () => {
     const source = new MemoryEventSource();
     source.events.push(event(1), event(2), event(3, 'run.completed'));
