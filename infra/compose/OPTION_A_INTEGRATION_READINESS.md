@@ -44,9 +44,11 @@ This validation establishes static configuration only. It does not contact the D
 
 ## Hosted CI evidence and journey coverage
 
-The pull-request run [43800489386](https://github.com/Jeysibn/omnis-os/actions/runs/43800489386) tested platform revision `ea547466f1364c369a9c8b05af038ad99a87e9b6` with event `pull_request` and completed successfully. `checks`, `checks-core`, `frontend-browser`, `platform-security`, both database integration jobs, `backup-restore`, `full-stack-browser-integration`, and `container-images` passed. This is GitHub-hosted CI evidence; it is not a WSL2 startup or restricted-profile runtime result.
+The earlier pull-request run [43800489386](https://github.com/Jeysibn/omnis-os/actions/runs/43800489386) tested platform revision `ea547466f1364c369a9c8b05af038ad99a87e9b6` and completed successfully. The final source revision `5837462e5e1037d54464acb059e139b1d4eb1bb6` passed pull-request run [43802613033](https://github.com/Jeysibn/omnis-os/actions/runs/43802613033): `checks`, `checks-core`, `frontend-browser`, `platform-security`, both database integration jobs, `backup-restore`, `full-stack-browser-integration`, and `container-images` all passed. Both are GitHub-hosted CI evidence; neither is a WSL2 startup or restricted-profile runtime result.
 
-A prior container job failure was traced to a fixture permission gap: the non-root Worker could not traverse the synthetic launcher socket directory because the CI overlay omitted its supplemental fixture group. `docker-compose.ci.yml` now adds only `OMNIS_LAUNCHER_SOCKET_GID` to that CI Worker, and the smoke asserts the effective group list from rendered Compose configuration. The exact change passed independent platform review and the `container-images` job in the run above. The restricted development profile and mock-execution overlay are unchanged by this CI-only permission.
+A prior container job failure was traced to a fixture permission gap: the non-root Worker could not traverse the synthetic launcher socket directory because the CI overlay omitted its supplemental fixture group. `docker-compose.ci.yml` now adds only `OMNIS_LAUNCHER_SOCKET_GID` to that CI Worker, and the smoke asserts the effective group list from rendered Compose configuration. The exact change passed independent platform review and the `container-images` jobs in both runs above. The restricted development profile and mock-execution overlay are unchanged by this CI-only permission.
+
+The final revision also includes bounded launcher-failure diagnostics. The launcher logs allowlisted executor error codes through its request logger; the parser correlates them only with exact POST `/internal/v1/mock-executions` request and completion records. It accepts bounded string or safe integer request IDs, invalidates signals for duplicate/reused IDs, and outputs only allowlisted error codes and HTTP status numbers. The three focused parser tests and normal pre-commit suite passed, and this code is included in final run `43802613033`. It does not expose request IDs, payloads, or credential values.
 
 The hosted tests cover related stages through two separate synthetic paths:
 
@@ -62,7 +64,7 @@ The hosted tests cover related stages through two separate synthetic paths:
 | Accept the target WSL2 runtime | No WSL2 startup, ingress, or runtime verification occurred | Blocked pending separate owner authorization and runtime evidence |
 | Exercise a real provider | No provider credentials or services were used | Excluded; requires a later separate owner authorization |
 
-These results are test evidence, not Phase 1 acceptance. The canonical [Phase 1 completion matrix](../../docs/06-delivery/PHASE_1_COMPLETION_MATRIX.md) remains authoritative for acceptance status; this readiness document does not modify its AO rows, mark Stage B authorized, or change R1 from **BLOCKED / NOT ACCEPTED**. The subsequent request-ID diagnostic hardening is separately covered by focused local tests and review; it is not represented as part of run `43800489386`.
+These results are test evidence, not Phase 1 acceptance. The canonical [Phase 1 completion matrix](../../docs/06-delivery/PHASE_1_COMPLETION_MATRIX.md) remains authoritative for acceptance status; this readiness document does not modify its AO rows, mark Stage B authorized, or change R1 from **BLOCKED / NOT ACCEPTED**. The request-ID diagnostic hardening is not represented in earlier run `43800489386`; it is included in final run `43802613033`.
 
 ## PostgreSQL initialization plan — not executed
 
