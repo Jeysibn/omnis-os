@@ -8,6 +8,7 @@ import {
   classifyAcceptanceFailure,
 } from './acceptResult.js';
 import { formatManilaWithZone } from './manilaTime.js';
+import type { AcceptanceAvailability } from './useAcceptanceAvailability.js';
 
 type Problem = { kind: 'conflict' | 'uncertain' | 'unavailable' | 'rejected'; message: string };
 
@@ -28,6 +29,8 @@ export function AcceptResultAction({
   onConflict,
   onReload,
   getSessionGeneration,
+  availability,
+  onRecheckAvailability,
 }: {
   ownerId: string;
   task: Task | null | undefined;
@@ -48,8 +51,16 @@ export function AcceptResultAction({
   onReload: (runId: string) => void;
   /** Identifies the login session; differs between sessions even for the same owner. */
   getSessionGeneration: () => number;
+  /**
+   * What the backend reports about the Authorizer. `unavailable` only adds an advisory note: it is
+   * a health reading, not a statement about the accept route, so it never disables or closes
+   * anything. The accept route is the authority.
+   */
+  availability: AcceptanceAvailability;
+  onRecheckAvailability: () => void;
 }) {
   const headingId = useId();
+  const advisoryId = useId();
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<Problem | null>(null);
@@ -72,6 +83,9 @@ export function AcceptResultAction({
   // same owner-authorised endpoint; the backend, not this component, decides the outcome.
   const reconciling = view.kind === 'receipt-in-review';
   const eligible = (view.kind === 'eligible' || reconciling) && !blocked && task;
+  // The Authorizer health reading is not authoritative for acceptance (outside the restricted
+  // profile it comes from a separate probe), so it is advice only. Nothing is disabled or closed.
+  const advisory = availability === 'unavailable';
   const open = confirming && Boolean(eligible);
 
   // Move focus to the receipt only after the server confirmed and the receipt is on screen.
@@ -89,18 +103,26 @@ export function AcceptResultAction({
 
   // The trigger is replaced by the confirmation while it is open, so focus returns to it once it
   // is back; otherwise a keyboard user would be dropped at the top of the page.
-  const restoreFocus = useRef(false);
+  // The run and task that asked for focus to come back to the trigger. Restoration happens only for
+  // that same scope, so a pending request can never move focus to another run's control.
+  const scopeKey = `${run.id}\u0000${task?.id ?? ''}`;
+  const restoreFocus = useRef<string | null>(null);
+  // The trigger can be hidden for a moment (the freshness gate hides it while a task and run re-read
+  // is refreshing), so restoration waits until it exists instead of being dropped.
   useEffect(() => {
-    if (!open && restoreFocus.current) {
-      restoreFocus.current = false;
-      triggerRef.current?.focus();
+    if (restoreFocus.current !== null && restoreFocus.current !== scopeKey) {
+      restoreFocus.current = null; // asked for by a different run or task: drop it
+    } else if (!open && restoreFocus.current === scopeKey && triggerRef.current) {
+      restoreFocus.current = null;
+      triggerRef.current.focus();
     }
-  }, [open]);
+  }, [open, blocked, view.kind, scopeKey]);
 
   // A different run or task starts from a clean state.
   useEffect(() => {
     setConfirming(false);
     setProblem(null);
+    restoreFocus.current = null; // a pending restoration belongs to the previous run or task
   }, [run.id, task?.id]);
 
   async function submit() {
@@ -132,16 +154,18 @@ export function AcceptResultAction({
         // The request may have applied: read the authoritative state before any retry is offered.
         onReload(run.id);
       } else if (failure.kind === 'unavailable') {
-        // Definitive: the approval service is unavailable (for example the restricted profile).
-        // Keep the key so a later explicit attempt reuses it, close the confirmation (a retry now
-        // cannot succeed), and read the task as the backend handoff requires.
-        restoreFocus.current = true;
+        // The backend reports the approval service unavailable (for example at the restricted
+        // profile's feature guard). That is not the lost-response code, but the status and code
+        // alone do not prove nothing was committed, so no outcome is claimed either way: keep the
+        // key for a later explicit attempt, close the confirmation, and re-read the task as the
+        // backend handoff says to do before deciding whether to retry.
+        restoreFocus.current = scopeKey;
         setConfirming(false);
         setProblem({ kind: 'unavailable', message: failure.message });
         onReload(run.id);
       } else {
         acceptanceAttempts.settle(ownerId, task.id, run.id);
-        restoreFocus.current = true;
+        restoreFocus.current = scopeKey;
         setConfirming(false);
         setProblem({ kind: failure.kind, message: failure.message });
         if (failure.kind === 'conflict') onConflict(run.id);
@@ -154,7 +178,7 @@ export function AcceptResultAction({
 
   function cancel() {
     if (busy) return;
-    restoreFocus.current = true;
+    restoreFocus.current = scopeKey;
     setConfirming(false);
   }
 
@@ -182,11 +206,13 @@ export function AcceptResultAction({
               className="primary-button accept-result-button"
               onClick={() => setConfirming(true)}
               disabled={busy}
+              aria-describedby={advisory ? advisoryId : undefined}
             >
               <BadgeCheck size={15} aria-hidden="true" />
               Accept Result
             </button>
           )}
+          {advisory && <AvailabilityAdvisory id={advisoryId} onRecheck={onRecheckAvailability} />}
           {open && task && (
             <div
               className="accept-result-confirm"
@@ -280,10 +306,14 @@ export function AcceptResultAction({
                 className="primary-button accept-result-button"
                 onClick={() => setConfirming(true)}
                 disabled={busy}
+                aria-describedby={advisory ? advisoryId : undefined}
               >
                 <BadgeCheck size={15} aria-hidden="true" />
                 Reconcile task status
               </button>
+            )}
+            {!blocked && advisory && (
+              <AvailabilityAdvisory id={advisoryId} onRecheck={onRecheckAvailability} />
             )}
             {open && task && (
               <div
@@ -381,11 +411,29 @@ export function AcceptResultAction({
               : problem.kind === 'uncertain'
                 ? `${problem.message} The result may or may not have been accepted. Retrying uses the same request and cannot accept it twice.`
                 : problem.kind === 'unavailable'
-                  ? `${problem.message} The approval service is unavailable, so this request could not be made and the result is not shown as accepted. Omnis OS is re-reading the task; try again when the service is available.`
+                  ? `${problem.message} The approval service (Authorizer) is unavailable. Omnis OS is re-reading the task; review its state before trying again.`
                   : problem.message}
           </p>
         </div>
       )}
     </section>
+  );
+}
+
+/**
+ * Advice only. A health check reads the Authorizer as unavailable, but that is not the accept route's
+ * answer: the request may succeed or be refused, and only the server determines the outcome.
+ */
+function AvailabilityAdvisory({ id, onRecheck }: { id: string; onRecheck: () => void }) {
+  return (
+    <div className="accept-result-unavailable" role="status">
+      <p id={id}>
+        A check reports the approval service (Authorizer) as unavailable. This request may succeed
+        or be refused; only the server can determine the outcome.
+      </p>
+      <button type="button" className="text-button" onClick={onRecheck}>
+        Check again
+      </button>
+    </div>
   );
 }

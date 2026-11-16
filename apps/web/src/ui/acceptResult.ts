@@ -120,9 +120,11 @@ export type AcceptanceFailure =
   /** The outcome is unknown; the same key may be retried. */
   | { kind: 'uncertain'; message: string }
   /**
-   * The backend definitively reports that the approval service (Authorizer) is unavailable, for
-   * example in the restricted Authorizer-free profile. This is NOT an unknown outcome: nothing is
-   * claimed either way except that acceptance cannot be requested right now.
+   * The backend reports that the approval service (Authorizer) is unavailable: `503
+   * authorizer_unavailable`, for example from the restricted profile's feature guard. It is not the
+   * lost-response code (`task_acceptance_outcome_unknown`), so it is not shown as an unknown
+   * outcome, but the status and code alone do not prove that nothing was committed. Callers must
+   * claim neither success nor failure and must re-read the task before any retry.
    */
   | { kind: 'unavailable'; message: string }
   | { kind: 'rejected'; message: string };

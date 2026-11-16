@@ -96,7 +96,12 @@ idempotency keys`.
 independently and retries without false empty states`; `deep-linked historical run survives reload
 and browser back/forward`; `unknown run links explain the missing run…`; `successful empty task
 and run resources show their own empty states`.
-- **Pass/fail:** pass if every status label matches the record. Fail on any fabricated status.
+  Usage readout: `Run usage readout` tests (every field reads `Unknown`, never zero; switching runs;
+  no readout without a run, while loading or after a failed load; restricted mode; 320–1280 px
+  overflow and axe) and `usageReadout.logic.spec.ts`.
+- **Pass/fail:** pass if every status label matches the record and every Run shows a Usage section
+  whose fields read `Unknown`. Fail on any fabricated status, or any usage field shown as `0` or as
+  a value the backend did not report.
 - **Status:** IMPLEMENTED AND TESTED (L). T not executed.
 
 ### U6 — Events and SSE replay
@@ -146,20 +151,44 @@ nothing on cancel` (Command Center). Source: `openApproval` re-checks capabiliti
 
 ### U9 — Authorizer-dependent operations unavailable
 
-- **Expected:** with no Authorizer, owner approvals, connector authorization and **result
-  acceptance** cannot succeed. The UI says so plainly. For result acceptance the API answers
-  `503 authorizer_unavailable`; the owner must see that acceptance is unavailable and that the
-  result is **not** shown as accepted, and must **not** be told the outcome is unknown.
-- **Procedure:** if a historical task is `in_review`, open its run and try "Accept Result" and
-  confirm; read the message.
-- **Evidence:** L — `a definitive authorizer_unavailable is reported as unavailable, never as an
-unknown outcome` (added with this change; fails without the fix); existing acceptance tests keep
-  the genuinely ambiguous 5xx cases (`concurrency_limit`, lost response) as "uncertain".
-- **Pass/fail:** pass if the message says acceptance is unavailable, nothing is shown as accepted,
-  and the task is re-read. Fail if the UI says "may or may not have been accepted" for this case.
-- **Status:** IMPLEMENTED AND TESTED (L) after the fix in section 5. T not executed. Residual: the
-  Accept control is still shown on the Runs page even though it cannot succeed in this profile (the
-  Runs page does not load capabilities); the message is truthful but the control is not pre-gated.
+- **Expected:** in the restricted profile the accept route refuses at its feature guard. Before
+  submission the UI shows the neutral availability advisory (below); after `503 authorizer_unavailable`
+  it reports the approval service as unavailable and asks the owner to review the task's state before
+  trying again, without claiming whether acceptance committed. When the backend reports the Authorizer
+  unavailable (`authorization.availability: unavailable`), the Runs page shows an advisory beside
+  Accept Result and Reconcile: "A check reports the approval service (Authorizer) as unavailable.
+  This request may succeed or be refused; only the server can determine the outcome." The wording is
+  deliberately neutral: it also fits the reconcile view, where a receipt already exists, and it fits
+  a transient health-probe failure, where the accept route may still work. The control stays usable;
+  the reading is a health probe, not the accept route's answer, so it never blocks anything. The
+  advisory is shown with the control: while the freshness gate hides the control (a task and run
+  re-read is refreshing or failed) neither is shown (source-verified, not separately tested).
+  Outcomes if the owner confirms: in the **restricted profile** the accept route refuses at its
+  feature guard with `503 authorizer_unavailable`; the same code can also come from Authorizer error
+  handling. Either way the UI asserts neither success nor failure: it says the approval service
+  (Authorizer) is unavailable, re-reads the task, keeps the idempotency key, and tells the owner to
+  review the task's state before trying again (the backend handoff says to read task state first).
+  It no longer says the outcome "may or may not have been accepted". With a **transient probe
+  failure** the accept route decides: it may succeed (the receipt is shown) or return any of its
+  documented errors, each handled as before.
+- **Procedure:** if a historical task is `in_review`, open its completed run on the Runs page; read
+  the Owner review section; activate the control and confirm; read the message; use "Check again".
+- **Evidence:** L — `Authorizer advisory on Accept Result` tests (restricted; Authorizer unavailable;
+  the reconcile control; authorized mock mode shows no advisory and still needs confirmation; a late
+  `unavailable` never closes an open confirmation and acceptance can still succeed; a failed
+  capability read claims nothing; "Check again"; moving to another completed run re-reads; an answer
+  for the ended session never shows an advisory in the replacement; a run that completes on its own
+  is never accepted automatically) and `authorizer_unavailable is reported as the approval service
+being unavailable, not as a lost response` (the PR #128 behaviour, reworded in this milestone).
+  Ambiguous 5xx cases stay "uncertain".
+- **Pass/fail:** for any advisory case, pass if the advisory is shown, the control stays usable and
+  nothing is sent until the owner confirms; fail if the reading alone blocks or closes the control.
+  For the restricted-profile feature-guard refusal, pass if the message says the approval service is
+  unavailable and to review the task's state, and no success state is shown; fail if "may or may not
+  have been accepted" appears. For a transient probe failure, accept any documented outcome of the
+  accept route, including success, as decided by the route.
+- **Status:** IMPLEMENTED AND TESTED (L) as advice. T not executed. Authoritative disabling is BLOCKED
+  BY BACKEND (section 9).
 
 ### U10 — Loading, empty and error states
 
@@ -222,7 +251,7 @@ explicit acceptance → completed Task → persisted receipt.**
 | J7  | Duplicate-acceptance prevention          | Rapid clicks send one request; a repeat returns the original receipt; only the latest eligible run can be accepted                       | L: `rapid repeated clicks submit one acceptance and show progress`; `after a mock rerun only the latest run can be accepted…`; reconcile tests                                                                                                                                          |
 | J8  | Session expiry during operations         | An expiry during approve, start, stop or accept signs the owner out, keeps the same idempotency key, and shows no success                | L: `a lost session signs the owner out without reporting acceptance, and keeps the key`; the stale-session suites                                                                                                                                                                       |
 | J9  | Backend restart and recovery             | Committed Task, Run and event identities survive; an uncertain run stays `unknown`; no automatic replay                                  | H only: `Compose recovery preserves the committed Task, Run and event identities`. L cannot show backend restart. T not executed                                                                                                                                                        |
-| J10 | Usage reporting including unknown values | Usage is reported or shown as unknown; never a fabricated zero                                                                           | H asserts the API returns `usage` as unknown. **The UI has no usage readout** (see section 5, gap 2), so this can only be checked as "no fabricated usage value appears"                                                                                                                |
+| J10 | Usage reporting including unknown values | The Run inspector shows a Usage section; every field reads `Unknown` (never zero) and nothing is fabricated                              | L: `Run usage readout` tests and `usageReadout.logic.spec.ts`. H: the API returns `usage` as unknown. Real usage values cannot be shown: the Phase 1 contract carries none (section 9)                                                                                                  |
 
 **Pass criteria for the whole journey:** every row passes on the target host with the owner present,
 the persisted receipt matches the accepted run, and nothing in the UI is presented as provider
@@ -230,25 +259,26 @@ activity. **Status:** OWNER AUTHORIZATION REQUIRED (and BLOCKED BY PLATFORM for 
 
 ## 4. Frontend readiness matrix
 
-| Area                                                          | Status                          | Evidence and notes                                                                                                                |
-| ------------------------------------------------------------- | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| Owner login/logout, session, CSRF, protected routes           | IMPLEMENTED AND TESTED          | L (U1–U3).                                                                                                                        |
-| Session replacement and stale asynchronous work               | IMPLEMENTED AND TESTED          | L; see the proof-level split in `FRONTEND_PHASE_1_ACCEPTANCE.md`.                                                                 |
-| OMNIS NEXUS Command Center                                    | IMPLEMENTED AND TESTED          | `command-center*.spec.ts` (90 tests across three files).                                                                          |
-| Agents and Profiles                                           | IMPLEMENTED AND TESTED          | `agents.spec.ts`; identity/profile editor session guards are untested (below).                                                    |
-| Departments                                                   | IMPLEMENTED AND TESTED          | `departments.spec.ts`; department-write session guards are untested (below).                                                      |
-| Projects and planning                                         | IMPLEMENTED AND TESTED          | `projects*.spec.ts`, `planning*.spec.ts`; planning-writer session guards are untested (below).                                    |
-| Tasks (create, assign, list, detail)                          | IMPLEMENTED AND TESTED          | App.spec task, assignment and idempotency tests.                                                                                  |
-| Run inspector, history, SSE and replay                        | IMPLEMENTED AND TESTED          | L (U5, U6). Backend replay is single API replica only.                                                                            |
-| Runtime capability reporting                                  | IMPLEMENTED AND TESTED          | L (U7). Banner on the Tasks page only.                                                                                            |
-| Execution-disabled controls and messages                      | IMPLEMENTED AND TESTED          | L (U8).                                                                                                                           |
-| Result acceptance when the Authorizer is unavailable          | IMPLEMENTED AND TESTED          | Fixed and regression-tested in this change (section 5, gap 1). Control not pre-gated.                                             |
-| Mock owner approval and result acceptance (Authorizer-backed) | IMPLEMENTED, RUNTIME UNVERIFIED | L and H only; needs the mock-enabled profile on the target host.                                                                  |
-| Run usage readout ("basic readout, `unknown` when absent")    | SOURCE FIX REQUIRED             | Gap 2. Small and well defined; needs an owner decision on whether it is part of the R1 gate because it changes the Run inspector. |
-| Full mock-agent owner journey on the target host              | OWNER AUTHORIZATION REQUIRED    | Section 3. Also BLOCKED BY PLATFORM for target access.                                                                            |
-| Backend restart/recovery and multi-replica session behaviour  | BLOCKED BY BACKEND              | Session state is process-local; only a single API replica is established (AO-109).                                                |
-| Responsive and accessibility behaviour                        | IMPLEMENTED AND TESTED          | L, Chromium only; no screen-reader or other-browser run.                                                                          |
-| Real provider execution (R1)                                  | BLOCKED BY BACKEND              | AO-107 / AO-113 stay BLOCKED; out of scope here.                                                                                  |
+| Area                                                          | Status                          | Evidence and notes                                                                                                                                                                  |
+| ------------------------------------------------------------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Owner login/logout, session, CSRF, protected routes           | IMPLEMENTED AND TESTED          | L (U1–U3).                                                                                                                                                                          |
+| Session replacement and stale asynchronous work               | IMPLEMENTED AND TESTED          | L; see the proof-level split in `FRONTEND_PHASE_1_ACCEPTANCE.md`.                                                                                                                   |
+| OMNIS NEXUS Command Center                                    | IMPLEMENTED AND TESTED          | `command-center*.spec.ts` (90 tests across three files).                                                                                                                            |
+| Agents and Profiles                                           | IMPLEMENTED AND TESTED          | `agents.spec.ts`; identity/profile editor session guards are untested (below).                                                                                                      |
+| Departments                                                   | IMPLEMENTED AND TESTED          | `departments.spec.ts`; department-write session guards are untested (below).                                                                                                        |
+| Projects and planning                                         | IMPLEMENTED AND TESTED          | `projects*.spec.ts`, `planning*.spec.ts`; planning-writer session guards are untested (below).                                                                                      |
+| Tasks (create, assign, list, detail)                          | IMPLEMENTED AND TESTED          | App.spec task, assignment and idempotency tests.                                                                                                                                    |
+| Run inspector, history, SSE and replay                        | IMPLEMENTED AND TESTED          | L (U5, U6). Backend replay is single API replica only.                                                                                                                              |
+| Runtime capability reporting                                  | IMPLEMENTED AND TESTED          | L (U7). Banner on the Tasks page only.                                                                                                                                              |
+| Execution-disabled controls and messages                      | IMPLEMENTED AND TESTED          | L (U8).                                                                                                                                                                             |
+| Result acceptance when the Authorizer is unavailable          | IMPLEMENTED AND TESTED          | A neutral unavailable message that asserts neither success nor failure (PR #128, reworded here) plus an advisory from `authorization.availability` that does not block (section 9). |
+| Authoritative gating of Accept Result (disable the control)   | BLOCKED BY BACKEND              | The capability contract has no field about acceptance; `authorization.availability` is a health probe. Needs `ownerAcceptance.availability` (section 9).                            |
+| Mock owner approval and result acceptance (Authorizer-backed) | IMPLEMENTED, RUNTIME UNVERIFIED | L and H only; needs the mock-enabled profile on the target host.                                                                                                                    |
+| Run usage readout ("basic readout, `unknown` when absent")    | IMPLEMENTED AND TESTED          | Truthful `Unknown` readout for the only usage the contract can express. Real usage values are BLOCKED BY BACKEND (no contract for them).                                            |
+| Full mock-agent owner journey on the target host              | OWNER AUTHORIZATION REQUIRED    | Section 3. Also BLOCKED BY PLATFORM for target access.                                                                                                                              |
+| Backend restart/recovery and multi-replica session behaviour  | BLOCKED BY BACKEND              | Session state is process-local; only a single API replica is established (AO-109).                                                                                                  |
+| Responsive and accessibility behaviour                        | IMPLEMENTED AND TESTED          | L, Chromium only; no screen-reader or other-browser run.                                                                                                                            |
+| Real provider execution (R1)                                  | BLOCKED BY BACKEND              | AO-107 / AO-113 stay BLOCKED; out of scope here.                                                                                                                                    |
 
 ### Residual test limitations, evaluated
 
@@ -262,25 +292,28 @@ activity. **Status:** OWNER AUTHORIZATION REQUIRED (and BLOCKED BY PLATFORM for 
 
 ## 5. Genuine gaps found by this audit
 
-1. **Accept Result under `authorizer_unavailable` was mis-framed — FIXED in this change.** The
-   restricted API answers `503 authorizer_unavailable` ("Authorizer-backed functionality is
-   unavailable in this configuration.") without reaching any Authorizer. The frontend treated every
+1. **Accept Result under `authorizer_unavailable` was mis-framed — FIXED.** The restricted API
+   answers `503 authorizer_unavailable` ("Authorizer-backed functionality is unavailable in this
+   configuration.") at its feature guard, before any Authorizer is reached. The frontend treated every
    5xx as an unknown outcome and told the owner "The result may or may not have been accepted.
-   Retrying uses the same request…". The backend has a separate code, `task_acceptance_outcome_unknown`,
-   for the genuinely uncertain case. Fix: `classifyAcceptanceFailure` now returns a distinct
-   `unavailable` outcome for `503` with code `authorizer_unavailable`; the UI says the approval
-   service is unavailable and the result is not shown as accepted, keeps the idempotency key, and
-   re-reads the task. Regression test added; with the classification removed the test fails with the
-   old text. All other 5xx handling is unchanged.
-2. **No Run usage readout — SOURCE FIX REQUIRED, not fixed here.** The Phase 0/1 handoff lists
-   "Usage event schema and basic readout, `unknown` when absent" and AO-112 requires "usage
-   reported or unknown; no fabricated zero". `Run.usage` is always `{quality: 'unknown', …null}` in
-   Phase 1, and the frontend renders nothing for it. Nothing is fabricated, but there is no readout.
-   A one-line "Usage: unknown" in the Run inspector would satisfy it; this changes the inspector
-   design, so it should be an owner-approved milestone.
-3. **Capability state appears only on the Tasks page — by design, noted for UAT.** Command Center
-   "Review approval" and the connector action re-check capabilities before acting, so they fail
-   closed. The Runs page does not load capabilities, so Accept Result is not pre-gated (see U9).
+   Retrying uses the same request…", which is untruthful there. The backend has a separate code,
+   `task_acceptance_outcome_unknown`, for the lost-response case, and the same `authorizer_unavailable`
+   code can also come from Authorizer error handling, where the handoff says to read task state before
+   deciding to retry. Fix: `classifyAcceptanceFailure` returns a distinct `unavailable` outcome for
+   `503` with code `authorizer_unavailable`; the UI says the approval service is unavailable, asserts
+   neither success nor failure, keeps the idempotency key, re-reads the task and tells the owner to
+   review its state before trying again. Regression test added; with the classification removed it
+   fails with the old text. All other 5xx handling is unchanged.
+2. **No Run usage readout — IMPLEMENTED in the usage-readout milestone.** See section 9. The Phase
+   1 contract can express only unknown usage, so the readout is a truthful `Unknown` display and is
+   not a Cost & Usage Center.
+3. **Accept Result was not pre-gated on the Runs page — advisory IMPLEMENTED; authoritative gating
+   BLOCKED BY BACKEND.** An isolated check reads `authorization.availability` while a completed run
+   is open and shows an advisory when it is `unavailable`. It does not disable the control: outside the
+   restricted profile that value comes from a separate health request, and the accept route only
+   refuses at its feature guard in the restricted profile, so a failed probe does not prove
+   acceptance would fail. Command Center "Review approval" and the connector action still re-check
+   capabilities before acting, so they fail closed.
 
 ## 6. Backend and platform dependencies
 
@@ -289,9 +322,8 @@ activity. **Status:** OWNER AUTHORIZATION REQUIRED (and BLOCKED BY PLATFORM for 
   profile has none by design.
 - The mock-journey checklist needs the mock-enabled profile, which is not authorized.
 - Multi-replica session revocation and SSE replay are not established (AO-109).
-- No backend change is requested by this audit. Optionally, a capability field for "result
-  acceptance available" would let the Runs page pre-gate the Accept control; that is a backend and
-  owner decision.
+- Two optional backend contract extensions are proposed for Codex #1 in section 9; neither is
+  required for the current behaviour and none was made here.
 
 ## 7. CI reliability evidence for Codex #3
 
@@ -333,3 +365,60 @@ does **not** change the pre-merge approval history: the approval was issued for 
   torn down and recreated on sign-out, so it cannot release a replacement session's shared state.
 - **Verdict:** NON-BLOCKING FINDINGS ONLY. The reviewer ran no tests, CI, backend or Docker; the
   validation figures quoted elsewhere are the author's.
+
+## 9. Usage readout and acceptance gating (milestone record)
+
+**Contract evidence (read from source, not assumed).**
+
+- `packages/contracts/src/index.ts`: `Run.usage` is `UsageSchema` = `{quality: 'unknown', inputTokens:
+null, outputTokens: null, cost: null}`. There is no measured or estimated variant, no currency, and
+  no run event that carries usage (`RunEventTypeSchema` has none). A Run with any other usage fails
+  to parse. `usageReadout.logic.spec.ts` pins this with a tripwire test: if the contract is
+  extended, that test fails and the readout and its tests must change with it.
+- `packages/contracts/src/runtime-capabilities.ts` and `apps/api/src/server.ts`:
+  `authorization.availability` is produced by `checkAuthorizerAvailability()`, which is `false` in the
+  restricted profile (where the accept route also refuses at its feature guard) and otherwise the
+  result of a separate `/internal/v1/health` request through the Authorizer client that result
+  acceptance also uses. Outside the restricted profile `unavailable` is therefore only an advisory
+  signal: the probe can fail while the acceptance endpoint works, so it does not prove acceptance
+  would fail. `available` does not promise acceptance will succeed either. The frontend treats the
+  value as advice and never as the authority (see "Why it is not a hard gate" below).
+
+**Usage readout.** `RunUsageReadout` adds a compact "Usage" section to the Run inspector: Input
+tokens, Output tokens and Cost, each `Unknown`, with the note "No usage was reported for this run.
+Unknown does not mean zero." Nothing is computed, estimated or priced. `formatUsageCount` shows `null`
+as `Unknown` and `0` as `0` so that, if the contract is extended, missing data is not rendered as zero;
+cost is not formatted because the contract carries no currency. The design spec's collapsible usage
+inspector belongs to AI Chat, which is outside Phase 1, so the section is always visible and small.
+`docs/04-design/OMNIS_NEXUS_UI_UX_SPEC_V2.md` is not in the repository; `UI_UX_SPEC.md` and
+`NEXUS_DESIGN_SYSTEM.md` were used.
+
+**Acceptance control (advisory only).** `useAcceptanceAvailability` reads `authorization.availability`
+only while a completed run is open on the Runs page, re-reads when the selected run changes, and
+keeps its own state so the Tasks page execution gate is untouched. When it reads `unavailable`, the
+Accept Result and Reconcile controls get an advisory note (associated with the button, with a "Check
+again" action). **Nothing is disabled, blocked or closed.** While loading, after a failed read, or
+when `available`, nothing changes. The accept route stays the authority, and Origin/CSRF, exact run
+identity and idempotency are untouched.
+
+**Why it is not a hard gate (found by independent review).** An earlier revision disabled the
+control. Review showed that is unjustified: outside the restricted profile `authorization.availability`
+comes from a separate `/internal/v1/health` request (`apps/api/src/server.ts`, any probe error maps to
+`false`), while the accept route only refuses at its feature guard in the restricted profile
+(`apps/api/src/auth.ts`) and otherwise calls the acceptance endpoint (`task-routes.ts`). A failed
+health probe with a working acceptance endpoint would have blocked an action that could succeed.
+Deriving a rule from restricted-profile field combinations would invent an authority the contract
+does not state, so the hard gate was removed. This is the documented blocker: the contract has no
+field that authoritatively states acceptance availability.
+
+**Proposed contract extensions for Codex #1 (not made here, not required):**
+
+1. A dedicated field such as `ownerAcceptance: { availability }` in the capability response that is
+   computed from what the accept route itself requires. With it the frontend could disable the
+   control authoritatively; without it the frontend can only advise.
+2. If real usage is to be shown, a versioned `Usage` variant with `quality` (`measured` | `estimated`
+   | `unknown`), token counts, and a cost with an explicit currency and source, plus the run event or
+   field that delivers it. The frontend and shared contracts must change together.
+
+**Evidence level.** Everything above is L (mock-API Playwright, plus pure-logic tests). The restricted
+profile's real responses are T and were not executed; no UAT item is marked passed on the target host.
