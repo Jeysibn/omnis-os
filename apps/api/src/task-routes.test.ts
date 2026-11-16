@@ -172,6 +172,14 @@ describe('owner task routes', () => {
       });
       assert.equal(missingKey.statusCode, 400);
       assert.equal(authorizerCalls.length, 0, 'invalid input must not reach the Authorizer');
+      const malformedKey = await owner.inject({
+        method: 'POST',
+        url: `/api/v1/tasks/${task.id}/accept-result`,
+        headers: { ...protectedHeaders, 'idempotency-key': 'not-a-uuid' },
+        payload: { runId },
+      });
+      assert.equal(malformedKey.statusCode, 400);
+      assert.equal(authorizerCalls.length, 0, 'invalid input must not reach the Authorizer');
       const accepted = await owner.inject({
         method: 'POST',
         url: `/api/v1/tasks/${task.id}/accept-result`,
