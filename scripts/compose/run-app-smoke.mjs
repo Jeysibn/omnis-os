@@ -11,7 +11,7 @@ import {
   testOwnerPassword,
 } from '../../tests/integration/support/mock-services.mjs';
 import { canRemoveBrowserBridgeGuard } from './firewall-guard-policy.mjs';
-import { safeLauncherFailureCodes } from './safe-launcher-diagnostics.mjs';
+import { safeLauncherFailureSignals } from './safe-launcher-diagnostics.mjs';
 
 const scrypt = promisify(scryptCallback);
 const root = process.cwd();
@@ -690,8 +690,8 @@ try {
       redact(status.stdout || status.stderr || 'unavailable'),
       'Compose logs:',
       redact(logs.stdout || logs.stderr || 'unavailable'),
-      'Host launcher safe failure codes:',
-      JSON.stringify(safeLauncherFailureCodes(fixtures?.launcher?.capturedLogs ?? '')),
+      'Host launcher safe diagnostics:',
+      JSON.stringify(safeLauncherFailureSignals(fixtures?.launcher?.capturedLogs ?? '')),
     ].join('\n');
     process.stderr.write(`${diagnostics}\n`);
     if (process.env.OMNIS_COMPOSE_DIAGNOSTICS_PATH) {
