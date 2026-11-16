@@ -262,9 +262,13 @@ test('Compose owner creates an authorized mock Run through the web gateway', asy
   } catch {
     const events = await readRunEvents(page, admitted.body.id);
     const terminal = events.find((event) =>
-      ['run.failed', 'run.interrupted', 'run.outcome_unknown', 'run.cancelled'].includes(
-        event.type,
-      ),
+      [
+        'run.completed',
+        'run.failed',
+        'run.interrupted',
+        'run.outcome_unknown',
+        'run.cancelled',
+      ].includes(event.type),
     );
     throw new Error(
       `Compose mock Run did not complete (status=${observedRunStatus}, terminal=${terminal?.type ?? 'none'}): ${terminal?.message ?? 'No terminal event was observed.'}`,
