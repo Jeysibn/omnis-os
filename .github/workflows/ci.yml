@@ -197,6 +197,8 @@ jobs:
       - run: docker pull node@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85
       - run: pnpm install --frozen-lockfile
       - name: Generate and mask run-scoped PostgreSQL credentials
+        env:
+          OMNIS_CI_DATABASE_SUITE: ${{ matrix.suite }}
         run: node scripts/ci/create-test-database-environment.mjs
       - name: Start disposable PostgreSQL on loopback
         run: bash scripts/ci/start-test-postgres.sh
@@ -208,7 +210,7 @@ jobs:
       - name: Verify restricted database bootstrap and migrations
         if: matrix.suite == 'restricted-bootstrap'
         run: |
-          source scripts/ci/export-test-database-environment.sh
+          source scripts/ci/export-restricted-test-database-environment.sh
           node --experimental-strip-types packages/db/src/restricted-bootstrap-ci.ts
       - name: Run PostgreSQL DB package integration suite
         if: matrix.suite == 'legacy-upgrade'

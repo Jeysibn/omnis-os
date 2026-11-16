@@ -41,6 +41,35 @@ test('creates isolated per-run PostgreSQL passwords and a scoped container name'
   assert.equal(new Set(passwords).size, passwords.length);
 });
 
+test('restricted bootstrap credentials exclude Authorizer and launcher secrets', () => {
+  const environment = createTestDatabaseEnvironment({
+    runId: '12345',
+    runAttempt: '2',
+    job: 'database-integration',
+    suite: 'restricted-bootstrap',
+    createRandomBytes: (size) => Buffer.alloc(size, 7),
+  });
+
+  assert.deepEqual(
+    Object.keys(environment)
+      .filter((name) => name.endsWith('_PASSWORD'))
+      .sort(),
+    [
+      'OMNIS_CI_POSTGRES_ADMIN_PASSWORD',
+      'OMNIS_CI_POSTGRES_MIGRATION_PASSWORD',
+      'OMNIS_CI_POSTGRES_RUNTIME_PASSWORD',
+    ],
+  );
+  assert.throws(() =>
+    createTestDatabaseEnvironment({
+      runId: '12345',
+      runAttempt: '2',
+      job: 'database-integration',
+      suite: 'unexpected',
+    }),
+  );
+});
+
 test('masks passwords before writing a mode-0600 file and exposes only its path', () => {
   const directory = mkdtempSync(join(tmpdir(), 'omnis-ci-db-env-'));
   const githubEnvPath = join(directory, 'github-env');
@@ -114,6 +143,52 @@ test('disposable PostgreSQL uses loopback, bounded health readiness, and exact c
   assert.match(databaseEnvironment, /127\.0\.0\.1:5432\/omnis_test/);
   assert.match(databaseEnvironment, /source "\$expected_environment_file"/);
   assert.match(databaseEnvironment, /stat -c '%a'/);
+});
+
+test('restricted credential export requires only the restricted bootstrap roles', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'omnis-ci-restricted-db-'));
+  const credentialsFilePath = join(directory, 'omnis-ci-db-12345-2-database-integration.env');
+  const passwords = {
+    OMNIS_CI_POSTGRES_ADMIN_PASSWORD: 'a'.repeat(64),
+    OMNIS_CI_POSTGRES_MIGRATION_PASSWORD: 'b'.repeat(64),
+    OMNIS_CI_POSTGRES_RUNTIME_PASSWORD: 'c'.repeat(64),
+  };
+
+  try {
+    writeFileSync(
+      credentialsFilePath,
+      Object.entries(passwords)
+        .map(([name, value]) => `${name}=${value}`)
+        .join('\n') + '\n',
+      { mode: 0o600 },
+    );
+    const result = spawnSync(
+      'bash',
+      [
+        '-c',
+        'source "$1"; env | cut -d= -f1 | grep "^OMNIS_CI_POSTGRES_.*PASSWORD$" | sort',
+        '--',
+        new URL('./export-restricted-test-database-environment.sh', import.meta.url).pathname,
+      ],
+      {
+        encoding: 'utf8',
+        env: {
+          PATH: process.env.PATH,
+          GITHUB_RUN_ID: '12345',
+          GITHUB_RUN_ATTEMPT: '2',
+          GITHUB_JOB: 'database-integration',
+          RUNNER_TEMP: directory,
+          OMNIS_CI_POSTGRES_ENV_FILE: credentialsFilePath,
+        },
+      },
+    );
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(result.stdout.trim().split('\n'), Object.keys(passwords).sort());
+    assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /[a-f]{64}/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('startup keeps the password out of action environment, Docker arguments, and output', () => {
