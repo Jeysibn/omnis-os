@@ -4,10 +4,15 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, it } from 'node:test';
 import type { Pool } from 'pg';
-import { loadRestrictedBootstrapConfig } from './restricted-bootstrap.ts';
+import {
+  loadRestrictedBootstrapConfig,
+  loadRestrictedMigrationConfig,
+  RESTRICTED_MIGRATION_ENV_ALLOWLIST,
+} from './restricted-bootstrap.ts';
 import { provisionRestrictedDatabaseRoles } from './provision-roles.ts';
 
 const directories: string[] = [];
+const SYSTEM_IDENTIFIER = '7656119800000000000';
 
 afterEach(() => {
   for (const directory of directories.splice(0))
@@ -21,6 +26,7 @@ describe('restricted database bootstrap configuration', () => {
     assert.equal(config.databaseName, 'omnis_restricted_dev');
     assert.equal(config.adminUrl, fixture.adminUrl);
     assert.equal(config.migrationUrl, fixture.migrationUrl);
+    assert.equal(config.systemIdentifier, SYSTEM_IDENTIFIER);
     assert.equal(config.migratorPassword, 'a'.repeat(64));
     assert.equal(config.runtimePassword, 'b'.repeat(64));
   });
@@ -39,11 +45,12 @@ describe('restricted database bootstrap configuration', () => {
       { databaseName: 'omnis' },
       { databaseName: 'omnis_other' },
       { project: 'omnis-os' },
+      { systemIdentifier: 'not-a-system-identifier' },
     ]) {
       const fixture = files(options);
       assert.throws(
         () => loadRestrictedBootstrapConfig(fixture.bootstrap, fixture.worker),
-        /omnis_restricted_dev|OMNIS_RESTRICTED_DB_NAME|omnis-os-restricted-dev/,
+        /omnis_restricted_dev|OMNIS_RESTRICTED_DB_NAME|omnis-os-restricted-dev|system identifier/,
       );
     }
   });
@@ -90,6 +97,63 @@ describe('restricted database bootstrap configuration', () => {
       /credentials must match/,
     );
   });
+
+  it('accepts a migration-only file without administrative or runtime credentials', () => {
+    const fixture = files();
+    const migrationPath = path.join(path.dirname(fixture.bootstrap), 'restricted-migration.env');
+    const values = [
+      'OMNIS_RESTRICTED_DEVELOPMENT=true',
+      'OMNIS_EXECUTION_MODE=disabled',
+      'OMNIS_RESTRICTED_COMPOSE_PROJECT=omnis-os-restricted-dev',
+      'OMNIS_RESTRICTED_DB_NAME=omnis_restricted_dev',
+      `OMNIS_RESTRICTED_PG_SYSTEM_IDENTIFIER=${SYSTEM_IDENTIFIER}`,
+      `OMNIS_RESTRICTED_MIGRATION_DATABASE_URL=${fixture.migrationUrl}`,
+    ].join('\n');
+    writeFileSync(migrationPath, values);
+    chmodSync(migrationPath, 0o600);
+    const config = loadRestrictedMigrationConfig(migrationPath);
+    assert.equal(config.databaseName, 'omnis_restricted_dev');
+    assert.equal(config.migrationUrl, fixture.migrationUrl);
+    assert.equal(
+      RESTRICTED_MIGRATION_ENV_ALLOWLIST.has('OMNIS_RESTRICTED_ADMIN_DATABASE_URL'),
+      false,
+    );
+    assert.equal(
+      RESTRICTED_MIGRATION_ENV_ALLOWLIST.has('OMNIS_RESTRICTED_RUNTIME_PASSWORD'),
+      false,
+    );
+  });
+
+  it('rejects administrative credentials in the migration-only env file without echoing values', () => {
+    const fixture = files();
+    const migrationPath = path.join(path.dirname(fixture.bootstrap), 'restricted-migration.env');
+    const secret = 'administrative-secret-sentinel';
+    writeFileSync(
+      migrationPath,
+      [
+        'OMNIS_RESTRICTED_DEVELOPMENT=true',
+        'OMNIS_EXECUTION_MODE=disabled',
+        'OMNIS_RESTRICTED_COMPOSE_PROJECT=omnis-os-restricted-dev',
+        'OMNIS_RESTRICTED_DB_NAME=omnis_restricted_dev',
+        `OMNIS_RESTRICTED_PG_SYSTEM_IDENTIFIER=${SYSTEM_IDENTIFIER}`,
+        `OMNIS_RESTRICTED_MIGRATION_DATABASE_URL=${fixture.migrationUrl}`,
+        `OMNIS_RESTRICTED_ADMIN_DATABASE_URL=postgresql://omnis:${secret}@127.0.0.1:5432/omnis_restricted_dev`,
+      ].join('\n'),
+    );
+    chmodSync(migrationPath, 0o600);
+    assert.throws(() => loadRestrictedMigrationConfig(migrationPath), /disallowed variable/);
+    assert.doesNotMatch(
+      (() => {
+        try {
+          loadRestrictedMigrationConfig(migrationPath);
+        } catch (error) {
+          return error instanceof Error ? error.message : String(error);
+        }
+        return '';
+      })(),
+      new RegExp(secret),
+    );
+  });
 });
 
 describe('restricted database target preflight', () => {
@@ -103,10 +167,11 @@ describe('restricted database target preflight', () => {
     });
 
     await assert.rejects(
-      provisionRestrictedDatabaseRoles(pool, {
-        migration: 'a'.repeat(64),
-        runtime: 'b'.repeat(64),
-      }),
+      provisionRestrictedDatabaseRoles(
+        pool,
+        { migration: 'a'.repeat(64), runtime: 'b'.repeat(64) },
+        SYSTEM_IDENTIFIER,
+      ),
       /omnis_restricted_dev/,
     );
     assert.equal(queries.length, 1);
@@ -115,8 +180,24 @@ describe('restricted database target preflight', () => {
 
   it('rejects a live role or privilege mismatch before provisioning SQL', async () => {
     for (const identity of [
-      { database_name: 'omnis_restricted_dev', role_name: 'omnis_runtime', is_superuser: false },
-      { database_name: 'omnis_restricted_dev', role_name: 'omnis', is_superuser: false },
+      {
+        database_name: 'omnis_restricted_dev',
+        role_name: 'omnis_runtime',
+        is_superuser: false,
+        system_identifier: SYSTEM_IDENTIFIER,
+      },
+      {
+        database_name: 'omnis_restricted_dev',
+        role_name: 'omnis',
+        is_superuser: false,
+        system_identifier: SYSTEM_IDENTIFIER,
+      },
+      {
+        database_name: 'omnis_restricted_dev',
+        role_name: 'omnis',
+        is_superuser: true,
+        system_identifier: '7656119800000000001',
+      },
     ]) {
       const queries: string[] = [];
       const pool = fakePool(async (sql) => {
@@ -132,13 +213,46 @@ describe('restricted database target preflight', () => {
         };
       });
       await assert.rejects(
-        provisionRestrictedDatabaseRoles(pool, {
-          migration: 'a'.repeat(64),
-          runtime: 'b'.repeat(64),
-        }),
+        provisionRestrictedDatabaseRoles(
+          pool,
+          { migration: 'a'.repeat(64), runtime: 'b'.repeat(64) },
+          SYSTEM_IDENTIFIER,
+        ),
       );
       assert.equal(queries.length, 1);
     }
+  });
+
+  it('rejects an already provisioned cluster before changing cluster-global role passwords', async () => {
+    const queries: string[] = [];
+    const pool = fakePool(async (sql) => {
+      queries.push(sql);
+      if (sql.includes('current_database()')) {
+        return {
+          rows: [
+            {
+              database_name: 'omnis_restricted_dev',
+              current_user: 'omnis',
+              is_superuser: true,
+              system_identifier: SYSTEM_IDENTIFIER,
+            },
+          ],
+        };
+      }
+      if (sql.includes('pg_roles')) return { rows: [{ role_name: 'omnis_runtime' }] };
+      return { rows: [], rowCount: 0 };
+    });
+
+    await assert.rejects(
+      provisionRestrictedDatabaseRoles(
+        pool,
+        { migration: 'a'.repeat(64), runtime: 'b'.repeat(64) },
+        SYSTEM_IDENTIFIER,
+      ),
+      /fresh PostgreSQL application role set/,
+    );
+    assert.ok(queries.length > 1);
+    assert.doesNotMatch(queries.join('\n'), /\b(?:ALTER|CREATE|GRANT|REVOKE)\b/i);
   });
 
   it('provisions only runtime and migrator roles with scoped grants', async () => {
@@ -152,6 +266,7 @@ describe('restricted database target preflight', () => {
               database_name: 'omnis_restricted_dev',
               current_user: 'omnis',
               is_superuser: true,
+              system_identifier: SYSTEM_IDENTIFIER,
             },
           ],
         };
@@ -160,10 +275,11 @@ describe('restricted database target preflight', () => {
       return { rows: [], rowCount: 0 };
     });
 
-    await provisionRestrictedDatabaseRoles(pool, {
-      migration: 'a'.repeat(64),
-      runtime: 'b'.repeat(64),
-    });
+    await provisionRestrictedDatabaseRoles(
+      pool,
+      { migration: 'a'.repeat(64), runtime: 'b'.repeat(64) },
+      SYSTEM_IDENTIFIER,
+    );
 
     const sql = queries.join('\n');
     assert.match(sql, /ALTER ROLE omnis_migrator WITH LOGIN NOINHERIT NOSUPERUSER/);
@@ -172,7 +288,23 @@ describe('restricted database target preflight', () => {
       sql,
       /GRANT CONNECT ON DATABASE "omnis_restricted_dev" TO omnis_migrator, omnis_runtime/,
     );
-    assert.doesNotMatch(sql, /omnis_authorizer|omnis_launcher/);
+    assert.match(
+      sql,
+      /CREATE ROLE omnis_authorizer WITH NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS/,
+    );
+    assert.match(
+      sql,
+      /CREATE ROLE omnis_launcher WITH NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS/,
+    );
+    assert.doesNotMatch(sql, /ALTER ROLE omnis_(?:authorizer|launcher)/);
+    assert.match(
+      sql,
+      /GRANT EXECUTE ON FUNCTION pg_catalog\.pg_control_system\(\) TO omnis_migrator/,
+    );
+    assert.doesNotMatch(
+      sql,
+      /GRANT EXECUTE ON FUNCTION pg_catalog\.pg_control_system\(\) TO omnis_runtime/,
+    );
     assert.doesNotMatch(sql, /GRANT (?:ALL|CREATE|UPDATE|DELETE) ON DATABASE .* TO omnis_runtime/);
   });
 
@@ -227,6 +359,7 @@ function files(
     restricted?: string | undefined;
     mode?: string | undefined;
     project?: string | undefined;
+    systemIdentifier?: string | undefined;
     extra?: string | undefined;
   } = {},
 ) {
@@ -244,6 +377,7 @@ function files(
       `OMNIS_RESTRICTED_DEVELOPMENT=${options.restricted ?? 'true'}`,
       `OMNIS_EXECUTION_MODE=${options.mode ?? 'disabled'}`,
       `OMNIS_RESTRICTED_COMPOSE_PROJECT=${options.project ?? 'omnis-os-restricted-dev'}`,
+      `OMNIS_RESTRICTED_PG_SYSTEM_IDENTIFIER=${options.systemIdentifier ?? SYSTEM_IDENTIFIER}`,
       ...(options.omitDatabaseName
         ? []
         : [`OMNIS_RESTRICTED_DB_NAME=${options.databaseName ?? 'omnis_restricted_dev'}`]),

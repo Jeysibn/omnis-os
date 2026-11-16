@@ -70,10 +70,14 @@ async function main(): Promise<void> {
     application_name: 'omnis-restricted-role-provisioner',
   });
   try {
-    await provisionRestrictedDatabaseRoles(pool, {
-      migration: config.migratorPassword,
-      runtime: config.runtimePassword,
-    });
+    await provisionRestrictedDatabaseRoles(
+      pool,
+      {
+        migration: config.migratorPassword,
+        runtime: config.runtimePassword,
+      },
+      config.systemIdentifier,
+    );
     process.stdout.write('Restricted runtime and migration roles were provisioned.\n');
   } catch {
     process.stderr.write(

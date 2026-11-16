@@ -57,5 +57,9 @@ export {
   assertNoRestrictedBootstrapOverrides,
   assertRestrictedDatabaseTarget,
   loadRestrictedBootstrapConfig,
+  loadRestrictedMigrationConfig,
 } from './restricted-bootstrap.ts';
-export type { RestrictedBootstrapConfig } from './restricted-bootstrap.ts';
+export type {
+  RestrictedBootstrapConfig,
+  RestrictedMigrationConfig,
+} from './restricted-bootstrap.ts';

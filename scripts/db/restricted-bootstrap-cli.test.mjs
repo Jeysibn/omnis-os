@@ -77,6 +77,7 @@ function createFiles(options = {}) {
       'OMNIS_EXECUTION_MODE=disabled',
       `OMNIS_RESTRICTED_COMPOSE_PROJECT=${options.project ?? 'omnis-os-restricted-dev'}`,
       `OMNIS_RESTRICTED_DB_NAME=${databaseName}`,
+      `OMNIS_RESTRICTED_PG_SYSTEM_IDENTIFIER=${options.systemIdentifier ?? '7656119800000000000'}`,
       `OMNIS_RESTRICTED_ADMIN_DATABASE_URL=postgresql://omnis:${adminPassword}@127.0.0.1:5432/omnis_restricted_dev`,
       `OMNIS_RESTRICTED_MIGRATION_DATABASE_URL=postgresql://omnis_migrator:${migrationPassword}@127.0.0.1:5432/omnis_restricted_dev`,
       `OMNIS_RESTRICTED_MIGRATOR_PASSWORD=${migrationPassword}`,

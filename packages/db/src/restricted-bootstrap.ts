@@ -10,6 +10,7 @@ export const RESTRICTED_BOOTSTRAP_ENV_ALLOWLIST = new Set([
   'OMNIS_EXECUTION_MODE',
   'OMNIS_RESTRICTED_COMPOSE_PROJECT',
   'OMNIS_RESTRICTED_DB_NAME',
+  'OMNIS_RESTRICTED_PG_SYSTEM_IDENTIFIER',
   'OMNIS_RESTRICTED_ADMIN_DATABASE_URL',
   'OMNIS_RESTRICTED_MIGRATION_DATABASE_URL',
   'OMNIS_RESTRICTED_MIGRATOR_PASSWORD',
@@ -21,14 +22,30 @@ export const RESTRICTED_WORKER_DATABASE_ENV_ALLOWLIST = new Set([
   'OMNIS_RUNTIME_DB_PASSWORD',
 ]);
 
+export const RESTRICTED_MIGRATION_ENV_ALLOWLIST = new Set([
+  'OMNIS_RESTRICTED_DEVELOPMENT',
+  'OMNIS_EXECUTION_MODE',
+  'OMNIS_RESTRICTED_COMPOSE_PROJECT',
+  'OMNIS_RESTRICTED_DB_NAME',
+  'OMNIS_RESTRICTED_PG_SYSTEM_IDENTIFIER',
+  'OMNIS_RESTRICTED_MIGRATION_DATABASE_URL',
+]);
+
 const SECRET_HEX = /^[a-f\d]{64,}$/i;
 
 export interface RestrictedBootstrapConfig {
   readonly databaseName: typeof RESTRICTED_DATABASE_NAME;
+  readonly systemIdentifier: string;
   readonly adminUrl: string;
   readonly migrationUrl: string;
   readonly migratorPassword: string;
   readonly runtimePassword: string;
+}
+
+export interface RestrictedMigrationConfig {
+  readonly databaseName: typeof RESTRICTED_DATABASE_NAME;
+  readonly systemIdentifier: string;
+  readonly migrationUrl: string;
 }
 
 export function loadRestrictedBootstrapConfig(
@@ -48,19 +65,10 @@ export function loadRestrictedBootstrapConfig(
     ['OMNIS_RUNTIME_DB_PASSWORD'],
   );
 
-  if (bootstrap.OMNIS_RESTRICTED_DEVELOPMENT !== 'true') {
-    throw new Error(
-      'Restricted bootstrap configuration must set OMNIS_RESTRICTED_DEVELOPMENT=true.',
-    );
-  }
-  if (bootstrap.OMNIS_EXECUTION_MODE !== 'disabled') {
-    throw new Error('Restricted bootstrap configuration must set OMNIS_EXECUTION_MODE=disabled.');
-  }
-  if (bootstrap.OMNIS_RESTRICTED_COMPOSE_PROJECT !== RESTRICTED_COMPOSE_PROJECT) {
-    throw new Error(`Restricted bootstrap project must be ${RESTRICTED_COMPOSE_PROJECT}.`);
-  }
-  if (bootstrap.OMNIS_RESTRICTED_DB_NAME !== RESTRICTED_DATABASE_NAME) {
-    throw new Error(`Restricted bootstrap target must be ${RESTRICTED_DATABASE_NAME}.`);
+  assertRestrictedModeAndTarget(bootstrap);
+  const systemIdentifier = bootstrap.OMNIS_RESTRICTED_PG_SYSTEM_IDENTIFIER!;
+  if (!isValidSystemIdentifier(systemIdentifier)) {
+    throw new Error('Restricted PostgreSQL system identifier is invalid.');
   }
 
   const adminUrl = bootstrap.OMNIS_RESTRICTED_ADMIN_DATABASE_URL!;
@@ -90,11 +98,32 @@ export function loadRestrictedBootstrapConfig(
 
   return {
     databaseName: RESTRICTED_DATABASE_NAME,
+    systemIdentifier,
     adminUrl,
     migrationUrl,
     migratorPassword,
     runtimePassword,
   };
+}
+
+export function loadRestrictedMigrationConfig(filePath: string): RestrictedMigrationConfig {
+  const values = readPrivateEnvFile(
+    filePath,
+    'restricted migration',
+    RESTRICTED_MIGRATION_ENV_ALLOWLIST,
+    [...RESTRICTED_MIGRATION_ENV_ALLOWLIST],
+  );
+  assertRestrictedModeAndTarget(values);
+  const systemIdentifier = values.OMNIS_RESTRICTED_PG_SYSTEM_IDENTIFIER!;
+  if (!isValidSystemIdentifier(systemIdentifier)) {
+    throw new Error('Restricted PostgreSQL system identifier is invalid.');
+  }
+  const migrationUrl = values.OMNIS_RESTRICTED_MIGRATION_DATABASE_URL!;
+  const migration = validateConnectionUrl(migrationUrl, 'omnis_migrator');
+  if (!SECRET_HEX.test(migration.password)) {
+    throw new Error('Restricted migration database URL has an invalid password format.');
+  }
+  return { databaseName: RESTRICTED_DATABASE_NAME, systemIdentifier, migrationUrl };
 }
 
 export function assertNoRestrictedBootstrapOverrides(
@@ -115,29 +144,59 @@ export function assertNoRestrictedBootstrapOverrides(
   }
 }
 
+function assertRestrictedModeAndTarget(values: Record<string, string>): void {
+  if (values.OMNIS_RESTRICTED_DEVELOPMENT !== 'true') {
+    throw new Error('Restricted configuration must set OMNIS_RESTRICTED_DEVELOPMENT=true.');
+  }
+  if (values.OMNIS_EXECUTION_MODE !== 'disabled') {
+    throw new Error('Restricted configuration must set OMNIS_EXECUTION_MODE=disabled.');
+  }
+  if (values.OMNIS_RESTRICTED_COMPOSE_PROJECT !== RESTRICTED_COMPOSE_PROJECT) {
+    throw new Error(`Restricted configuration project must be ${RESTRICTED_COMPOSE_PROJECT}.`);
+  }
+  if (values.OMNIS_RESTRICTED_DB_NAME !== RESTRICTED_DATABASE_NAME) {
+    throw new Error(`Restricted configuration target must be ${RESTRICTED_DATABASE_NAME}.`);
+  }
+}
+
 export async function assertRestrictedDatabaseTarget(
   pool: Pick<Pool, 'query'>,
   expectedRole: 'omnis' | 'omnis_migrator',
   expectedSuperuser: boolean,
+  expectedSystemIdentifier: string,
 ): Promise<void> {
   const result = await pool.query<{
     database_name: string;
     role_name: string;
     is_superuser: boolean;
+    system_identifier: string;
   }>(`
     SELECT current_database() AS database_name,
            current_user AS role_name,
-           current_setting('is_superuser')::boolean AS is_superuser
+           current_setting('is_superuser')::boolean AS is_superuser,
+           system_identifier::text AS system_identifier
+      FROM pg_catalog.pg_control_system()
   `);
   const identity = result.rows[0];
   if (
     identity?.database_name !== RESTRICTED_DATABASE_NAME ||
     identity.role_name !== expectedRole ||
-    identity.is_superuser !== expectedSuperuser
+    identity.is_superuser !== expectedSuperuser ||
+    identity.system_identifier !== expectedSystemIdentifier
   ) {
     throw new Error(
-      `Restricted database connection must report ${RESTRICTED_DATABASE_NAME}, role ${expectedRole}, and superuser=${expectedSuperuser}.`,
+      `Restricted database connection must report ${RESTRICTED_DATABASE_NAME}, role ${expectedRole}, superuser=${expectedSuperuser}, and the verified PostgreSQL system identifier.`,
     );
+  }
+}
+
+function isValidSystemIdentifier(value: string): boolean {
+  if (!/^\d{1,19}$/.test(value)) return false;
+  try {
+    const numeric = BigInt(value);
+    return numeric > 0n && numeric <= 9_223_372_036_854_775_807n;
+  } catch {
+    return false;
   }
 }
 

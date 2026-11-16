@@ -181,7 +181,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [legacy-upgrade, recovery]
+        suite: [legacy-upgrade, recovery, restricted-bootstrap]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -201,15 +201,22 @@ jobs:
       - name: Start disposable PostgreSQL on loopback
         run: bash scripts/ci/start-test-postgres.sh
       - name: Provision restricted PostgreSQL roles
+        if: matrix.suite != 'restricted-bootstrap'
         run: |
           source scripts/ci/export-test-database-environment.sh
           node --experimental-strip-types packages/db/src/provision.ts
+      - name: Verify restricted database bootstrap and migrations
+        if: matrix.suite == 'restricted-bootstrap'
+        run: |
+          source scripts/ci/export-test-database-environment.sh
+          node --experimental-strip-types packages/db/src/restricted-bootstrap-ci.ts
       - name: Run PostgreSQL DB package integration suite
         if: matrix.suite == 'legacy-upgrade'
         run: |
           source scripts/ci/export-test-database-environment.sh
           pnpm --filter @omnis/db test
       - name: Run ${{ matrix.suite }} integration test
+        if: matrix.suite != 'restricted-bootstrap'
         run: |
           source scripts/ci/export-test-database-environment.sh
           pnpm integration:${{ matrix.suite }}

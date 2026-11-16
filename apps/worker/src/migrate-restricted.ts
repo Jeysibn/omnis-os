@@ -4,16 +4,15 @@ import { PgBoss } from 'pg-boss';
 import {
   assertNoRestrictedBootstrapOverrides,
   assertRestrictedDatabaseTarget,
-  loadRestrictedBootstrapConfig,
-  type RestrictedBootstrapConfig,
+  loadRestrictedMigrationConfig,
+  type RestrictedMigrationConfig,
 } from '@omnis/db';
 import { createPool, migrate } from '@omnis/db';
 
 type Pool = Parameters<typeof migrate>[0];
 
 interface Arguments {
-  bootstrapPath: string;
-  workerPath: string;
+  migrationPath: string;
 }
 
 interface MigrationBoss {
@@ -31,25 +30,24 @@ export function parseRestrictedMigrationArguments(args: readonly string[]): Argu
   const options = new Map<string, string>();
   for (let index = 0; index < args.length; index += 1) {
     const flag = args[index];
-    if (!['--bootstrap-env', '--worker-env'].includes(flag!) || options.has(flag!)) {
-      throw new Error('Usage: migrate-restricted.ts --bootstrap-env <path> --worker-env <path>');
+    if (flag !== '--migration-env' || options.has(flag)) {
+      throw new Error('Usage: migrate-restricted.ts --migration-env <path>');
     }
     const value = args[index + 1];
     if (!value || value.startsWith('--'))
-      throw new Error('Both restricted env-file paths are required.');
-    options.set(flag!, value);
+      throw new Error('A restricted migration env-file path is required.');
+    options.set(flag, value);
     index += 1;
   }
-  const bootstrapPath = options.get('--bootstrap-env');
-  const workerPath = options.get('--worker-env');
-  if (!bootstrapPath || !workerPath || options.size !== 2) {
-    throw new Error('Usage: migrate-restricted.ts --bootstrap-env <path> --worker-env <path>');
+  const migrationPath = options.get('--migration-env');
+  if (!migrationPath || options.size !== 1) {
+    throw new Error('Usage: migrate-restricted.ts --migration-env <path>');
   }
-  return { bootstrapPath, workerPath };
+  return { migrationPath };
 }
 
 export async function applyRestrictedMigrations(
-  config: RestrictedBootstrapConfig,
+  config: RestrictedMigrationConfig,
   pool: Pool,
   dependencies: MigrationDependencies = {
     migrateSchema: migrate,
@@ -65,14 +63,12 @@ export async function applyRestrictedMigrations(
       }),
   },
 ): Promise<void> {
-  await assertRestrictedDatabaseTarget(pool, 'omnis_migrator', false);
+  await assertRestrictedDatabaseTarget(pool, 'omnis_migrator', false, config.systemIdentifier);
   await dependencies.migrateSchema(pool);
 
   const boss = dependencies.createBoss(config.migrationUrl);
-  let started = false;
   try {
     await boss.start({ attempts: 5 });
-    started = true;
     await boss.createQueue('omnis-mock-run', { retryLimit: 0, retryDelay: 0 });
     await pool.query(`
       GRANT USAGE ON SCHEMA pgboss TO omnis_runtime;
@@ -84,17 +80,17 @@ export async function applyRestrictedMigrations(
         GRANT USAGE, SELECT ON SEQUENCES TO omnis_runtime;
     `);
   } finally {
-    if (started) await boss.stop().catch(() => undefined);
+    await boss.stop();
   }
 }
 
 async function main(): Promise<void> {
   let args: Arguments;
-  let config: RestrictedBootstrapConfig;
+  let config: RestrictedMigrationConfig;
   try {
     args = parseRestrictedMigrationArguments(process.argv.slice(2));
     assertNoRestrictedBootstrapOverrides(process.env);
-    config = loadRestrictedBootstrapConfig(args.bootstrapPath, args.workerPath);
+    config = loadRestrictedMigrationConfig(args.migrationPath);
   } catch (error) {
     const message =
       error instanceof Error ? error.message : 'Restricted migration preflight failed.';

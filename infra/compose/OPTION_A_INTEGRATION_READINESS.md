@@ -70,9 +70,9 @@ These results are test evidence, not Phase 1 acceptance. The canonical [Phase 1 
 
 Use only a new volume rendered for project `omnis-os-restricted-dev` (`omnis-os-restricted-dev_omnis-postgres-data`) and database `omnis_restricted_dev`. Before startup, a separately authorized, read-only inventory must establish that this exact project volume is fresh and that the published host port is available. Do not select, rename, or clean up existing Omnis, QA, backup, or MoniKey resources.
 
-The generic `pnpm db:roles` path remains the mock-enabled provisioning path and retains the Authorizer/launcher role contract. Restricted startup uses `pnpm db:roles:restricted` with explicit private env-file paths. It accepts only the `omnis_migrator` and `omnis_runtime` passwords, rejects unknown variables and inherited target/mode overrides, and verifies the live database is exactly `omnis_restricted_dev` as the `omnis` superuser before mutating SQL. It does not require Authorizer, launcher, or provider credentials.
+The generic `pnpm db:roles` path remains the mock-enabled provisioning path and retains the Authorizer/launcher role contract. Restricted startup uses `pnpm db:roles:restricted` with explicit private env-file paths. It accepts login passwords only for `omnis_migrator` and `omnis_runtime`, rejects unknown variables and inherited target/mode overrides, and verifies the live database is exactly `omnis_restricted_dev` as the `omnis` superuser on the captured PostgreSQL system identifier before mutation. It also requires a fresh application role/schema set, then creates `omnis_authorizer` and `omnis_launcher` only as inert `NOLOGIN` ACL principals because existing migrations refer to those names. No Authorizer, launcher, or provider credentials are required.
 
-Only after role provisioning succeeds, run `pnpm db:migrate:restricted` with the same explicit bootstrap and Worker env-file paths. It requires the URL to target loopback port `5432`, database `omnis_restricted_dev`, and user `omnis_migrator`, then verifies that exact live identity before application or pg-boss mutation. The migration path applies application schema migrations and initializes pg-boss schema/queue metadata and runtime grants. Option A's disabled Worker must not start consumers or recovery; migration setup is an explicit one-time administrative step, not an application startup side effect.
+Only after role provisioning succeeds, run `pnpm db:migrate:restricted` with a separate `restricted-db-migration.env` path containing only the restricted lock, project, database, system identifier, and migration URL. It requires the URL to target loopback port `5432`, database `omnis_restricted_dev`, and user `omnis_migrator`, then verifies that live identity and the same PostgreSQL system identifier before application or pg-boss mutation. The migration path applies application schema migrations and initializes pg-boss schema/queue metadata and runtime grants. Option A's disabled Worker must not start consumers or recovery; migration setup is an explicit one-time administrative step, not an application startup side effect.
 
 The launcher derives its scope from the database URL pathname alone. Before any later mock transition, compare this database name against every relevant launcher-managed Omnis database; duplicate or unknown mappings stop the operation. Project-name uniqueness does not prove launcher-scope uniqueness.
 
@@ -124,8 +124,7 @@ pnpm db:roles:restricted -- roles \
   --bootstrap-env "$OMNIS_RESTRICTED_DB_BOOTSTRAP_ENV" \
   --worker-env "$OMNIS_RESTRICTED_WORKER_ENV_FILE"
 pnpm db:migrate:restricted -- \
-  --bootstrap-env "$OMNIS_RESTRICTED_DB_BOOTSTRAP_ENV" \
-  --worker-env "$OMNIS_RESTRICTED_WORKER_ENV_FILE"
+  --migration-env "$OMNIS_RESTRICTED_DB_MIGRATION_ENV"
 
 # Image builds require separate authorization and may use registries.
 scripts/compose/restricted-compose.sh \
