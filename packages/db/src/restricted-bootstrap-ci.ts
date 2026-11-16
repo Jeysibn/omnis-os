@@ -249,7 +249,6 @@ async function verifyRestrictedDatabase(
       runtime_login: boolean;
       runtime_inherit: boolean;
       runtime_accept_result: boolean;
-      runtime_control_system: boolean;
       migrator_control_system: boolean;
       admin_system_identifier: string;
       migrator_schema_owner: string;
@@ -264,7 +263,6 @@ async function verifyRestrictedDatabase(
               runtime.rolcanlogin AS runtime_login,
               runtime.rolinherit AS runtime_inherit,
               has_function_privilege('omnis_runtime', 'omnis.accept_task_result(text,text,uuid)', 'EXECUTE') AS runtime_accept_result,
-              has_function_privilege('omnis_runtime', 'pg_catalog.pg_control_system()', 'EXECUTE') AS runtime_control_system,
               has_function_privilege('omnis_migrator', 'pg_catalog.pg_control_system()', 'EXECUTE') AS migrator_control_system,
               (SELECT system_identifier::text FROM pg_catalog.pg_control_system()) AS admin_system_identifier,
               (SELECT r.rolname FROM pg_namespace n JOIN pg_roles r ON r.oid = n.nspowner WHERE n.nspname = 'omnis') AS migrator_schema_owner,
@@ -297,9 +295,16 @@ async function verifyRestrictedDatabase(
       throw new Error('Runtime role retains owner-acceptance function access.');
     }
 
-    failureStage = 'runtime cluster-inspection privilege denial';
-    if (row.runtime_control_system) {
-      throw new Error('Runtime role retains PostgreSQL cluster-inspection access.');
+    failureStage = 'runtime cluster-inspection access denial';
+    let runtimeClusterInspectionDenied = false;
+    try {
+      await runtime.query('SELECT system_identifier FROM pg_catalog.pg_control_system()');
+    } catch (error) {
+      if (!hasPostgresErrorCode(error, '42501')) throw error;
+      runtimeClusterInspectionDenied = true;
+    }
+    if (!runtimeClusterInspectionDenied) {
+      throw new Error('Runtime role can inspect PostgreSQL cluster identity.');
     }
 
     failureStage = 'migration cluster-inspection privilege';
@@ -443,6 +448,10 @@ function required(name: string): string {
   const value = process.env[name];
   if (!value) throw new Error(`Required CI variable ${name} is unavailable.`);
   return value;
+}
+
+function hasPostgresErrorCode(error: unknown, code: string): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === code;
 }
 
 void main().catch(() => {
