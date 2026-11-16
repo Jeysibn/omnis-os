@@ -170,7 +170,8 @@ export function TaskEpicDialog({
     );
     if (outcome.kind === 'saved')
       return onSaved(task, epicId === null ? null : (epicTitle(epicId) ?? null), outcome.value);
-    if (outcome.kind === 'busy' || outcome.kind === 'unauthorized') return;
+    if (outcome.kind === 'busy' || outcome.kind === 'unauthorized' || outcome.kind === 'stale')
+      return;
     if (outcome.kind === 'unknown')
       return setProblem({
         tone: 'warning',

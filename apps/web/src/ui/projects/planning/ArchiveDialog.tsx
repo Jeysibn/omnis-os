@@ -103,7 +103,8 @@ export function ArchiveDialog<T extends Rec>({
       (key, csrf) => archive(target, key, csrf),
     );
     if (outcome.kind === 'saved') return onArchived(outcome.value);
-    if (outcome.kind === 'busy' || outcome.kind === 'unauthorized') return;
+    if (outcome.kind === 'busy' || outcome.kind === 'unauthorized' || outcome.kind === 'stale')
+      return;
     if (outcome.kind === 'unknown')
       return setProblem({
         tone: 'warning',

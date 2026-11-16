@@ -42,7 +42,7 @@ Rules applied everywhere:
 | Run SSE messages / `onerror`             | stream open             | ignored                          | ignored                       | n/a                     | stream revocation / reconnect tests; see note B    |
 | Stop, approve, revoke, accept            | dispatch                | not applied                      | not shown                     | yes                     | revoke: stale-revoke test; others existing tests   |
 | Agent create / archive                   | dispatch (context)      | not applied, storage kept        | not applied                   | n/a                     | create: stale-create test; archive: guarded, untested |
-| Planning writers (`useWriter`)           | dispatch (context)      | reported as `unauthorized`       | same, no CSRF refresh         | n/a                     | guarded, untested; see note C                      |
+| Planning writers (`useWriter`)           | dispatch (context)      | distinct `stale` outcome         | same, no CSRF refresh         | n/a                     | guarded, untested; see note C                      |
 | Departments / Projects forms             | unmount + bound CSRF    | unmounted-only writes            | `sessionBoundExpire` inert    | n/a                     | guarded by unmount; see note C                     |
 | `AcceptResultAction` (accept result)     | generation at submit    | not applied                      | cannot expire replacement     | yes                     | accept-result stale-session tests                  |
 
@@ -69,8 +69,9 @@ needed no session guard because they unmount and abort. Independent review of 8e
 not enough: a late completion can still clear shared `sessionStorage`, navigate, or refresh CSRF. Now:
 a `SessionScopeContext` lets nested writers capture the session at dispatch; `AgentCreateForm`,
 `AgentArchiveAction` and the shared planning `useWriter` drop outcomes for a replaced session (a stale
-`useWriter` result is reported as `unauthorized`, so no key is retired and nothing is stored or
-applied); the `refreshCsrf` given to Departments and Projects rejects for a replaced session.
+`useWriter` result is a distinct `stale` outcome that every caller handles by doing nothing; an earlier
+revision reused `unauthorized`, which let a first-attempt epic or milestone create clear its persisted
+pending record - found by independent review of 07ddb80 and fixed); the `refreshCsrf` given to Departments and Projects rejects for a replaced session.
 Departments and Projects form state is protected by unmount (the workspace is always unmounted between
 sessions). Only agent create has a regression test (verified to fail with its guard removed); agent
 archive, `useWriter` and the department/project continuations are guarded but not separately tested.

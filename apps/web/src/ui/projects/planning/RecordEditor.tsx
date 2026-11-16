@@ -246,6 +246,7 @@ export function RecordEditor<T extends Record_>({
         return;
       case 'busy':
       case 'unauthorized':
+      case 'stale':
         return;
       case 'unknown':
         setProblem({
@@ -299,7 +300,9 @@ export function RecordEditor<T extends Record_>({
       (key, csrf) => create(envelope.request, key, csrf),
       { key: envelope.idempotencyKey },
     );
-    if (outcome.kind === 'busy') return;
+    // `stale`: the owner session that sent this was replaced. Nothing may change, in particular the
+    // persisted pending create must stay so the same owner can recover it after signing in again.
+    if (outcome.kind === 'busy' || outcome.kind === 'stale') return;
     const summary: SendOutcome =
       outcome.kind === 'saved'
         ? { kind: 'saved' }

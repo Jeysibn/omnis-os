@@ -11,7 +11,12 @@ export type WriteOutcome<T> =
   /** The session ended; the shell has already handled it. */
   | { kind: 'unauthorized' }
   /** Another write from this control is still running; nothing was sent. */
-  | { kind: 'busy' };
+  | { kind: 'busy' }
+  /**
+   * The owner session that sent this write was replaced. Callers must do nothing at all: no state,
+   * no storage, no recovery transition. It is NOT a rejection and NOT an expired session.
+   */
+  | { kind: 'stale' };
 
 type Input = {
   csrfToken: string;
@@ -62,8 +67,8 @@ export function useWriter({ csrfToken, refreshCsrf, onUnauthorized }: Input) {
       if (inflight.current) return { kind: 'busy' };
       inflight.current = true;
       setBusy(true);
-      // A completion for a replaced owner session reports `unauthorized` ("the shell has handled
-      // it"): nothing is retired, stored, refreshed or applied for the session that replaced it.
+      // A completion for a replaced owner session reports `stale`: nothing is retired, stored,
+      // refreshed or applied for the session that replaced it.
       const live = beginSession();
       const owned = options.key !== undefined;
       const key = options.key ?? intent.current.keyFor(signature);
@@ -72,11 +77,11 @@ export function useWriter({ csrfToken, refreshCsrf, onUnauthorized }: Input) {
       };
       try {
         const value = await send(key, csrf.current);
-        if (!live()) return { kind: 'unauthorized' };
+        if (!live()) return { kind: 'stale' };
         settle();
         return { kind: 'saved', value };
       } catch (cause) {
-        if (!live()) return { kind: 'unauthorized' };
+        if (!live()) return { kind: 'stale' };
         const failure = classifyMutationFailure(cause);
         if (failure.evidence === 'unauthorized') {
           settle();
@@ -94,7 +99,7 @@ export function useWriter({ csrfToken, refreshCsrf, onUnauthorized }: Input) {
           } catch {
             // The message still asks the owner to try again.
           }
-          if (!live()) return { kind: 'unauthorized' };
+          if (!live()) return { kind: 'stale' };
         }
         const message = cause instanceof Error ? cause.message : '';
         return { kind: 'rejected', status: failure.status, code: failure.code, message };
