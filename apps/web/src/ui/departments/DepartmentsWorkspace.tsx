@@ -19,6 +19,7 @@ import {
   type RecoveryMode,
 } from './recovery.js';
 import { departmentsHash, parseDepartmentsHash, type DepartmentsRoute } from './route.js';
+import { useMountedInSession } from '../sessionContext.js';
 
 type Props = {
   onUnauthorized: (cause: unknown) => void;
@@ -96,7 +97,7 @@ export function DepartmentsWorkspace({
   const [awaitingRefresh, setAwaitingRefresh] = useState(false);
 
   const busyRef = useRef(false);
-  const mounted = useRef(true);
+  const mounted = useMountedInSession();
   const csrfRef = useRef(csrfToken);
   csrfRef.current = csrfToken;
   const moveFocus = useRef(arrivedByNavigation);
@@ -106,13 +107,6 @@ export function DepartmentsWorkspace({
   const rowHeadings = useRef(new Map<string, HTMLElement>());
   const renameButtons = useRef(new Map<string, HTMLButtonElement>());
   const nonce = useRef(0);
-
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-    };
-  }, []);
 
   useEffect(() => {
     const onHashChange = () => {

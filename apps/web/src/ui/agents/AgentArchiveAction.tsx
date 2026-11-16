@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react';
 import { AgentIdempotencyKeySchema, type AgentProfileResponse } from '@omnis/contracts';
 import { ConfirmDialog, NxTheme } from '../design/index.js';
+import { useBeginSession } from '../sessionContext.js';
 import { ApiRequestError } from '../api.js';
 import { archiveAgent, fetchProfile } from './data.js';
 
@@ -49,6 +50,7 @@ export function AgentArchiveAction({
   onUnauthorized: (cause: unknown) => void;
   onArchived: () => void;
 }) {
+  const beginSession = useBeginSession();
   const { agent } = profile;
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -69,14 +71,18 @@ export function AgentArchiveAction({
     inflight.current = true;
     setBusy(true);
     setMessage('');
+    // Outcomes for a replaced owner session must not clear shared storage or call `onArchived`.
+    const live = beginSession();
     try {
       await archiveAgent(agent.id, key, csrfToken);
+      if (!live()) return;
       requestId.current = null;
       clearPendingRequestId(agent.id);
       setUnknown(false);
       setMessage('The server confirmed that the agent was archived.');
       onArchived();
     } catch (cause) {
+      if (!live()) return;
       if (cause instanceof ApiRequestError && cause.status === 401) {
         if (!unknown) {
           requestId.current = null;
@@ -97,6 +103,7 @@ export function AgentArchiveAction({
       setUnknown(true);
       try {
         const current = await fetchProfile(agent.id, new AbortController().signal);
+        if (!live()) return;
         if (current.agent.lifecycle === 'archived') {
           requestId.current = null;
           clearPendingRequestId(agent.id);
@@ -106,6 +113,7 @@ export function AgentArchiveAction({
           return;
         }
       } catch (readCause) {
+        if (!live()) return;
         if (readCause instanceof ApiRequestError && readCause.status === 401) {
           onUnauthorized(readCause);
           return;

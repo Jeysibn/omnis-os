@@ -5,6 +5,7 @@ import {
 } from '@omnis/contracts/connector-authorization-schema';
 import { ApiRequestError, request } from './api.js';
 import { canRevokeAuthorization } from './SyntheticOperationDialog.js';
+import type { SessionScope } from './sessionScope.js';
 
 const sameOperation = (a: ConnectorAuthorization, b: ConnectorAuthorization) =>
   a.id === b.id && a.requestId === b.requestId && a.promptDigest === b.promptDigest;
@@ -35,8 +36,11 @@ export function useConnectorAuthorizationRevoke(input: {
   blocked: boolean;
   onSessionExpired: (cause: unknown) => boolean;
   onAuthorization: (value: ConnectorAuthorization) => void;
+  /** Captures the owner session at dispatch; outcomes for a replaced session change nothing. */
+  beginSession: () => SessionScope;
 }) {
-  const { authorization, csrfToken, blocked, onSessionExpired, onAuthorization } = input;
+  const { authorization, csrfToken, blocked, onSessionExpired, onAuthorization, beginSession } =
+    input;
   const [pending, setPending] = useState(false);
   const [unresolvedKind, setUnresolvedKind] = useState<RevokeUnresolved>('none');
   const [error, setError] = useState('');
@@ -62,9 +66,14 @@ export function useConnectorAuthorizationRevoke(input: {
 
   /** Re-read the authorization; only a successful read clears an unresolved state. */
   const recheck = useCallback(
-    async (target: ConnectorAuthorization, kind: Exclude<RevokeUnresolved, 'none'>) => {
+    async (
+      target: ConnectorAuthorization,
+      kind: Exclude<RevokeUnresolved, 'none'>,
+      live: SessionScope,
+    ) => {
       try {
         const current = await readCurrent(target);
+        if (!live()) return;
         onAuthorization(current);
         setUnresolvedKind('none');
         const stillActive = current.status === 'authorized' && current.consumedAt === null;
@@ -85,7 +94,7 @@ export function useConnectorAuthorizationRevoke(input: {
           );
         }
       } catch (cause) {
-        if (onSessionExpired(cause)) return;
+        if (!live() || onSessionExpired(cause)) return;
         setUnresolvedKind(kind); // still unknown: stay closed
         setError(
           kind === 'rejected-unverified'
@@ -101,6 +110,7 @@ export function useConnectorAuthorizationRevoke(input: {
     const target = authorization;
     if (!target || inFlight.current || blocked || !canRevokeAuthorization(target)) return;
     inFlight.current = true;
+    const live = beginSession();
     setPending(true);
     setError('');
     setNotice('');
@@ -121,11 +131,12 @@ export function useConnectorAuthorizationRevoke(input: {
           return result;
         },
       );
+      if (!live()) return;
       setUnresolvedKind('none');
       onAuthorization(revoked);
       setNotice('Approval revoked. It can no longer be used, and no Run was started from it.');
     } catch (cause) {
-      if (onSessionExpired(cause)) return;
+      if (!live() || onSessionExpired(cause)) return;
       const rejected = cause instanceof ApiRequestError && cause.outcome === 'rejected';
       rejection.current = rejected ? cause.message : '';
       // Fail closed BEFORE the status read: whatever it returns (or fails to), the authorization
@@ -137,25 +148,26 @@ export function useConnectorAuthorizationRevoke(input: {
           ? `Omnis OS rejected the revoke request. ${cause.message} Re-checking the approval's status…`
           : 'The revoke result is unknown. Omnis OS has not confirmed that this approval was revoked, so it is still treated as active. Re-checking its status…',
       );
-      await recheck(target, kind);
+      await recheck(target, kind, live);
     } finally {
       inFlight.current = false;
       setPending(false);
     }
-  }, [authorization, blocked, csrfToken, onAuthorization, onSessionExpired, recheck]);
+  }, [authorization, beginSession, blocked, csrfToken, onAuthorization, onSessionExpired, recheck]);
 
   const refreshStatus = useCallback(async () => {
     const target = authorization;
     if (!target || inFlight.current || blocked || unresolvedKind === 'none') return;
     inFlight.current = true;
+    const live = beginSession();
     setPending(true);
     try {
-      await recheck(target, unresolvedKind);
+      await recheck(target, unresolvedKind, live);
     } finally {
       inFlight.current = false;
       setPending(false);
     }
-  }, [authorization, blocked, recheck, unresolvedKind]);
+  }, [authorization, beginSession, blocked, recheck, unresolvedKind]);
 
   const clearMessages = useCallback(() => {
     setError('');

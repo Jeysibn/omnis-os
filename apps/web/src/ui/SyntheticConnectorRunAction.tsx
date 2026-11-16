@@ -22,6 +22,7 @@ import {
 import { SyntheticOperationDialog } from './SyntheticOperationDialog.js';
 import { useConnectorAuthorizationRevoke } from './useConnectorAuthorizationRevoke.js';
 import { renderSyntheticConnectorRequest } from '@omnis/contracts/synthetic-connector-prompt';
+import { StaleSessionError, isStaleSession, type SessionScope } from './sessionScope.js';
 import {
   checkRefusal,
   fixtureAllowed,
@@ -49,7 +50,9 @@ export function SyntheticConnectorRunAction({
   gate,
   fixtureEnabled,
   refreshCapabilities,
+  beginSession,
 }: {
+  beginSession: () => SessionScope;
   refreshCapabilities: () => Promise<CapabilityCheck>;
   gate: ExecutionGate;
   fixtureEnabled: boolean;
@@ -94,6 +97,7 @@ export function SyntheticConnectorRunAction({
     blocked: busy,
     onSessionExpired,
     onAuthorization: applyAuthorization,
+    beginSession,
   });
   const { clearMessages: clearRevocationMessages } = revocation;
 
@@ -155,8 +159,9 @@ export function SyntheticConnectorRunAction({
   );
 
   const createOrReadAuthorization = useCallback(
-    async (operation: PendingOperation) => {
+    async (operation: PendingOperation, live: SessionScope) => {
       const { rendered, input } = await loadRequest(operation);
+      if (!live()) throw new StaleSessionError();
       let grant: ConnectorAuthorization;
       if (operation.authorizationId) {
         try {
@@ -167,6 +172,8 @@ export function SyntheticConnectorRunAction({
           );
         } catch (cause) {
           if (!(cause instanceof ApiRequestError) || cause.status !== 404) throw cause;
+          // The session was replaced while the lookup was pending: send no follow-up request.
+          if (!live()) throw new StaleSessionError();
           grant = await createAuthorization(operation, input, csrfToken);
         }
       } else {
@@ -190,6 +197,8 @@ export function SyntheticConnectorRunAction({
       ) {
         throw new Error('The persisted authorization did not match the exact synthetic operation.');
       }
+      // The owner session that began this operation was replaced: store and show nothing.
+      if (!live()) throw new StaleSessionError();
       const nextOperation = { ...operation, authorizationId: grant.id };
       storePendingOperation(nextOperation, ownerId, task.id);
       setPendingOperation(nextOperation);
@@ -226,17 +235,20 @@ export function SyntheticConnectorRunAction({
       stored.assignmentRevision === task.assignmentRevision
     ) {
       setPendingOperation(stored);
+      const live = beginSession();
       void refreshCapabilities()
         .then((check) => {
-          if (!fixtureAllowed(check)) return undefined;
-          return createOrReadAuthorization(stored);
+          if (!live() || !fixtureAllowed(check)) return undefined;
+          return createOrReadAuthorization(stored, live);
         })
-        .catch((cause: unknown) =>
-          handleError(cause, 'The pending synthetic operation could not be recovered.'),
-        );
+        .catch((cause: unknown) => {
+          if (!live() || isStaleSession(cause)) return;
+          handleError(cause, 'The pending synthetic operation could not be recovered.');
+        });
     }
   }, [
     availability,
+    beginSession,
     canRun,
     createOrReadAuthorization,
     handleError,
@@ -250,8 +262,9 @@ export function SyntheticConnectorRunAction({
   ]);
 
   /** Re-reads capabilities now; the returned value, not React state, decides. API stays the authority. */
-  async function ensureAvailable(): Promise<boolean> {
+  async function ensureAvailable(live: SessionScope): Promise<boolean> {
     const check = await refreshCapabilities();
+    if (!live()) return false; // session replaced while checking: no request, no message
     if (fixtureAllowed(check)) return true;
     if (check.status === 'expired') return false;
     setError(
@@ -262,10 +275,11 @@ export function SyntheticConnectorRunAction({
 
   async function prepare() {
     if (!canRun || !task.projectId || !task.agentId || !task.profileVersion) return;
+    const live = beginSession();
     setBusy(true);
     setError('');
-    if (!(await ensureAvailable())) {
-      setBusy(false);
+    if (!(await ensureAvailable(live))) {
+      if (live()) setBusy(false);
       return;
     }
     const operation: PendingOperation = {
@@ -280,21 +294,23 @@ export function SyntheticConnectorRunAction({
     storePendingOperation(operation, ownerId, task.id);
     setPendingOperation(operation);
     try {
-      await createOrReadAuthorization(operation);
+      await createOrReadAuthorization(operation, live);
     } catch (cause) {
-      handleError(cause, 'The synthetic operation could not be prepared.');
+      if (live() && !isStaleSession(cause))
+        handleError(cause, 'The synthetic operation could not be prepared.');
     } finally {
-      setBusy(false);
+      if (live()) setBusy(false);
     }
   }
 
   async function approve() {
     if (!authorization || authorization.status !== 'pending') return;
+    const live = beginSession();
     setBusy(true);
     setError('');
     clearRevocationMessages();
     try {
-      if (!(await ensureAvailable())) return;
+      if (!(await ensureAvailable(live))) return;
       const decision = ConnectorAuthorizationDecisionSchema.parse({
         decision: 'approve',
         promptDigestConfirmation: authorization.promptDigest,
@@ -308,6 +324,7 @@ export function SyntheticConnectorRunAction({
         },
         (value) => ConnectorAuthorizationSchema.parse(value),
       );
+      if (!live()) return;
       if (
         approved.id !== authorization.id ||
         approved.requestId !== authorization.requestId ||
@@ -319,9 +336,9 @@ export function SyntheticConnectorRunAction({
       setAuthorization(approved);
       setAnnouncement('Exact synthetic operation approved. No run has started yet.');
     } catch (cause) {
-      handleError(cause, 'The synthetic operation could not be approved.');
+      if (live()) handleError(cause, 'The synthetic operation could not be approved.');
     } finally {
-      setBusy(false);
+      if (live()) setBusy(false);
     }
   }
 
@@ -334,11 +351,12 @@ export function SyntheticConnectorRunAction({
       revocation.unresolved
     )
       return;
+    const live = beginSession();
     setBusy(true);
     setError('');
     clearRevocationMessages();
     try {
-      if (!(await ensureAvailable())) return;
+      if (!(await ensureAvailable(live))) return;
       const requestBinding = ConnectorAuthorizationRequestSchema.parse({
         projectId: authorization.projectId,
         projectRevision: authorization.projectRevision,
@@ -371,15 +389,17 @@ export function SyntheticConnectorRunAction({
         },
         (value) => RunSchema.parse(value),
       );
+      // A Run admitted for a replaced owner session never reaches the parent or its state.
+      if (!live()) return;
       if (run.id !== authorization.correlationId || run.taskId !== task.id) {
         throw new Error('The admitted Run did not match its approved task and correlation.');
       }
       clearPendingOperation(ownerId, task.id);
       onRunAdmitted(run);
     } catch (cause) {
-      handleError(cause, 'The authorized synthetic Run could not be started.');
+      if (live()) handleError(cause, 'The authorized synthetic Run could not be started.');
     } finally {
-      setBusy(false);
+      if (live()) setBusy(false);
     }
   }
 
