@@ -57,8 +57,9 @@ Note A — the in-code `/me` and CSRF staleness guards still **cannot be driven 
 sign-in control is disabled while CSRF loads and sign-out is unreachable while sign-in is in flight,
 so no second session can start while those requests are pending. What IS reachable is now tested
 (see "Guard evidence" below): a held boot `/me` ending in 401 or success with a single bootstrap
-(StrictMode), a stale 401 arriving while the replacement sign-in's `/me` is pending, and a stale 401
-arriving while the replacement CSRF refresh is pending.
+(StrictMode), a stale Tasks 401 released while the replacement sign-in's `/me` is pending, and a
+stale Tasks 401 released while the replacement CSRF refresh is pending. No stale `/me` or CSRF
+response is itself delivered; that is the part that stays untestable.
 
 Note B — the SSE session guards (message, `onopen`, `onerror`, the recovery `recreate` and
 `onExhausted` callbacks, and the probe's stream scope) protect the instant between session rotation
