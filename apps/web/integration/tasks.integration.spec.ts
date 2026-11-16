@@ -282,19 +282,193 @@ test('Compose owner creates an authorized mock Run through the web gateway', asy
   expect(events.every((event) => event.synthetic === true && event.source === 'mock')).toBe(true);
   expect(events.map((event) => event.sequence)).toEqual(events.map((_, index) => index + 1));
 
+  const reviewTasks = await ownerRequest(page, '/api/v1/tasks');
+  expect(reviewTasks.status).toBe(200);
+  const awaitingReview = reviewTasks.body.find((item) => item.id === task.id);
+  expect(awaitingReview.status).toBe('in_review');
+  expect(awaitingReview.resultAcceptance ?? null).toBeNull();
+
+  const csrfToken = await page.evaluate(async () => {
+    const response = await fetch('/api/v1/auth/csrf', { credentials: 'same-origin' });
+    if (!response.ok) throw new Error('Owner CSRF token could not be refreshed.');
+    return (await response.json()).csrfToken;
+  });
+  const anonymousContext = await playwrightRequest.newContext({ baseURL: frontendOrigin });
+  try {
+    const anonymousAcceptance = await anonymousContext.post(
+      `/api/v1/tasks/${task.id}/accept-result`,
+      {
+        headers: {
+          origin: frontendOrigin,
+          'x-omnis-csrf': csrfToken,
+          'idempotency-key': randomUUID(),
+        },
+        data: { runId: admitted.body.id },
+      },
+    );
+    expect(anonymousAcceptance.status()).toBe(401);
+  } finally {
+    await anonymousContext.dispose();
+  }
+  const ownerCookie = (await page.context().cookies(frontendOrigin)).find(
+    (cookie) => cookie.name === 'omnis_session',
+  );
+  expect(ownerCookie?.value).toBeTruthy();
+  const invalidOriginContext = await playwrightRequest.newContext({ baseURL: frontendOrigin });
+  try {
+    const invalidOriginAcceptance = await invalidOriginContext.post(
+      `/api/v1/tasks/${task.id}/accept-result`,
+      {
+        headers: {
+          cookie: `omnis_session=${ownerCookie!.value}`,
+          origin: 'https://invalid.example',
+          'x-omnis-csrf': csrfToken,
+          'idempotency-key': randomUUID(),
+        },
+        data: { runId: admitted.body.id },
+      },
+    );
+    expect(invalidOriginAcceptance.status()).toBe(403);
+    const missingOriginAcceptance = await invalidOriginContext.post(
+      `/api/v1/tasks/${task.id}/accept-result`,
+      {
+        headers: {
+          cookie: `omnis_session=${ownerCookie!.value}`,
+          'x-omnis-csrf': csrfToken,
+          'idempotency-key': randomUUID(),
+        },
+        data: { runId: admitted.body.id },
+      },
+    );
+    expect(missingOriginAcceptance.status()).toBe(403);
+  } finally {
+    await invalidOriginContext.dispose();
+  }
+  const invalidCsrfAcceptance = await page.evaluate(
+    async ({ taskId, runId }) => {
+      const response = await fetch(`/api/v1/tasks/${taskId}/accept-result`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          'content-type': 'application/json',
+          'x-omnis-csrf': 'invalid-compose-token',
+          'idempotency-key': crypto.randomUUID(),
+        },
+        body: JSON.stringify({ runId }),
+      });
+      return response.status;
+    },
+    { taskId: task.id, runId: admitted.body.id },
+  );
+  expect(invalidCsrfAcceptance).toBe(403);
+  const missingCsrfAcceptance = await page.evaluate(
+    async ({ taskId, runId }) => {
+      const response = await fetch(`/api/v1/tasks/${taskId}/accept-result`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          'content-type': 'application/json',
+          'idempotency-key': crypto.randomUUID(),
+        },
+        body: JSON.stringify({ runId }),
+      });
+      return response.status;
+    },
+    { taskId: task.id, runId: admitted.body.id },
+  );
+  expect(missingCsrfAcceptance).toBe(403);
+  const invalidAcceptanceKey = await ownerRequest(page, `/api/v1/tasks/${task.id}/accept-result`, {
+    method: 'POST',
+    idempotencyKey: 'not-a-uuid',
+    body: { runId: admitted.body.id },
+  });
+  expect(invalidAcceptanceKey.status).toBe(400);
+  const staleRunAcceptance = await ownerRequest(page, `/api/v1/tasks/${task.id}/accept-result`, {
+    method: 'POST',
+    idempotencyKey: randomUUID(),
+    body: { runId: `run-stale-${randomUUID()}` },
+  });
+  expect(staleRunAcceptance.status).toBe(409);
+  const unchangedReview = await ownerRequest(page, '/api/v1/tasks');
+  const stillAwaitingReview = unchangedReview.body.find((item) => item.id === task.id);
+  expect(stillAwaitingReview.status).toBe('in_review');
+  expect(stillAwaitingReview.resultAcceptance ?? null).toBeNull();
+
   await page.goto(`/#runs/${admitted.body.id}`);
   await page.reload();
   await expect(page.getByRole('region', { name: `Event history for ${taskTitle}` })).toContainText(
     'completed',
   );
+  await expect(page.getByText('Awaiting your review.')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Accept Result', exact: true })).toBeVisible();
+  const acceptanceRequestPromise = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return url.pathname === `/api/v1/tasks/${task.id}/accept-result` && request.method() === 'POST';
+  });
+  const acceptanceResponsePromise = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return (
+      url.pathname === `/api/v1/tasks/${task.id}/accept-result` &&
+      response.request().method() === 'POST'
+    );
+  });
+  await page.getByRole('button', { name: 'Accept Result', exact: true }).click();
+  await page
+    .getByRole('group', { name: 'Confirm result acceptance' })
+    .getByRole('button', { name: 'Confirm acceptance' })
+    .click();
+  const acceptanceRequest = await acceptanceRequestPromise;
+  const acceptanceHeaders = await acceptanceRequest.allHeaders();
+  expect(acceptanceHeaders.origin).toBe(frontendOrigin);
+  expect(acceptanceHeaders['x-omnis-csrf']).toBeTruthy();
+  expect(acceptanceHeaders['idempotency-key']).toMatch(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+  );
+  expect(acceptanceRequest.postDataJSON()).toEqual({ runId: admitted.body.id });
+  const acceptanceResponse = await acceptanceResponsePromise;
+  expect(acceptanceResponse.status()).toBe(200);
+  await expect(page.getByRole('heading', { name: 'Result accepted by owner.' })).toBeVisible();
   const taskList = await ownerRequest(page, '/api/v1/tasks');
   expect(taskList.status).toBe(200);
   const persistedTask = taskList.body.find((item) => item.id === task.id);
   expect(persistedTask).toMatchObject({
+    status: 'completed',
     agentId: agent.body.agentId,
     profileVersion: 1,
     runtimeId: 'mock',
+    resultAcceptance: {
+      runId: admitted.body.id,
+      acceptedBy: 'owner',
+      requestId: acceptanceHeaders['idempotency-key'],
+    },
   });
+  const receipt = persistedTask.resultAcceptance;
+  const sameKeyRetry = await ownerRequest(page, `/api/v1/tasks/${task.id}/accept-result`, {
+    method: 'POST',
+    idempotencyKey: receipt.requestId,
+    body: { runId: admitted.body.id },
+  });
+  expect(sameKeyRetry.status).toBe(200);
+  expect(sameKeyRetry.body).toMatchObject({ created: false, acceptance: receipt });
+  const duplicateAcceptance = await ownerRequest(page, `/api/v1/tasks/${task.id}/accept-result`, {
+    method: 'POST',
+    idempotencyKey: randomUUID(),
+    body: { runId: admitted.body.id },
+  });
+  expect(duplicateAcceptance.status).toBe(200);
+  expect(duplicateAcceptance.body).toMatchObject({ created: false, acceptance: receipt });
+  await page.goto(`/#runs/${admitted.body.id}`);
+  await page.reload();
+  await expect(page.getByRole('region', { name: `Event history for ${taskTitle}` })).toContainText(
+    'completed',
+  );
+  await expect(page.getByRole('heading', { name: 'Result accepted by owner.' })).toBeVisible();
+  const replayedEvents = await readRunEvents(page, admitted.body.id);
+  expect(eventIdentities(replayedEvents)).toEqual(eventIdentities(events));
+  const replayedTaskList = await ownerRequest(page, '/api/v1/tasks');
+  expect(replayedTaskList.body.find((item) => item.id === task.id).resultAcceptance).toEqual(
+    receipt,
+  );
   await writeFile(
     composeJourneyResultPath,
     JSON.stringify({
@@ -304,6 +478,7 @@ test('Compose owner creates an authorized mock Run through the web gateway', asy
       profileVersion: persistedTask.profileVersion,
       runtimeId: persistedTask.runtimeId,
       runId: admitted.body.id,
+      resultAcceptance: receipt,
       events: eventIdentities(events),
     }),
     { mode: 0o600 },
@@ -324,9 +499,11 @@ test('Compose recovery preserves the committed Task, Run and event identities', 
   expect(tasks.status).toBe(200);
   const persistedTask = tasks.body.find((task) => task.id === expected.taskId);
   expect(persistedTask).toMatchObject({
+    status: 'completed',
     agentId: expected.agentId,
     profileVersion: expected.profileVersion,
     runtimeId: expected.runtimeId,
+    resultAcceptance: expected.resultAcceptance,
   });
   const run = await ownerRequest(page, `/api/v1/runs/${expected.runId}`);
   expect(run.status).toBe(200);
