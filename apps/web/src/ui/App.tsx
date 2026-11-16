@@ -50,6 +50,11 @@ import {
 import { ExecutionCapabilityBanner } from './ExecutionCapabilityBanner.js';
 import { useRuntimeCapabilities } from './useRuntimeCapabilities.js';
 import {
+  useAcceptanceAvailability,
+  type AcceptanceAvailability,
+} from './useAcceptanceAvailability.js';
+import { RunUsageReadout } from './RunUsageReadout.js';
+import {
   StaleSessionError,
   bindExpiryToSession,
   bindToSession,
@@ -470,6 +475,17 @@ function App() {
     sessionGeneration,
   );
   const executionGate = describeExecution(capabilityLoad);
+  // Owner result acceptance needs the Authorizer. Read what the backend reports only while a
+  // completed run is open on the Runs page; this is a UX hint and the accept route stays the authority.
+  const { availability: acceptanceAvailability, recheck: recheckAcceptanceAvailability } =
+    useAcceptanceAvailability(
+      owner !== null &&
+        page === 'runs' &&
+        runs.some((run) => run.id === selectedRunId && run.status === 'completed'),
+      expireSessionIfNeeded,
+      sessionGeneration,
+      selectedRunId,
+    );
 
   const loadTasks = useCallback(async () => {
     const live = beginSession();
@@ -1547,6 +1563,8 @@ function App() {
               onConflict: (runId) => void refreshAfterConflict(runId),
               onReload: (runId) => void refreshAfterConflict(runId),
               getSessionGeneration: () => sessionGeneration.current,
+              availability: acceptanceAvailability,
+              onRecheckAvailability: () => void recheckAcceptanceAvailability(),
             }}
           />
         )}
@@ -2084,6 +2102,9 @@ type AcceptanceBindings = {
   onConflict: (runId: string) => void;
   onReload: (runId: string) => void;
   getSessionGeneration: () => number;
+  /** What the backend reports about the Authorizer acceptance needs. A hint, not the authority. */
+  availability: AcceptanceAvailability;
+  onRecheckAvailability: () => void;
 };
 
 function RunsWorkspace({
@@ -2304,6 +2325,7 @@ function RunInspector({
               </button>
             )}
           </div>
+          <RunUsageReadout usage={run.usage} />
           <div className="event-heading">
             <h3>Event trail</h3>
             <span>
@@ -2380,6 +2402,8 @@ function RunInspector({
               onConflict={acceptance.onConflict}
               onReload={acceptance.onReload}
               getSessionGeneration={acceptance.getSessionGeneration}
+              availability={acceptance.availability}
+              onRecheckAvailability={acceptance.onRecheckAvailability}
             />
           )}
           {run.status === 'failed' && (

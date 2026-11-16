@@ -237,10 +237,25 @@ async function startEventScenario(events: RunEvent[]): Promise<EventScenarioServ
   };
 }
 
+/**
+ * Barrier for "the browser has processed the response that was just released". Negative assertions
+ * (disabled, absent) pass instantly otherwise, before a late response is handled, and would let a
+ * missing guard go unnoticed. Ordering-based: two frames plus a macrotask, no sleeps.
+ */
+const settleClient = (page: Page) =>
+  page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 0))),
+      ),
+  );
+
 type MockApi = ReturnType<typeof createMockApi>;
 type CapabilityOutcome =
   | 'available'
   | 'disabled'
+  /** Restricted profile: execution disabled and no Authorizer (the API hard-wires it unavailable). */
+  | 'restricted'
   | 'worker-down'
   | 'authorizer-down'
   | 'error'
@@ -535,17 +550,25 @@ function createMockApi(page: Page) {
         const worker = {
           version: 'omnis.worker-execution-status.v1' as const,
           serviceAvailability: 'healthy' as const,
-          executionMode: scenario === 'disabled' ? ('disabled' as const) : ('mock' as const),
+          executionMode:
+            scenario === 'disabled' || scenario === 'restricted'
+              ? ('disabled' as const)
+              : ('mock' as const),
           queueAvailability:
-            scenario === 'disabled' ? ('not_required' as const) : ('available' as const),
+            scenario === 'disabled' || scenario === 'restricted'
+              ? ('not_required' as const)
+              : ('available' as const),
           launcherAvailability:
-            scenario === 'disabled' ? ('not_required' as const) : ('available' as const),
+            scenario === 'disabled' || scenario === 'restricted'
+              ? ('not_required' as const)
+              : ('available' as const),
         };
         return route.fulfill({
           json: runtimeCapabilities({
-            apiExecutionMode: scenario === 'disabled' ? 'disabled' : 'mock',
+            apiExecutionMode:
+              scenario === 'disabled' || scenario === 'restricted' ? 'disabled' : 'mock',
             ...(scenario === 'worker-down' ? {} : { workerStatus: worker }),
-            authorizationAvailable: scenario !== 'authorizer-down',
+            authorizationAvailable: scenario !== 'authorizer-down' && scenario !== 'restricted',
             syntheticConnectorEnabled: false,
           }),
         });
@@ -1101,13 +1124,15 @@ function createMockApi(page: Page) {
         return fulfillError(route, 403, 'csrf', 'The request origin or CSRF token is invalid.');
       if (behavior === 'concurrency-limit')
         return fulfillError(route, 503, 'concurrency_limit', 'Mission Lane is busy. Retry.');
-      if (behavior === 'authorizer-unavailable')
+      if (behavior === 'authorizer-unavailable') {
+        afterConflict = true; // lets a test hold the follow-up re-read (conflictReadsManual)
         return fulfillError(
           route,
           503,
           'authorizer_unavailable',
           'Authorizer-backed functionality is unavailable in this configuration.',
         );
+      }
       if (behavior === 'lost-not-applied') return route.abort();
       const task = currentTasks.find((item) => item.id === taskId);
       if (!task) return fulfillError(route, 404, 'not_found', 'Task not found.');
@@ -3678,7 +3703,7 @@ test.describe('R1 owner result acceptance', () => {
     expect(api.acceptPosts).toHaveLength(1);
   });
 
-  test('a definitive authorizer_unavailable is reported as unavailable, never as an unknown outcome', async ({
+  test('authorizer_unavailable is reported as the approval service being unavailable, not as a lost response', async ({
     page,
     api,
   }) => {
@@ -3691,7 +3716,7 @@ test.describe('R1 owner result acceptance', () => {
     await accept(page).click();
     await confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' }).click();
     const problem = page.getByRole('alert').filter({ hasText: 'Authorizer-backed functionality' });
-    await expect(problem).toContainText('the result is not shown as accepted');
+    await expect(problem).toContainText('review its state before trying again');
     await expect(problem).not.toContainText('may or may not have been accepted');
     // No retry loop is offered inside the confirmation; the owner reloads and tries again later.
     await expect(page.getByRole('button', { name: 'Retry acceptance' })).toHaveCount(0);
@@ -3699,12 +3724,193 @@ test.describe('R1 owner result acceptance', () => {
     expect(api.acceptPosts).toHaveLength(1);
     // Task state is read again, as the backend handoff requires for authorizer_unavailable.
     await expect(accept(page)).toBeVisible();
+    // Closing the confirmation while the re-read hid the control must not drop keyboard focus.
+    await expect(accept(page)).toBeFocused();
     // When the service returns, the next explicit attempt reuses the same idempotency key.
     await accept(page).click();
     await confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' }).click();
     await expect(page.getByText('Result accepted by owner.')).toBeVisible();
     expect(api.acceptPosts).toHaveLength(2);
     expect(api.acceptPosts[1]?.key).toBe(api.acceptPosts[0]?.key);
+  });
+
+  test.describe('Authorizer advisory on Accept Result (advice only; the accept route stays the authority)', () => {
+    const advisory = (page: Page) =>
+      page.getByText('reports the approval service (Authorizer) as unavailable');
+    const releaseAll = (api: MockApi, outcome: 'available' | 'restricted' | 'authorizer-down') => {
+      while (api.pendingCapabilities > 0) api.releaseCapability(0, outcome);
+    };
+
+    for (const [label, capability] of [
+      ['restricted (execution disabled, no Authorizer)', 'restricted'],
+      ['Authorizer unavailable', 'authorizer-down'],
+    ] as const) {
+      test(`${label}: an advisory is shown, the control stays available, and nothing is sent until the owner confirms`, async ({
+        page,
+        api,
+      }) => {
+        api.configure({
+          tasks: [reviewTask],
+          runs: [reviewRun],
+          capability,
+          acceptBehaviors: ['authorizer-unavailable'],
+        });
+        await openReview(page);
+        await expect(advisory(page)).toBeVisible();
+        await expect(accept(page)).toBeEnabled();
+        await expect(accept(page)).not.toHaveAttribute('aria-disabled', 'true');
+        await expect(accept(page)).toHaveAccessibleDescription(/may succeed or be refused/);
+        await accept(page).click();
+        await expect(confirmGroup(page)).toBeVisible();
+        expect(api.acceptPosts).toHaveLength(0); // advice never accepts, and never sends, anything
+        await confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' }).click();
+        // The backend is asked and answers; PR #128's truthful refusal is shown, never success.
+        await expect(page.getByRole('alert')).toContainText('review its state before trying again');
+        await expect(page.getByText('Result accepted by owner.')).toHaveCount(0);
+        expect(api.acceptPosts).toHaveLength(1);
+      });
+    }
+
+    test('restricted: the reconcile control for an existing receipt is advised, not blocked', async ({
+      page,
+      api,
+    }) => {
+      api.configure({ tasks: [restoredTask], runs: [reviewRun], capability: 'restricted' });
+      await openReview(page);
+      await expect(advisory(page)).toBeVisible();
+      await expect(reconcile(page)).toBeEnabled();
+      await reconcile(page).click();
+      await expect(confirmReconcile(page)).toBeVisible();
+      expect(api.acceptPosts).toHaveLength(0);
+    });
+
+    test('authorized mock mode: no advisory, and the owner must still confirm', async ({
+      page,
+      api,
+    }) => {
+      api.configure({ tasks: [reviewTask], runs: [reviewRun] });
+      await openReview(page);
+      await expect(accept(page)).toBeEnabled();
+      await expect(advisory(page)).toHaveCount(0);
+      expect(api.acceptPosts).toHaveLength(0); // nothing is accepted just because the run completed
+      await accept(page).click();
+      await expect(confirmGroup(page)).toBeVisible();
+      expect(api.acceptPosts).toHaveLength(0); // still nothing until the owner confirms
+    });
+
+    test('a late "unavailable" never blocks: an open confirmation stays open and can still succeed', async ({
+      page,
+      api,
+    }) => {
+      api.configure({ tasks: [reviewTask], runs: [reviewRun] });
+      api.holdCapabilities();
+      await openReview(page);
+      await expect.poll(() => api.pendingCapabilities).toBeGreaterThanOrEqual(1);
+      await expect(accept(page)).toBeEnabled();
+      await expect(advisory(page)).toHaveCount(0); // loading claims nothing
+      await accept(page).click();
+      await expect(confirmGroup(page)).toBeVisible();
+      // A transient probe failure (execution is mock-capable), so a successful acceptance is coherent.
+      releaseAll(api, 'authorizer-down');
+      await expect(advisory(page)).toBeVisible();
+      await expect(confirmGroup(page)).toBeVisible(); // advice did not close or disable anything
+      await confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' }).click();
+      await expect(page.getByText('Result accepted by owner.')).toBeVisible(); // it could succeed
+      expect(api.acceptPosts).toHaveLength(1);
+    });
+
+    test('a failed capability read claims nothing: no advisory and the backend decides', async ({
+      page,
+      api,
+    }) => {
+      api.configure({ tasks: [reviewTask], runs: [reviewRun], capability: 'error' });
+      await openReview(page);
+      await expect(accept(page)).toBeEnabled();
+      await expect(advisory(page)).toHaveCount(0);
+      await accept(page).click();
+      await confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' }).click();
+      await expect(page.getByText('Result accepted by owner.')).toBeVisible();
+      expect(api.acceptPosts).toHaveLength(1);
+    });
+
+    test('"Check again" re-reads capabilities and removes the advisory when they allow it', async ({
+      page,
+      api,
+    }) => {
+      api.configure({ tasks: [reviewTask], runs: [reviewRun] });
+      api.holdCapabilities();
+      await openReview(page);
+      await expect.poll(() => api.pendingCapabilities).toBeGreaterThanOrEqual(1);
+      releaseAll(api, 'restricted');
+      await expect(advisory(page)).toBeVisible();
+      await page.getByRole('button', { name: 'Check again' }).click();
+      await expect.poll(() => api.pendingCapabilities).toBeGreaterThanOrEqual(1);
+      releaseAll(api, 'available');
+      await expect(advisory(page)).toHaveCount(0);
+      await expect(accept(page)).toBeEnabled();
+      expect(api.acceptPosts).toHaveLength(0);
+    });
+
+    test('moving to another completed run re-reads availability instead of keeping a stale advisory', async ({
+      page,
+      api,
+    }) => {
+      api.configure({
+        tasks: [reviewTask, makeTask('task-two', 'Second task', 'in_review')],
+        runs: [reviewRun, makeRun('run-two', 'task-two', 'Second task')],
+      });
+      api.holdCapabilities();
+      await openReview(page);
+      await expect.poll(() => api.pendingCapabilities).toBeGreaterThanOrEqual(1);
+      releaseAll(api, 'restricted');
+      await expect(advisory(page)).toBeVisible();
+      await page.evaluate(() => {
+        window.location.hash = '#runs/run-two';
+      });
+      await expect(page.getByRole('heading', { level: 3, name: 'Second task' })).toBeVisible();
+      await expect.poll(() => api.pendingCapabilities).toBeGreaterThanOrEqual(1);
+      releaseAll(api, 'available');
+      await expect(advisory(page)).toHaveCount(0);
+    });
+
+    test('a capability answer for the ended session never shows an advisory in the replacement session', async ({
+      page,
+      api,
+    }) => {
+      api.configure({ tasks: [reviewTask], runs: [reviewRun] });
+      api.holdCapabilities();
+      await openReview(page);
+      await expect.poll(() => api.pendingCapabilities).toBeGreaterThanOrEqual(1);
+      const old = api.pendingCapabilities;
+      await page.getByRole('button', { name: 'Sign out' }).click();
+      await expect(page.getByRole('heading', { name: 'Welcome back.' })).toBeVisible();
+      await page.getByLabel('Owner password').fill('fixture-owner-password');
+      await expect(page.getByRole('button', { name: 'Sign in' })).toBeEnabled();
+      await page.getByRole('button', { name: 'Sign in' }).click();
+      await expect(page.getByRole('navigation', { name: 'Primary navigation' })).toBeVisible();
+      await expect.poll(() => api.pendingCapabilities).toBeGreaterThan(old);
+      for (let i = 0; i < old; i += 1) api.releaseCapability(0, 'restricted'); // session 1, late
+      await settleClient(page);
+      await expect(advisory(page)).toHaveCount(0);
+      releaseAll(api, 'available');
+    });
+
+    test('a run that completes on its own is never accepted automatically', async ({
+      page,
+      api,
+    }) => {
+      api.configure({
+        tasks: [makeTask('task-live', 'Live task', 'in_progress')],
+        runs: [makeRun('run-live', 'task-live', 'Live task', 'running')],
+        completeOnStream: true,
+        capability: 'restricted',
+      });
+      await openReview(page, '#runs/run-live');
+      await expect(accept(page)).toBeVisible();
+      await settleClient(page);
+      expect(api.acceptPosts).toHaveLength(0);
+      await expect(page.getByText('Result accepted by owner.')).toHaveCount(0);
+    });
   });
 
   test('a network failure that never applied can be retried with the same key', async ({
@@ -4047,6 +4253,30 @@ test.describe('R1 owner result acceptance', () => {
     expect(api.acceptPosts).toHaveLength(1);
   });
 
+  test('a pending focus restoration never moves keyboard focus to another run', async ({
+    page,
+    api,
+  }) => {
+    api.configure({
+      tasks: [reviewTask, otherTask],
+      runs: [reviewRun, otherRun],
+      acceptBehaviors: ['authorizer-unavailable'],
+      conflictReadsManual: true,
+    });
+    await openReview(page);
+    await confirmAccept(page);
+    // The refusal closes the confirmation and starts a re-read that hides the control.
+    await expect(refreshing(page)).toBeVisible();
+    await expect(accept(page)).toHaveCount(0);
+    await pick(page, 'Draft vendor summary'); // the owner moves to another run meanwhile
+    await expect(page.getByText('Owner review')).toBeVisible();
+    api.releaseReads();
+    await expect(accept(page)).toBeVisible(); // the re-read finished and the control is back
+    // The restoration belonged to the first run: it must not focus this run's control.
+    await expect(accept(page)).not.toBeFocused();
+    expect(api.acceptPosts).toHaveLength(1);
+  });
+
   test('switching runs after a failed refresh keeps acceptance blocked until a successful reload', async ({
     page,
     api,
@@ -4127,6 +4357,118 @@ test.describe('R1 owner result acceptance', () => {
     await expect(accept(page)).toBeVisible();
     expect(api.acceptPosts).toHaveLength(1);
   });
+});
+
+test.describe('Run usage readout', () => {
+  const usageSection = (page: Page) => page.getByRole('region', { name: 'Usage' });
+  const value = (page: Page, key: 'input' | 'output' | 'cost') =>
+    usageSection(page).locator(`[data-usage="${key}"] dd`);
+
+  test('shows Unknown for every usage field, never zero, and says so', async ({ page, api }) => {
+    api.configure();
+    await openWorkspace(page, '#runs/run-active');
+    await expect(usageSection(page)).toBeVisible();
+    await expect(usageSection(page).getByRole('heading', { name: 'Usage' })).toBeVisible();
+    for (const key of ['input', 'output', 'cost'] as const) {
+      await expect(value(page, key)).toHaveText('Unknown');
+    }
+    await expect(usageSection(page)).toContainText('Unknown does not mean zero');
+    await expect(usageSection(page)).not.toContainText(/(^|\s)0(\s|$)/);
+  });
+
+  test('each run shows its own readout when switching runs, never a stale one', async ({
+    page,
+    api,
+  }) => {
+    api.configure();
+    await openWorkspace(page, '#runs/run-active');
+    await expect(
+      page.getByRole('heading', { level: 3, name: 'Review launch checklist' }),
+    ).toBeVisible();
+    await expect(usageSection(page)).toHaveCount(1);
+    await page.evaluate(() => {
+      window.location.hash = '#runs/run-old';
+    });
+    await expect(page.getByRole('heading', { level: 3, name: 'Audit access notes' })).toBeVisible();
+    await expect(usageSection(page)).toHaveCount(1);
+    for (const key of ['input', 'output', 'cost'] as const) {
+      await expect(value(page, key)).toHaveText('Unknown');
+    }
+  });
+
+  test('there is no readout when no run is selected', async ({ page, api }) => {
+    // No run to inspect.
+    api.configure({ runs: [] });
+    await openWorkspace(page, '#runs');
+    await expect(page.getByText('Select a run')).toBeVisible();
+    await expect(usageSection(page)).toHaveCount(0);
+  });
+
+  test('a held Runs read shows loading and no usage until it settles', async ({ page, api }) => {
+    api.configure();
+    api.holdGet('/api/v1/runs');
+    await page.goto('/#runs/run-active');
+    await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
+    await expect.poll(() => api.pendingGets('/api/v1/runs')).toBeGreaterThanOrEqual(1);
+    await expect(usageSection(page)).toHaveCount(0);
+    api.releaseGet('/api/v1/runs', 0, 'ok');
+    await expect(usageSection(page)).toBeVisible();
+  });
+
+  test('a failed Runs read shows the failure, never usage, and recovers on retry', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ runGetFailures: 1 });
+    await openWorkspace(page, '#runs');
+    await expect(page.getByText('Runs unavailable').first()).toBeVisible();
+    await expect(usageSection(page)).toHaveCount(0);
+    await page.getByRole('button', { name: 'Retry runs' }).first().click();
+    await expect(usageSection(page)).toBeVisible();
+    await expect(value(page, 'input')).toHaveText('Unknown');
+  });
+
+  test('restricted mode: the readout is unchanged and implies no cost or provider usage', async ({
+    page,
+    api,
+  }) => {
+    api.configure({
+      tasks: [makeTask('task-review', 'Review quarterly notes', 'in_review')],
+      runs: [makeRun('run-review', 'task-review', 'Review quarterly notes')],
+      capability: 'restricted',
+    });
+    await openWorkspace(page, '#runs/run-review');
+    await expect(usageSection(page)).toBeVisible();
+    for (const key of ['input', 'output', 'cost'] as const) {
+      await expect(value(page, key)).toHaveText('Unknown');
+    }
+    await expect(usageSection(page)).not.toContainText(/[$€£]|USD|billed|credit/i);
+    await expect(page.getByText('SYNTHETIC MOCK')).toBeVisible();
+  });
+
+  for (const width of [320, 390, 768, 1280]) {
+    test(`the readout fits without horizontal overflow and passes axe at ${width}px`, async ({
+      page,
+      api,
+    }) => {
+      await page.setViewportSize({ width, height: 900 });
+      api.configure();
+      await openWorkspace(page, '#runs/run-active');
+      await expect(usageSection(page)).toBeVisible();
+      const overflow = await page.evaluate(
+        () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      );
+      expect(overflow).toBeLessThanOrEqual(0);
+      const box = await usageSection(page).boundingBox();
+      expect(box).not.toBeNull();
+      expect(box!.x).toBeGreaterThanOrEqual(0);
+      expect(box!.x + box!.width).toBeLessThanOrEqual(width);
+      const results = await new AxeBuilder({ page }).include('.run-usage').analyze();
+      expect(
+        results.violations.filter((v) => v.impact === 'serious' || v.impact === 'critical'),
+      ).toEqual([]);
+    });
+  }
 });
 
 test.describe('execution capability states', () => {
@@ -4581,18 +4923,6 @@ test.describe('capability refresh ordering', () => {
     await expect(page.getByRole('heading', { name: 'Welcome back.' })).toHaveCount(0);
     await expect(page.getByRole('navigation', { name: 'Primary navigation' })).toBeVisible();
   };
-  /**
-   * Barrier for "the browser has processed the response that was just released". Negative
-   * assertions (disabled, absent) pass instantly otherwise, before a late response is handled, and
-   * would let a missing guard go unnoticed. Ordering-based: two frames plus a macrotask.
-   */
-  const settleClient = (page: Page) =>
-    page.evaluate(
-      () =>
-        new Promise<void>((resolve) =>
-          requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 0))),
-        ),
-    );
   const bootHeld = async (page: Page, api: MockApi, path: string, hash: string) => {
     api.configure();
     api.holdGet(path);
@@ -5172,7 +5502,30 @@ test.describe('capability refresh ordering', () => {
     });
   });
 
-  test('pages other than Tasks never request capabilities', async ({ page, api }) => {
+  test.describe('session guards: Run usage readout', () => {
+    test('a Runs read from the ended session never shows its run or usage in the replacement session', async ({
+      page,
+      api,
+    }) => {
+      api.configure();
+      api.holdGet('/api/v1/runs');
+      await page.goto('/#runs/run-active');
+      await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
+      await expect.poll(() => api.pendingGets('/api/v1/runs')).toBeGreaterThanOrEqual(1);
+      const old = await signOutAndBackIn(page, api, '/api/v1/runs');
+      releaseOld(api, '/api/v1/runs', old, 'ok'); // session 1's Runs answer arrives late
+      await settleClient(page);
+      await expect(page.getByRole('region', { name: 'Usage' })).toHaveCount(0);
+      api.releaseGet('/api/v1/runs', 0, 'ok'); // session 2's own read still applies
+      await expect(page.getByRole('region', { name: 'Usage' })).toBeVisible();
+      await stillSignedIn(page);
+    });
+  });
+
+  test('pages without a selected completed run do not request runtime capabilities', async ({
+    page,
+    api,
+  }) => {
     api.configure();
     await openWorkspace(page, '#command-center');
     for (const name of ['Runs', 'Projects']) {
