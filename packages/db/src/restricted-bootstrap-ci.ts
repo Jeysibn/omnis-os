@@ -292,14 +292,24 @@ async function verifyRestrictedDatabase(
       throw new Error('Restricted runtime role attributes are not least-privilege.');
     }
 
-    failureStage = 'acceptance and cluster-inspection function privileges';
-    if (
-      row.runtime_accept_result ||
-      row.runtime_control_system ||
-      !row.migrator_control_system ||
-      row.admin_system_identifier !== systemIdentifier
-    ) {
-      throw new Error('Restricted function privileges or cluster identity checks failed.');
+    failureStage = 'runtime acceptance-function privilege denial';
+    if (row.runtime_accept_result) {
+      throw new Error('Runtime role retains owner-acceptance function access.');
+    }
+
+    failureStage = 'runtime cluster-inspection privilege denial';
+    if (row.runtime_control_system) {
+      throw new Error('Runtime role retains PostgreSQL cluster-inspection access.');
+    }
+
+    failureStage = 'migration cluster-inspection privilege';
+    if (!row.migrator_control_system) {
+      throw new Error('Migration role lacks the required cluster identity inspection grant.');
+    }
+
+    failureStage = 'PostgreSQL cluster identity consistency';
+    if (row.admin_system_identifier !== systemIdentifier) {
+      throw new Error('PostgreSQL cluster identity differs from the inspected fixture.');
     }
 
     failureStage = 'migration schema ownership and history';
