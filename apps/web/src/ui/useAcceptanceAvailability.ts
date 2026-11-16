@@ -5,21 +5,24 @@ import { captureSession } from './sessionScope.js';
 
 /**
  * What the backend currently reports about the Authorizer that owner result acceptance depends on.
- * `unavailable` is the only value that changes the UI: `available` and `unknown` (not yet loaded or
- * the read failed) leave the control as it is and the backend stays the authority.
+ * `unavailable` only adds an advisory note: it is a health reading, not a statement about the accept
+ * route (outside the restricted profile it comes from a separate probe), so it never blocks anything.
+ * `available` and `unknown` (not yet loaded or the read failed) change nothing.
  */
 export type AcceptanceAvailability = 'available' | 'unavailable' | 'unknown';
 
 /**
  * Reads `authorization.availability` from `omnis.runtime-capabilities.v3`, which the API computes
- * with the same Authorizer request that result acceptance uses (it is hard-wired unavailable in the
- * restricted profile). This is a UX hint only; the accept route still decides. It deliberately keeps
- * its own state and never touches the Tasks page's execution gate.
+ * with a health request through the Authorizer client that result acceptance also uses (it is
+ * hard-wired unavailable in the restricted profile). Advice only; the accept route still decides. It
+ * deliberately keeps its own state and never touches the Tasks page's execution gate. `scope` (the
+ * selected run) re-reads when the owner moves to another completed run.
  */
 export function useAcceptanceAvailability(
   enabled: boolean,
   onSessionExpired: (cause: unknown) => boolean,
   sessionGeneration: { readonly current: number },
+  scope: string | null = null,
 ) {
   const [availability, setAvailability] = useState<AcceptanceAvailability>('unknown');
   const seq = useRef(0);
@@ -58,7 +61,7 @@ export function useAcceptanceAvailability(
     return () => {
       seq.current += 1;
     };
-  }, [enabled, check]);
+  }, [enabled, check, scope]);
 
   return { availability, recheck: check };
 }

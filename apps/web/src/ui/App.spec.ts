@@ -3730,8 +3730,9 @@ test.describe('R1 owner result acceptance', () => {
     expect(api.acceptPosts[1]?.key).toBe(api.acceptPosts[0]?.key);
   });
 
-  test.describe('capability gating of Accept Result (a UX hint; the accept route stays the authority)', () => {
-    const unavailableNote = (page: Page) => page.getByText('Result acceptance is unavailable.');
+  test.describe('Authorizer advisory on Accept Result (advice only; the accept route stays the authority)', () => {
+    const advisory = (page: Page) =>
+      page.getByText('as unavailable, so acceptance is likely to be refused');
     const releaseAll = (api: MockApi, outcome: 'available' | 'restricted') => {
       while (api.pendingCapabilities > 0) api.releaseCapability(0, outcome);
     };
@@ -3740,53 +3741,60 @@ test.describe('R1 owner result acceptance', () => {
       ['restricted (execution disabled, no Authorizer)', 'restricted'],
       ['Authorizer unavailable', 'authorizer-down'],
     ] as const) {
-      test(`${label}: Accept Result is shown unavailable, cannot be activated, and sends nothing`, async ({
+      test(`${label}: an advisory is shown, the control stays available, and nothing is sent until the owner confirms`, async ({
         page,
         api,
       }) => {
-        api.configure({ tasks: [reviewTask], runs: [reviewRun], capability });
+        api.configure({
+          tasks: [reviewTask],
+          runs: [reviewRun],
+          capability,
+          acceptBehaviors: ['authorizer-unavailable'],
+        });
         await openReview(page);
-        await expect(unavailableNote(page)).toBeVisible();
-        await expect(accept(page)).toHaveAttribute('aria-disabled', 'true');
-        await expect(accept(page)).toHaveAccessibleDescription(/Result acceptance is unavailable/);
-        await accept(page).click({ force: true });
-        await accept(page).focus();
-        await page.keyboard.press('Enter');
-        await expect(confirmGroup(page)).toHaveCount(0);
+        await expect(advisory(page)).toBeVisible();
+        await expect(accept(page)).toBeEnabled();
+        await expect(accept(page)).not.toHaveAttribute('aria-disabled', 'true');
+        await expect(accept(page)).toHaveAccessibleDescription(/likely to be refused/);
+        await accept(page).click();
+        await expect(confirmGroup(page)).toBeVisible();
+        expect(api.acceptPosts).toHaveLength(0); // advice never accepts, and never sends, anything
+        await confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' }).click();
+        // The backend is asked and answers; PR #128's truthful refusal is shown, never success.
+        await expect(page.getByRole('alert')).toContainText('the result is not shown as accepted');
         await expect(page.getByText('Result accepted by owner.')).toHaveCount(0);
-        expect(api.acceptPosts).toHaveLength(0);
+        expect(api.acceptPosts).toHaveLength(1);
       });
     }
 
-    test('restricted: the reconcile control for an existing receipt is unavailable too', async ({
+    test('restricted: the reconcile control for an existing receipt is advised, not blocked', async ({
       page,
       api,
     }) => {
       api.configure({ tasks: [restoredTask], runs: [reviewRun], capability: 'restricted' });
       await openReview(page);
-      await expect(unavailableNote(page)).toBeVisible();
-      await expect(reconcile(page)).toHaveAttribute('aria-disabled', 'true');
-      await reconcile(page).click({ force: true });
-      await expect(confirmReconcile(page)).toHaveCount(0);
+      await expect(advisory(page)).toBeVisible();
+      await expect(reconcile(page)).toBeEnabled();
+      await reconcile(page).click();
+      await expect(confirmReconcile(page)).toBeVisible();
       expect(api.acceptPosts).toHaveLength(0);
     });
 
-    test('authorized mock mode: Accept Result is available and the owner must still confirm', async ({
+    test('authorized mock mode: no advisory, and the owner must still confirm', async ({
       page,
       api,
     }) => {
       api.configure({ tasks: [reviewTask], runs: [reviewRun] });
       await openReview(page);
       await expect(accept(page)).toBeEnabled();
-      await expect(accept(page)).not.toHaveAttribute('aria-disabled', 'true');
-      await expect(unavailableNote(page)).toHaveCount(0);
+      await expect(advisory(page)).toHaveCount(0);
       expect(api.acceptPosts).toHaveLength(0); // nothing is accepted just because the run completed
       await accept(page).click();
       await expect(confirmGroup(page)).toBeVisible();
       expect(api.acceptPosts).toHaveLength(0); // still nothing until the owner confirms
     });
 
-    test('while capabilities load the control claims nothing; a late "unavailable" closes an open confirmation', async ({
+    test('a late "unavailable" never blocks: an open confirmation stays open and can still succeed', async ({
       page,
       api,
     }) => {
@@ -3795,30 +3803,32 @@ test.describe('R1 owner result acceptance', () => {
       await openReview(page);
       await expect.poll(() => api.pendingCapabilities).toBeGreaterThanOrEqual(1);
       await expect(accept(page)).toBeEnabled();
-      await expect(unavailableNote(page)).toHaveCount(0);
+      await expect(advisory(page)).toHaveCount(0); // loading claims nothing
       await accept(page).click();
       await expect(confirmGroup(page)).toBeVisible();
       releaseAll(api, 'restricted');
-      await expect(unavailableNote(page)).toBeVisible();
-      await expect(confirmGroup(page)).toHaveCount(0);
-      expect(api.acceptPosts).toHaveLength(0);
+      await expect(advisory(page)).toBeVisible();
+      await expect(confirmGroup(page)).toBeVisible(); // advice did not close or disable anything
+      await confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' }).click();
+      await expect(page.getByText('Result accepted by owner.')).toBeVisible(); // it could succeed
+      expect(api.acceptPosts).toHaveLength(1);
     });
 
-    test('a failed capability read claims nothing: the control stays available and the backend decides', async ({
+    test('a failed capability read claims nothing: no advisory and the backend decides', async ({
       page,
       api,
     }) => {
       api.configure({ tasks: [reviewTask], runs: [reviewRun], capability: 'error' });
       await openReview(page);
       await expect(accept(page)).toBeEnabled();
-      await expect(unavailableNote(page)).toHaveCount(0);
+      await expect(advisory(page)).toHaveCount(0);
       await accept(page).click();
       await confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' }).click();
       await expect(page.getByText('Result accepted by owner.')).toBeVisible();
       expect(api.acceptPosts).toHaveLength(1);
     });
 
-    test('"Check again" re-reads capabilities and re-enables the control when they allow it', async ({
+    test('"Check again" re-reads capabilities and removes the advisory when they allow it', async ({
       page,
       api,
     }) => {
@@ -3827,16 +3837,38 @@ test.describe('R1 owner result acceptance', () => {
       await openReview(page);
       await expect.poll(() => api.pendingCapabilities).toBeGreaterThanOrEqual(1);
       releaseAll(api, 'restricted');
-      await expect(unavailableNote(page)).toBeVisible();
+      await expect(advisory(page)).toBeVisible();
       await page.getByRole('button', { name: 'Check again' }).click();
       await expect.poll(() => api.pendingCapabilities).toBeGreaterThanOrEqual(1);
       releaseAll(api, 'available');
-      await expect(unavailableNote(page)).toHaveCount(0);
+      await expect(advisory(page)).toHaveCount(0);
       await expect(accept(page)).toBeEnabled();
       expect(api.acceptPosts).toHaveLength(0);
     });
 
-    test('a capability answer for the ended session never gates the replacement session', async ({
+    test('moving to another completed run re-reads availability instead of keeping a stale advisory', async ({
+      page,
+      api,
+    }) => {
+      api.configure({
+        tasks: [reviewTask, makeTask('task-two', 'Second task', 'in_review')],
+        runs: [reviewRun, makeRun('run-two', 'task-two', 'Second task')],
+      });
+      api.holdCapabilities();
+      await openReview(page);
+      await expect.poll(() => api.pendingCapabilities).toBeGreaterThanOrEqual(1);
+      releaseAll(api, 'restricted');
+      await expect(advisory(page)).toBeVisible();
+      await page.evaluate(() => {
+        window.location.hash = '#runs/run-two';
+      });
+      await expect(page.getByRole('heading', { level: 3, name: 'Second task' })).toBeVisible();
+      await expect.poll(() => api.pendingCapabilities).toBeGreaterThanOrEqual(1);
+      releaseAll(api, 'available');
+      await expect(advisory(page)).toHaveCount(0);
+    });
+
+    test('a capability answer for the ended session never shows an advisory in the replacement session', async ({
       page,
       api,
     }) => {
@@ -3854,8 +3886,7 @@ test.describe('R1 owner result acceptance', () => {
       await expect.poll(() => api.pendingCapabilities).toBeGreaterThan(old);
       for (let i = 0; i < old; i += 1) api.releaseCapability(0, 'restricted'); // session 1, late
       await settleClient(page);
-      await expect(unavailableNote(page)).toHaveCount(0);
-      await expect(accept(page)).not.toHaveAttribute('aria-disabled', 'true');
+      await expect(advisory(page)).toHaveCount(0);
       releaseAll(api, 'available');
     });
 
@@ -3867,6 +3898,7 @@ test.describe('R1 owner result acceptance', () => {
         tasks: [makeTask('task-live', 'Live task', 'in_progress')],
         runs: [makeRun('run-live', 'task-live', 'Live task', 'running')],
         completeOnStream: true,
+        capability: 'restricted',
       });
       await openReview(page, '#runs/run-live');
       await expect(accept(page)).toBeVisible();

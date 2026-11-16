@@ -484,6 +484,7 @@ function App() {
         runs.some((run) => run.id === selectedRunId && run.status === 'completed'),
       expireSessionIfNeeded,
       sessionGeneration,
+      selectedRunId,
     );
 
   const loadTasks = useCallback(async () => {

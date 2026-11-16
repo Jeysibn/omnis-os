@@ -2622,10 +2622,6 @@ button:disabled {
 }
 
 /* Acceptance control while the backend reports the Authorizer unavailable. */
-.accept-result-button[aria-disabled='true'] {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
 .accept-result-unavailable {
   margin-top: 10px;
   color: #566478;
