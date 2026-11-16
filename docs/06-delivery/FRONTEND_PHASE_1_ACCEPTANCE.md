@@ -20,7 +20,10 @@ flag and can only write state into a component instance that is being unmounted.
 
 Rules applied everywhere:
 
-1. A response for a replaced session changes nothing: no data, error, loading or busy state.
+1. A response for a replaced session changes nothing the replacement session can observe and no
+   shared state: no data, error, loading or busy state. The one exception is the abort-only read
+   effects (below), which may still write local state into a component instance that is being
+   unmounted.
 2. A stale 401 never expires, and a stale success never authorizes, the replacement session.
 3. A session end releases the flags it owned itself (`busy`, loading flags, in-flight guards),
    because the old operations' guarded `finally` blocks no longer will.
@@ -29,26 +32,26 @@ Rules applied everywhere:
 
 ## 2. Authenticated request coverage matrix
 
-| Request / path                       | Session captured at                | Stale success                  | Stale failure / 401        | Cleanup guarded | Regression test                                                                          |
-| ------------------------------------ | ---------------------------------- | ------------------------------ | -------------------------- | --------------- | ---------------------------------------------------------------------------------------- |
-| `GET /me` (boot)                     | boot (once, StrictMode)            | ignored                        | ignored                    | yes             | StrictMode boot test; held-`/me` boot tests (invariant); see note A                      |
-| `GET /me` (sign-in)                  | after login rotation               | ignored                        | ignored                    | yes             | stale-401-during-sign-in test (guard-proving); see note A                                |
-| `GET /auth/csrf`                     | dispatch                           | token not stored               | no error state, no clear   | yes             | pending-CSRF test (invariant); see note A                                                |
-| `POST /auth/login`                   | dispatch                           | n/a                            | shown only if live         | yes             | login / expiry tests                                                                     |
-| `POST /auth/logout`                  | dispatch                           | cannot clear replacement       | cannot expire replacement  | yes             | stale logout (ok, 401)                                                                   |
-| `GET /tasks`, `/runs`, `/projects`   | dispatch                           | not applied                    | cannot expire replacement  | yes             | stale Tasks / Runs / Projects tests                                                      |
-| quiet task refresh, 409 refresh      | dispatch (+ sequence)              | not applied                    | cannot expire replacement  | yes             | refresh-held-across-session test                                                         |
-| `GET /runs/:id` (reconcile, probe)   | dispatch / abort signal            | not applied                    | cannot expire replacement  | yes             | stream-session and reconcile tests                                                       |
-| `POST /tasks`                        | dispatch                           | not applied                    | not shown                  | yes             | old-operation busy-state test                                                            |
-| `POST synthetic-runs`                | dispatch                           | not admitted into new session  | not shown                  | yes             | stale synthetic Run test                                                                 |
-| `PUT execution-assignment`           | dispatch                           | not applied                    | not shown                  | yes             | stale assignment test                                                                    |
-| `GET runtime-capabilities`           | per request + session              | superseded result fails closed | cannot expire replacement  | yes             | capability ordering tests (A–E)                                                          |
-| Run SSE messages / `onerror`         | stream open                        | ignored                        | ignored                    | n/a             | stream revocation / reconnect tests; held-events and probe tests (invariant); see note B |
-| Stop, approve, revoke, accept        | dispatch                           | not applied                    | not shown                  | yes             | revoke: stale-revoke test; others existing tests                                         |
-| Agent create / archive               | dispatch (context)                 | not applied, storage kept      | not applied                | n/a             | stale-create and late-archive tests (guard-proving)                                      |
-| Planning writers (`useWriter`)       | dispatch (context)                 | distinct `stale` outcome       | same, no CSRF refresh      | n/a             | guarded, untested; see note C                                                            |
-| Departments / Projects forms         | `useMountedInSession` + bound CSRF | gated by mounted-in-session    | `sessionBoundExpire` inert | n/a             | project create: invariant test; department writes untested; see note C                   |
-| `AcceptResultAction` (accept result) | generation at submit               | not applied                    | cannot expire replacement  | yes             | accept-result stale-session tests                                                        |
+| Request / path                       | Session captured at                | Stale success                  | Stale failure / 401        | Cleanup guarded | Regression test                                                                                                                       |
+| ------------------------------------ | ---------------------------------- | ------------------------------ | -------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /me` (boot)                     | boot (once, StrictMode)            | ignored                        | ignored                    | yes             | StrictMode boot test; held-`/me` boot tests (invariant); see note A                                                                   |
+| `GET /me` (sign-in)                  | after login rotation               | ignored                        | ignored                    | yes             | a stale Tasks 401 released while the replacement `/me` is pending (guard-proving); no stale `/me` response is delivered; see note A   |
+| `GET /auth/csrf`                     | dispatch                           | token not stored               | no error state, no clear   | yes             | a stale Tasks 401 released while the replacement CSRF refresh is pending (invariant); no stale CSRF response is delivered; see note A |
+| `POST /auth/login`                   | dispatch                           | n/a                            | shown only if live         | yes             | login / expiry tests                                                                                                                  |
+| `POST /auth/logout`                  | dispatch                           | cannot clear replacement       | cannot expire replacement  | yes             | stale logout (ok, 401)                                                                                                                |
+| `GET /tasks`, `/runs`, `/projects`   | dispatch                           | not applied                    | cannot expire replacement  | yes             | stale Tasks / Runs / Projects tests                                                                                                   |
+| quiet task refresh, 409 refresh      | dispatch (+ sequence)              | not applied                    | cannot expire replacement  | yes             | refresh-held-across-session test                                                                                                      |
+| `GET /runs/:id` (reconcile, probe)   | dispatch / abort signal            | not applied                    | cannot expire replacement  | yes             | stream-session and reconcile tests                                                                                                    |
+| `POST /tasks`                        | dispatch                           | not applied                    | not shown                  | yes             | old-operation busy-state test                                                                                                         |
+| `POST synthetic-runs`                | dispatch                           | not admitted into new session  | not shown                  | yes             | stale synthetic Run test                                                                                                              |
+| `PUT execution-assignment`           | dispatch                           | not applied                    | not shown                  | yes             | stale assignment test                                                                                                                 |
+| `GET runtime-capabilities`           | per request + session              | superseded result fails closed | cannot expire replacement  | yes             | capability ordering tests (A–E)                                                                                                       |
+| Run SSE messages / `onerror`         | stream open                        | ignored                        | ignored                    | n/a             | stream revocation / reconnect tests; held-events and probe tests (invariant); see note B                                              |
+| Stop, approve, revoke, accept        | dispatch                           | not applied                    | not shown                  | yes             | revoke: stale-revoke test; others existing tests                                                                                      |
+| Agent create / archive               | dispatch (context)                 | not applied, storage kept      | not applied                | n/a             | stale-create and late-archive tests (guard-proving)                                                                                   |
+| Planning writers (`useWriter`)       | dispatch (context)                 | distinct `stale` outcome       | same, no CSRF refresh      | n/a             | guarded, untested; see note C                                                                                                         |
+| Departments / Projects forms         | `useMountedInSession` + bound CSRF | gated by mounted-in-session    | `sessionBoundExpire` inert | n/a             | project create: invariant test; department writes untested; see note C                                                                |
+| `AcceptResultAction` (accept result) | generation at submit               | not applied                    | cannot expire replacement  | yes             | accept-result stale-session tests                                                                                                     |
 
 Note A — the in-code `/me` and CSRF staleness guards still **cannot be driven through the UI**: the
 sign-in control is disabled while CSRF loads and sign-out is unreachable while sign-in is in flight,
@@ -102,9 +105,11 @@ after the session generation has rotated, and a continuation can run in between 
 Regression tests whose guard was removed to confirm the test fails (**guard-proving**): stale Run,
 stale assignment, busy-flag release, late revoke success, late agent create, late agent archive,
 a 404 authorization lookup for a replaced session (no follow-up create), and a stale Tasks 401 during the replacement sign-in.
-Everything else listed in this note is guarded in code but not separately tested, because the needed
-flows have no session-replacement mock (planning writers, department writes, profile and identity
-editors) and the timing windows cannot be forced deterministically.
+Everything else listed in this note is guarded in code but not separately guard-proven. Part of it
+has invariant tests only (held boot `/me`, CSRF timing, SSE, recovery probes, stale Agents and
+Departments reads, late project create; see the table above). The rest has no session-replacement
+test at all, because the needed flows have no session-replacement mock (planning writers, department
+writes, profile and identity editors) and the timing windows cannot be forced deterministically.
 
 Backend dependency for Codex #1: none found. The frontend assumes only that a replaced session's
 cookie is rejected with 401 and that mutations remain idempotent under the documented keys.
