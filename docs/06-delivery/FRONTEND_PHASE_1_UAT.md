@@ -154,8 +154,11 @@ nothing on cancel` (Command Center). Source: `openApproval` re-checks capabiliti
 - **Expected:** with no Authorizer, owner approvals, connector authorization and **result
   acceptance** cannot succeed, and the UI says so plainly. When the backend reports the Authorizer
   unavailable (`authorization.availability: unavailable`, which the restricted profile always does),
-  the Runs page shows an advisory beside Accept Result and Reconcile ("likely to be refused; you can
-  still try; the server decides"). The control stays usable: the reading is a health probe, not the
+  the Runs page shows an advisory beside Accept Result and Reconcile ("this request is likely to be
+  refused; you can still try; the server decides"). The wording is deliberately neutral so it also
+  fits the reconcile view, where a receipt already exists. The advisory is shown with the control: while
+  the freshness gate hides the control (a task and run re-read is refreshing or failed) neither is
+  shown (source-verified, not separately tested). The control stays usable: the reading is a health probe, not the
   accept route's answer, so it never blocks anything. If the owner confirms, the API answers `503
 authorizer_unavailable` and the owner is told acceptance is unavailable and the result is **not**
   accepted, never that the outcome is unknown.
@@ -359,10 +362,12 @@ null, outputTokens: null, cost: null}`. There is no measured or estimated varian
   extended, that test fails and the readout and its tests must change with it.
 - `packages/contracts/src/runtime-capabilities.ts` and `apps/api/src/server.ts`:
   `authorization.availability` is produced by `checkAuthorizerAvailability()`, which is `false` in the
-  restricted profile and otherwise a health request through the same `authorizerRequest` that result
-  acceptance uses. The accept route is guarded by `requireAuthorizerFeature` and calls the Authorizer
-  through the same client. So `unavailable` means the Authorizer acceptance needs is not reachable;
-  `available` does not promise acceptance will succeed.
+  restricted profile (where the accept route also refuses at its feature guard) and otherwise the
+  result of a separate `/internal/v1/health` request through the Authorizer client that result
+  acceptance also uses. Outside the restricted profile `unavailable` is therefore only an advisory
+  signal: the probe can fail while the acceptance endpoint works, so it does not prove acceptance
+  would fail. `available` does not promise acceptance will succeed either. The frontend treats the
+  value as advice and never as the authority (see "Why it is not a hard gate" below).
 
 **Usage readout.** `RunUsageReadout` adds a compact "Usage" section to the Run inspector: Input
 tokens, Output tokens and Cost, each `Unknown`, with the note "No usage was reported for this run.

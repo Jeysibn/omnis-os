@@ -418,9 +418,8 @@ function AvailabilityAdvisory({ id, onRecheck }: { id: string; onRecheck: () => 
   return (
     <div className="accept-result-unavailable" role="status">
       <p id={id}>
-        Omnis OS reports the approval service (Authorizer) as unavailable, so acceptance is likely
-        to be refused. You can still try; the server decides. Nothing is accepted until you confirm
-        and the server says so.
+        Omnis OS reports the approval service (Authorizer) as unavailable, so this request is likely
+        to be refused. You can still try; the server decides, and nothing changes until it answers.
       </p>
       <button type="button" className="text-button" onClick={onRecheck}>
         Check again

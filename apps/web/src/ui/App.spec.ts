@@ -3732,7 +3732,7 @@ test.describe('R1 owner result acceptance', () => {
 
   test.describe('Authorizer advisory on Accept Result (advice only; the accept route stays the authority)', () => {
     const advisory = (page: Page) =>
-      page.getByText('as unavailable, so acceptance is likely to be refused');
+      page.getByText('as unavailable, so this request is likely to be refused');
     const releaseAll = (api: MockApi, outcome: 'available' | 'restricted') => {
       while (api.pendingCapabilities > 0) api.releaseCapability(0, outcome);
     };
