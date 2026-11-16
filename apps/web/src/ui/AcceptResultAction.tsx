@@ -146,9 +146,11 @@ export function AcceptResultAction({
         // The request may have applied: read the authoritative state before any retry is offered.
         onReload(run.id);
       } else if (failure.kind === 'unavailable') {
-        // Definitive: the approval service is unavailable (for example the restricted profile).
-        // Keep the key so a later explicit attempt reuses it, close the confirmation (a retry now
-        // cannot succeed), and read the task as the backend handoff requires.
+        // The backend reports the approval service unavailable (for example at the restricted
+        // profile's feature guard). That is not the lost-response code, but the status and code
+        // alone do not prove nothing was committed, so no outcome is claimed either way: keep the
+        // key for a later explicit attempt, close the confirmation, and re-read the task as the
+        // backend handoff says to do before deciding whether to retry.
         restoreFocus.current = true;
         setConfirming(false);
         setProblem({ kind: 'unavailable', message: failure.message });
@@ -401,7 +403,7 @@ export function AcceptResultAction({
               : problem.kind === 'uncertain'
                 ? `${problem.message} The result may or may not have been accepted. Retrying uses the same request and cannot accept it twice.`
                 : problem.kind === 'unavailable'
-                  ? `${problem.message} The approval service is unavailable, so this request could not be made and the result is not shown as accepted. Omnis OS is re-reading the task; try again when the service is available.`
+                  ? `${problem.message} The approval service (Authorizer) is unavailable. Omnis OS is re-reading the task; review its state before trying again.`
                   : problem.message}
           </p>
         </div>

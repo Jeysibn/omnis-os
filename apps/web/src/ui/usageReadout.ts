@@ -9,8 +9,8 @@ export const unknownLabel = 'Unknown';
 
 /**
  * A count is "Unknown" only when it is null. Zero is a real reported value and is shown as 0; it is
- * never produced as a stand-in for a missing value. (Kept so a future contract extension cannot
- * silently turn missing data into a zero.)
+ * never produced as a stand-in for a missing value. (Kept so that, if the contract is extended,
+ * missing data is not silently rendered as zero.)
  */
 export function formatUsageCount(value: number | null): string {
   return value === null ? unknownLabel : value.toLocaleString('en-US');
@@ -25,8 +25,8 @@ export function describeUsage(usage: Usage): UsageReadout {
     rows: [
       { key: 'input', label: 'Input tokens', value: formatUsageCount(usage.inputTokens) },
       { key: 'output', label: 'Output tokens', value: formatUsageCount(usage.outputTokens) },
-      // The contract carries no currency, so a cost can never be formatted truthfully: it is either
-      // unknown or reported without a unit this interface can show.
+      // The contract carries no currency, so a cost is not formatted here: it reads as unknown, or as
+      // reported without a unit this interface can show.
       {
         key: 'cost',
         label: 'Cost',

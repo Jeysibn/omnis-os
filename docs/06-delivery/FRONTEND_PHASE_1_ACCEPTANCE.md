@@ -149,7 +149,7 @@ follow-up request, so no production change was made.
   failed, disabled, worker unavailable, authorizer unavailable, mode mismatch, mock-ready.
   Loading and error states fail closed; Run and approval controls are disabled with a reason.
 - Execution-disabled copy states that nothing is simulated, queued or approved.
-- Only the Tasks page requests capabilities.
+- The execution-capability indicator is on Tasks; Runs also reads Authorizer availability for a selected completed run (advice only).
 - Historical Tasks and Runs keep their recorded statuses; an `in_review` task is not "Completed".
 - SSE: Last-Event-ID resume, replay de-duplication, ordering, bounded retry, revoked-session
   recovery, terminal reconciliation.

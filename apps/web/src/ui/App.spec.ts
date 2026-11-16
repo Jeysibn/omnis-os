@@ -3701,7 +3701,7 @@ test.describe('R1 owner result acceptance', () => {
     expect(api.acceptPosts).toHaveLength(1);
   });
 
-  test('a definitive authorizer_unavailable is reported as unavailable, never as an unknown outcome', async ({
+  test('authorizer_unavailable is reported as the approval service being unavailable, not as a lost response', async ({
     page,
     api,
   }) => {
@@ -3714,7 +3714,7 @@ test.describe('R1 owner result acceptance', () => {
     await accept(page).click();
     await confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' }).click();
     const problem = page.getByRole('alert').filter({ hasText: 'Authorizer-backed functionality' });
-    await expect(problem).toContainText('the result is not shown as accepted');
+    await expect(problem).toContainText('review its state before trying again');
     await expect(problem).not.toContainText('may or may not have been accepted');
     // No retry loop is offered inside the confirmation; the owner reloads and tries again later.
     await expect(page.getByRole('button', { name: 'Retry acceptance' })).toHaveCount(0);
@@ -3761,7 +3761,7 @@ test.describe('R1 owner result acceptance', () => {
         expect(api.acceptPosts).toHaveLength(0); // advice never accepts, and never sends, anything
         await confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' }).click();
         // The backend is asked and answers; PR #128's truthful refusal is shown, never success.
-        await expect(page.getByRole('alert')).toContainText('the result is not shown as accepted');
+        await expect(page.getByRole('alert')).toContainText('review its state before trying again');
         await expect(page.getByText('Result accepted by owner.')).toHaveCount(0);
         expect(api.acceptPosts).toHaveLength(1);
       });
@@ -5494,7 +5494,10 @@ test.describe('capability refresh ordering', () => {
     });
   });
 
-  test('pages other than Tasks never request capabilities', async ({ page, api }) => {
+  test('pages without a selected completed run do not request runtime capabilities', async ({
+    page,
+    api,
+  }) => {
     api.configure();
     await openWorkspace(page, '#command-center');
     for (const name of ['Runs', 'Projects']) {
