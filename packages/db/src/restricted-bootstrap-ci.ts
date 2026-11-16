@@ -298,7 +298,7 @@ async function verifyRestrictedDatabase(
     failureStage = 'runtime cluster-inspection access denial';
     let runtimeClusterInspectionDenied = false;
     try {
-      await runtime.query('SELECT system_identifier FROM pg_catalog.pg_control_system()');
+      await runtime.query('SELECT * FROM pg_catalog.pg_control_system()');
     } catch (error) {
       if (!hasPostgresErrorCode(error, '42501')) throw error;
       runtimeClusterInspectionDenied = true;
