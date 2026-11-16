@@ -240,7 +240,7 @@ async function verifyRestrictedDatabase(
       throw new Error('Runtime role did not connect to the restricted database.');
     }
 
-    failureStage = 'runtime and migration privilege verification';
+    failureStage = 'privilege snapshot SQL query';
     const checks = await admin.query<{
       runtime_superuser: boolean;
       runtime_createdb: boolean;
@@ -279,6 +279,7 @@ async function verifyRestrictedDatabase(
         WHERE runtime.rolname = 'omnis_runtime'`,
     );
     const row = checks.rows[0];
+    failureStage = 'runtime role privilege attributes';
     if (
       !row ||
       row.runtime_superuser ||
@@ -286,17 +287,33 @@ async function verifyRestrictedDatabase(
       row.runtime_createrole ||
       row.runtime_bypassrls ||
       !row.runtime_login ||
-      row.runtime_inherit ||
+      row.runtime_inherit
+    ) {
+      throw new Error('Restricted runtime role attributes are not least-privilege.');
+    }
+
+    failureStage = 'acceptance and cluster-inspection function privileges';
+    if (
       row.runtime_accept_result ||
       row.runtime_control_system ||
       !row.migrator_control_system ||
-      row.admin_system_identifier !== systemIdentifier ||
+      row.admin_system_identifier !== systemIdentifier
+    ) {
+      throw new Error('Restricted function privileges or cluster identity checks failed.');
+    }
+
+    failureStage = 'migration schema ownership and history';
+    if (
       row.migrator_schema_owner !== 'omnis_migrator' ||
       row.pgboss_schema_owner !== 'omnis_migrator' ||
-      row.migration_count < 1 ||
-      row.role_membership_count !== 0
+      row.migration_count < 1
     ) {
-      throw new Error('Restricted role, schema ownership, or migration acceptance checks failed.');
+      throw new Error('Restricted schema ownership or migration history checks failed.');
+    }
+
+    failureStage = 'restricted application-role membership isolation';
+    if (row.role_membership_count !== 0) {
+      throw new Error('Restricted application roles have unexpected role membership.');
     }
 
     failureStage = 'Authorizer and launcher ACL-principal verification';
