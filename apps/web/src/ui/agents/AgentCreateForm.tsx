@@ -8,6 +8,7 @@ import {
 import { ApiRequestError, request } from '../api.js';
 import { AgentDepartmentSelect } from './AgentDepartmentSelect.js';
 import { profileHash } from './route.js';
+import { useBeginSession } from '../sessionContext.js';
 
 type Operation = { input: CreateAgentInput; key: string };
 const pendingStorageKey = 'omnis.agent-create.pending.v1';
@@ -52,6 +53,7 @@ export function AgentCreateForm({
   onUnauthorized: (cause: unknown) => void;
   onCancel: () => void;
 }) {
+  const beginSession = useBeginSession();
   const ids = { name: useId(), slug: useId() };
   const [operation, setOperation] = useState<Operation | null>(restorePendingOperation);
   const [name, setName] = useState(() => operation?.input.name ?? '');
@@ -87,6 +89,8 @@ export function AgentCreateForm({
     }
     setOperation(current);
     setBusy(true);
+    // Outcomes for a replaced owner session must not clear the shared pending operation or navigate.
+    const live = beginSession();
     try {
       const receipt = await request(
         '/api/v1/agents',
@@ -109,9 +113,11 @@ export function AgentCreateForm({
           return result;
         },
       );
+      if (!live()) return;
       clearPendingOperation();
       window.location.hash = profileHash(receipt.agentId);
     } catch (cause) {
+      if (!live()) return;
       if (cause instanceof ApiRequestError && cause.status === 401) {
         if (!unknown) {
           clearPendingOperation();

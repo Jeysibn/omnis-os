@@ -41,7 +41,9 @@ Rules applied everywhere:
 | `GET runtime-capabilities`               | per request + session   | superseded result fails closed   | cannot expire replacement     | yes                     | capability ordering tests (A–E)                    |
 | Run SSE messages / `onerror`             | stream open             | ignored                          | ignored                       | n/a                     | stream revocation / reconnect tests; see note B    |
 | Stop, approve, revoke, accept            | dispatch                | not applied                      | not shown                     | yes                     | revoke: stale-revoke test; others existing tests   |
-| Agents / Departments / Projects pages    | n/a (unmount + abort)   | writes only to unmounted state   | `sessionBoundExpire` is inert | n/a                     | existing page specs; see note C                    |
+| Agent create / archive                   | dispatch (context)      | not applied, storage kept        | not applied                   | n/a                     | create: stale-create test; archive: guarded, untested |
+| Planning writers (`useWriter`)           | dispatch (context)      | reported as `unauthorized`       | same, no CSRF refresh         | n/a                     | guarded, untested; see note C                      |
+| Departments / Projects forms             | unmount + bound CSRF    | unmounted-only writes            | `sessionBoundExpire` inert    | n/a                     | guarded by unmount; see note C                     |
 | `AcceptResultAction` (accept result)     | generation at submit    | not applied                      | cannot expire replacement     | yes                     | accept-result stale-session tests                  |
 
 Note A — `/me` and CSRF staleness are guarded in code but **cannot be driven through the UI**:
@@ -62,9 +64,16 @@ untested for the same timing reason), and the connector revoke hook is session-s
 fail with the guard removed).
 The existing revocation and reconnect tests continue to pass.
 
-Note C — these pages push no results into App state; their requests abort on unmount, and their
-only App-level hook is `sessionBoundExpire`. A stale page calling the shared `refreshCsrf` late would
-fetch the live session's own token, which is harmless. Reviewed by reading, not by a dedicated test.
+Note C — correction: an earlier version of this record said the Agents, Departments and Projects pages
+needed no session guard because they unmount and abort. Independent review of 8e79dc8 showed that is
+not enough: a late completion can still clear shared `sessionStorage`, navigate, or refresh CSRF. Now:
+a `SessionScopeContext` lets nested writers capture the session at dispatch; `AgentCreateForm`,
+`AgentArchiveAction` and the shared planning `useWriter` drop outcomes for a replaced session (a stale
+`useWriter` result is reported as `unauthorized`, so no key is retired and nothing is stored or
+applied); the `refreshCsrf` given to Departments and Projects rejects for a replaced session.
+Departments and Projects form state is protected by unmount (the workspace is always unmounted between
+sessions). Only agent create has a regression test (verified to fail with its guard removed); agent
+archive, `useWriter` and the department/project continuations are guarded but not separately tested.
 
 Backend dependency for Codex #1: none found. The frontend assumes only that a replaced session's
 cookie is rejected with 401 and that mutations remain idempotent under the documented keys.

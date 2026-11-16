@@ -482,6 +482,24 @@ function createMockApi(page: Page) {
         }),
       });
     }
+    if (path === '/api/v1/departments' && method === 'GET')
+      return route.fulfill({ json: { departments: [], total: 0 } });
+    if (path === '/api/v1/agents' && method === 'POST') {
+      const key = request.headers()['idempotency-key'] ?? '';
+      return route.fulfill({
+        status: 201,
+        json: {
+          requestId: key,
+          operation: 'agent.created',
+          agentId: 'agent-created',
+          lifecycle: 'draft',
+          versionId: null,
+          versionNo: null,
+          draftRevision: 0,
+          occurredAt: new Date().toISOString(),
+        },
+      });
+    }
     if (path === '/api/v1/runtime-capabilities' && method === 'GET') {
       capabilityRequests += 1;
       // Deterministic ordering: a held request settles only when the test releases it.
@@ -4627,6 +4645,38 @@ test.describe('capability refresh ordering', () => {
     await expect.poll(() => api.connectorRevokeIds.length).toBe(1);
     await settleClient(page);
     expect(await storedOperations()).toBe(1); // the late result must not clear it
+    await stillSignedIn(page);
+  });
+
+  test('a late agent create from a replaced session cannot clear the shared pending operation or navigate', async ({
+    page,
+    api,
+  }) => {
+    const pendingKey = 'omnis.agent-create.pending.v1';
+    const stored = () =>
+      page.evaluate((key) => (sessionStorage.getItem(key) === null ? 0 : 1), pendingKey);
+    api.configure({ runs: [] });
+    api.holdGet('/api/v1/runs');
+    api.holdRequest('POST', '/api/v1/agents');
+    await page.goto('/#agents');
+    await page.getByRole('button', { name: 'Create agent' }).click();
+    await page.getByLabel('Name', { exact: true }).fill('Orion');
+    await page.getByLabel('Slug', { exact: true }).fill('orion-ops');
+    await page.getByRole('button', { name: 'Create draft agent' }).click();
+    await expect.poll(() => api.pendingRequests('POST', '/api/v1/agents')).toBe(1);
+    expect(await stored()).toBe(1);
+    await expireViaRuns(page, api);
+    await signInAgain(page);
+    expect(await stored()).toBe(1);
+    api.releaseRequest('POST', '/api/v1/agents', 0, 'ok'); // session 1's create succeeds late
+    await expect
+      .poll(
+        () => api.requests.filter((r) => r.method === 'POST' && r.path === '/api/v1/agents').length,
+      )
+      .toBe(1);
+    await settleClient(page);
+    expect(await stored()).toBe(1); // the late result must not clear the shared operation
+    expect(page.url()).not.toContain('agent-created'); // nor navigate the replacement session
     await stillSignedIn(page);
   });
 

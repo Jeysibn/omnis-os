@@ -57,6 +57,7 @@ import {
   isStaleSession,
   type SessionScope,
 } from './sessionScope.js';
+import { SessionScopeContext } from './sessionContext.js';
 import { formatDate } from './manilaTime.js';
 import { AcceptResultAction } from './AcceptResultAction.js';
 import { isAwaitingOwnerReview } from './acceptResult.js';
@@ -441,6 +442,12 @@ function App() {
 
   // Results that children push up are bound to the session they were started in, so a late
   // result from a replaced session can never enter the replacement session's state.
+  // A page opened under a replaced session must not refresh the replacement session's CSRF token.
+  const sessionBoundRefreshCsrf = useMemo(() => {
+    void sessionEpoch;
+    const live = captureSession(sessionGeneration);
+    return () => (live() ? refreshCsrf() : Promise.reject(new StaleSessionError()));
+  }, [refreshCsrf, sessionEpoch]);
   const adoptUpdatedTask = useMemo(() => {
     void sessionEpoch;
     return bindToSession(sessionGeneration, (updated: Task) => {
@@ -1544,24 +1551,30 @@ function App() {
           />
         )}
         {page === 'agents' && (
-          <AgentsWorkspace onUnauthorized={sessionBoundExpire} csrfToken={csrfToken} />
+          <SessionScopeContext.Provider value={beginSession}>
+            <AgentsWorkspace onUnauthorized={sessionBoundExpire} csrfToken={csrfToken} />
+          </SessionScopeContext.Provider>
         )}
         {page === 'departments' && (
-          <DepartmentsWorkspace
-            onUnauthorized={sessionBoundExpire}
-            csrfToken={csrfToken}
-            refreshCsrf={refreshCsrf}
-            arrivedByNavigation={navigatedInApp.current}
-          />
+          <SessionScopeContext.Provider value={beginSession}>
+            <DepartmentsWorkspace
+              onUnauthorized={sessionBoundExpire}
+              csrfToken={csrfToken}
+              refreshCsrf={sessionBoundRefreshCsrf}
+              arrivedByNavigation={navigatedInApp.current}
+            />
+          </SessionScopeContext.Provider>
         )}
         {page === 'projects' && (
-          <ProjectsWorkspace
-            ownerId={owner.id}
-            onUnauthorized={sessionBoundExpire}
-            csrfToken={csrfToken}
-            refreshCsrf={refreshCsrf}
-            arrivedByNavigation={navigatedInApp.current}
-          />
+          <SessionScopeContext.Provider value={beginSession}>
+            <ProjectsWorkspace
+              ownerId={owner.id}
+              onUnauthorized={sessionBoundExpire}
+              csrfToken={csrfToken}
+              refreshCsrf={sessionBoundRefreshCsrf}
+              arrivedByNavigation={navigatedInApp.current}
+            />
+          </SessionScopeContext.Provider>
         )}
         <footer className="page-foot">
           <ShieldCheck size={14} />

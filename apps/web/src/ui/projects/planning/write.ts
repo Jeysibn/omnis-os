@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { classifyMutationFailure } from '../data.js';
 import { IdempotentIntent } from '../intent.js';
+import { useBeginSession } from '../../sessionContext.js';
 
 export type WriteOutcome<T> =
   | { kind: 'saved'; value: T }
@@ -39,6 +40,7 @@ export function useWriter({ csrfToken, refreshCsrf, onUnauthorized }: Input) {
   unauthorized.current = onUnauthorized;
   const refresh = useRef(refreshCsrf);
   refresh.current = refreshCsrf;
+  const beginSession = useBeginSession();
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -60,6 +62,9 @@ export function useWriter({ csrfToken, refreshCsrf, onUnauthorized }: Input) {
       if (inflight.current) return { kind: 'busy' };
       inflight.current = true;
       setBusy(true);
+      // A completion for a replaced owner session reports `unauthorized` ("the shell has handled
+      // it"): nothing is retired, stored, refreshed or applied for the session that replaced it.
+      const live = beginSession();
       const owned = options.key !== undefined;
       const key = options.key ?? intent.current.keyFor(signature);
       const settle = () => {
@@ -67,9 +72,11 @@ export function useWriter({ csrfToken, refreshCsrf, onUnauthorized }: Input) {
       };
       try {
         const value = await send(key, csrf.current);
+        if (!live()) return { kind: 'unauthorized' };
         settle();
         return { kind: 'saved', value };
       } catch (cause) {
+        if (!live()) return { kind: 'unauthorized' };
         const failure = classifyMutationFailure(cause);
         if (failure.evidence === 'unauthorized') {
           settle();
@@ -87,6 +94,7 @@ export function useWriter({ csrfToken, refreshCsrf, onUnauthorized }: Input) {
           } catch {
             // The message still asks the owner to try again.
           }
+          if (!live()) return { kind: 'unauthorized' };
         }
         const message = cause instanceof Error ? cause.message : '';
         return { kind: 'rejected', status: failure.status, code: failure.code, message };
@@ -95,7 +103,7 @@ export function useWriter({ csrfToken, refreshCsrf, onUnauthorized }: Input) {
         if (mounted.current) setBusy(false);
       }
     },
-    [],
+    [beginSession],
   );
 
   /** End the current intent, for example when the owner abandons an unknown outcome. */
