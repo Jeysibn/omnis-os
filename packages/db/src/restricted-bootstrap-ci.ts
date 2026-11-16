@@ -228,6 +228,7 @@ async function verifyRestrictedDatabase(
   const runtime = createPool({ connectionString: runtimeUrl, max: 1 });
   const migrator = createPool({ connectionString: migratorUrl, max: 1 });
   try {
+    failureStage = 'runtime database identity verification';
     const identity = await runtime.query<{
       current_user: string;
       current_database: string;
@@ -239,6 +240,7 @@ async function verifyRestrictedDatabase(
       throw new Error('Runtime role did not connect to the restricted database.');
     }
 
+    failureStage = 'runtime and migration privilege verification';
     const checks = await admin.query<{
       runtime_superuser: boolean;
       runtime_createdb: boolean;
@@ -297,6 +299,7 @@ async function verifyRestrictedDatabase(
       throw new Error('Restricted role, schema ownership, or migration acceptance checks failed.');
     }
 
+    failureStage = 'Authorizer and launcher ACL-principal verification';
     const auxiliaryRoles = await admin.query<{
       role_name: string;
       can_login: boolean;
@@ -318,6 +321,7 @@ async function verifyRestrictedDatabase(
       throw new Error('Restricted ACL-only Authorizer/launcher database roles are not inert.');
     }
 
+    failureStage = 'migration database identity verification';
     const migrationIdentity = await migrator.query<{
       current_user: string;
       current_database: string;

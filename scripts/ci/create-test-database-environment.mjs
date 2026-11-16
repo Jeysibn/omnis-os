@@ -13,6 +13,12 @@ const restrictedPasswordNames = [
   'OMNIS_CI_POSTGRES_MIGRATION_PASSWORD',
   'OMNIS_CI_POSTGRES_RUNTIME_PASSWORD',
 ];
+const standardDatabaseSuites = [
+  'legacy-upgrade',
+  'recovery',
+  'platform-security',
+  'full-stack-browser-integration',
+];
 
 export function createTestDatabaseEnvironment({
   runId,
@@ -24,7 +30,7 @@ export function createTestDatabaseEnvironment({
   if (!/^\d+$/.test(runId) || !/^\d+$/.test(runAttempt) || !/^[a-z0-9-]+$/.test(job)) {
     throw new Error('CI run identity is not safe for a disposable PostgreSQL container name');
   }
-  if (!['legacy-upgrade', 'recovery', 'restricted-bootstrap'].includes(suite)) {
+  if (suite !== 'restricted-bootstrap' && !standardDatabaseSuites.includes(suite)) {
     throw new Error('CI database suite is not supported for credential preparation');
   }
   const passwordNames =

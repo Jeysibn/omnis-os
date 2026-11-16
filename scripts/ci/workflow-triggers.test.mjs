@@ -48,3 +48,9 @@ test('restricted database CI receives only its dedicated credential export path'
   );
   assert.doesNotMatch(restrictedStep, /export-test-database-environment\.sh/);
 });
+
+test('every PostgreSQL fixture workflow selects its credential suite explicitly', () => {
+  assert.match(workflow, /OMNIS_CI_DATABASE_SUITE: platform-security/);
+  assert.match(workflow, /OMNIS_CI_DATABASE_SUITE: full-stack-browser-integration/);
+  assert.match(workflow, /OMNIS_CI_DATABASE_SUITE: \$\{\{ matrix\.suite \}\}/);
+});

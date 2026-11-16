@@ -150,6 +150,8 @@ jobs:
       - name: Verify disposable Linux service identity boundaries
         run: sudo --preserve-env=CI bash scripts/host-security/test-disposable-identities.sh
       - name: Generate and mask run-scoped PostgreSQL credentials
+        env:
+          OMNIS_CI_DATABASE_SUITE: platform-security
         run: node scripts/ci/create-test-database-environment.mjs
       - name: Start disposable PostgreSQL on loopback
         run: bash scripts/ci/start-test-postgres.sh
@@ -246,6 +248,8 @@ jobs:
       - name: Install Playwright Chromium and system dependencies
         run: pnpm --filter @omnis/web exec playwright install --with-deps chromium
       - name: Generate and mask run-scoped PostgreSQL credentials
+        env:
+          OMNIS_CI_DATABASE_SUITE: full-stack-browser-integration
         run: node scripts/ci/create-test-database-environment.mjs
       - name: Start disposable PostgreSQL on loopback
         run: bash scripts/ci/start-test-postgres.sh
