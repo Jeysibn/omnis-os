@@ -4194,7 +4194,7 @@ test.describe('capability refresh ordering', () => {
     expect(executionPosts(api)).toHaveLength(0);
   });
 
-  test('B2: a stale "available" cannot start the Run once the dialog check is superseded', async ({
+  test('B2: an Authorizer outage after the dialog opens blocks the approval click', async ({
     page,
     api,
   }) => {
@@ -4204,7 +4204,7 @@ test.describe('capability refresh ordering', () => {
     api.releaseCapability(0, 'available');
     const dialog = page.getByRole('dialog', { name: dialogTitle });
     await expect(dialog).toBeVisible();
-    // Two overlapping checks from the open dialog's primary button (idle between clicks).
+    // A single check from the dialog's primary button; supersession is covered by A/A2/C.
     await dialog.getByRole('button', { name: 'Approve & run' }).click(); // C
     await expect.poll(() => api.pendingCapabilities).toBe(1);
     api.releaseCapability(0, 'authorizer-down');
@@ -4300,6 +4300,66 @@ test.describe('capability refresh ordering', () => {
     await expect.poll(() => api.pendingCapabilities).toBe(1);
     api.releaseCapability(0, 'available');
     await expect.poll(() => api.runPosts.length).toBe(1);
+  });
+
+  const sessionExpiredText = 'Your owner session expired. Sign in again to continue.';
+
+  test('stale 401 after a newer success neither expires the session nor changes state', async ({
+    page,
+    api,
+  }) => {
+    await ready(page, api);
+    await rowButton(page).click(); // A
+    await rowButton(page).click(); // B
+    await expect.poll(() => api.pendingCapabilities).toBe(2);
+    api.releaseCapability(1, 'available'); // B succeeds and is current
+    await expect(page.getByRole('dialog', { name: dialogTitle })).toBeVisible();
+    api.releaseCapability(0, 'unauthorized'); // A returns a stale 401
+    await expect(page.getByText(sessionExpiredText)).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: 'Welcome back.' })).toHaveCount(0);
+    await expect(page.getByRole('dialog', { name: dialogTitle })).toBeVisible();
+    await expect(page.locator('.execution-banner')).toHaveAttribute(
+      'data-execution-state',
+      'mock_ready',
+    );
+    expect(executionPosts(api)).toHaveLength(0);
+  });
+
+  test('stale 401 from a previous owner session cannot expire the replacement session', async ({
+    page,
+    api,
+  }) => {
+    await ready(page, api);
+    await rowButton(page).click(); // A, in session 1
+    await expect.poll(() => api.pendingCapabilities).toBe(1);
+    await page.getByRole('button', { name: 'Sign out' }).click();
+    await expect(page.getByRole('heading', { name: 'Welcome back.' })).toBeVisible();
+    await page.getByLabel('Owner password').fill('fixture-owner-password');
+    await page.getByRole('button', { name: 'Sign in' }).click(); // session 2
+    await expect(page.getByRole('navigation', { name: 'Primary navigation' })).toBeVisible();
+    await page.getByRole('link', { name: 'Tasks', exact: true }).first().click();
+    await expect.poll(() => api.pendingCapabilities).toBe(2); // A plus session 2's own check
+    api.releaseCapability(0, 'unauthorized'); // A (session 1) returns 401 late
+    await expect(page.getByText(sessionExpiredText)).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: 'Welcome back.' })).toHaveCount(0);
+    api.releaseCapability(0, 'available'); // session 2's own check still applies
+    await expect(page.locator('.execution-banner')).toHaveAttribute(
+      'data-execution-state',
+      'mock_ready',
+    );
+    expect(executionPosts(api)).toHaveLength(0);
+  });
+
+  test('a stale 401 after leaving Tasks cannot expire the session', async ({ page, api }) => {
+    await ready(page, api);
+    await rowButton(page).click();
+    await expect.poll(() => api.pendingCapabilities).toBe(1);
+    await page.getByRole('link', { name: 'Runs' }).click();
+    await expect(page.getByRole('heading', { name: 'Runs' })).toBeVisible();
+    api.releaseCapability(0, 'unauthorized');
+    await expect(page.getByText(sessionExpiredText)).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: 'Runs' })).toBeVisible();
+    expect(executionPosts(api)).toHaveLength(0);
   });
 
   test('pages other than Tasks never request capabilities', async ({ page, api }) => {

@@ -410,6 +410,7 @@ function App() {
     // Only the Tasks page shows execution state; other pages never request capabilities.
     owner !== null && page === 'tasks',
     expireSessionIfNeeded,
+    sessionGeneration,
   );
   const executionGate = describeExecution(capabilityLoad);
 
