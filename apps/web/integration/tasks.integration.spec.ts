@@ -247,11 +247,29 @@ test('Compose owner creates an authorized mock Run through the web gateway', asy
   expect([200, 201]).toContain(replay.status);
   expect(replay.body.id).toBe(admitted.body.id);
 
-  await expect
-    .poll(async () => (await ownerRequest(page, `/api/v1/runs/${admitted.body.id}`)).body.status, {
-      timeout: 45_000,
-    })
-    .toBe('completed');
+  let observedRunStatus = 'unavailable';
+  try {
+    await expect
+      .poll(
+        async () => {
+          const response = await ownerRequest(page, `/api/v1/runs/${admitted.body.id}`);
+          observedRunStatus = response.body.status;
+          return observedRunStatus;
+        },
+        { timeout: 45_000 },
+      )
+      .toBe('completed');
+  } catch {
+    const events = await readRunEvents(page, admitted.body.id);
+    const terminal = events.find((event) =>
+      ['run.failed', 'run.interrupted', 'run.outcome_unknown', 'run.cancelled'].includes(
+        event.type,
+      ),
+    );
+    throw new Error(
+      `Compose mock Run did not complete (status=${observedRunStatus}, terminal=${terminal?.type ?? 'none'}): ${terminal?.message ?? 'No terminal event was observed.'}`,
+    );
+  }
   const run = (await ownerRequest(page, `/api/v1/runs/${admitted.body.id}`)).body;
   expect(run.runtimeKind).toBe('mock');
   expect(run.synthetic).toBe(true);
@@ -1060,7 +1078,18 @@ async function readRunEvents(page, runId) {
     let buffer = '';
     const deadline = Date.now() + 10_000;
     try {
-      while (Date.now() < deadline && !events.some((event) => event.type === 'run.completed')) {
+      while (
+        Date.now() < deadline &&
+        !events.some((event) =>
+          [
+            'run.completed',
+            'run.failed',
+            'run.interrupted',
+            'run.outcome_unknown',
+            'run.cancelled',
+          ].includes(event.type),
+        )
+      ) {
         const item = await Promise.race([
           reader.read(),
           new Promise((resolve) => setTimeout(() => resolve({ timeout: true }), 1_000)),
