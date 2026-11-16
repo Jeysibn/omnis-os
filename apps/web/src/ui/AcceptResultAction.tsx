@@ -9,7 +9,7 @@ import {
 } from './acceptResult.js';
 import { formatManilaWithZone } from './manilaTime.js';
 
-type Problem = { kind: 'conflict' | 'uncertain' | 'rejected'; message: string };
+type Problem = { kind: 'conflict' | 'uncertain' | 'unavailable' | 'rejected'; message: string };
 
 /**
  * Owner review of a finished synthetic run. Accepting is deliberate (two steps), shows progress,
@@ -130,6 +130,14 @@ export function AcceptResultAction({
       } else if (failure.kind === 'uncertain') {
         setProblem({ kind: 'uncertain', message: failure.message });
         // The request may have applied: read the authoritative state before any retry is offered.
+        onReload(run.id);
+      } else if (failure.kind === 'unavailable') {
+        // Definitive: the approval service is unavailable (for example the restricted profile).
+        // Keep the key so a later explicit attempt reuses it, close the confirmation (a retry now
+        // cannot succeed), and read the task as the backend handoff requires.
+        restoreFocus.current = true;
+        setConfirming(false);
+        setProblem({ kind: 'unavailable', message: failure.message });
         onReload(run.id);
       } else {
         acceptanceAttempts.settle(ownerId, task.id, run.id);
@@ -372,7 +380,9 @@ export function AcceptResultAction({
               ? problem.message
               : problem.kind === 'uncertain'
                 ? `${problem.message} The result may or may not have been accepted. Retrying uses the same request and cannot accept it twice.`
-                : problem.message}
+                : problem.kind === 'unavailable'
+                  ? `${problem.message} The approval service is unavailable, so this acceptance could not be requested and the result is not shown as accepted. Reload to check the task before trying again.`
+                  : problem.message}
           </p>
         </div>
       )}
