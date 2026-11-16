@@ -910,25 +910,42 @@ async function startRestrictedWorker(launcherSocket) {
     });
   }
   const healthUrl = `http://127.0.0.1:${port}/internal/v1/health`;
+  const capabilitiesUrl = `http://127.0.0.1:${port}/internal/v1/runtime-capabilities`;
   for (let attempt = 0; attempt < 120; attempt += 1) {
     if (child.exitCode !== null) {
       throw new Error(
         `Restricted worker exited during legacy upgrade (${child.exitCode}). ${sanitize(workerLogs)}`,
       );
     }
+    const headers = { 'x-omnis-internal-token': internalToken };
+    let response;
     try {
-      const response = await fetch(healthUrl, {
-        headers: { 'x-omnis-internal-token': internalToken },
-      });
-      if (response.ok) {
-        const health = await response.json();
-        assert.equal(health.runtimeKind, 'mock');
-        assert.equal(health.synthetic, true);
-        assert.equal(health.persistence, 'postgresql');
-        return { child, baseUrl: `http://127.0.0.1:${port}`, internalToken };
-      }
+      response = await fetch(healthUrl, { headers });
     } catch {
       // Startup is asynchronous; retry until the bounded deadline.
+      await delay(250);
+      continue;
+    }
+    if (response.ok) {
+      const health = await response.json();
+      assert.deepEqual(health, { status: 'ok', product: 'Omnis OS', service: 'worker' });
+
+      let capabilitiesResponse;
+      try {
+        capabilitiesResponse = await fetch(capabilitiesUrl, { headers });
+      } catch {
+        await delay(250);
+        continue;
+      }
+      if (capabilitiesResponse.ok) {
+        const capabilities = await capabilitiesResponse.json();
+        assert.equal(capabilities.version, 'omnis.worker-execution-status.v1');
+        assert.equal(capabilities.serviceAvailability, 'healthy');
+        assert.equal(capabilities.executionMode, 'mock');
+        assert.equal(capabilities.queueAvailability, 'available');
+        assert.equal(capabilities.launcherAvailability, 'available');
+        return { child, baseUrl: `http://127.0.0.1:${port}`, internalToken };
+      }
     }
     await delay(250);
   }
