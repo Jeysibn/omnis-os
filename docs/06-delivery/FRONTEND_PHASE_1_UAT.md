@@ -309,3 +309,27 @@ The suite grew from 802 to 813 tests between these runs; local full runs took 7 
 The margin is under one minute at worst. This document does not change CI. Suggested options for
 Codex #3: raise `timeout-minutes`, or shard the suite. Without a change, a slow runner will fail the
 required check on an unchanged commit and force a rerun.
+
+## 8. Retrospective review of PR #125 (evidence record)
+
+This is a read-only retrospective by the independent Codex reviewer of the exact merged revision. It
+does **not** change the pre-merge approval history: the approval was issued for branch revision
+`155e5ca`, and the merged branch head was `32a159c`.
+
+- **Reconciliation.** `App.spec.ts` is byte-identical between `155e5ca` and `32a159c`. The only
+  difference in `FRONTEND_PHASE_1_ACCEPTANCE.md` is two wording edits (the generation counter is
+  owned by `App.tsx`, with `sessionScope.ts` providing the helpers; and a dangling commit reference
+  was replaced). The extra commit was documentation-only and not substantive. The squash `5f8094c`
+  adds regression tests and updates the record and changes no production code. Both were verified
+  against Git.
+- **Production code on `5f8094c`.** No path was found where a replaced owner session's continuation
+  can expire or authorize the replacement session, write shared state or storage, change the hash,
+  send a request, call a parent callback, or leave a shared busy or loading flag stuck.
+- **Proof levels.** The proof levels in `FRONTEND_PHASE_1_ACCEPTANCE.md` match the tests; no
+  over-claim was found. The reviewer read the tests and did not execute them.
+- **Non-blocking:** several guards are not individually guard-proven (already documented); and the
+  `finally` blocks in `agents/AgentProfileEditor.tsx` and `agents/AgentIdentityEditor.tsx` clear a
+  component-local `busy` flag without a session check. That flag is local, and the owner subtree is
+  torn down and recreated on sign-out, so it cannot release a replacement session's shared state.
+- **Verdict:** NON-BLOCKING FINDINGS ONLY. The reviewer ran no tests, CI, backend or Docker; the
+  validation figures quoted elsewhere are the author's.
