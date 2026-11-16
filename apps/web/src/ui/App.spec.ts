@@ -9,10 +9,14 @@ import {
   AgentDirectoryResponseSchema,
   CreateAuthorizationSchema,
   CreateRunSchema,
+  CreateAgentInputSchema,
+  CreateProjectSchema,
   CreateTaskSchema,
+  DepartmentListResponseSchema,
   RunEventSchema,
   ProjectSchema,
   RunSchema,
+  AgentMutationReceiptSchema,
   AgentProfileDraftResponseSchema,
   AgentProfileResponseSchema,
   AgentProfileVersionResponseSchema,
@@ -487,12 +491,19 @@ function createMockApi(page: Page) {
       });
     }
     if (path === '/api/v1/departments' && method === 'GET')
-      return route.fulfill({ json: { departments: [], total: 0 } });
+      return route.fulfill({
+        json: DepartmentListResponseSchema.parse({ departments: [], total: 0 }),
+      });
     if (path === '/api/v1/agents' && method === 'POST') {
-      const key = request.headers()['idempotency-key'] ?? '';
+      const key = request.headers()['idempotency-key'];
+      if (!key || !request.headers()['x-omnis-csrf'])
+        return fulfillError(route, 403, 'invalid_csrf', 'Mutation protection failed.');
+      const input = CreateAgentInputSchema.safeParse(request.postDataJSON());
+      if (!input.success)
+        return fulfillError(route, 400, 'invalid_input', 'Agent payload is invalid.');
       return route.fulfill({
         status: 201,
-        json: {
+        json: AgentMutationReceiptSchema.parse({
           requestId: key,
           operation: 'agent.created',
           agentId: 'agent-created',
@@ -501,7 +512,7 @@ function createMockApi(page: Page) {
           versionNo: null,
           draftRevision: 0,
           occurredAt: new Date().toISOString(),
-        },
+        }),
       });
     }
     if (path === '/api/v1/runtime-capabilities' && method === 'GET') {
@@ -613,9 +624,12 @@ function createMockApi(page: Page) {
       });
     }
     if (method === 'POST' && path === '/api/v1/agents/agent-analyst/archive') {
+      const key = request.headers()['idempotency-key'];
+      if (!key || !request.headers()['x-omnis-csrf'])
+        return fulfillError(route, 403, 'invalid_csrf', 'Mutation protection failed.');
       return route.fulfill({
-        json: {
-          requestId: request.headers()['idempotency-key'] ?? '',
+        json: AgentMutationReceiptSchema.parse({
+          requestId: key,
           operation: 'agent.archived',
           agentId: 'agent-analyst',
           lifecycle: 'archived',
@@ -623,7 +637,7 @@ function createMockApi(page: Page) {
           versionNo: null,
           draftRevision: 0,
           occurredAt: now,
-        },
+        }),
       });
     }
     const profileMatch = path.match(/^\/api\/v1\/agents\/([^/]+)\/versions\/(\d+)$/);
@@ -658,18 +672,17 @@ function createMockApi(page: Page) {
       return route.fulfill({ status: 204, body: '' });
     }
     if (path === '/api/v1/projects' && method === 'POST') {
-      const body = request.postDataJSON() as {
-        key: string;
-        name: string;
-        objective: string;
-        priority: ProjectSummary['priority'];
-      };
+      if (!request.headers()['idempotency-key'] || !request.headers()['x-omnis-csrf'])
+        return fulfillError(route, 403, 'invalid_csrf', 'Mutation protection failed.');
+      const input = CreateProjectSchema.safeParse(request.postDataJSON());
+      if (!input.success)
+        return fulfillError(route, 400, 'invalid_input', 'Project payload is invalid.');
       return route.fulfill({
         status: 201,
         json: ProjectSchema.parse({
-          ...makeProject(`prj_${'c'.repeat(32)}`, body.key, body.name),
-          objective: body.objective,
-          priority: body.priority,
+          ...makeProject(`prj_${'c'.repeat(32)}`, input.data.key, input.data.name),
+          objective: input.data.objective,
+          priority: input.data.priority,
         }),
       });
     }
@@ -5020,6 +5033,8 @@ test.describe('capability refresh ordering', () => {
       await stillSignedIn(page);
     });
 
+    // Proves the mounted-in-session gate as a whole (removing it fails this test). It does NOT isolate
+    // the session-generation half: by the time the response lands the old form is already unmounted.
     test('a late project create from a replaced session cannot navigate the replacement session', async ({
       page,
       api,
