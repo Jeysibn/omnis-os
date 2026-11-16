@@ -381,7 +381,7 @@ export function AcceptResultAction({
               : problem.kind === 'uncertain'
                 ? `${problem.message} The result may or may not have been accepted. Retrying uses the same request and cannot accept it twice.`
                 : problem.kind === 'unavailable'
-                  ? `${problem.message} The approval service is unavailable, so this acceptance could not be requested and the result is not shown as accepted. Reload to check the task before trying again.`
+                  ? `${problem.message} The approval service is unavailable, so this request could not be made and the result is not shown as accepted. Omnis OS is re-reading the task; try again when the service is available.`
                   : problem.message}
           </p>
         </div>
