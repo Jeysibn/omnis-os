@@ -50,6 +50,20 @@ export async function requireMutationProtection(
   }
 }
 
+export async function requireAuthorizerFeature(
+  _request: FastifyRequest,
+  reply: FastifyReply,
+): Promise<void> {
+  if (!env.restrictedDevelopment) return;
+  await reply.code(503).send({
+    error: {
+      code: 'authorizer_unavailable',
+      message:
+        'This Authorizer-backed feature is unavailable in the restricted development profile.',
+    },
+  });
+}
+
 declare module 'fastify' {
   interface FastifyRequest {
     omnisSession?: LocalSession;

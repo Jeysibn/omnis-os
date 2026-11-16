@@ -287,6 +287,31 @@ describe('durable mock run coordinator', () => {
     assert.equal(authorizationReads, 0);
   });
 
+  it('rejects Run stop while disabled without mutating persisted state', async () => {
+    let stopRequests = 0;
+    const coordinator = testCoordinator(
+      {
+        requestStop: async () => {
+          stopRequests += 1;
+          throw new Error('Disabled stop must not reach persistence.');
+        },
+      } as unknown as PostgresRunStore,
+      { send: async () => null, findJobs: async () => [] },
+      undefined as never,
+      undefined,
+      emptyAuthorizationStore,
+      { executionEnabled: false },
+    );
+    await assert.rejects(
+      coordinator.stopRun('run-0001'),
+      (error: unknown) =>
+        error instanceof CoordinatorError &&
+        error.code === 'execution_disabled' &&
+        error.statusCode === 503,
+    );
+    assert.equal(stopRequests, 0);
+  });
+
   it('does not replay a durable job from a previous worker session', async () => {
     let interrupted = '';
     let runReads = 0;

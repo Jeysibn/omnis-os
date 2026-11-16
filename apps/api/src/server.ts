@@ -6,10 +6,10 @@ import {
   CreateAuthorizationSchema,
 } from '@omnis/contracts';
 import { syntheticTaskRunTestMode } from '@omnis/contracts/synthetic-task-run';
-import { executionModeFromEnvironment } from '@omnis/contracts/execution-mode';
 import {
   isOwnerPasswordValid,
   requireMutationProtection,
+  requireAuthorizerFeature,
   requireOwner,
   verifyOrigin,
   verifyCsrf,
@@ -47,7 +47,7 @@ const app = Fastify({
   trustProxy: false,
   logger: { redact: ['req.headers.cookie', 'res.headers.set-cookie', 'req.headers.x-omnis-csrf'] },
 });
-const apiExecutionMode = executionModeFromEnvironment(process.env.OMNIS_EXECUTION_MODE);
+const apiExecutionMode = env.executionMode;
 const syntheticBrokerTestMode =
   apiExecutionMode === 'mock' && syntheticTaskRunTestMode(process.env);
 const AuthorizerHealthSchema = z
@@ -59,6 +59,7 @@ const AuthorizerHealthSchema = z
   .strict();
 
 async function checkAuthorizerAvailability(): Promise<boolean> {
+  if (env.restrictedDevelopment) return false;
   try {
     await authorizerRequest('/internal/v1/health', {}, (value) =>
       AuthorizerHealthSchema.parse(value),
@@ -151,7 +152,7 @@ app.post(
 );
 app.get<{ Params: { authorizationId: string } }>(
   '/api/v1/authorizations/:authorizationId',
-  { preHandler: requireOwner },
+  { preHandler: [requireOwner, requireAuthorizerFeature] },
   async (request, reply) => {
     if (!/^[0-9a-f-]{36}$/i.test(request.params.authorizationId)) {
       return reply
@@ -167,7 +168,7 @@ app.get<{ Params: { authorizationId: string } }>(
 );
 app.post(
   '/api/v1/authorizations',
-  { preHandler: [requireOwner, requireMutationProtection] },
+  { preHandler: [requireOwner, requireMutationProtection, requireAuthorizerFeature] },
   async (request, reply) => {
     const parsed = CreateAuthorizationSchema.safeParse(request.body);
     const idempotencyKey = request.headers['idempotency-key'];
@@ -196,7 +197,7 @@ app.post(
 );
 app.post<{ Params: { authorizationId: string } }>(
   '/api/v1/authorizations/:authorizationId/decision',
-  { preHandler: [requireOwner, requireMutationProtection] },
+  { preHandler: [requireOwner, requireMutationProtection, requireAuthorizerFeature] },
   async (request, reply) => {
     const parsed = AuthorizationDecisionSchema.safeParse(request.body);
     if (!parsed.success || !/^[0-9a-f-]{36}$/i.test(request.params.authorizationId))
@@ -216,7 +217,7 @@ app.post<{ Params: { authorizationId: string } }>(
 );
 app.post<{ Params: { authorizationId: string } }>(
   '/api/v1/authorizations/:authorizationId/revoke',
-  { preHandler: [requireOwner, requireMutationProtection] },
+  { preHandler: [requireOwner, requireMutationProtection, requireAuthorizerFeature] },
   async (request, reply) => {
     if (!/^[0-9a-f-]{36}$/i.test(request.params.authorizationId))
       return reply
@@ -281,6 +282,7 @@ registerRunStopRoute(app, {
   requireOwner,
   requireMutationProtection,
   syntheticBrokerEnabled: syntheticBrokerTestMode,
+  executionMode: apiExecutionMode,
 });
 registerRunEventsRoute(app, {
   sessions,

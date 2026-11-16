@@ -271,6 +271,13 @@ export class RunCoordinator {
   }
 
   async stopRun(runId: string): Promise<Run> {
+    if (!this.executionEnabled || !this.runtime) {
+      throw new CoordinatorError(
+        'execution_disabled',
+        'Run stop is unavailable while execution is disabled.',
+        503,
+      );
+    }
     const result = await translateStoreError(() => this.store.requestStop(runId));
     this.publish(result.events);
     const active = this.active.get(runId);

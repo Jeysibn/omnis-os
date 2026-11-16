@@ -12,3 +12,25 @@ export function validateApiNetwork(
     throw new Error('The worker target must use loopback or private Compose networking.');
   }
 }
+
+export function validateApiAuthorizerConfiguration(input: {
+  restrictedDevelopment: boolean;
+  token: string | undefined;
+  internalToken?: string | undefined;
+  socket: string | undefined;
+}): void {
+  if (input.restrictedDevelopment) {
+    if (input.token || input.socket) {
+      throw new Error(
+        'Authorizer token and socket must be omitted in the restricted development profile.',
+      );
+    }
+    return;
+  }
+  if (!input.token || input.token.length < 64 || input.token === input.internalToken) {
+    throw new Error('A separate OMNIS_API_AUTHORIZER_TOKEN must be configured.');
+  }
+  if (!input.socket) {
+    throw new Error('OMNIS_AUTHORIZER_SOCKET must be configured for Authorizer-backed operation.');
+  }
+}

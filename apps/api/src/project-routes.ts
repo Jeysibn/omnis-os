@@ -7,7 +7,7 @@ import {
   ProjectSchema,
   UpdateProjectSchema,
 } from '@omnis/contracts';
-import { requireMutationProtection, requireOwner } from './auth.ts';
+import { requireAuthorizerFeature, requireMutationProtection, requireOwner } from './auth.ts';
 import { authorizerRequest, AuthorizerRequestError } from './authorizer-client.ts';
 
 type AuthorizerRequest = typeof authorizerRequest;
@@ -47,14 +47,14 @@ export function registerProjectRoutes(
     });
   };
 
-  app.get('/api/v1/projects', { preHandler: requireOwner }, async () =>
+  app.get('/api/v1/projects', { preHandler: [requireOwner, requireAuthorizerFeature] }, async () =>
     request('/internal/v1/projects', {}, (value) => ProjectListResponseSchema.parse(value)),
   );
 
   app.post(
     '/api/v1/projects',
     {
-      preHandler: [requireOwner, requireMutationProtection],
+      preHandler: [requireOwner, requireMutationProtection, requireAuthorizerFeature],
       bodyLimit: 32 * 1024,
       errorHandler: mutationErrorHandler,
     },
@@ -85,7 +85,7 @@ export function registerProjectRoutes(
   app.patch<{ Params: { projectId: string } }>(
     '/api/v1/projects/:projectId',
     {
-      preHandler: [requireOwner, requireMutationProtection],
+      preHandler: [requireOwner, requireMutationProtection, requireAuthorizerFeature],
       bodyLimit: 32 * 1024,
       errorHandler: mutationErrorHandler,
     },
@@ -116,7 +116,7 @@ export function registerProjectRoutes(
   app.post<{ Params: { projectId: string } }>(
     '/api/v1/projects/:projectId/archive',
     {
-      preHandler: [requireOwner, requireMutationProtection],
+      preHandler: [requireOwner, requireMutationProtection, requireAuthorizerFeature],
       bodyLimit: 32 * 1024,
       errorHandler: mutationErrorHandler,
     },
@@ -146,7 +146,7 @@ export function registerProjectRoutes(
 
   app.get<{ Params: { projectId: string } }>(
     '/api/v1/projects/:projectId',
-    { preHandler: requireOwner },
+    { preHandler: [requireOwner, requireAuthorizerFeature] },
     async (httpRequest, reply) => {
       const id = ProjectIdSchema.safeParse(httpRequest.params.projectId);
       if (!id.success)

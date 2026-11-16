@@ -10,7 +10,7 @@ import {
   SaveAgentProfileDraftInputSchema,
   UpdateAgentIdentityInputSchema,
 } from '@omnis/contracts';
-import { requireMutationProtection, requireOwner } from './auth.ts';
+import { requireAuthorizerFeature, requireMutationProtection, requireOwner } from './auth.ts';
 import { authorizerRequest } from './authorizer-client.ts';
 
 type AuthorizerRequest = typeof authorizerRequest;
@@ -20,7 +20,7 @@ export function registerAgentManagementRoutes(
   app: FastifyInstance,
   request: AuthorizerRequest = authorizerRequest,
 ) {
-  const mutationPreHandler = [requireOwner, requireMutationProtection];
+  const mutationPreHandler = [requireOwner, requireMutationProtection, requireAuthorizerFeature];
   function idempotencyKey(value: unknown): string | undefined {
     const parsed = AgentIdempotencyKeySchema.safeParse(value);
     return parsed.success ? parsed.data : undefined;
@@ -28,7 +28,7 @@ export function registerAgentManagementRoutes(
 
   app.get<{ Params: { agentId: string } }>(
     '/api/v1/agents/:agentId/draft-profile',
-    { preHandler: requireOwner },
+    { preHandler: [requireOwner, requireAuthorizerFeature] },
     async (httpRequest, reply) => {
       const agentId = AgentIdSchema.safeParse(httpRequest.params.agentId);
       if (!agentId.success) return reply.code(422).send(invalid);

@@ -8,6 +8,7 @@ import {
 } from '@omnis/contracts/connector-authorization';
 import { AgentProfileVersionSchema, ProjectSchema, TaskSchema } from '@omnis/contracts';
 import { renderSyntheticConnectorRequest } from '@omnis/contracts/synthetic-connector-prompt';
+import { requireAuthorizerFeature } from './auth.ts';
 
 type AuthorizerForwarder = <T>(
   path: string,
@@ -64,7 +65,7 @@ export function registerConnectorAuthorizationRoutes(
     });
   app.get<{ Params: { authorizationId: string } }>(
     '/api/v1/connector-authorizations/:authorizationId',
-    { preHandler: guards.requireOwner },
+    { preHandler: [guards.requireOwner, requireAuthorizerFeature] },
     async (request, reply) => {
       if (!isUuid(request.params.authorizationId)) {
         return reply.code(400).send({
@@ -81,7 +82,9 @@ export function registerConnectorAuthorizationRoutes(
 
   app.post(
     '/api/v1/connector-authorizations',
-    { preHandler: [guards.requireOwner, guards.requireMutationProtection] },
+    {
+      preHandler: [guards.requireOwner, guards.requireMutationProtection, requireAuthorizerFeature],
+    },
     async (request, reply) => {
       const parsed = CreateConnectorAuthorizationSchema.safeParse(request.body);
       const idempotencyKey = request.headers['idempotency-key'];
@@ -157,7 +160,9 @@ export function registerConnectorAuthorizationRoutes(
 
   app.post<{ Params: { authorizationId: string } }>(
     '/api/v1/connector-authorizations/:authorizationId/decision',
-    { preHandler: [guards.requireOwner, guards.requireMutationProtection] },
+    {
+      preHandler: [guards.requireOwner, guards.requireMutationProtection, requireAuthorizerFeature],
+    },
     async (request, reply) => {
       const parsed = ConnectorAuthorizationDecisionSchema.safeParse(request.body);
       if (!parsed.success || !isUuid(request.params.authorizationId)) {
@@ -176,7 +181,9 @@ export function registerConnectorAuthorizationRoutes(
 
   app.post<{ Params: { authorizationId: string } }>(
     '/api/v1/connector-authorizations/:authorizationId/revoke',
-    { preHandler: [guards.requireOwner, guards.requireMutationProtection] },
+    {
+      preHandler: [guards.requireOwner, guards.requireMutationProtection, requireAuthorizerFeature],
+    },
     async (request, reply) => {
       if (!isUuid(request.params.authorizationId)) {
         return reply.code(400).send({

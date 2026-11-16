@@ -1,5 +1,6 @@
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { ApiErrorSchema, RunSchema } from '@omnis/contracts';
+import type { ExecutionMode } from '@omnis/contracts/execution-mode';
 import { stopSyntheticRunBeforeStandardStop } from './synthetic-run-stop.ts';
 
 type Forwarder = <TResult>(
@@ -13,6 +14,7 @@ export function registerRunStopRoute(
   input: {
     requireOwner: preHandlerHookHandler;
     requireMutationProtection: preHandlerHookHandler;
+    executionMode: ExecutionMode;
     syntheticBrokerEnabled: boolean;
     forwardWorker?: Forwarder;
     forwardAuthorizer?: Forwarder;
@@ -33,6 +35,14 @@ export function registerRunStopRoute(
     '/api/v1/runs/:runId/stop',
     { preHandler: [input.requireOwner, input.requireMutationProtection] },
     async (request, reply) => {
+      if (input.executionMode === 'disabled') {
+        return reply.code(503).send({
+          error: {
+            code: 'execution_disabled',
+            message: 'Run stop requests are unavailable while execution is disabled.',
+          },
+        });
+      }
       if (input.syntheticBrokerEnabled) {
         try {
           const syntheticRun = await stopSyntheticRunBeforeStandardStop(request.params.runId, {

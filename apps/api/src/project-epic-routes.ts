@@ -11,7 +11,7 @@ import {
   ProjectWorkspaceTaskPageSchema,
   UpdateEpicSchema,
 } from '@omnis/contracts';
-import { requireMutationProtection, requireOwner } from './auth.ts';
+import { requireAuthorizerFeature, requireMutationProtection, requireOwner } from './auth.ts';
 import { authorizerRequest, AuthorizerRequestError } from './authorizer-client.ts';
 
 type AuthorizerRequest = typeof authorizerRequest;
@@ -54,7 +54,7 @@ export function registerProjectEpicRoutes(
     Querystring: { cursor?: string; limit?: string };
   }>(
     '/api/v1/projects/:projectId/epics',
-    { preHandler: requireOwner },
+    { preHandler: [requireOwner, requireAuthorizerFeature] },
     async (httpRequest, reply) => {
       const projectId = ProjectIdSchema.safeParse(httpRequest.params.projectId);
       const query = EpicListQuerySchema.safeParse(httpRequest.query);
@@ -77,7 +77,7 @@ export function registerProjectEpicRoutes(
   app.post<{ Params: { projectId: string } }>(
     '/api/v1/projects/:projectId/epics',
     {
-      preHandler: [requireOwner, requireMutationProtection],
+      preHandler: [requireOwner, requireMutationProtection, requireAuthorizerFeature],
       bodyLimit: 16 * 1024,
       errorHandler: epicErrorHandler,
     },
@@ -112,7 +112,7 @@ export function registerProjectEpicRoutes(
 
   app.get<{ Params: { projectId: string; epicId: string } }>(
     '/api/v1/projects/:projectId/epics/:epicId',
-    { preHandler: requireOwner },
+    { preHandler: [requireOwner, requireAuthorizerFeature] },
     async (httpRequest, reply) => {
       const projectId = ProjectIdSchema.safeParse(httpRequest.params.projectId);
       const epicId = EpicIdSchema.safeParse(httpRequest.params.epicId);
@@ -133,7 +133,7 @@ export function registerProjectEpicRoutes(
     Querystring: { cursor?: string; limit?: string };
   }>(
     '/api/v1/projects/:projectId/epics/:epicId/tasks',
-    { preHandler: requireOwner, errorHandler: epicErrorHandler },
+    { preHandler: [requireOwner, requireAuthorizerFeature], errorHandler: epicErrorHandler },
     async (httpRequest, reply) => {
       const projectId = ProjectIdSchema.safeParse(httpRequest.params.projectId);
       const epicId = EpicIdSchema.safeParse(httpRequest.params.epicId);
@@ -157,7 +157,7 @@ export function registerProjectEpicRoutes(
   app.patch<{ Params: { projectId: string; epicId: string } }>(
     '/api/v1/projects/:projectId/epics/:epicId',
     {
-      preHandler: [requireOwner, requireMutationProtection],
+      preHandler: [requireOwner, requireMutationProtection, requireAuthorizerFeature],
       bodyLimit: 16 * 1024,
       errorHandler: epicErrorHandler,
     },
@@ -194,7 +194,7 @@ export function registerProjectEpicRoutes(
   app.post<{ Params: { projectId: string; epicId: string } }>(
     '/api/v1/projects/:projectId/epics/:epicId/archive',
     {
-      preHandler: [requireOwner, requireMutationProtection],
+      preHandler: [requireOwner, requireMutationProtection, requireAuthorizerFeature],
       bodyLimit: 16 * 1024,
       errorHandler: epicErrorHandler,
     },

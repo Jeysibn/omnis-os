@@ -14,7 +14,9 @@ import {
 import { syntheticTaskRunTestMode } from '@omnis/contracts/synthetic-task-run';
 import {
   executionModeFromEnvironment,
+  restrictedDevelopmentFromEnvironment,
   validateExecutionConfiguration,
+  validateRestrictedDevelopmentConfiguration,
 } from '@omnis/contracts/execution-mode';
 import { WorkerExecutionStatusSchema } from '@omnis/contracts/runtime-capabilities';
 import { PgBoss } from 'pg-boss';
@@ -50,7 +52,25 @@ if (!internalToken || internalToken.length < 64) {
   throw new Error('OMNIS_INTERNAL_TOKEN must be generated with `pnpm configure:owner`.');
 }
 const executionMode = executionModeFromEnvironment(process.env.OMNIS_EXECUTION_MODE);
+const restrictedDevelopment = restrictedDevelopmentFromEnvironment(
+  process.env.OMNIS_RESTRICTED_DEVELOPMENT,
+);
 const launcherSocket = process.env.OMNIS_SANDBOX_LAUNCHER_SOCKET;
+validateRestrictedDevelopmentConfiguration({
+  restrictedDevelopment,
+  configuredMode: executionMode,
+  rawMode: process.env.OMNIS_EXECUTION_MODE,
+  launcherSocket,
+  authorizerToken: process.env.OMNIS_API_AUTHORIZER_TOKEN,
+  authorizerSocket: process.env.OMNIS_AUTHORIZER_SOCKET,
+  authorizerSecrets: [
+    process.env.OMNIS_AUTHORIZER_DB_PASSWORD,
+    process.env.OMNIS_AUTHORIZER_DATABASE_URL,
+    process.env.OMNIS_AGENT_IDEMPOTENCY_KEY,
+    process.env.OMNIS_CONNECTOR_DECISION_KEY_FILE,
+    process.env.OMNIS_BROKER_AUTHORIZER_TOKEN,
+  ],
+});
 validateExecutionConfiguration(executionMode, launcherSocket);
 for (const forbiddenSecret of [
   'OMNIS_AUTHORIZER_DB_PASSWORD',
