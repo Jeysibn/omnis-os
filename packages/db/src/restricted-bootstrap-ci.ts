@@ -8,6 +8,7 @@ const PROJECT = 'omnis-os-restricted-dev';
 const POSTGRES_IMAGE =
   'postgres:17.6-alpine@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94';
 const APP_ROLES = ['omnis_migrator', 'omnis_runtime', 'omnis_authorizer', 'omnis_launcher'];
+let failureStage = 'runner identity and credential validation';
 
 async function main(): Promise<void> {
   const runId = process.env.GITHUB_RUN_ID ?? '';
@@ -36,6 +37,7 @@ async function main(): Promise<void> {
     }
   }
 
+  failureStage = 'disposable PostgreSQL fixture inspection';
   const systemIdentifier = inspectFixture(containerName, runId, job);
   const rootAdminUrl = databaseUrl('omnis', adminPassword, 'omnis_test');
   const rootAdmin = createPool({ connectionString: rootAdminUrl, max: 1 });
@@ -44,6 +46,7 @@ async function main(): Promise<void> {
   let migrationPath: string | undefined;
   const createdCredentialFiles: string[] = [];
   try {
+    failureStage = 'PostgreSQL identity and freshness verification';
     const identity = await rootAdmin.query<{
       current_user: string;
       current_database: string;
@@ -78,6 +81,7 @@ async function main(): Promise<void> {
     }
 
     // This mutation is limited to the run-scoped CI container validated above.
+    failureStage = 'restricted database and credential-file preparation';
     await rootAdmin.query(`CREATE DATABASE ${DATABASE_NAME}`);
     const runnerTemp = required('RUNNER_TEMP');
     const suffix = `-${runId}-${runAttempt}-database-integration`;
@@ -117,14 +121,18 @@ async function main(): Promise<void> {
       createdCredentialFiles,
     );
 
+    failureStage = 'restricted bootstrap preflight';
     runRestrictedCli(
       'packages/db/src/provision-restricted.ts',
       'preflight',
       bootstrapPath,
       workerPath,
     );
+    failureStage = 'restricted role provisioning';
     runRestrictedCli('packages/db/src/provision-restricted.ts', 'roles', bootstrapPath, workerPath);
+    failureStage = 'restricted migrations';
     runRestrictedMigration(migrationPath);
+    failureStage = 'post-migration privilege and identity verification';
     await verifyRestrictedDatabase(
       databaseUrl('omnis', adminPassword, DATABASE_NAME),
       databaseUrl('omnis_runtime', runtimePassword, DATABASE_NAME),
@@ -404,7 +412,7 @@ function required(name: string): string {
 
 void main().catch(() => {
   process.stderr.write(
-    'Restricted database CI verification failed; credentials and driver details withheld.\n',
+    `Restricted database CI verification failed during ${failureStage}; credentials and driver details withheld.\n`,
   );
   process.exitCode = 1;
 });
