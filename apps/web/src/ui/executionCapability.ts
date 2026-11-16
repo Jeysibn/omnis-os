@@ -109,7 +109,36 @@ export function syntheticFixtureOffered(load: CapabilityLoad): boolean {
   );
 }
 
-/** Fixture gate for a freshly fetched result, so handlers never read stale React state. */
-export function fixtureAllowed(capabilities: RuntimeCapabilities | null): boolean {
-  return capabilities !== null && syntheticFixtureOffered({ status: 'ready', capabilities });
+/**
+ * Outcome of one capability refresh. Only 'current' (this request was still the newest when it
+ * settled) can ever authorize a UI action; 'superseded' and 'failed' always fail closed.
+ */
+export type CapabilityCheck =
+  | { status: 'current'; capabilities: RuntimeCapabilities }
+  | { status: 'superseded' }
+  | { status: 'expired' } // 401: the session handler owns the message
+  | { status: 'failed' };
+
+export function runAllowed(check: CapabilityCheck): boolean {
+  return (
+    check.status === 'current' &&
+    describeExecution({ status: 'ready', capabilities: check.capabilities }).canStartRun
+  );
+}
+
+/** Fixture gate for a freshly settled check, so handlers never read stale React state. */
+export function fixtureAllowed(check: CapabilityCheck): boolean {
+  return (
+    check.status === 'current' &&
+    syntheticFixtureOffered({ status: 'ready', capabilities: check.capabilities })
+  );
+}
+
+/** Truthful reason a check did not allow execution; never implies availability. */
+export function checkRefusal(check: CapabilityCheck): string {
+  if (check.status === 'superseded')
+    return 'Execution availability was re-checked while this action was starting';
+  if (check.status === 'failed' || check.status === 'expired')
+    return 'Execution availability could not be confirmed';
+  return describeExecution({ status: 'ready', capabilities: check.capabilities }).title;
 }

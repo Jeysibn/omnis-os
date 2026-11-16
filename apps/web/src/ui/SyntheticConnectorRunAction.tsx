@@ -22,8 +22,12 @@ import {
 import { SyntheticOperationDialog } from './SyntheticOperationDialog.js';
 import { useConnectorAuthorizationRevoke } from './useConnectorAuthorizationRevoke.js';
 import { renderSyntheticConnectorRequest } from '@omnis/contracts/synthetic-connector-prompt';
-import type { RuntimeCapabilities } from '@omnis/contracts/runtime-capabilities';
-import { describeExecution, fixtureAllowed, type ExecutionGate } from './executionCapability.js';
+import {
+  checkRefusal,
+  fixtureAllowed,
+  type CapabilityCheck,
+  type ExecutionGate,
+} from './executionCapability.js';
 import { ApiRequestError, request } from './api.js';
 
 const limits = {
@@ -46,7 +50,7 @@ export function SyntheticConnectorRunAction({
   fixtureEnabled,
   refreshCapabilities,
 }: {
-  refreshCapabilities: () => Promise<RuntimeCapabilities | null>;
+  refreshCapabilities: () => Promise<CapabilityCheck>;
   gate: ExecutionGate;
   fixtureEnabled: boolean;
   ownerId: string;
@@ -223,8 +227,8 @@ export function SyntheticConnectorRunAction({
     ) {
       setPendingOperation(stored);
       void refreshCapabilities()
-        .then((fresh) => {
-          if (!fixtureAllowed(fresh)) return undefined;
+        .then((check) => {
+          if (!fixtureAllowed(check)) return undefined;
           return createOrReadAuthorization(stored);
         })
         .catch((cause: unknown) =>
@@ -247,12 +251,11 @@ export function SyntheticConnectorRunAction({
 
   /** Re-reads capabilities now; the returned value, not React state, decides. API stays the authority. */
   async function ensureAvailable(): Promise<boolean> {
-    const fresh = await refreshCapabilities();
-    if (fixtureAllowed(fresh)) return true;
+    const check = await refreshCapabilities();
+    if (fixtureAllowed(check)) return true;
+    if (check.status === 'expired') return false;
     setError(
-      fresh
-        ? `${describeExecution({ status: 'ready', capabilities: fresh }).title}. The synthetic connector fixture is not available, so no request was sent.`
-        : 'Execution availability could not be confirmed, so no request was sent.',
+      `${checkRefusal(check)}. The synthetic connector fixture is not available, so no request was sent.`,
     );
     return false;
   }

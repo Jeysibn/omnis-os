@@ -4,8 +4,10 @@ import {
   type WorkerExecutionStatus,
 } from '@omnis/contracts/runtime-capabilities';
 import {
+  checkRefusal,
   describeExecution,
   fixtureAllowed,
+  runAllowed,
   syntheticFixtureOffered,
 } from './executionCapability.js';
 
@@ -166,27 +168,31 @@ test('overlapping dependency failures are attributed in precedence order', () =>
   ).toBe('worker_unavailable');
 });
 
-test('fixtureAllowed requires fresh available capability and the fixture flag', () => {
+test('only a current, available check can authorize; superseded and failed fail closed', () => {
   const base = {
     apiExecutionMode: 'mock' as const,
     workerStatus: worker({}),
     authorizationAvailable: true,
   };
-  expect(fixtureAllowed(null)).toBe(false);
-  expect(fixtureAllowed(runtimeCapabilities({ ...base, syntheticConnectorEnabled: false }))).toBe(
-    false,
-  );
-  expect(fixtureAllowed(runtimeCapabilities({ ...base, syntheticConnectorEnabled: true }))).toBe(
-    true,
-  );
-  expect(
-    fixtureAllowed(
-      runtimeCapabilities({
-        apiExecutionMode: 'disabled',
-        workerStatus: disabledWorker,
-        authorizationAvailable: true,
-        syntheticConnectorEnabled: true,
-      }),
-    ),
-  ).toBe(false);
+  const current = (input: Parameters<typeof runtimeCapabilities>[0]) =>
+    ({ status: 'current', capabilities: runtimeCapabilities(input) }) as const;
+  const available = current({ ...base, syntheticConnectorEnabled: true });
+  expect(runAllowed(available)).toBe(true);
+  expect(fixtureAllowed(available)).toBe(true);
+  // An "available" payload that was superseded must never authorize anything.
+  for (const check of [{ status: 'superseded' }, { status: 'failed' }] as const) {
+    expect(runAllowed(check)).toBe(false);
+    expect(fixtureAllowed(check)).toBe(false);
+    expect(checkRefusal(check)).not.toMatch(/available$/);
+  }
+  expect(fixtureAllowed(current({ ...base, syntheticConnectorEnabled: false }))).toBe(false);
+  const disabled = current({
+    apiExecutionMode: 'disabled',
+    workerStatus: disabledWorker,
+    authorizationAvailable: true,
+    syntheticConnectorEnabled: true,
+  });
+  expect(runAllowed(disabled)).toBe(false);
+  expect(fixtureAllowed(disabled)).toBe(false);
+  expect(checkRefusal(disabled)).toBe('Execution is disabled');
 });

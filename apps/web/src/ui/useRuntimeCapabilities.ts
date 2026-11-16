@@ -1,10 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import {
-  RuntimeCapabilitiesSchema,
-  type RuntimeCapabilities,
-} from '@omnis/contracts/runtime-capabilities';
+import { RuntimeCapabilitiesSchema } from '@omnis/contracts/runtime-capabilities';
 import { request } from './api.js';
-import type { CapabilityLoad } from './executionCapability.js';
+import type { CapabilityCheck, CapabilityLoad } from './executionCapability.js';
 
 /**
  * Loads the authenticated runtime-capabilities contract. `refresh` returns the freshly validated
@@ -19,26 +16,31 @@ export function useRuntimeCapabilities(
   const expired = useRef(onSessionExpired);
   expired.current = onSessionExpired;
 
-  const refresh = useCallback(async (): Promise<RuntimeCapabilities | null> => {
+  const refresh = useCallback(async (): Promise<CapabilityCheck> => {
+    // One counter per App-owned hook instance; every consumer receives this same `refresh` by
+    // prop, so dashboard, banner and connector refreshes all order against each other here.
     const mine = ++generation.current;
     try {
       const value = await request('/api/v1/runtime-capabilities', {}, (raw) =>
         RuntimeCapabilitiesSchema.parse(raw),
       );
-      if (mine === generation.current) setLoad({ status: 'ready', capabilities: value });
-      return value;
+      // A newer request, session expiry or unmount invalidated this one: it neither updates state
+      // nor may authorize the caller, even if it says "available".
+      if (mine !== generation.current) return { status: 'superseded' };
+      setLoad({ status: 'ready', capabilities: value });
+      return { status: 'current', capabilities: value };
     } catch (cause) {
       if (expired.current(cause)) {
         generation.current++;
         setLoad({ status: 'loading' });
-        return null;
+        return { status: 'expired' };
       }
-      if (mine === generation.current)
-        setLoad({
-          status: 'error',
-          message: 'Execution capability could not be loaded from Omnis OS.',
-        });
-      return null;
+      if (mine !== generation.current) return { status: 'superseded' };
+      setLoad({
+        status: 'error',
+        message: 'Execution capability could not be loaded from Omnis OS.',
+      });
+      return { status: 'failed' };
     }
   }, []);
 
@@ -49,6 +51,10 @@ export function useRuntimeCapabilities(
       return;
     }
     void refresh();
+    return () => {
+      // Unmount, sign-out or leaving the Tasks page invalidates any in-flight check.
+      generation.current++;
+    };
   }, [enabled, refresh]);
 
   return { load, refresh };

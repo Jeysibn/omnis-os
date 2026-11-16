@@ -40,9 +40,14 @@ import {
   type Task,
 } from '@omnis/contracts';
 import { ApiRequestError, request } from './api.js';
-import { describeExecution, type ExecutionGate } from './executionCapability.js';
+import {
+  checkRefusal,
+  describeExecution,
+  runAllowed,
+  type CapabilityCheck,
+  type ExecutionGate,
+} from './executionCapability.js';
 import { ExecutionCapabilityBanner } from './ExecutionCapabilityBanner.js';
-import type { RuntimeCapabilities } from '@omnis/contracts/runtime-capabilities';
 import { useRuntimeCapabilities } from './useRuntimeCapabilities.js';
 import { formatDate } from './manilaTime.js';
 import { AcceptResultAction } from './AcceptResultAction.js';
@@ -930,9 +935,10 @@ function App() {
 
   async function openApproval(task: Task, trigger: HTMLButtonElement) {
     // UI convenience only; the API remains the authority and re-checks execution itself.
-    const fresh = await refreshCapabilities();
-    if (!fresh || !describeExecution({ status: 'ready', capabilities: fresh }).canStartRun) {
-      setError('Execution is not currently available, so no approval was opened.');
+    const check = await refreshCapabilities();
+    if (check.status === 'expired') return;
+    if (!runAllowed(check)) {
+      setError(`${checkRefusal(check)}, so no approval was opened.`);
       return;
     }
     approvalTrigger.current = trigger;
@@ -964,11 +970,12 @@ function App() {
   async function startRun(task: Task) {
     let operation = approvalOperation;
     setBusy(true);
-    const fresh = await refreshCapabilities();
+    const check = await refreshCapabilities();
     setBusy(false);
-    if (!fresh || !describeExecution({ status: 'ready', capabilities: fresh }).canStartRun) {
+    if (check.status === 'expired') return;
+    if (!runAllowed(check)) {
       setApprovalError(
-        'Execution is not currently available, so no approval or Run was requested. Close this dialog and check the execution status.',
+        `${checkRefusal(check)}, so no approval or Run was requested. Close this dialog and check the execution status.`,
       );
       return;
     }
@@ -1635,7 +1642,7 @@ function TasksWorkspace({
   onRetryCapabilities,
   refreshCapabilities,
 }: {
-  refreshCapabilities: () => Promise<RuntimeCapabilities | null>;
+  refreshCapabilities: () => Promise<CapabilityCheck>;
   executionGate: ExecutionGate;
   syntheticFixtureEnabled: boolean;
   onRetryCapabilities: () => void;

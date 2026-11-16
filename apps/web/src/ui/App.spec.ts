@@ -156,7 +156,7 @@ type FixtureOptions = {
   eventDuplicates?: boolean;
   syntheticEnabled?: boolean;
   /** Runtime capability scenario; default is available mock execution. */
-  capability?: 'disabled' | 'worker-down' | 'authorizer-down' | 'error' | 'unauthorized';
+  capability?: Exclude<CapabilityOutcome, 'available' | 'invalid'>;
   capabilityDelayMs?: number;
   /** Scripted native-EventSource scenario: deliver event 1, drop, then replay 1 and send 2. */
   eventReconnectScenario?: boolean;
@@ -229,6 +229,14 @@ async function startEventScenario(events: RunEvent[]): Promise<EventScenarioServ
 }
 
 type MockApi = ReturnType<typeof createMockApi>;
+type CapabilityOutcome =
+  | 'available'
+  | 'disabled'
+  | 'worker-down'
+  | 'authorizer-down'
+  | 'error'
+  | 'invalid'
+  | 'unauthorized';
 
 const test = base.extend<{ api: MockApi }>({
   api: async ({ page }, use) => {
@@ -241,6 +249,9 @@ const test = base.extend<{ api: MockApi }>({
 
 function createMockApi(page: Page) {
   let options: FixtureOptions = {};
+  let capabilityHold = false;
+  let capabilityRequests = 0;
+  const capabilityPending: Array<(outcome: CapabilityOutcome) => void> = [];
   let currentTasks = [...defaultTasks];
   let currentRuns = [...defaultRuns];
   let currentProjects = [...defaultProjects];
@@ -458,14 +469,21 @@ function createMockApi(page: Page) {
       });
     }
     if (path === '/api/v1/runtime-capabilities' && method === 'GET') {
+      capabilityRequests += 1;
+      // Deterministic ordering: a held request settles only when the test releases it.
+      const released: CapabilityOutcome | undefined = capabilityHold
+        ? await new Promise<CapabilityOutcome>((resolve) => capabilityPending.push(resolve))
+        : undefined;
+      const effective = released === 'available' ? undefined : (released ?? options.capability);
+      if (effective === 'invalid') return route.fulfill({ json: { version: 'nonsense' } });
       if (options.capabilityDelayMs)
         await new Promise((r) => setTimeout(r, options.capabilityDelayMs));
-      if (options.capability === 'error')
+      if (effective === 'error')
         return fulfillError(route, 503, 'unavailable', 'Capability service down.');
-      if (options.capability === 'unauthorized')
+      if (effective === 'unauthorized')
         return fulfillError(route, 401, 'unauthorized', 'Sign in to continue.');
-      if (options.capability) {
-        const scenario = options.capability;
+      if (effective) {
+        const scenario = effective;
         const worker = {
           version: 'omnis.worker-execution-status.v1' as const,
           serviceAvailability: 'healthy' as const,
@@ -1120,9 +1138,27 @@ function createMockApi(page: Page) {
       return scenario?.cursors ?? [];
     },
     releaseReconnect: () => scenario?.release(),
-    dispose: async () => scenario?.close(),
+    dispose: async () => {
+      capabilityHold = false;
+      for (const resolve of capabilityPending.splice(0)) resolve('error');
+      await scenario?.close();
+    },
     runDetailGets,
     assignmentWrites,
+    holdCapabilities: () => {
+      capabilityHold = true;
+    },
+    get pendingCapabilities() {
+      return capabilityPending.length;
+    },
+    get capabilityRequests() {
+      return capabilityRequests;
+    },
+    /** Settle the n-th still-held capability request with the given outcome. */
+    releaseCapability: (index: number, outcome: CapabilityOutcome) => {
+      const [resolve] = capabilityPending.splice(index, 1);
+      resolve?.(outcome);
+    },
     get tasks() {
       return currentTasks;
     },
@@ -3978,7 +4014,9 @@ test.describe('execution capability states', () => {
     await openApproval(page);
     api.configure({ capability: 'disabled' });
     await page.getByRole('dialog').getByRole('button', { name: 'Approve & run' }).click();
-    await expect(page.getByRole('dialog')).toContainText('Execution is not currently available');
+    await expect(page.getByRole('dialog')).toContainText(
+      'Execution is disabled, so no approval or Run was requested',
+    );
     expect(api.runPosts).toHaveLength(0);
     expect(api.requests.some((r) => r.path === '/api/v1/authorizations')).toBe(false);
   });
@@ -4071,5 +4109,208 @@ test.describe('synthetic connector capability refresh', () => {
     expect(api.requests.some((r) => r.path === `/api/v1/tasks/${task.id}/synthetic-runs`)).toBe(
       false,
     );
+  });
+});
+
+test.describe('capability refresh ordering', () => {
+  const dialogTitle = 'Approve one synthetic run?';
+  const freshTask = () => makeTask('task-fresh', 'Fresh task');
+  const rowButton = (page: Page) =>
+    page
+      .getByRole('listitem')
+      .filter({ hasText: 'Fresh task' })
+      .getByRole('button', { name: 'Approve & run' });
+  const executionPosts = (api: MockApi) =>
+    api.requests.filter(
+      (r) =>
+        r.method === 'POST' &&
+        (r.path === '/api/v1/authorizations' ||
+          r.path === '/api/v1/runs' ||
+          r.path.startsWith('/api/v1/connector-authorizations') ||
+          r.path.endsWith('/synthetic-runs')),
+    );
+  const ready = async (page: Page, api: MockApi, extra: Partial<FixtureOptions> = {}) => {
+    api.configure({ tasks: [freshTask()], runs: [], ...extra });
+    await openWorkspace(page, '#tasks');
+    await expect(rowButton(page)).toBeEnabled();
+    api.holdCapabilities();
+  };
+
+  test('A: an older "available" is superseded by a newer "disabled" and opens nothing', async ({
+    page,
+    api,
+  }) => {
+    await ready(page, api);
+    await rowButton(page).click(); // request A
+    await rowButton(page).click(); // request B, while A is still pending
+    await expect.poll(() => api.pendingCapabilities).toBe(2);
+    api.releaseCapability(1, 'disabled'); // B settles first
+    await expect(page.locator('.execution-banner')).toHaveAttribute(
+      'data-execution-state',
+      'disabled',
+    );
+    api.releaseCapability(0, 'available'); // A settles late; must not overwrite or authorize
+    await expect(page.getByText('re-checked while this action was starting')).toBeVisible();
+    await expect(page.getByRole('dialog', { name: dialogTitle })).toHaveCount(0);
+    await expect(page.locator('.execution-banner')).toHaveAttribute(
+      'data-execution-state',
+      'disabled',
+    );
+    expect(executionPosts(api)).toHaveLength(0);
+  });
+
+  test('A2: an older "available" that settles while a newer check is pending still fails closed', async ({
+    page,
+    api,
+  }) => {
+    await ready(page, api);
+    await rowButton(page).click(); // A
+    await rowButton(page).click(); // B
+    await expect.poll(() => api.pendingCapabilities).toBe(2);
+    api.releaseCapability(0, 'available'); // A settles while B is unresolved
+    await expect(page.getByText('re-checked while this action was starting')).toBeVisible();
+    await expect(page.getByRole('dialog', { name: dialogTitle })).toHaveCount(0);
+    api.releaseCapability(0, 'available'); // B is current and available: the click may proceed
+    await expect(page.getByRole('dialog', { name: dialogTitle })).toBeVisible();
+    expect(executionPosts(api)).toHaveLength(0);
+  });
+
+  test('B: available when the dialog opens, disabled before approval completes', async ({
+    page,
+    api,
+  }) => {
+    await ready(page, api);
+    await rowButton(page).click();
+    await expect.poll(() => api.pendingCapabilities).toBe(1);
+    api.releaseCapability(0, 'available');
+    const dialog = page.getByRole('dialog', { name: dialogTitle });
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole('button', { name: 'Approve & run' }).click();
+    await expect.poll(() => api.pendingCapabilities).toBe(1);
+    api.releaseCapability(0, 'disabled');
+    await expect(dialog).toContainText(
+      'Execution is disabled, so no approval or Run was requested',
+    );
+    expect(executionPosts(api)).toHaveLength(0);
+  });
+
+  test('B2: a stale "available" cannot start the Run once the dialog check is superseded', async ({
+    page,
+    api,
+  }) => {
+    await ready(page, api);
+    await rowButton(page).click();
+    await expect.poll(() => api.pendingCapabilities).toBe(1);
+    api.releaseCapability(0, 'available');
+    const dialog = page.getByRole('dialog', { name: dialogTitle });
+    await expect(dialog).toBeVisible();
+    // Two overlapping checks from the open dialog's primary button (idle between clicks).
+    await dialog.getByRole('button', { name: 'Approve & run' }).click(); // C
+    await expect.poll(() => api.pendingCapabilities).toBe(1);
+    api.releaseCapability(0, 'authorizer-down');
+    await expect(dialog).toContainText('Approval service unavailable');
+    expect(executionPosts(api)).toHaveLength(0);
+  });
+
+  test('C: overlapping connector and task-row checks cannot proceed on the older result', async ({
+    page,
+    api,
+  }) => {
+    const task = TaskSchema.parse({
+      ...makeTask('task-synthetic', 'Summarize policy changes'),
+      projectId: defaultProjects[0]!.id,
+      associationRevision: 1,
+      agentId: 'agent-analyst',
+      profileVersion: 3,
+      runtimeId: 'mock',
+    });
+    api.configure({ tasks: [task], runs: [], syntheticEnabled: true });
+    await openWorkspace(page, '#tasks');
+    await page.getByRole('button', { name: 'Load available projects' }).click();
+    await page.getByRole('button', { name: 'Summarize policy changes' }).click();
+    api.holdCapabilities();
+    await page.getByRole('button', { name: 'Review synthetic operation' }).click(); // A (connector)
+    await expect.poll(() => api.pendingCapabilities).toBe(1);
+    await page
+      .getByRole('listitem')
+      .filter({ hasText: 'Summarize policy changes' })
+      .getByRole('button', { name: 'Approve & run' })
+      .click(); // B (task row)
+    await expect.poll(() => api.pendingCapabilities).toBe(2);
+    api.releaseCapability(1, 'disabled');
+    api.releaseCapability(0, 'available'); // older connector result must not prepare anything
+    await expect(page.getByText(/re-checked while this action was starting/).first()).toBeVisible();
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    expect(executionPosts(api)).toHaveLength(0);
+  });
+
+  for (const [outcome, expected] of [
+    ['invalid', 'could not be confirmed'],
+    ['error', 'could not be confirmed'],
+    ['worker-down', 'Execution service unavailable'],
+  ] as const) {
+    test(`D: a ${outcome} capability response fails closed`, async ({ page, api }) => {
+      await ready(page, api);
+      await rowButton(page).click();
+      await expect.poll(() => api.pendingCapabilities).toBe(1);
+      api.releaseCapability(0, outcome);
+      await expect(page.getByText(expected).first()).toBeVisible();
+      await expect(page.getByRole('dialog', { name: dialogTitle })).toHaveCount(0);
+      expect(executionPosts(api)).toHaveLength(0);
+    });
+  }
+
+  test('D: session expiry during a capability check ends the session and opens nothing', async ({
+    page,
+    api,
+  }) => {
+    await ready(page, api);
+    await rowButton(page).click();
+    await expect.poll(() => api.pendingCapabilities).toBe(1);
+    api.releaseCapability(0, 'unauthorized');
+    await expect(
+      page.getByText('Your owner session expired. Sign in again to continue.'),
+    ).toBeVisible();
+    await expect(page.getByRole('dialog', { name: dialogTitle })).toHaveCount(0);
+    expect(executionPosts(api)).toHaveLength(0);
+  });
+
+  test('D: leaving the Tasks page invalidates an in-flight check', async ({ page, api }) => {
+    await ready(page, api);
+    await rowButton(page).click();
+    await expect.poll(() => api.pendingCapabilities).toBe(1);
+    await page.getByRole('link', { name: 'Runs' }).click();
+    await expect(page.getByRole('heading', { name: 'Runs' })).toBeVisible();
+    api.releaseCapability(0, 'available');
+    await expect(page.getByRole('dialog', { name: dialogTitle })).toHaveCount(0);
+    expect(executionPosts(api)).toHaveLength(0);
+  });
+
+  test('E: a current available check still opens approval and permits the Run', async ({
+    page,
+    api,
+  }) => {
+    await ready(page, api);
+    await rowButton(page).click();
+    await expect.poll(() => api.pendingCapabilities).toBe(1);
+    api.releaseCapability(0, 'available');
+    const dialog = page.getByRole('dialog', { name: dialogTitle });
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole('button', { name: 'Approve & run' }).click();
+    await expect.poll(() => api.pendingCapabilities).toBe(1);
+    api.releaseCapability(0, 'available');
+    await expect.poll(() => api.runPosts.length).toBe(1);
+  });
+
+  test('pages other than Tasks never request capabilities', async ({ page, api }) => {
+    api.configure();
+    await openWorkspace(page, '#command-center');
+    for (const name of ['Runs', 'Projects']) {
+      await page.getByRole('link', { name, exact: true }).first().click();
+      await expect(page.getByRole('heading', { name, exact: true }).first()).toBeVisible();
+    }
+    expect(api.capabilityRequests).toBe(0);
+    await page.getByRole('link', { name: 'Tasks', exact: true }).first().click();
+    await expect.poll(() => api.capabilityRequests).toBeGreaterThan(0);
   });
 });
