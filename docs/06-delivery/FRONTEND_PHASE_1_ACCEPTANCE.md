@@ -46,23 +46,18 @@ Rules applied everywhere:
 | Departments / Projects forms         | unmount + bound CSRF    | unmounted-only writes          | `sessionBoundExpire` inert | n/a             | guarded by unmount; see note C                        |
 | `AcceptResultAction` (accept result) | generation at submit    | not applied                    | cannot expire replacement  | yes             | accept-result stale-session tests                     |
 
-Note A — `/me` and CSRF staleness are guarded in code but **cannot be driven through the UI**:
-the sign-in control is disabled while CSRF loads and sign-out is unreachable while sign-in is in
-flight, so no second session can start while those requests are pending. They are therefore not
-covered by a UI regression test and should not be read as one.
+Note A — the in-code `/me` and CSRF staleness guards still **cannot be driven through the UI**: the
+sign-in control is disabled while CSRF loads and sign-out is unreachable while sign-in is in flight,
+so no second session can start while those requests are pending. What IS reachable is now tested
+(see "Guard evidence" below): a held boot `/me` ending in 401 or success with a single bootstrap
+(StrictMode), a stale 401 arriving while the replacement sign-in's `/me` is pending, and a stale 401
+arriving while the replacement CSRF refresh is pending.
 
-Note B — the SSE session guards (message, `onopen`, `onerror`, and the recovery `recreate` and
-`onExhausted` callbacks) have no dedicated test: a callback delivered in the instant between session
-rotation and the stream's teardown cannot be forced deterministically. The same applies to the
-connector authorization lookup that returns 404 for a replaced session (the follow-up create is
-guarded): session 2 legitimately re-recovers the same stored operation, so a stale POST cannot be
-told apart from it. Both were found by independent review of 0d8b81b and are guarded but untested.
-Independent review of cb12deb found two more: the stream recovery probe now carries the stream's own
-session scope (a retry timer firing after rotation no longer probes under the replacement; guarded,
-untested for the same timing reason), and the connector revoke hook is session-scoped (covered by
-`a late revoke success from a replaced session cannot clear the replacement operation`, verified to
-fail with the guard removed).
-The existing revocation and reconnect tests continue to pass.
+Note B — the SSE session guards (message, `onopen`, `onerror`, the recovery `recreate` and
+`onExhausted` callbacks, and the probe's stream scope) protect the instant between session rotation
+and the stream's teardown, which cannot be forced deterministically. Teardown also closes the old
+EventSource, so end-to-end tests pass with or without those individual checks. They are covered only
+by invariant tests (see below), not by tests proven to fail when the guard is removed.
 
 Note C — correction history. An earlier version of this record said the Agents, Departments and
 Projects pages needed no session guard because they unmount and abort. Independent review (five
@@ -100,13 +95,37 @@ after the session generation has rotated, and a continuation can run in between 
   the owner changes. The project form and project detail 403 paths re-check the session after the
   CSRF refresh before writing a notice.
 
-Regression tests exist for: late revoke success, late agent create (each verified to fail with its
-guard removed). Everything else in this note is guarded in code but NOT separately tested, because
-the needed flows (planning create, agent archive, project and department writes, profile editors)
-have no session-replacement mock and the timing windows cannot be forced deterministically.
+Regression tests whose guard was removed to confirm the test fails (**guard-proving**): stale Run,
+stale assignment, busy-flag release, late revoke success, late agent create, late agent archive,
+late project create (removes the `useMountedInSession` gate), a 404 authorization lookup for a
+replaced session (no follow-up create), and a stale Tasks 401 during the replacement sign-in.
+Everything else listed in this note is guarded in code but not separately tested, because the needed
+flows have no session-replacement mock (planning writers, department writes, profile and identity
+editors) and the timing windows cannot be forced deterministically.
 
 Backend dependency for Codex #1: none found. The frontend assumes only that a replaced session's
 cookie is rejected with 401 and that mutations remain idempotent under the documented keys.
+
+### Guard evidence added in the regression-hardening milestone
+
+| Test (App.spec.ts, `session guards: …`)         | What it pins                                                                             | Guard-proving?                                                                                           |
+| ----------------------------------------------- | ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| boot: held `/me` then 401                       | no sign-in/error while pending, clean sign-in after, one bootstrap read                  | invariant                                                                                                |
+| boot: held `/me` then success                   | owner restored once                                                                      | invariant                                                                                                |
+| stale 401 while replacement `/me` pending       | a stale Tasks 401 cannot derail the replacement sign-in                                  | **yes** (remove the Tasks-load session check)                                                            |
+| stale 401 while replacement CSRF pending        | CSRF and sign-in stay intact                                                             | invariant                                                                                                |
+| 404 authorization lookup for a replaced session | no follow-up create is sent (session 2 is a different owner, so a create is session 1's) | **yes** (remove the 404-branch check)                                                                    |
+| late agent archive                              | shared pending archive key is not cleared                                                | **yes**                                                                                                  |
+| late project create                             | the replacement session is not navigated                                                 | **yes** (remove the mounted-in-session gate)                                                             |
+| stale Agents / Departments read 401             | cannot expire the replacement session                                                    | invariant: the read is already aborted on unmount, so the session-bound expiry wrapper is redundant here |
+| SSE events held across replacement              | none enter the replacement session; its own stream still delivers                        | invariant                                                                                                |
+| recovery probe in flight across replacement     | cannot expire or change the replacement                                                  | invariant                                                                                                |
+
+Abort-only read effects (reviewed in this milestone): the agents and departments reads are aborted
+on unmount, so an aborted request never reaches the expiry handler; the projects read has an
+existing stale-401 test; the assignment editor's agent list checks an `active` flag. No path was
+found that expires a replacement session, changes shared busy or loading flags, or sends a
+follow-up request, so no production change was made.
 
 ## 3. Verified restricted-mode behaviour (local, mocked API)
 
