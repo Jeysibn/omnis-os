@@ -10,30 +10,47 @@ const safeSandboxErrorCodes = new Set([
 
 export function safeLauncherFailureSignals(logText) {
   const codes = new Set();
-  const requestIds = new Set();
   const responseStatusCodes = new Set();
+  const activeRequests = new Map();
+  const ambiguousRequestIds = new Set();
   for (const line of logText.split(/\r?\n/)) {
     try {
       const entry = JSON.parse(line);
-      if (
-        entry.req?.method === 'POST' &&
-        entry.req.url === '/internal/v1/mock-executions' &&
-        typeof entry.reqId === 'string'
-      ) {
-        requestIds.add(entry.reqId);
-      }
-      if (
-        typeof entry.reqId === 'string' &&
-        requestIds.has(entry.reqId) &&
-        [200, 409, 503].includes(entry.res?.statusCode)
-      ) {
-        responseStatusCodes.add(entry.res.statusCode);
+      const requestId = typeof entry.reqId === 'string' ? entry.reqId : undefined;
+      if (entry.msg === 'incoming request' && requestId) {
+        if (activeRequests.has(requestId) || ambiguousRequestIds.has(requestId)) {
+          activeRequests.delete(requestId);
+          ambiguousRequestIds.add(requestId);
+        } else if (
+          entry.req?.method === 'POST' &&
+          entry.req.url === '/internal/v1/mock-executions'
+        ) {
+          activeRequests.set(requestId, new Set());
+        }
       }
       if (
         entry.msg === 'Mock sandbox execution failed.' &&
+        requestId &&
+        activeRequests.has(requestId) &&
         safeSandboxErrorCodes.has(entry.sandboxErrorCode)
       ) {
-        codes.add(entry.sandboxErrorCode);
+        activeRequests.get(requestId).add(entry.sandboxErrorCode);
+      }
+      if (
+        entry.msg === 'request completed' &&
+        requestId &&
+        [200, 409, 503].includes(entry.res?.statusCode)
+      ) {
+        if (ambiguousRequestIds.has(requestId)) {
+          ambiguousRequestIds.delete(requestId);
+        } else {
+          const requestCodes = activeRequests.get(requestId);
+          if (requestCodes) {
+            responseStatusCodes.add(entry.res.statusCode);
+            for (const code of requestCodes) codes.add(code);
+            activeRequests.delete(requestId);
+          }
+        }
       }
     } catch {
       // Ignore non-JSON output and never copy it into diagnostics.

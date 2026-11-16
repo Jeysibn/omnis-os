@@ -374,6 +374,11 @@ try {
 
   const renderedConfig = JSON.parse(compose(['config', '--format', 'json']).stdout);
   assert.deepEqual(
+    renderedConfig.services.worker.group_add,
+    [gid],
+    'CI Worker must receive only the synthetic launcher fixture group',
+  );
+  assert.deepEqual(
     renderedConfig.services.postgres.ports ?? [],
     [],
     'disposable PostgreSQL must remain unpublished outside its internal data network',

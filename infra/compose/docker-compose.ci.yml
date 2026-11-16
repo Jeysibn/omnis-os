@@ -50,6 +50,8 @@ services:
     environment:
       OMNIS_EXECUTION_MODE: mock
       OMNIS_SANDBOX_LAUNCHER_SOCKET: /run/omnis-sandbox/launcher.sock
+    group_add:
+      - '${OMNIS_LAUNCHER_SOCKET_GID:?CI launcher socket group is required}'
     volumes:
       - type: bind
         source: ${OMNIS_CI_LAUNCHER_SOCKET_DIRECTORY:?CI launcher fixture directory is required}
