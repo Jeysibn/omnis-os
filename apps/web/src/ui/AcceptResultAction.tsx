@@ -8,6 +8,7 @@ import {
   classifyAcceptanceFailure,
 } from './acceptResult.js';
 import { formatManilaWithZone } from './manilaTime.js';
+import type { AcceptanceAvailability } from './useAcceptanceAvailability.js';
 
 type Problem = { kind: 'conflict' | 'uncertain' | 'unavailable' | 'rejected'; message: string };
 
@@ -28,6 +29,8 @@ export function AcceptResultAction({
   onConflict,
   onReload,
   getSessionGeneration,
+  availability,
+  onRecheckAvailability,
 }: {
   ownerId: string;
   task: Task | null | undefined;
@@ -48,8 +51,15 @@ export function AcceptResultAction({
   onReload: (runId: string) => void;
   /** Identifies the login session; differs between sessions even for the same owner. */
   getSessionGeneration: () => number;
+  /**
+   * What the backend reports about the Authorizer that acceptance needs. Only `unavailable` changes
+   * the control; `available` and `unknown` leave it alone because the accept route is the authority.
+   */
+  availability: AcceptanceAvailability;
+  onRecheckAvailability: () => void;
 }) {
   const headingId = useId();
+  const unavailableId = useId();
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<Problem | null>(null);
@@ -72,7 +82,13 @@ export function AcceptResultAction({
   // same owner-authorised endpoint; the backend, not this component, decides the outcome.
   const reconciling = view.kind === 'receipt-in-review';
   const eligible = (view.kind === 'eligible' || reconciling) && !blocked && task;
-  const open = confirming && Boolean(eligible);
+  // The backend reports the Authorizer unavailable (for example the restricted profile): offering
+  // acceptance would only produce a refusal. The control stays visible but cannot be activated.
+  const unavailable = availability === 'unavailable';
+  const open = confirming && Boolean(eligible) && !unavailable;
+  useEffect(() => {
+    if (unavailable) setConfirming(false);
+  }, [unavailable]);
 
   // Move focus to the receipt only after the server confirmed and the receipt is on screen.
   useEffect(() => {
@@ -180,12 +196,19 @@ export function AcceptResultAction({
               ref={triggerRef}
               type="button"
               className="primary-button accept-result-button"
-              onClick={() => setConfirming(true)}
+              onClick={() => {
+                if (!unavailable) setConfirming(true);
+              }}
               disabled={busy}
+              aria-disabled={unavailable || undefined}
+              aria-describedby={unavailable ? unavailableId : undefined}
             >
               <BadgeCheck size={15} aria-hidden="true" />
               Accept Result
             </button>
+          )}
+          {!open && unavailable && (
+            <UnavailableNote id={unavailableId} onRecheck={onRecheckAvailability} />
           )}
           {open && task && (
             <div
@@ -278,12 +301,19 @@ export function AcceptResultAction({
                 ref={triggerRef}
                 type="button"
                 className="primary-button accept-result-button"
-                onClick={() => setConfirming(true)}
+                onClick={() => {
+                  if (!unavailable) setConfirming(true);
+                }}
                 disabled={busy}
+                aria-disabled={unavailable || undefined}
+                aria-describedby={unavailable ? unavailableId : undefined}
               >
                 <BadgeCheck size={15} aria-hidden="true" />
                 Reconcile task status
               </button>
+            )}
+            {!open && !blocked && unavailable && (
+              <UnavailableNote id={unavailableId} onRecheck={onRecheckAvailability} />
             )}
             {open && task && (
               <div
@@ -387,5 +417,20 @@ export function AcceptResultAction({
         </div>
       )}
     </section>
+  );
+}
+
+/** Why acceptance cannot be requested right now. States nothing about the result itself. */
+function UnavailableNote({ id, onRecheck }: { id: string; onRecheck: () => void }) {
+  return (
+    <div className="accept-result-unavailable" role="status">
+      <p id={id}>
+        Result acceptance is unavailable. It needs the approval service (Authorizer), which Omnis OS
+        reports as unavailable in this configuration. Nothing has been accepted.
+      </p>
+      <button type="button" className="text-button" onClick={onRecheck}>
+        Check again
+      </button>
+    </div>
   );
 }

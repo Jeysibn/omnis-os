@@ -237,10 +237,25 @@ async function startEventScenario(events: RunEvent[]): Promise<EventScenarioServ
   };
 }
 
+/**
+ * Barrier for "the browser has processed the response that was just released". Negative assertions
+ * (disabled, absent) pass instantly otherwise, before a late response is handled, and would let a
+ * missing guard go unnoticed. Ordering-based: two frames plus a macrotask, no sleeps.
+ */
+const settleClient = (page: Page) =>
+  page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 0))),
+      ),
+  );
+
 type MockApi = ReturnType<typeof createMockApi>;
 type CapabilityOutcome =
   | 'available'
   | 'disabled'
+  /** Restricted profile: execution disabled and no Authorizer (the API hard-wires it unavailable). */
+  | 'restricted'
   | 'worker-down'
   | 'authorizer-down'
   | 'error'
@@ -535,17 +550,25 @@ function createMockApi(page: Page) {
         const worker = {
           version: 'omnis.worker-execution-status.v1' as const,
           serviceAvailability: 'healthy' as const,
-          executionMode: scenario === 'disabled' ? ('disabled' as const) : ('mock' as const),
+          executionMode:
+            scenario === 'disabled' || scenario === 'restricted'
+              ? ('disabled' as const)
+              : ('mock' as const),
           queueAvailability:
-            scenario === 'disabled' ? ('not_required' as const) : ('available' as const),
+            scenario === 'disabled' || scenario === 'restricted'
+              ? ('not_required' as const)
+              : ('available' as const),
           launcherAvailability:
-            scenario === 'disabled' ? ('not_required' as const) : ('available' as const),
+            scenario === 'disabled' || scenario === 'restricted'
+              ? ('not_required' as const)
+              : ('available' as const),
         };
         return route.fulfill({
           json: runtimeCapabilities({
-            apiExecutionMode: scenario === 'disabled' ? 'disabled' : 'mock',
+            apiExecutionMode:
+              scenario === 'disabled' || scenario === 'restricted' ? 'disabled' : 'mock',
             ...(scenario === 'worker-down' ? {} : { workerStatus: worker }),
-            authorizationAvailable: scenario !== 'authorizer-down',
+            authorizationAvailable: scenario !== 'authorizer-down' && scenario !== 'restricted',
             syntheticConnectorEnabled: false,
           }),
         });
@@ -3707,6 +3730,152 @@ test.describe('R1 owner result acceptance', () => {
     expect(api.acceptPosts[1]?.key).toBe(api.acceptPosts[0]?.key);
   });
 
+  test.describe('capability gating of Accept Result (a UX hint; the accept route stays the authority)', () => {
+    const unavailableNote = (page: Page) => page.getByText('Result acceptance is unavailable.');
+    const releaseAll = (api: MockApi, outcome: 'available' | 'restricted') => {
+      while (api.pendingCapabilities > 0) api.releaseCapability(0, outcome);
+    };
+
+    for (const [label, capability] of [
+      ['restricted (execution disabled, no Authorizer)', 'restricted'],
+      ['Authorizer unavailable', 'authorizer-down'],
+    ] as const) {
+      test(`${label}: Accept Result is shown unavailable, cannot be activated, and sends nothing`, async ({
+        page,
+        api,
+      }) => {
+        api.configure({ tasks: [reviewTask], runs: [reviewRun], capability });
+        await openReview(page);
+        await expect(unavailableNote(page)).toBeVisible();
+        await expect(accept(page)).toHaveAttribute('aria-disabled', 'true');
+        await expect(accept(page)).toHaveAccessibleDescription(/Result acceptance is unavailable/);
+        await accept(page).click({ force: true });
+        await accept(page).focus();
+        await page.keyboard.press('Enter');
+        await expect(confirmGroup(page)).toHaveCount(0);
+        await expect(page.getByText('Result accepted by owner.')).toHaveCount(0);
+        expect(api.acceptPosts).toHaveLength(0);
+      });
+    }
+
+    test('restricted: the reconcile control for an existing receipt is unavailable too', async ({
+      page,
+      api,
+    }) => {
+      api.configure({ tasks: [restoredTask], runs: [reviewRun], capability: 'restricted' });
+      await openReview(page);
+      await expect(unavailableNote(page)).toBeVisible();
+      await expect(reconcile(page)).toHaveAttribute('aria-disabled', 'true');
+      await reconcile(page).click({ force: true });
+      await expect(confirmReconcile(page)).toHaveCount(0);
+      expect(api.acceptPosts).toHaveLength(0);
+    });
+
+    test('authorized mock mode: Accept Result is available and the owner must still confirm', async ({
+      page,
+      api,
+    }) => {
+      api.configure({ tasks: [reviewTask], runs: [reviewRun] });
+      await openReview(page);
+      await expect(accept(page)).toBeEnabled();
+      await expect(accept(page)).not.toHaveAttribute('aria-disabled', 'true');
+      await expect(unavailableNote(page)).toHaveCount(0);
+      expect(api.acceptPosts).toHaveLength(0); // nothing is accepted just because the run completed
+      await accept(page).click();
+      await expect(confirmGroup(page)).toBeVisible();
+      expect(api.acceptPosts).toHaveLength(0); // still nothing until the owner confirms
+    });
+
+    test('while capabilities load the control claims nothing; a late "unavailable" closes an open confirmation', async ({
+      page,
+      api,
+    }) => {
+      api.configure({ tasks: [reviewTask], runs: [reviewRun] });
+      api.holdCapabilities();
+      await openReview(page);
+      await expect.poll(() => api.pendingCapabilities).toBeGreaterThanOrEqual(1);
+      await expect(accept(page)).toBeEnabled();
+      await expect(unavailableNote(page)).toHaveCount(0);
+      await accept(page).click();
+      await expect(confirmGroup(page)).toBeVisible();
+      releaseAll(api, 'restricted');
+      await expect(unavailableNote(page)).toBeVisible();
+      await expect(confirmGroup(page)).toHaveCount(0);
+      expect(api.acceptPosts).toHaveLength(0);
+    });
+
+    test('a failed capability read claims nothing: the control stays available and the backend decides', async ({
+      page,
+      api,
+    }) => {
+      api.configure({ tasks: [reviewTask], runs: [reviewRun], capability: 'error' });
+      await openReview(page);
+      await expect(accept(page)).toBeEnabled();
+      await expect(unavailableNote(page)).toHaveCount(0);
+      await accept(page).click();
+      await confirmGroup(page).getByRole('button', { name: 'Confirm acceptance' }).click();
+      await expect(page.getByText('Result accepted by owner.')).toBeVisible();
+      expect(api.acceptPosts).toHaveLength(1);
+    });
+
+    test('"Check again" re-reads capabilities and re-enables the control when they allow it', async ({
+      page,
+      api,
+    }) => {
+      api.configure({ tasks: [reviewTask], runs: [reviewRun] });
+      api.holdCapabilities();
+      await openReview(page);
+      await expect.poll(() => api.pendingCapabilities).toBeGreaterThanOrEqual(1);
+      releaseAll(api, 'restricted');
+      await expect(unavailableNote(page)).toBeVisible();
+      await page.getByRole('button', { name: 'Check again' }).click();
+      await expect.poll(() => api.pendingCapabilities).toBeGreaterThanOrEqual(1);
+      releaseAll(api, 'available');
+      await expect(unavailableNote(page)).toHaveCount(0);
+      await expect(accept(page)).toBeEnabled();
+      expect(api.acceptPosts).toHaveLength(0);
+    });
+
+    test('a capability answer for the ended session never gates the replacement session', async ({
+      page,
+      api,
+    }) => {
+      api.configure({ tasks: [reviewTask], runs: [reviewRun] });
+      api.holdCapabilities();
+      await openReview(page);
+      await expect.poll(() => api.pendingCapabilities).toBeGreaterThanOrEqual(1);
+      const old = api.pendingCapabilities;
+      await page.getByRole('button', { name: 'Sign out' }).click();
+      await expect(page.getByRole('heading', { name: 'Welcome back.' })).toBeVisible();
+      await page.getByLabel('Owner password').fill('fixture-owner-password');
+      await expect(page.getByRole('button', { name: 'Sign in' })).toBeEnabled();
+      await page.getByRole('button', { name: 'Sign in' }).click();
+      await expect(page.getByRole('navigation', { name: 'Primary navigation' })).toBeVisible();
+      await expect.poll(() => api.pendingCapabilities).toBeGreaterThan(old);
+      for (let i = 0; i < old; i += 1) api.releaseCapability(0, 'restricted'); // session 1, late
+      await settleClient(page);
+      await expect(unavailableNote(page)).toHaveCount(0);
+      await expect(accept(page)).not.toHaveAttribute('aria-disabled', 'true');
+      releaseAll(api, 'available');
+    });
+
+    test('a run that completes on its own is never accepted automatically', async ({
+      page,
+      api,
+    }) => {
+      api.configure({
+        tasks: [makeTask('task-live', 'Live task', 'in_progress')],
+        runs: [makeRun('run-live', 'task-live', 'Live task', 'running')],
+        completeOnStream: true,
+      });
+      await openReview(page, '#runs/run-live');
+      await expect(accept(page)).toBeVisible();
+      await settleClient(page);
+      expect(api.acceptPosts).toHaveLength(0);
+      await expect(page.getByText('Result accepted by owner.')).toHaveCount(0);
+    });
+  });
+
   test('a network failure that never applied can be retried with the same key', async ({
     page,
     api,
@@ -4127,6 +4296,118 @@ test.describe('R1 owner result acceptance', () => {
     await expect(accept(page)).toBeVisible();
     expect(api.acceptPosts).toHaveLength(1);
   });
+});
+
+test.describe('Run usage readout', () => {
+  const usageSection = (page: Page) => page.getByRole('region', { name: 'Usage' });
+  const value = (page: Page, key: 'input' | 'output' | 'cost') =>
+    usageSection(page).locator(`[data-usage="${key}"] dd`);
+
+  test('shows Unknown for every usage field, never zero, and says so', async ({ page, api }) => {
+    api.configure();
+    await openWorkspace(page, '#runs/run-active');
+    await expect(usageSection(page)).toBeVisible();
+    await expect(usageSection(page).getByRole('heading', { name: 'Usage' })).toBeVisible();
+    for (const key of ['input', 'output', 'cost'] as const) {
+      await expect(value(page, key)).toHaveText('Unknown');
+    }
+    await expect(usageSection(page)).toContainText('Unknown does not mean zero');
+    await expect(usageSection(page)).not.toContainText(/(^|\s)0(\s|$)/);
+  });
+
+  test('each run shows its own readout when switching runs, never a stale one', async ({
+    page,
+    api,
+  }) => {
+    api.configure();
+    await openWorkspace(page, '#runs/run-active');
+    await expect(
+      page.getByRole('heading', { level: 3, name: 'Review launch checklist' }),
+    ).toBeVisible();
+    await expect(usageSection(page)).toHaveCount(1);
+    await page.evaluate(() => {
+      window.location.hash = '#runs/run-old';
+    });
+    await expect(page.getByRole('heading', { level: 3, name: 'Audit access notes' })).toBeVisible();
+    await expect(usageSection(page)).toHaveCount(1);
+    for (const key of ['input', 'output', 'cost'] as const) {
+      await expect(value(page, key)).toHaveText('Unknown');
+    }
+  });
+
+  test('there is no readout when no run is selected', async ({ page, api }) => {
+    // No run to inspect.
+    api.configure({ runs: [] });
+    await openWorkspace(page, '#runs');
+    await expect(page.getByText('Select a run')).toBeVisible();
+    await expect(usageSection(page)).toHaveCount(0);
+  });
+
+  test('a held Runs read shows loading and no usage until it settles', async ({ page, api }) => {
+    api.configure();
+    api.holdGet('/api/v1/runs');
+    await page.goto('/#runs/run-active');
+    await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
+    await expect.poll(() => api.pendingGets('/api/v1/runs')).toBeGreaterThanOrEqual(1);
+    await expect(usageSection(page)).toHaveCount(0);
+    api.releaseGet('/api/v1/runs', 0, 'ok');
+    await expect(usageSection(page)).toBeVisible();
+  });
+
+  test('a failed Runs read shows the failure, never usage, and recovers on retry', async ({
+    page,
+    api,
+  }) => {
+    api.configure({ runGetFailures: 1 });
+    await openWorkspace(page, '#runs');
+    await expect(page.getByText('Runs unavailable').first()).toBeVisible();
+    await expect(usageSection(page)).toHaveCount(0);
+    await page.getByRole('button', { name: 'Retry runs' }).first().click();
+    await expect(usageSection(page)).toBeVisible();
+    await expect(value(page, 'input')).toHaveText('Unknown');
+  });
+
+  test('restricted mode: the readout is unchanged and implies no cost or provider usage', async ({
+    page,
+    api,
+  }) => {
+    api.configure({
+      tasks: [makeTask('task-review', 'Review quarterly notes', 'in_review')],
+      runs: [makeRun('run-review', 'task-review', 'Review quarterly notes')],
+      capability: 'restricted',
+    });
+    await openWorkspace(page, '#runs/run-review');
+    await expect(usageSection(page)).toBeVisible();
+    for (const key of ['input', 'output', 'cost'] as const) {
+      await expect(value(page, key)).toHaveText('Unknown');
+    }
+    await expect(usageSection(page)).not.toContainText(/[$€£]|USD|billed|credit/i);
+    await expect(page.getByText('SYNTHETIC MOCK')).toBeVisible();
+  });
+
+  for (const width of [320, 390, 768, 1280]) {
+    test(`the readout fits without horizontal overflow and passes axe at ${width}px`, async ({
+      page,
+      api,
+    }) => {
+      await page.setViewportSize({ width, height: 900 });
+      api.configure();
+      await openWorkspace(page, '#runs/run-active');
+      await expect(usageSection(page)).toBeVisible();
+      const overflow = await page.evaluate(
+        () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      );
+      expect(overflow).toBeLessThanOrEqual(0);
+      const box = await usageSection(page).boundingBox();
+      expect(box).not.toBeNull();
+      expect(box!.x).toBeGreaterThanOrEqual(0);
+      expect(box!.x + box!.width).toBeLessThanOrEqual(width);
+      const results = await new AxeBuilder({ page }).include('.run-usage').analyze();
+      expect(
+        results.violations.filter((v) => v.impact === 'serious' || v.impact === 'critical'),
+      ).toEqual([]);
+    });
+  }
 });
 
 test.describe('execution capability states', () => {
@@ -4581,18 +4862,6 @@ test.describe('capability refresh ordering', () => {
     await expect(page.getByRole('heading', { name: 'Welcome back.' })).toHaveCount(0);
     await expect(page.getByRole('navigation', { name: 'Primary navigation' })).toBeVisible();
   };
-  /**
-   * Barrier for "the browser has processed the response that was just released". Negative
-   * assertions (disabled, absent) pass instantly otherwise, before a late response is handled, and
-   * would let a missing guard go unnoticed. Ordering-based: two frames plus a macrotask.
-   */
-  const settleClient = (page: Page) =>
-    page.evaluate(
-      () =>
-        new Promise<void>((resolve) =>
-          requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 0))),
-        ),
-    );
   const bootHeld = async (page: Page, api: MockApi, path: string, hash: string) => {
     api.configure();
     api.holdGet(path);
@@ -5169,6 +5438,26 @@ test.describe('capability refresh ordering', () => {
       await stillSignedIn(page);
       // Session 2's stream (the drop was already consumed) still delivers its events.
       await expect(page.getByText('Synthetic queued event 1.')).toBeVisible();
+    });
+  });
+
+  test.describe('session guards: Run usage readout', () => {
+    test('a Runs read from the ended session never shows its run or usage in the replacement session', async ({
+      page,
+      api,
+    }) => {
+      api.configure();
+      api.holdGet('/api/v1/runs');
+      await page.goto('/#runs/run-active');
+      await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
+      await expect.poll(() => api.pendingGets('/api/v1/runs')).toBeGreaterThanOrEqual(1);
+      const old = await signOutAndBackIn(page, api, '/api/v1/runs');
+      releaseOld(api, '/api/v1/runs', old, 'ok'); // session 1's Runs answer arrives late
+      await settleClient(page);
+      await expect(page.getByRole('region', { name: 'Usage' })).toHaveCount(0);
+      api.releaseGet('/api/v1/runs', 0, 'ok'); // session 2's own read still applies
+      await expect(page.getByRole('region', { name: 'Usage' })).toBeVisible();
+      await stillSignedIn(page);
     });
   });
 
