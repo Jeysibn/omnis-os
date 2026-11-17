@@ -1,405 +1,139 @@
-name: CI
-
+name: Temporary Node release authentication
 on:
-  pull_request:
-    types: [opened, reopened, synchronize, ready_for_review]
   workflow_dispatch:
-    inputs:
-      full_validation:
-        description: Run the complete integration and security acceptance suite
-        required: true
-        type: boolean
-        default: false
-
-permissions:
-  contents: read
-
+permissions: {}
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
+  group: temporary-node-release-authentication
+  cancel-in-progress: false
 jobs:
-  validation_mode:
+  authenticate:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/temporary-node-release-verification'
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    outputs:
-      mode: ${{ steps.plan.outputs.mode }}
-      full: ${{ steps.plan.outputs.full }}
-      security_sensitive: ${{ steps.plan.outputs.securitySensitive }}
-      container_sensitive: ${{ steps.plan.outputs.containerSensitive }}
-      database_sensitive: ${{ steps.plan.outputs.databaseSensitive }}
-      full_stack_sensitive: ${{ steps.plan.outputs.fullStackSensitive }}
-      full_frontend_sensitive: ${{ steps.plan.outputs.fullFrontendSensitive }}
-      browser_specs: ${{ steps.plan.outputs.browserSpecs }}
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 24.22.1
-      - name: Resolve validation mode and changed-file suites
-        id: plan
+      - name: Authenticate public release without executing Node
+        shell: bash
         run: |
           set -euo pipefail
-          changed_files=''
-          if [[ "$GITHUB_EVENT_NAME" == 'pull_request' ]]; then
-            base_sha="$(node -e "const e=require(process.env.GITHUB_EVENT_PATH); process.stdout.write(e.pull_request.base.sha)")"
-            changed_files="$(git diff --name-only "$base_sha...$GITHUB_SHA")"
-          fi
-          OMNIS_CHANGED_FILES="$changed_files" node scripts/ci/validation-plan.mjs
-
-  frontend-browser:
-    needs: validation_mode
-    outputs:
-      full_suite: ${{ steps.select_suite.outputs.full_suite }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-        with:
-          version: 12.16.1
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 24.22.1
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - name: Install Playwright Chromium and system dependencies
-        run: pnpm --filter @omnis/web exec playwright install --with-deps chromium
-      - name: Select full or targeted browser suite
-        id: select_suite
-        env:
-          FULL_VALIDATION: ${{ needs.validation_mode.outputs.full }}
-          FULL_FRONTEND_SENSITIVE: ${{ needs.validation_mode.outputs.full_frontend_sensitive }}
-        run: |
-          if [[ "$FULL_VALIDATION" == 'true' || "$FULL_FRONTEND_SENSITIVE" == 'true' ]]; then
-            echo 'full_suite=true' >> "$GITHUB_OUTPUT"
-          else
-            echo 'full_suite=false' >> "$GITHUB_OUTPUT"
-          fi
-      - name: Run full frontend browser tests
-        if: needs.validation_mode.outputs.full == 'true' || needs.validation_mode.outputs.full_frontend_sensitive == 'true'
-        run: pnpm --filter @omnis/web test:e2e
-      - name: Run changed-area browser tests plus shell smoke
-        if: needs.validation_mode.outputs.full != 'true' && needs.validation_mode.outputs.full_frontend_sensitive != 'true'
-        env:
-          BROWSER_SPECS: ${{ needs.validation_mode.outputs.browser_specs }}
-        run: |
-          node --input-type=module <<'NODE'
-          import { spawnSync } from 'node:child_process';
-          const specs = JSON.parse(process.env.BROWSER_SPECS);
-          const result = spawnSync('pnpm', ['--filter', '@omnis/web', 'exec', 'playwright', 'test', ...specs], { stdio: 'inherit' });
-          process.exit(result.status ?? 1);
-          NODE
-      - name: Upload Playwright failure diagnostics
-        if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: playwright-failure-diagnostics
-          path: apps/web/test-results/
-          if-no-files-found: ignore
-          retention-days: 7
-
-  checks-core:
-    needs: validation_mode
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-        with:
-          version: 12.16.1
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 24.22.1
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - name: Run formatting, lint, typecheck, unit, and fast security checks
-        run: |
-          set -euo pipefail
-          pnpm check
-          pnpm --filter @omnis/web build
-          pnpm compose:config:test
-          node --test scripts/host-security/*.test.mjs
-
-  platform-security:
-    needs: validation_mode
-    if: needs.validation_mode.outputs.full == 'true' || needs.validation_mode.outputs.security_sensitive == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-        with:
-          version: 12.16.1
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 24.22.1
-          cache: pnpm
-      - run: docker pull node@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85
-      - run: pnpm install --frozen-lockfile
-      - name: Verify disposable Linux service identity boundaries
-        run: sudo --preserve-env=CI bash scripts/host-security/test-disposable-identities.sh
-      - name: Generate and mask run-scoped PostgreSQL credentials
-        env:
-          OMNIS_CI_DATABASE_SUITE: platform-security
-        run: node scripts/ci/create-test-database-environment.mjs
-      - name: Start disposable PostgreSQL on loopback
-        run: bash scripts/ci/start-test-postgres.sh
-      - name: Provision restricted PostgreSQL roles
-        run: |
-          source scripts/ci/export-test-database-environment.sh
-          node --experimental-strip-types packages/db/src/provision.ts
-      - name: Verify SO_PEERCRED broker IPC gate
-        run: python3 scripts/platform/test-broker-peer-proxy.py
-      - name: Verify host isolation in disposable systemd deployment
-        env:
-          CI: 'true'
-          OMNIS_HOST_ISOLATION_TEST: 'true'
-          OMNIS_SYSTEMD_VERIFICATION_REQUIRED: 'true'
-          OMNIS_SANDBOX_INTEGRATION: '1'
-        run: |
-          source scripts/ci/export-test-database-environment.sh
-          export OMNIS_TEST_NODE_EXECUTABLE="$(command -v node)"
-          sudo --preserve-env=CI,GITHUB_ACTIONS,RUNNER_OS,RUNNER_ENVIRONMENT,OMNIS_HOST_ISOLATION_TEST,OMNIS_SYSTEMD_VERIFICATION_REQUIRED,OMNIS_SANDBOX_INTEGRATION,OMNIS_TEST_NODE_EXECUTABLE,OMNIS_RUNTIME_DB_PASSWORD,OMNIS_AUTHORIZER_DB_PASSWORD,OMNIS_LAUNCHER_DB_PASSWORD,OMNIS_TEST_MIGRATION_DATABASE_URL,OMNIS_TEST_DATABASE_URL,OMNIS_TEST_AUTHORIZER_DATABASE_URL,OMNIS_TEST_LAUNCHER_DATABASE_URL bash scripts/host-security/verify-disposable-systemd-deployment.sh
-      - name: Remove disposable PostgreSQL container
-        if: always()
-        run: bash scripts/ci/cleanup-test-postgres.sh
-
-  database-integration:
-    needs: validation_mode
-    if: needs.validation_mode.outputs.full == 'true' || needs.validation_mode.outputs.database_sensitive == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        suite: [legacy-upgrade, recovery, restricted-bootstrap]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-        with:
-          version: 12.16.1
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 24.22.1
-          cache: pnpm
-      - run: docker pull node@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85
-      - run: pnpm install --frozen-lockfile
-      - name: Generate and mask run-scoped PostgreSQL credentials
-        env:
-          OMNIS_CI_DATABASE_SUITE: ${{ matrix.suite }}
-        run: node scripts/ci/create-test-database-environment.mjs
-      - name: Start disposable PostgreSQL on loopback
-        run: bash scripts/ci/start-test-postgres.sh
-      - name: Provision restricted PostgreSQL roles
-        if: matrix.suite != 'restricted-bootstrap'
-        run: |
-          source scripts/ci/export-test-database-environment.sh
-          node --experimental-strip-types packages/db/src/provision.ts
-      - name: Verify restricted database bootstrap and migrations
-        if: matrix.suite == 'restricted-bootstrap'
-        run: |
-          source scripts/ci/export-restricted-test-database-environment.sh
-          node --experimental-strip-types packages/db/src/restricted-bootstrap-ci.ts
-      - name: Run PostgreSQL DB package integration suite
-        if: matrix.suite == 'legacy-upgrade'
-        run: |
-          source scripts/ci/export-test-database-environment.sh
-          pnpm --filter @omnis/db test
-      - name: Run ${{ matrix.suite }} integration test
-        if: matrix.suite != 'restricted-bootstrap'
-        run: |
-          source scripts/ci/export-test-database-environment.sh
-          pnpm integration:${{ matrix.suite }}
-      - name: Remove disposable PostgreSQL container
-        if: always()
-        run: bash scripts/ci/cleanup-test-postgres.sh
-
-  full-stack-browser-integration:
-    needs: validation_mode
-    if: needs.validation_mode.outputs.full == 'true' || needs.validation_mode.outputs.full_stack_sensitive == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-        with:
-          version: 12.16.1
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 24.22.1
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - name: Install Playwright Chromium and system dependencies
-        run: pnpm --filter @omnis/web exec playwright install --with-deps chromium
-      - name: Generate and mask run-scoped PostgreSQL credentials
-        env:
-          OMNIS_CI_DATABASE_SUITE: full-stack-browser-integration
-        run: node scripts/ci/create-test-database-environment.mjs
-      - name: Start disposable PostgreSQL on loopback
-        run: bash scripts/ci/start-test-postgres.sh
-      - name: Provision restricted PostgreSQL roles
-        run: |
-          source scripts/ci/export-test-database-environment.sh
-          node --experimental-strip-types packages/db/src/provision.ts
-      - name: Run real browser to PostgreSQL smoke test
-        run: |
-          source scripts/ci/export-test-database-environment.sh
-          pnpm integration:browser-smoke
-        env:
-          OMNIS_TEST_DIAGNOSTICS_PATH: ${{ runner.temp }}/omnis-full-stack-smoke.txt
-      - name: Remove disposable PostgreSQL container
-        if: always()
-        run: bash scripts/ci/cleanup-test-postgres.sh
-      - name: Upload sanitized full-stack smoke diagnostics
-        if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: full-stack-smoke-diagnostics
-          path: ${{ runner.temp }}/omnis-full-stack-smoke.txt
-          if-no-files-found: ignore
-          retention-days: 7
-
-  backup-restore:
-    needs: validation_mode
-    if: needs.validation_mode.outputs.full == 'true' || needs.validation_mode.outputs.database_sensitive == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-        with:
-          version: 12.16.1
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 24.22.1
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - name: Verify disposable PostgreSQL backup and restore
-        run: pnpm integration:backup-restore
-
-  container-images:
-    needs: validation_mode
-    if: needs.validation_mode.outputs.full == 'true' || needs.validation_mode.outputs.container_sensitive == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-        with:
-          version: 12.16.1
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 24.22.1
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - name: Build images and verify non-root metadata, runtime-only configuration, and secret exclusion
-        run: |
-          set -euo pipefail
-          trap 'rm -f .env.container-image-canary' EXIT
-          printf '%s' 'omnis-image-canary-9f6d3e2c1a' > .env.container-image-canary
-          docker build --file infra/docker/api.Dockerfile --tag omnis-api:ci .
-          docker build --file infra/docker/worker.Dockerfile --tag omnis-worker:ci .
-          docker build --file infra/docker/synthetic-broker.Dockerfile --tag omnis-synthetic-broker:ci .
-          docker build --file infra/docker/web.Dockerfile --tag omnis-web:ci .
-          docker build --file infra/docker/web-assets.Dockerfile --tag omnis-web-assets:ci .
-          node scripts/compose/verify-app-config.mjs
-          node scripts/container-images/verify-built-images.mjs
-      - name: Verify synthetic broker network boundary with positive and negative controls
-        run: node scripts/platform/run-synthetic-egress.mjs
-      - name: Verify disposable Docker privilege, socket, lifecycle, and network boundaries
-        env:
-          OMNIS_DOCKER_TEST_RUN_ID: omnis-${{ github.run_id }}-${{ github.run_attempt }}
-        run: |
-          set -euo pipefail
-          cleanup() {
-            local status=$?
-            trap - EXIT
-            while IFS= read -r resource; do
-              [[ -z "$resource" ]] || docker rm -f "$resource" >/dev/null || status=1
-            done < <(docker ps -aq --filter "label=com.omnis.docker-boundary.run=$OMNIS_DOCKER_TEST_RUN_ID" 2>/dev/null || true)
-            while IFS= read -r network; do
-              [[ -z "$network" ]] || docker network rm "$network" >/dev/null || status=1
-            done < <(docker network ls -q --filter "label=com.omnis.docker-boundary.run=$OMNIS_DOCKER_TEST_RUN_ID" 2>/dev/null || true)
-            sudo rm -rf -- /tmp/omnis-boundary-"$OMNIS_DOCKER_TEST_RUN_ID"-*
-            exit "$status"
-          }
-          trap cleanup EXIT
-          sudo --preserve-env=PATH env OMNIS_DOCKER_TEST_RUN_ID="$OMNIS_DOCKER_TEST_RUN_ID" node scripts/container-boundary/verify-disposable-boundary.mjs
-      - name: Pull the pinned mock sandbox runtime image
-        run: docker pull node@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85
-      - name: Run disposable full-stack Compose integration using the images built above
-        run: pnpm integration:compose-smoke
-        env:
-          OMNIS_CI_PREBUILT_IMAGES: '1'
-          OMNIS_CI_HOST_GATEWAY_GUARD: '1'
-          OMNIS_COMPOSE_DIAGNOSTICS_PATH: ${{ runner.temp }}/omnis-compose-smoke-diagnostics.txt
-      - name: Upload sanitized Compose diagnostics
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: compose-integration-diagnostics
-          path: ${{ runner.temp }}/omnis-compose-smoke-diagnostics.txt
-          if-no-files-found: ignore
-          retention-days: 7
-
-  checks:
-    if: always()
-    needs:
-      [
-        validation_mode,
-        checks-core,
-        frontend-browser,
-        platform-security,
-        database-integration,
-        full-stack-browser-integration,
-        backup-restore,
-        container-images,
-      ]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 24.22.1
-      - name: Fail closed on missing, skipped, cancelled, or failed required validation
-        env:
-          MODE_RESULT: ${{ needs.validation_mode.result }}
-          MODE: ${{ needs.validation_mode.outputs.mode }}
-          FULL: ${{ needs.validation_mode.outputs.full }}
-          SECURITY_SENSITIVE: ${{ needs.validation_mode.outputs.security_sensitive }}
-          CONTAINER_SENSITIVE: ${{ needs.validation_mode.outputs.container_sensitive }}
-          DATABASE_SENSITIVE: ${{ needs.validation_mode.outputs.database_sensitive }}
-          FULL_STACK_SENSITIVE: ${{ needs.validation_mode.outputs.full_stack_sensitive }}
-          FULL_FRONTEND_SENSITIVE: ${{ needs.validation_mode.outputs.full_frontend_sensitive }}
-          CORE_RESULT: ${{ needs.checks-core.result }}
-          FRONTEND_RESULT: ${{ needs.frontend-browser.result }}
-          FRONTEND_FULL_SUITE: ${{ needs.frontend-browser.outputs.full_suite }}
-          PLATFORM_RESULT: ${{ needs.platform-security.result }}
-          DATABASE_RESULT: ${{ needs.database-integration.result }}
-          FULL_STACK_RESULT: ${{ needs.full-stack-browser-integration.result }}
-          BACKUP_RESULT: ${{ needs.backup-restore.result }}
-          CONTAINER_RESULT: ${{ needs.container-images.result }}
-        run: node scripts/ci/verify-validation-gate.mjs
+          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 /usr/bin/python3 -I -B - <<'PY'
+          import hashlib, json, os, pathlib, subprocess, tarfile, tempfile, urllib.request
+          FPR = '5BE8A3F6C8A5C01D106C0AD820B1A390B168D356'
+          KEY_REV = '481637f813e912c4aa3622d7964ab426c97b8e8d'
+          NAME = 'node-v24.22.1-linux-x64.tar.xz'
+          EXPECTED_ARCHIVE = '6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6'
+          EXPECTED_BINARY = 'e32e2d16081cf644f88392934288086e7662529d0d43277c34f7aad2207cfafb'
+          BASE = 'https://nodejs.org/dist/v24.22.1/'
+          stage = 'setup'
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, *args, **kwargs):
+                  raise ValueError('redirect rejected')
+          opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+          def fetch(url, destination, limit):
+              with opener.open(url, timeout=30) as response:
+                  if response.status != 200 or response.url != url:
+                      raise ValueError('unexpected response')
+                  total = 0
+                  with destination.open('xb') as output:
+                      os.chmod(destination, 0o600)
+                      while True:
+                          chunk = response.read(65536)
+                          if not chunk:
+                              break
+                          total += len(chunk)
+                          if total > limit:
+                              raise ValueError('download size exceeded')
+                          output.write(chunk)
+          def digest(path):
+              with path.open('rb') as source:
+                  return hashlib.file_digest(source, 'sha256').hexdigest()
+          try:
+              # Only this disposable hosted-runner directory receives public files.
+              root = pathlib.Path(tempfile.mkdtemp(prefix='omnis-node-public-'))
+              os.chmod(root, 0o700)
+              home = root / 'gnupg'
+              home.mkdir(mode=0o700)
+              env = {'PATH': '/usr/bin:/bin', 'HOME': str(root), 'GNUPGHOME': str(home),
+                     'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8'}
+              def command(args):
+                  return subprocess.run(args, check=True, capture_output=True, text=True,
+                                        env=env, timeout=30).stdout
+              stage = 'public-key'
+              key = root / 'release-key.asc'
+              fetch('https://raw.githubusercontent.com/nodejs/release-keys/' + KEY_REV + '/keys/' + FPR + '.asc', key, 262144)
+              metadata = command(['/usr/bin/gpg', '--batch', '--no-options', '--with-colons',
+                                  '--import-options', 'show-only', '--import', str(key)])
+              lines = metadata.splitlines()
+              primary = []
+              for index, line in enumerate(lines):
+                  if line.startswith('pub:'):
+                      primary.append(lines[index + 1].split(':')[9])
+              if primary != [FPR]:
+                  raise ValueError('unexpected primary key')
+              command(['/usr/bin/gpg', '--batch', '--no-options', '--import', str(key)])
+              keyring = home / 'pubring.kbx'
+              stage = 'manifest-download'
+              manifest, signature = root / 'SHASUMS256.txt', root / 'SHASUMS256.txt.sig'
+              fetch(BASE + manifest.name, manifest, 1048576)
+              fetch(BASE + signature.name, signature, 262144)
+              stage = 'manifest-signature'
+              status = command(['/usr/bin/gpgv', '--status-fd', '1', '--keyring', str(keyring),
+                                str(signature), str(manifest)])
+              valid = [line.split() for line in status.splitlines() if line.startswith('[GNUPG:] VALIDSIG ')]
+              if len(valid) != 1 or FPR not in (valid[0][2], valid[0][-1]):
+                  raise ValueError('unapproved signer')
+              stage = 'manifest-entry'
+              matches = []
+              for line in manifest.read_text(encoding='ascii').splitlines():
+                  fields = line.split()
+                  if len(fields) == 2 and fields[1] == NAME:
+                      matches.append(fields[0])
+              if matches != [EXPECTED_ARCHIVE]:
+                  raise ValueError('archive checksum mismatch')
+              stage = 'archive-download'
+              archive = root / NAME
+              fetch(BASE + NAME, archive, 134217728)
+              stage = 'archive-digest'
+              archive_hash = digest(archive)
+              if archive_hash != matches[0]:
+                  raise ValueError('archive integrity failed')
+              stage = 'archive-member'
+              member_name = 'node-v24.22.1-linux-x64/bin/node'
+              binary = root / 'verified-node.data'
+              found = 0
+              with tarfile.open(archive, 'r:xz') as package:
+                  for index, member in enumerate(package):
+                      if index >= 100000 or member.size > 1073741824:
+                          raise ValueError('archive bounds exceeded')
+                      path = pathlib.PurePosixPath(member.name)
+                      if path.is_absolute() or '..' in path.parts or not path.parts or path.parts[0] != 'node-v24.22.1-linux-x64':
+                          raise ValueError('unexpected archive path')
+                      if member.name != member_name:
+                          continue
+                      found += 1
+                      if found != 1 or not member.isfile() or not 1000000 <= member.size <= 209715200:
+                          raise ValueError('unexpected binary member')
+                      source = package.extractfile(member)
+                      with binary.open('xb') as output:
+                          os.chmod(binary, 0o600)
+                          remaining = member.size
+                          while remaining:
+                              chunk = source.read(min(65536, remaining))
+                              if not chunk:
+                                  raise ValueError('truncated member')
+                              output.write(chunk)
+                              remaining -= len(chunk)
+              if found != 1:
+                  raise ValueError('binary missing')
+              stage = 'comparison'
+              binary_hash = digest(binary)
+              verdict = 'MATCH' if binary_hash == EXPECTED_BINARY else 'MISMATCH'
+              print(json.dumps({'verdict': verdict, 'runner': 'github-hosted ubuntu-24.04',
+                                'signer_primary_fingerprint': FPR,
+                                'signing_fingerprint': valid[0][2], 'key_repository_revision': KEY_REV,
+                                'manifest_signature': 'VERIFIED', 'archive_sha256': archive_hash,
+                                'extracted_bin_node_sha256': binary_hash,
+                                'owner_reported_sha256': EXPECTED_BINARY}, sort_keys=True))
+          except Exception:
+              print(json.dumps({'verdict': 'INCONCLUSIVE', 'failed_stage': stage}))
+              raise SystemExit(1)
+          PY
