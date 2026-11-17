@@ -1,5 +1,8 @@
 interface QueryPool {
-  query(text: string, values?: unknown[]): Promise<{ rows: unknown[] }>;
+  query(
+    text: string,
+    values?: unknown[],
+  ): Promise<{ rows: unknown[] } | Array<{ rows: unknown[] }>>;
 }
 
 interface PgBossDatabaseAdapter {
@@ -11,7 +14,9 @@ export function createPgBossDatabase(pool: QueryPool): PgBossDatabaseAdapter {
   return {
     async executeSql(text, values) {
       const result = await pool.query(text, values);
-      return { rows: result.rows };
+      return {
+        rows: Array.isArray(result) ? result.flatMap((statement) => statement.rows) : result.rows,
+      };
     },
   };
 }

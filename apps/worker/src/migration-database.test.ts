@@ -18,6 +18,17 @@ describe('pg-boss migration database adapter', () => {
     assert.deepEqual(calls, [['SELECT $1', ['bound-value']]]);
   });
 
+  it('returns rows from every statement in pg-boss multi-statement queries', async () => {
+    const pool = {
+      query: async () => [{ rows: [{ setup: true }] }, { rows: [{ pg_advisory_xact_lock: null }] }],
+    };
+    const adapter = createPgBossDatabase(pool);
+
+    assert.deepEqual(await adapter.executeSql('SELECT 1; SELECT pg_advisory_xact_lock(1)'), {
+      rows: [{ setup: true }, { pg_advisory_xact_lock: null }],
+    });
+  });
+
   it('propagates denied pool access without opening another connection', async () => {
     let calls = 0;
     const pool = {
