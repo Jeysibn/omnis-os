@@ -2548,6 +2548,37 @@ test('Stop targets the selected run when the active run is not first in the fixt
   expect(api.stopRunIds).toEqual(['run-selected-active']);
 });
 
+test('inspector never presents a stop request as a confirmed cancellation', async ({
+  page,
+  api,
+}) => {
+  api.configure({
+    runs: [makeRun('run-selected-active', 'task-open', 'Review launch checklist', 'running')],
+  });
+  await openWorkspace(page, '#runs');
+  await page.getByRole('button', { name: /Review launch checklist/ }).click();
+  const lifecycle = page.locator('.run-lifecycle');
+  await expect(lifecycle).toContainText('The synthetic run is in progress.');
+  await expect(lifecycle.locator('.cancellation-state')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Request stop' }).click();
+  await expect(page.getByRole('button', { name: 'Stop requested' })).toBeVisible();
+  await expect(lifecycle.locator('.cancellation-state')).toHaveText('Stop requested');
+  await expect(lifecycle).toContainText('not cancelled until the runtime confirms');
+  await expect(lifecycle.locator('[data-cancellation="confirmed"]')).toHaveCount(0);
+});
+
+test('an unknown run offers Check state and is not shown as cancelled', async ({ page, api }) => {
+  api.configure({
+    runs: [makeRun('run-unknown', 'task-open', 'Review launch checklist', 'unknown')],
+  });
+  await openWorkspace(page, '#runs');
+  await page.getByRole('button', { name: /Review launch checklist/ }).click();
+  const lifecycle = page.locator('.run-lifecycle');
+  await expect(lifecycle).toContainText('Outcome unknown');
+  await expect(lifecycle.locator('[data-cancellation="confirmed"]')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Check state' })).toBeVisible();
+});
+
 test('revisiting a terminal run replays history, ends the stream, and stays closed', async ({
   page,
   api,

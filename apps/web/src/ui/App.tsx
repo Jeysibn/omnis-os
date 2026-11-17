@@ -54,6 +54,7 @@ import {
   type AcceptanceAvailability,
 } from './useAcceptanceAvailability.js';
 import { RunUsageReadout } from './RunUsageReadout.js';
+import { describeRunLifecycle } from './runLifecycle.js';
 import {
   StaleSessionError,
   bindExpiryToSession,
@@ -2314,6 +2315,12 @@ function RunInspector({
                 <strong>{formatDate(run.updatedAt)}</strong>
               </div>
             </div>
+            <RunLifecycleNotice lifecycle={describeRunLifecycle(run, events)} />
+            {run.status === 'unknown' && (
+              <button type="button" className="secondary-button" onClick={onReconcile}>
+                Check state
+              </button>
+            )}
             {isActive(run.status) && (
               <button
                 className="stop-button"
@@ -2415,6 +2422,24 @@ function RunInspector({
         </>
       )}
     </aside>
+  );
+}
+
+function RunLifecycleNotice({ lifecycle }: { lifecycle: ReturnType<typeof describeRunLifecycle> }) {
+  return (
+    <div
+      className={`run-lifecycle run-lifecycle-${lifecycle.tone}`}
+      role="status"
+      aria-live="polite"
+    >
+      <strong>{lifecycle.label}</strong>
+      {lifecycle.cancellationLabel && (
+        <span className="cancellation-state" data-cancellation={lifecycle.cancellation}>
+          {lifecycle.cancellationLabel}
+        </span>
+      )}
+      <p>{lifecycle.detail}</p>
+    </div>
   );
 }
 
