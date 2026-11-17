@@ -1,5 +1,6 @@
 import { PgBoss } from 'pg-boss';
 import { createPool, migrate } from '@omnis/db';
+import { createPgBossDatabase } from './migration-database.ts';
 
 const connectionString = getMigrationDatabaseUrl();
 const pool = createPool({
@@ -8,16 +9,15 @@ const pool = createPool({
   application_name: 'omnis-schema-migrator',
 });
 const boss = new PgBoss({
-  connectionString,
+  db: createPgBossDatabase(pool),
   schema: 'pgboss',
-  application_name: 'omnis-pgboss-migrator',
-  max: 2,
   supervise: false,
   migrate: true,
   createSchema: false,
 });
 
 try {
+  await verifyMigrationConnection(pool, connectionString);
   await migrate(pool);
   await boss.start({ attempts: 5 });
   await boss.createQueue(process.env.OMNIS_QUEUE_NAME ?? 'omnis-mock-run', {
@@ -37,6 +37,24 @@ try {
 } finally {
   await boss.stop().catch(() => undefined);
   await pool.end();
+}
+
+async function verifyMigrationConnection(
+  pool: ReturnType<typeof createPool>,
+  configuredConnectionString: string,
+): Promise<void> {
+  const configured = new URL(configuredConnectionString);
+  const result = await pool.query<{ current_user: string; database_name: string }>(
+    'SELECT current_user, current_database() AS database_name',
+  );
+  const identity = result.rows[0];
+  if (
+    !identity ||
+    identity.current_user !== decodeURIComponent(configured.username) ||
+    identity.database_name !== decodeURIComponent(configured.pathname.slice(1))
+  ) {
+    throw new Error('Migration pool identity does not match the configured PostgreSQL target.');
+  }
 }
 
 function getMigrationDatabaseUrl(): string {
