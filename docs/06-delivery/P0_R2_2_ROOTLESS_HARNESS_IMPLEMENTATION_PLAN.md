@@ -10,6 +10,8 @@
 **Decision state:** candidate architecture only; not implemented, tested, target-host validated, or approved for operation.
 **Review state:** Codex #1 and Claude #1 requested targeted corrections to this plan; neither approved Stage A implementation.
 
+> **Current authorization boundary (2026-11-18):** Current remote `main` is `cc8e9b4ba1323c982a741c790fd0f7401130f2f6`. The [owner decision package](./P0_R2_1_OWNER_DECISION_PACKAGE.md) records later conditional design selections; they do not authorize this plan, harness implementation/execution, or Stages 2–4. The implementation sequence and review state below are historical planning content.
+
 ## Snapshot verification
 
 The incoming P0-R2.2 plan matched the supplied review target `d0eb7f1823f02804dc8ed28fc7b35972df3b05d2cca70ef313e9371767d09623` before edits.

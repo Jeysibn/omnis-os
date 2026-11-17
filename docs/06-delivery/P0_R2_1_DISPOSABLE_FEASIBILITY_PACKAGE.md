@@ -6,6 +6,8 @@
 **Approval packet:** [P0-R2.1 Security Review Packet](./P0_R2_1_SECURITY_REVIEW_PACKET.md).
 **Existing normative plans:** [P0-R2.1 compatibility harness design](./P0_R2_1_ROOTLESS_COMPATIBILITY_HARNESS_DESIGN.md), [P0-R2.2 implementation plan](./P0_R2_2_ROOTLESS_HARNESS_IMPLEMENTATION_PLAN.md), [WSL2 ingress experiments](./WSL2_DISPOSABLE_EXPERIMENTS.md), [ADR-0012 review packet](../05-security/ADR_0012_REVIEW_PACKET.md), [Docker-only proof register](./P0_R2_DOCKER_ONLY_PROOF_REGISTER.md).
 
+> **Current decision reconciliation (2026-11-18):** Current remote `main` is `cc8e9b4ba1323c982a741c790fd0f7401130f2f6`. See the [owner decision package](./P0_R2_1_OWNER_DECISION_PACKAGE.md) for the subsequent conditional Option B, OB-0, M-3/M-4, and AF_UNIX design choices. This feasibility proposal and its historical review outcome remain non-executing; no harness build, install, startup, or execution is authorized.
+
 ## Test authorization boundary
 
 This file makes existing detailed test proposals easier to execute and review; it does not create an executable harness, policy, runnable gateway, CI workflow, listener, rootless Engine, or WSL2 environment. The owner explicitly authorized preparation and safe repository validation only. Guest-root account/cgroup/firewall/filesystem work, VM creation, WSL import/configuration, CI changes, and target-host activity require the separate decisions in the review packet. The current assignment does not authorize those actions.

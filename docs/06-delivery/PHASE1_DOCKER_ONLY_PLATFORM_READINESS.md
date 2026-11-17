@@ -1,7 +1,8 @@
 # Phase 1 Docker-Only WSL2 Platform Readiness
 
-**Status:** P0-R2 design approved for disposable harness planning only; P0-R2.1 exact-head reviews and owner decisions remain required. No deployment candidate is accepted or target-host validated.
-**Current main snapshot for this packet:** `fcd4c1bd179d9d680fc8ee449e3029c5db97e5f5` (PR #114 merged, 2026-11-13). Its post-merge main CI run [43478834756](https://github.com/Jeysibn/omnis-os/actions/runs/43478834756) passed all ten required jobs. The detailed static platform inspection below was performed at `0e1efbe803826059089fcfc16de65e9bb081bfcf`; PR #114 changes offline Codex app-server text-item parsing/fake parity only and does not alter the platform trust boundaries summarized here.
+**Current disposition:** Historical design/readiness analysis only. Current remote `main` is `cc8e9b4ba1323c982a741c790fd0f7401130f2f6`; Phase 1 R1 remains **BLOCKED / NOT ACCEPTED**, resource ownership remains **UNKNOWN**, and no deployment candidate is accepted or target-host validated.
+**Current conditional decisions:** See the [owner decision package](./P0_R2_1_OWNER_DECISION_PACKAGE.md), [Option B security delta](./P0_R2_1_OPTION_B_SECURITY_DESIGN_DELTA.md), and [restricted WSL2 acceptance gates](./RESTRICTED_WSL2_ACCEPTANCE_GATES.md). Historical P0-R2/P0-R2.1 comparisons and review outcomes below are not current-head approval and do not authorize harness or host operations.
+**Historical evidence:** The detailed static platform inspection below was performed at `0e1efbe803826059089fcfc16de65e9bb081bfcf`; the `fcd4c1bd179d9d680fc8ee449e3029c5db97e5f5` CI and inspection references below are historical only.
 **Scope:** Mock-only application and synthetic execution on the owner's existing WSL2 Ubuntu installation. This document is a source and design review, not operational acceptance.
 
 **P0-R2 proof register:** [`P0_R2_DOCKER_ONLY_PROOF_REGISTER.md`](./P0_R2_DOCKER_ONLY_PROOF_REGISTER.md).

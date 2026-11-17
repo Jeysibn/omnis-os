@@ -7,6 +7,8 @@
 **Companion test package:** [P0-R2.1 disposable feasibility package](./P0_R2_1_DISPOSABLE_FEASIBILITY_PACKAGE.md).
 **Consolidated finding register:** [Claude and Codex #1 review dispositions](./P0_R2_1_REVIEW_FINDING_REGISTER.md).
 
+> **Current decision reconciliation (2026-11-18):** The exact current `main` baseline is `cc8e9b4ba1323c982a741c790fd0f7401130f2f6`. The owner has conditionally selected Option B for further synthetic-only design, whole-Runtime-service stop for M-4, an independently administered conditional-append ledger as the M-3 preference, and AF_UNIX for the API-to-Authorizer design channel. These are conditional design selections only. They do not resolve this packet's historical **CHANGES REQUIRED** review, accept M-3/M-4/OB-0, authorize implementation, or provide operational evidence. Where this packet records an earlier option as undecided or describes earlier M-4 alternatives, that text is historical; the current decision queue and exact boundaries are in the [owner decision package](./P0_R2_1_OWNER_DECISION_PACKAGE.md) and [Option B security delta](./P0_R2_1_OPTION_B_SECURITY_DESIGN_DELTA.md).
+
 ## Purpose and scope
 
 This packet is for Codex #1's direct security/authorization review, Claude #1's independent threat-model review, and the project owner's architecture and environment decisions. Each reviewer must inspect the exact final PR commit and identify that full SHA in their response. The PR branch's final head SHA is recorded in the PR description. A review of an earlier source SHA, this summary alone, or an AI subagent's findings is not approval of the current head.

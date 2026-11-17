@@ -1,0 +1,18 @@
+# Restricted WSL2 Acceptance Gates
+
+**Status:** Planning criteria only. No target-host operation or deployment is authorized. Phase 1 R1 remains **BLOCKED / NOT ACCEPTED**.
+
+The repository already contains an execution-disabled restricted profile and static configuration checks. Those checks do not establish target WSL2 behavior. The gates below require a separate owner-approved, disposable acceptance run. They do not authorize P0 harness work or real-provider access.
+
+| Gate | Required evidence | Pass condition |
+| --- | --- | --- |
+| **Resource ownership and conflict prevention** | Owner-identified Docker context and endpoint; read-only inventory of project, containers, networks, volumes, ports, and database identity before changes. | Every target resource is owner-confirmed and project-scoped; no ownership inferred from names or labels; conflicts and unknown resources stop the procedure without cleanup. |
+| **Database bootstrap reliability** | Fresh approved project volume; PostgreSQL system identifier; separate bootstrap and application identities; role/migration ordering and redacted logs. | Database readiness precedes role provisioning; migrations run only after expected roles exist; partial failure preserves the volume and evidence for review; no automatic destructive retry. |
+| **Core/Runtime separation** | Effective service and process inventory, account/socket/data-root mapping, and allowed/denied access checks. | Restricted profile contains only its approved services; no Runtime Engine, host control service, or unintended Engine socket is present. No Core/Runtime separation claim without a separately approved design and evidence. |
+| **Service and socket identity** | Effective UID/GID, parent directory and socket ownership/mode, mount inventory, and denied-peer checks. | API/Worker run under intended non-root identities; restricted profile has no Authorizer/Launcher dependency or socket; no Docker socket or unapproved host mount is reachable. |
+| **Execution-disabled behavior** | Capability response, API responses, database/event state before and after denied execution/stop requests, worker queue/launcher inventory. | Capability clearly reports execution disabled and authorization unavailable; request is rejected before mutation; no queue item, run event, worker dispatch, launcher call, or provider activity occurs. |
+| **Backup, restore, and restart recovery** | Protected backup metadata/checksum; restore into a fresh isolated database; role/history comparison; controlled service, database, and WSL restart traces. | Restore integrity and required history/roles are verified; expected recovery-point/time objectives are met; restart preserves data and does not replay work or silently clear an unknown state. |
+| **Owner-facing ingress restrictions** | Selected Windows enforcement configuration; browser origin/TLS/cookie evidence; IPv4/IPv6 tests from Windows-local, LAN, WSL, and container paths. | Intended Windows-local path succeeds; LAN, WSL, and container paths are denied at the enforcement point. Loopback binding, TLS, Origin, Host, or forwarded headers alone do not pass this gate. |
+| **Observable operational failures** | Redacted service status, health/readiness, migration failure, missing socket, denied request, backup/restore, and interrupted restart evidence. | Each failure is visible to the owner, fails closed, preserves diagnostic evidence, and does not trigger unapproved cleanup, retry, restart, or execution. |
+
+Static Compose verification and hosted CI can close source-level checks only. They cannot pass resource ownership, service/socket identity on target, Windows ingress, target backup/restore, WSL restart recovery, or operational failure observability.
