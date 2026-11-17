@@ -4,7 +4,7 @@
 
 ## Exact request and authority
 
-Propose one read-only HTTP GET `/info` through the exact local Unix socket `/run/docker.sock` inside Ubuntu WSL2 as operator jeysi. This uses existing rootful Docker socket authority, not sudo, a container, network TCP endpoint or default Docker CLI context. Docker context is historically default but is not consulted by this command. No DOCKER_HOST, DOCKER_CONTEXT, HTTP proxy, Docker credential store or CLI version negotiation is involved. The HTTP host localhost is only the request header/URI authority; transport is the explicit Unix socket.
+Propose one read-only HTTP GET `/info` through the exact local Unix socket `/run/docker.sock` inside Ubuntu WSL2 as operator jeysi. This uses existing rootful Docker socket authority, not sudo, a container, network TCP endpoint or default Docker CLI context. Docker context is historically default but is not consulted by this command. Curl default config loading is disabled by `--disable` as its first argument; no user curlrc options may add credentials, files or requests. No DOCKER_HOST, DOCKER_CONTEXT, HTTP proxy, Docker credential store or CLI version negotiation is involved. The HTTP host localhost is only the request header/URI authority; transport is the explicit Unix socket.
 
 One request only: no `/version`, `/containers`, image/network/volume list, redirects or automatic retries. `/info` is a broad daemon metadata response even though the returned summary below is restricted. It can contain workload counts, labels, registry addresses and proxy/configuration details in process memory; owner approval must cover this transient read. Do not print/store the raw response. This is daemon self-reporting, not independent authentication. Existing socket access is rootful authority even when this single intended API call is read-only.
 
@@ -13,7 +13,7 @@ One request only: no `/version`, `/containers`, image/network/volume list, redir
 Use Bash; run once only after the owner approves this exact document/hash and a fresh window. Existing curl and Python3 must be available; do not install tools under this grant. The ordinary-user pipeline prints only selected fields or a generic failure. No output redirection or evidence files.
 
 ```sh
-(set -o pipefail; curl --unix-socket /run/docker.sock --noproxy '*' --proto '=http' --max-time 5 --max-filesize 65536 --silent --show-error --fail http://localhost/info | python3 -B -c 'import json,sys; raw=sys.stdin.buffer.read(65537); fields={"ID":str,"Name":str,"ServerVersion":str,"OSType":str,"Architecture":str,"DockerRootDir":str,"SecurityOptions":list};
+(set -o pipefail; curl --disable --unix-socket /run/docker.sock --noproxy '*' --proto '=http' --max-time 5 --max-filesize 65536 --silent --show-error --fail http://localhost/info | python3 -B -c 'import json,sys; raw=sys.stdin.buffer.read(65537); fields={"ID":str,"Name":str,"ServerVersion":str,"OSType":str,"Architecture":str,"DockerRootDir":str,"SecurityOptions":list};
 try:
     if len(raw)>65536: raise ValueError()
     data=json.loads(raw)
