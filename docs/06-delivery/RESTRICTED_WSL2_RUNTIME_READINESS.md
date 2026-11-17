@@ -269,3 +269,10 @@ Execute only under Authorization 4, after exact route/fixture approval. These ar
 Unknown target facts, PostgreSQL bounds/identity compatibility, exact acceptance fixtures/harness, secret custody and all four grants remain open. Future mock-runtime security dependencies belong to Codex #1; no backend security contract is changed here. This package is ready for an owner decision on inventory, not a claim that startup is authorized or currently executable.
 
 Current authorization-sheet validation: `node --test scripts/compose/*.test.mjs` passed 14/14 with zero skipped; `git diff --check` passed. PR #129 hosted results were read through GitHub metadata. No Docker CLI/daemon inspection was run. This isolated worktree lacks installed dependencies/pnpm on PATH; no package installation, hook bypass, commit, PR or full hook run is claimed for this documentation revision. Independent review binds the baseline plus exact document SHA-256 reported with delivery.
+
+
+## 12. Owner-accepted Stage 1A exception — 2026-11-17
+
+The [owner decision record](STAGE_1A_OWNER_ACCEPTANCE_EXCEPTION.md) accepts the existing bounded local daemon-process provenance evidence with exception. Technical daemon identity is SUPPORTED; procedure compliance remains DEVIATION; installed systemd version applicability remains UNVERIFIED; internal Docker daemon identity is NOT VERIFIED. This adds later evidence to the historical source-preparation statements above; it does not rewrite their original meaning or claim application startup occurred. The pre-update readiness document fingerprint was `ac0c44a852b4666da5a89733c048302fda976d56d9ec3942678e18ea8f084337`; this additive reconciliation intentionally produces a new revision requiring review.
+
+Stage1A is ACCEPTED BY OWNER WITH EXCEPTION. [Stage1B](STAGE_1B_DOCKER_API_IDENTITY_AUTHORIZATION.md) is only a query proposal. Stage1B, Stage1C and Stages2–4 are not authorized; all subsequent execution requires a separate scoped grant. Phase1 R1 remains BLOCKED / NOT ACCEPTED. No local host inspection or Docker API query was repeated to record this decision.
