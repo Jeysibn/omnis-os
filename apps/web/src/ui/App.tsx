@@ -2431,6 +2431,7 @@ function RunLifecycleNotice({ lifecycle }: { lifecycle: ReturnType<typeof descri
       className={`run-lifecycle run-lifecycle-${lifecycle.tone}`}
       role="status"
       aria-live="polite"
+      aria-atomic="true"
     >
       <strong>{lifecycle.label}</strong>
       {lifecycle.cancellationLabel && (

@@ -2579,6 +2579,32 @@ test('an unknown run offers Check state and is not shown as cancelled', async ({
   await expect(page.getByRole('button', { name: 'Check state' })).toBeVisible();
 });
 
+test('lifecycle notice is atomic, keyboard reachable and does not overflow at 360px', async ({
+  page,
+  api,
+}) => {
+  await page.setViewportSize({ width: 360, height: 740 });
+  api.configure({
+    runs: [makeRun('run-unknown', 'task-open', 'Review launch checklist', 'unknown')],
+  });
+  await openWorkspace(page, '#runs');
+  await page.getByRole('button', { name: /Review launch checklist/ }).click();
+  const lifecycle = page.locator('.run-lifecycle');
+  await expect(lifecycle).toHaveAttribute('aria-atomic', 'true');
+  const check = page.getByRole('button', { name: 'Check state' });
+  await check.focus();
+  await expect(check).toBeFocused();
+  const overflow = await page.evaluate(() => ({
+    doc: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    box: (() => {
+      const el = document.querySelector('.run-lifecycle') as HTMLElement;
+      return el.scrollWidth - el.clientWidth;
+    })(),
+  }));
+  expect(overflow.doc).toBeLessThanOrEqual(0);
+  expect(overflow.box).toBeLessThanOrEqual(0);
+});
+
 test('revisiting a terminal run replays history, ends the stream, and stays closed', async ({
   page,
   api,
