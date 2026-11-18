@@ -1,10 +1,12 @@
 # P0-R2.1 Disposable Rootless WSL2 Feasibility Package
 
-**Reviewed current main snapshot:** `fcd4c1bd179d9d680fc8ee449e3029c5db97e5f5` (PR #114 merged). Post-merge main CI run [43478834756](https://github.com/Jeysibn/omnis-os/actions/runs/43478834756) passed all ten required jobs on this source snapshot. `0e1efbe803826059089fcfc16de65e9bb081bfcf` remains the historical #115 baseline. PR #114 tightened the offline Codex app-server text-item contract and fake/projector parity; it does not add live dispatch or change the host/runtime trust boundaries assessed here. Earlier `b67aa2a` source assessments and exact reviewer SHAs below are historical.
+**Historical reviewed snapshot:** `fcd4c1bd179d9d680fc8ee449e3029c5db97e5f5` (PR #114 merged); its main CI run [43478834756](https://github.com/Jeysibn/omnis-os/actions/runs/43478834756) passed all ten required jobs at that source. `0e1efbe803826059089fcfc16de65e9bb081bfcf` remains the historical #115 baseline. Earlier `b67aa2a` source assessments and reviewer verdicts apply only to their named SHAs.
 **Status:** Proposed test package only; execution is not authorized. All runtime/WSL2 cases are **NOT TESTED**.
 **Historical source reviewed:** fetched `origin/main` commit `b67aa2a4b49cf47e1cbaa9d985b0c270fa9ed965` (2026-11-13). The prior baselines are historical; #112 adds offline app-server fixtures and protocol corrections but no live gateway or deployment authority.
 **Approval packet:** [P0-R2.1 Security Review Packet](./P0_R2_1_SECURITY_REVIEW_PACKET.md).
 **Existing normative plans:** [P0-R2.1 compatibility harness design](./P0_R2_1_ROOTLESS_COMPATIBILITY_HARNESS_DESIGN.md), [P0-R2.2 implementation plan](./P0_R2_2_ROOTLESS_HARNESS_IMPLEMENTATION_PLAN.md), [WSL2 ingress experiments](./WSL2_DISPOSABLE_EXPERIMENTS.md), [ADR-0012 review packet](../05-security/ADR_0012_REVIEW_PACKET.md), [Docker-only proof register](./P0_R2_DOCKER_ONLY_PROOF_REGISTER.md).
+
+> **Current decision reconciliation (2026-11-18):** Current remote `main` is `cc8e9b4ba1323c982a741c790fd0f7401130f2f6`. See the [owner decision package](./P0_R2_1_OWNER_DECISION_PACKAGE.md) for the subsequent conditional Option B, OB-0, M-3/M-4, and AF_UNIX design choices. This feasibility proposal and its historical review outcome remain non-executing; no harness build, install, startup, or execution is authorized.
 
 ## Test authorization boundary
 

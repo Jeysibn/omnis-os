@@ -1,6 +1,6 @@
 # P0-R2.2 Security-Gated Rootless Harness Implementation Plan
 
-**Reviewed current main snapshot:** `fcd4c1bd179d9d680fc8ee449e3029c5db97e5f5` (PR #114 merged). Post-merge main CI run [43478834756](https://github.com/Jeysibn/omnis-os/actions/runs/43478834756) passed all ten required jobs on this source snapshot. `0e1efbe803826059089fcfc16de65e9bb081bfcf` remains the historical #115 baseline. PR #114 tightened the offline Codex app-server text-item contract and fake/projector parity; it does not add live dispatch or change the host/runtime trust boundaries assessed here. Earlier `b67aa2a` source assessments and exact reviewer SHAs below are historical.
+**Historical reviewed snapshot:** `fcd4c1bd179d9d680fc8ee449e3029c5db97e5f5` (PR #114 merged); its main CI run [43478834756](https://github.com/Jeysibn/omnis-os/actions/runs/43478834756) passed all ten required jobs at that source. `0e1efbe803826059089fcfc16de65e9bb081bfcf` remains the historical #115 baseline. Earlier `b67aa2a` source assessments and reviewer verdicts apply only to their named SHAs.
 
 > **Controlling remediation (2026-11-13; refreshed after #112):** This remediation supersedes the earlier open placement language, the diagram below, the “Gateway container” assumptions, and the former Stage B/Stage C implementation sequence wherever they conflict. There is one candidate architecture: Core web/API/PostgreSQL in the Core rootless Engine; Worker, Launcher, Authorizer and Gateway as separate host systemd services under distinct non-login host UIDs; Runtime Engine as a separate rootless host systemd service; the termination supervisor is another separately identified host service. Gateway is never packaged or managed by the Runtime Engine. Root/systemd owns Gateway executable, unit, policy, trust roots, update/replacement/restart and raw Engine socket provisioning. See the security review packet for the normative UID/GID/socket/authorization/payload/journal contract. The Runtime Engine daemon remains trusted; owner acceptance is required. This is a documentation candidate only, not implementation authorization.
 
@@ -9,6 +9,8 @@
 **Approved P0-R2.1 snapshot:** all three supplied SHA-256 values were verified before this plan was prepared (see Snapshot verification).
 **Decision state:** candidate architecture only; not implemented, tested, target-host validated, or approved for operation.
 **Review state:** Codex #1 and Claude #1 requested targeted corrections to this plan; neither approved Stage A implementation.
+
+> **Current authorization boundary (2026-11-18):** Current remote `main` is `cc8e9b4ba1323c982a741c790fd0f7401130f2f6`. The [owner decision package](./P0_R2_1_OWNER_DECISION_PACKAGE.md) records later conditional design selections; they do not authorize this plan, harness implementation/execution, or Stages 2–4. The implementation sequence and review state below are historical planning content.
 
 ## Snapshot verification
 
