@@ -50,12 +50,15 @@ jobs:
           fi
           OMNIS_CHANGED_FILES="$changed_files" node scripts/ci/validation-plan.mjs
 
-  frontend-browser:
+  frontend-browser-shards:
     needs: validation_mode
-    outputs:
-      full_suite: ${{ steps.select_suite.outputs.full_suite }}
+    if: needs.validation_mode.outputs.full == 'true' || needs.validation_mode.outputs.full_frontend_sensitive == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -70,22 +73,37 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Install Playwright Chromium and system dependencies
         run: pnpm --filter @omnis/web exec playwright install --with-deps chromium
-      - name: Select full or targeted browser suite
-        id: select_suite
-        env:
-          FULL_VALIDATION: ${{ needs.validation_mode.outputs.full }}
-          FULL_FRONTEND_SENSITIVE: ${{ needs.validation_mode.outputs.full_frontend_sensitive }}
-        run: |
-          if [[ "$FULL_VALIDATION" == 'true' || "$FULL_FRONTEND_SENSITIVE" == 'true' ]]; then
-            echo 'full_suite=true' >> "$GITHUB_OUTPUT"
-          else
-            echo 'full_suite=false' >> "$GITHUB_OUTPUT"
-          fi
-      - name: Run full frontend browser tests
-        if: needs.validation_mode.outputs.full == 'true' || needs.validation_mode.outputs.full_frontend_sensitive == 'true'
-        run: pnpm --filter @omnis/web test:e2e
+      - name: Run full frontend browser test shard
+        run: pnpm --filter @omnis/web exec playwright test --shard=${{ matrix.shard }}/3
+      - name: Upload Playwright failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: playwright-failure-diagnostics-shard-${{ matrix.shard }}
+          path: apps/web/test-results/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  frontend-browser-targeted:
+    needs: validation_mode
+    if: needs.validation_mode.outputs.full != 'true' && needs.validation_mode.outputs.full_frontend_sensitive != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 12.16.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.22.1
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install Playwright Chromium and system dependencies
+        run: pnpm --filter @omnis/web exec playwright install --with-deps chromium
       - name: Run changed-area browser tests plus shell smoke
-        if: needs.validation_mode.outputs.full != 'true' && needs.validation_mode.outputs.full_frontend_sensitive != 'true'
         env:
           BROWSER_SPECS: ${{ needs.validation_mode.outputs.browser_specs }}
         run: |
@@ -99,10 +117,31 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: playwright-failure-diagnostics
+          name: playwright-failure-diagnostics-targeted
           path: apps/web/test-results/
           if-no-files-found: ignore
           retention-days: 7
+
+  frontend-browser:
+    if: always()
+    needs: [validation_mode, frontend-browser-shards, frontend-browser-targeted]
+    outputs:
+      full_suite: ${{ needs.validation_mode.outputs.full == 'true' || needs.validation_mode.outputs.full_frontend_sensitive == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require the selected browser validation path
+        env:
+          FULL_VALIDATION: ${{ needs.validation_mode.outputs.full }}
+          FULL_FRONTEND_SENSITIVE: ${{ needs.validation_mode.outputs.full_frontend_sensitive }}
+          SHARDS_RESULT: ${{ needs.frontend-browser-shards.result }}
+          TARGETED_RESULT: ${{ needs.frontend-browser-targeted.result }}
+        run: |
+          if [[ "$FULL_VALIDATION" == 'true' || "$FULL_FRONTEND_SENSITIVE" == 'true' ]]; then
+            [[ "$SHARDS_RESULT" == 'success' ]] || { echo "Full frontend browser shards did not pass: $SHARDS_RESULT"; exit 1; }
+          else
+            [[ "$TARGETED_RESULT" == 'success' ]] || { echo "Targeted frontend browser suite did not pass: $TARGETED_RESULT"; exit 1; }
+          fi
 
   checks-core:
     needs: validation_mode
