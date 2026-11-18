@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { copyFile, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, lstat, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { aclSnapshotQuery, aclSnapshotsMatch } from '../../scripts/db-recovery/acl-integrity.mjs';
@@ -36,8 +36,8 @@ const token = randomBytes(32).toString('hex');
 const target = 'omnis_restore_restricted_verified';
 let container;
 
-function run(program, args, { allowFailure = false } = {}) {
-  const result = spawnSync(program, args, { env, encoding: 'utf8', timeout: 240_000 });
+function run(program, args, { allowFailure = false, commandEnv = env } = {}) {
+  const result = spawnSync(program, args, { env: commandEnv, encoding: 'utf8', timeout: 240_000 });
   const output = result.stdout?.trim() ?? '';
   const diagnostics = result.stderr?.trim() ?? '';
   if (!allowFailure && result.status !== 0) {
@@ -85,11 +85,15 @@ function sql(db, statement) {
   );
 }
 
-function recovery(action, args, { allowFailure = false, cluster = systemId } = {}) {
+function recovery(
+  action,
+  args,
+  { allowFailure = false, cluster = systemId, commandEnv = env } = {},
+) {
   return run(
     process.execPath,
     ['scripts/db-recovery/restricted-recovery.mjs', action, ...base, container, cluster, ...args],
-    { allowFailure },
+    { allowFailure, commandEnv },
   );
 }
 
@@ -158,7 +162,14 @@ try {
     'postgres:17.6-alpine@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94';
   requireImage(image);
   wrapper('up', '--no-build', '--pull', 'never', '-d', 'postgres');
-  container = wrapper('ps', '--status', 'running', '--no-trunc', '--quiet');
+  container = docker(
+    'ps',
+    '--all',
+    '--no-trunc',
+    '--quiet',
+    '--filter',
+    `label=com.docker.compose.project=${project}`,
+  );
   assert.match(container, /^[a-f0-9]{64}$/);
   const deadline = Date.now() + 60_000;
   while (docker('inspect', '--format', '{{.State.Health.Status}}', container) !== 'healthy') {
@@ -249,6 +260,88 @@ try {
   const [, digest] = /Restricted manifest SHA-256: ([a-f0-9]{64})/.exec(backup) ?? [];
   assert.ok(digest);
   printTiming(backup);
+  const app = docker(
+    'create',
+    '--pull=never',
+    '--label',
+    `com.docker.compose.project=${project}`,
+    '--label',
+    'com.docker.compose.service=worker',
+    '--entrypoint',
+    'sleep',
+    nodeImage,
+    '300',
+  );
+  try {
+    assert.equal(docker('inspect', '--format', '{{.State.Status}}', app), 'created');
+    docker('start', app);
+    docker('pause', app);
+    assert.equal(docker('inspect', '--format', '{{.State.Status}}', app), 'paused');
+    const listed = docker(
+      'ps',
+      '--all',
+      '--no-trunc',
+      '--quiet',
+      '--filter',
+      `label=com.docker.compose.project=${project}`,
+    );
+    assert.ok(listed.split('\n').includes(app));
+    for (const state of ['paused', 'restarting']) {
+      let commandEnv = env;
+      if (state === 'restarting') {
+        // Keep the real daemon inventory; substitute only the paused fixture's inspected state.
+        await writeFile(
+          join(directory, 'docker'),
+          String.raw`#!/bin/sh
+if [ "$3" = inspect ] && [ "$4" = --type ]; then
+  result=$(/usr/bin/docker "$@") || exit $?
+  printf '%s\n' "$result" | sed '/^${app}|/s/|paused|true|true|false|/|restarting|true|false|true|/'
+else
+  exec /usr/bin/docker "$@"
+fi
+`,
+          { mode: 0o700, flag: 'wx' },
+        );
+        commandEnv = { ...env, PATH: `${directory}:${env.PATH}` };
+        const inspected = run(
+          'docker',
+          [
+            '--host',
+            endpoint,
+            'inspect',
+            '--type',
+            'container',
+            '--format',
+            '{{.Id}}|service|{{.State.Status}}|{{.State.Running}}|{{.State.Paused}}|{{.State.Restarting}}|tail',
+            app,
+          ],
+          { commandEnv },
+        ).output;
+        assert.match(inspected, /[|]restarting[|]true[|]false[|]true[|]/);
+      }
+      const rejectedArchive = join(directory, `${state}.dump`);
+      for (const [action, args] of [
+        ['backup', [rejectedArchive]],
+        ['restore', [archive, `omnis_restore_${state}`, digest]],
+      ]) {
+        const result = recovery(action, args, { allowFailure: true, commandEnv });
+        assert.equal(result.status, 1);
+        assert.match(
+          result.diagnostics,
+          /restricted context, Compose configuration and PostgreSQL container/,
+        );
+      }
+      await assert.rejects(lstat(rejectedArchive), { code: 'ENOENT' });
+      await assert.rejects(lstat(`${rejectedArchive}.manifest.json`), { code: 'ENOENT' });
+      assert.equal(targetState(`omnis_restore_${state}`), '');
+      process.stdout.write(
+        `Rejected ${state} application before backup publication or restore database creation.\n`,
+      );
+    }
+  } finally {
+    run('docker', ['--host', endpoint, 'unpause', app], { allowFailure: true });
+    docker('container', 'rm', '-f', app);
+  }
   const restored = recovery('restore', [archive, target, digest]).output;
   printTiming(restored);
   assert.match(targetState(target), /^false\|0\|omnis-restricted-restore:[a-f0-9]+:verified$/);

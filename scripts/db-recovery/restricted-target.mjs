@@ -49,34 +49,65 @@ export function restrictedTarget([context, endpoint, compose, api, worker, conta
 
   composeCheck('config', '--quiet');
   function verify() {
-    if (composeCheck('ps', '--status', 'running', '--no-trunc', '--quiet') !== container) {
-      throw new Error(
-        'Stop the application services and confirm the exact running PostgreSQL container.',
-      );
-    }
     checkContext();
-    const result = command('docker', [
+    const ids = command('docker', [
+      '--host',
+      endpoint,
+      'ps',
+      '--all',
+      '--no-trunc',
+      '--quiet',
+      '--filter',
+      `label=com.docker.compose.project=${project}`,
+    ]).split('\n');
+    if (!ids.includes(container) || !ids.every((id) => /^[a-f0-9]{64}$/.test(id))) {
+      throw new Error('Restricted PostgreSQL container is missing from the project inventory.');
+    }
+    const rows = command('docker', [
       '--host',
       endpoint,
       'inspect',
       '--type',
       'container',
       '--format',
-      '{{.Id}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{.State.Running}}|{{.State.StartedAt}}|{{index .Config.Labels "com.docker.compose.project.config_files"}}',
-      container,
-    ]);
-    const [id, actualProject, service, running, startedAt, configuredFiles] = result.split('|');
-    if (
-      id !== container ||
-      actualProject !== project ||
-      service !== 'postgres' ||
-      running !== 'true' ||
-      configuredFiles !== composeFiles ||
-      !Number.isFinite(Date.parse(startedAt))
-    ) {
-      throw new Error('PostgreSQL container did not match the restricted Compose project.');
+      '{{.Id}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{.State.Status}}|{{.State.Running}}|{{.State.Paused}}|{{.State.Restarting}}|{{.State.StartedAt}}|{{index .Config.Labels "com.docker.compose.project.config_files"}}',
+      ...ids,
+    ]).split('\n');
+    let postgresStart;
+    for (const [index, row] of rows.entries()) {
+      const [id, actualProject, service, state, running, paused, restarting, startedAt, files] =
+        row.split('|');
+      if (
+        id !== ids[index] ||
+        actualProject !== project ||
+        paused !== 'false' ||
+        restarting !== 'false'
+      ) {
+        throw new Error('Restricted project container identity or state is unsafe.');
+      }
+      if (id === container) {
+        if (
+          service !== 'postgres' ||
+          state !== 'running' ||
+          running !== 'true' ||
+          files !== composeFiles ||
+          !Number.isFinite(Date.parse(startedAt))
+        ) {
+          throw new Error('PostgreSQL container did not match the restricted Compose project.');
+        }
+        postgresStart = startedAt;
+      } else if (
+        !['api', 'worker', 'web'].includes(service) ||
+        !['created', 'exited'].includes(state) ||
+        running !== 'false'
+      ) {
+        throw new Error('Stop the application services and resolve unexpected project containers.');
+      }
     }
-    return startedAt;
+    if (rows.length !== ids.length || !postgresStart) {
+      throw new Error('Incomplete restricted project container inventory.');
+    }
+    return postgresStart;
   }
 
   const startedAt = verify();

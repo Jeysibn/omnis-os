@@ -17,8 +17,7 @@ shift 5
 
 case "$*" in
   'config --quiet'|'up --no-build --pull never -d postgres'|'build api worker web'|\
-    'up --no-build --pull never -d api worker web'|'ps --all'|\
-    'ps --status running --no-trunc --quiet'|'stop api worker web postgres') ;;
+    'up --no-build --pull never -d api worker web'|'ps --all'|'stop api worker web postgres') ;;
   *) fail ;;
 esac
 
