@@ -54,7 +54,7 @@ import {
   type AcceptanceAvailability,
 } from './useAcceptanceAvailability.js';
 import { RunUsageReadout } from './RunUsageReadout.js';
-import { describeRunLifecycle } from './runLifecycle.js';
+import { describeRunLifecycle, eventsForRun } from './runLifecycle.js';
 import {
   StaleSessionError,
   bindExpiryToSession,
@@ -2254,7 +2254,7 @@ function RunInspector({
   const task = run ? tasks.find((item) => item.id === run.taskId) : null;
   // Events from a previously selected run can still be in state while the stream effect catches up
   // (or when its retry budget is spent). Only this run's events may drive what is shown.
-  const runEvents = run ? events.filter((event) => event.runId === run.id) : [];
+  const runEvents = eventsForRun(run, events);
   return (
     <aside className="panel run-inspector" aria-label="Run inspector">
       <div className="section-heading">

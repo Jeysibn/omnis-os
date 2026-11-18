@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import type { Run } from '@omnis/contracts';
-import { describeRunLifecycle } from './runLifecycle.js';
+import { describeRunLifecycle, eventsForRun } from './runLifecycle.js';
 
 const stop = [{ type: 'run.stop_requested' as const }];
 const lifecycle = (status: Run['status'], events: Array<{ type: 'run.stop_requested' }> = []) =>
@@ -50,5 +50,27 @@ test.describe('run lifecycle model', () => {
     expect(result.tone).toBe('warning');
     expect(result.cancellation).toBeNull();
     expect(result.detail).toContain('not a confirmed cancellation');
+  });
+});
+
+test.describe('events scoped to the selected run', () => {
+  const mixed = [
+    { runId: 'run-a', type: 'run.stop_requested' as const },
+    { runId: 'run-b', type: 'run.started' as const },
+  ];
+
+  test("another run's stop event cannot make this run Pending or Unknown", () => {
+    const run = { id: 'run-b', status: 'running' as const };
+    const scoped = eventsForRun(run, mixed);
+    expect(scoped).toEqual([mixed[1]]);
+    expect(describeRunLifecycle(run, scoped).cancellation).toBeNull();
+    // Without scoping, the same input would wrongly report a pending stop.
+    expect(describeRunLifecycle(run, mixed).cancellation).toBe('pending');
+    const unknown = { id: 'run-b', status: 'unknown' as const };
+    expect(describeRunLifecycle(unknown, eventsForRun(unknown, mixed)).cancellation).toBeNull();
+  });
+
+  test('no selected run yields no events', () => {
+    expect(eventsForRun(null, mixed)).toEqual([]);
   });
 });

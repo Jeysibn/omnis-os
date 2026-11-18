@@ -98,3 +98,14 @@ export function describeRunLifecycle(
       );
   }
 }
+
+/**
+ * Events left in component state from a previously selected run (for example when its stream's
+ * retry budget is spent and history is kept) must never drive another run's lifecycle or trail.
+ */
+export function eventsForRun<T extends Pick<RunEvent, 'runId'>>(
+  run: Pick<Run, 'id'> | null,
+  events: ReadonlyArray<T>,
+): T[] {
+  return run ? events.filter((event) => event.runId === run.id) : [];
+}
