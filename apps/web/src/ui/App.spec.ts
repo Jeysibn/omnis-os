@@ -158,6 +158,8 @@ type FixtureOptions = {
   stopMutationStatus?: number;
   stopMutationFailures?: number;
   eventCount?: number;
+  /** Runs whose trail records a stop request followed by a later event, while status stays running. */
+  stopRecordedRunIds?: string[];
   eventDisconnects?: boolean;
   /** The session is revoked as the stream opens: the stream drops and authenticated reads 401. */
   eventRevoked?: boolean;
@@ -428,9 +430,10 @@ function createMockApi(page: Page) {
   });
 
   const makeEvents = (run: Run): RunEvent[] => {
+    const stopRecorded = options.stopRecordedRunIds?.includes(run.id) ?? false;
     const count =
       options.eventCount === undefined
-        ? run.status === 'completed'
+        ? run.status === 'completed' || stopRecorded
           ? 3
           : 2
         : Math.max(0, options.eventCount);
@@ -439,11 +442,13 @@ function createMockApi(page: Page) {
       const type: RunEvent['type'] =
         sequence === count && (run.status === 'completed' || options.eventCount)
           ? 'run.completed'
-          : sequence === 1
-            ? 'run.queued'
-            : sequence === 2
-              ? 'run.started'
-              : 'run.output';
+          : stopRecorded && sequence === 2
+            ? 'run.stop_requested'
+            : sequence === 1
+              ? 'run.queued'
+              : sequence === 2
+                ? 'run.started'
+                : 'run.output';
       const event: RunEvent = {
         id: `event-${run.id}-${sequence}`,
         runId: run.id,
@@ -2623,6 +2628,43 @@ test('refreshing during an active synthetic run restores the run, its events and
   await expect(rows).toHaveCount(before);
   await expect(page.locator('.runtime-kind')).toHaveText('SYNTHETIC MOCK');
   await expect(page.locator('.run-lifecycle [data-cancellation="confirmed"]')).toHaveCount(0);
+});
+
+test('a recorded stop on a still-running run shows Pending, never Confirmed', async ({
+  page,
+  api,
+}) => {
+  api.configure({
+    runs: [makeRun('run-active', 'task-open', 'Review launch checklist', 'running')],
+    stopRecordedRunIds: ['run-active'],
+  });
+  await openWorkspace(page, '#runs/run-active');
+  const lifecycle = page.locator('.run-lifecycle');
+  await expect(lifecycle.locator('.cancellation-state')).toHaveText('Stop pending');
+  await expect(lifecycle).toContainText('It is not cancelled.');
+  await expect(lifecycle.locator('[data-cancellation="confirmed"]')).toHaveCount(0);
+});
+
+test("switching runs never derives lifecycle from the previous run's events", async ({
+  page,
+  api,
+}) => {
+  api.configure({
+    runs: [
+      makeRun('run-a', 'task-open', 'Review launch checklist', 'running'),
+      makeRun('run-b', 'task-done', 'Audit access notes', 'running'),
+    ],
+    stopRecordedRunIds: ['run-a'],
+  });
+  await openWorkspace(page, '#runs/run-a');
+  await expect(page.locator('.run-lifecycle .cancellation-state')).toHaveText('Stop pending');
+  await page.getByRole('button', { name: /Audit access notes/ }).click();
+  await expect(page.locator('.inspector-summary h3')).toHaveText('Audit access notes');
+  await expect(page.locator('.run-lifecycle .cancellation-state')).toHaveCount(0);
+  for (const row of await page.locator('.event-row .event-source').allTextContents()) {
+    expect(row).toContain('synthetic');
+  }
+  await expect(page.locator('.event-row')).toHaveCount(2);
 });
 
 test('revisiting a terminal run replays history, ends the stream, and stays closed', async ({

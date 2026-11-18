@@ -2252,6 +2252,9 @@ function RunInspector({
   announcement: string;
 }) {
   const task = run ? tasks.find((item) => item.id === run.taskId) : null;
+  // Events from a previously selected run can still be in state while the stream effect catches up
+  // (or when its retry budget is spent). Only this run's events may drive what is shown.
+  const runEvents = run ? events.filter((event) => event.runId === run.id) : [];
   return (
     <aside className="panel run-inspector" aria-label="Run inspector">
       <div className="section-heading">
@@ -2315,7 +2318,7 @@ function RunInspector({
                 <strong>{formatDate(run.updatedAt)}</strong>
               </div>
             </div>
-            <RunLifecycleNotice lifecycle={describeRunLifecycle(run, events)} />
+            <RunLifecycleNotice lifecycle={describeRunLifecycle(run, runEvents)} />
             {run.status === 'unknown' && (
               <button type="button" className="secondary-button" onClick={onReconcile}>
                 Check state
@@ -2336,7 +2339,7 @@ function RunInspector({
           <div className="event-heading">
             <h3>Event trail</h3>
             <span>
-              {events.length} {events.length === 1 ? 'event' : 'events'}
+              {runEvents.length} {runEvents.length === 1 ? 'event' : 'events'}
             </span>
           </div>
           {reconcileError && (
@@ -2360,7 +2363,7 @@ function RunInspector({
               </button>
             </div>
           )}
-          {events.length ? (
+          {runEvents.length ? (
             <div
               className="event-scroll"
               tabIndex={0}
@@ -2368,7 +2371,7 @@ function RunInspector({
               aria-label={`Event history for ${run.taskTitle}`}
             >
               <ol className="event-list">
-                {events.map((event) => (
+                {runEvents.map((event) => (
                   <EventRow key={event.id} event={event} />
                 ))}
               </ol>
