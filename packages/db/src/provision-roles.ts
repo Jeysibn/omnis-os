@@ -1,4 +1,4 @@
-import type { Pool } from 'pg';
+import type { Pool, PoolClient } from 'pg';
 import { RESTRICTED_DATABASE_NAME } from './restricted-bootstrap.ts';
 
 const databaseRoles = {
@@ -61,6 +61,36 @@ export async function provisionRestrictedDatabaseRoles(
 
 async function provisionRolesForTarget(
   admin: Pool,
+  passwords: Partial<Record<DatabaseRoleKey, string>>,
+  roleKeys: readonly DatabaseRoleKey[],
+  expectedDatabaseName?: string,
+  expectedSystemIdentifier?: string,
+): Promise<void> {
+  const client = await admin.connect();
+  let transactionOpen = false;
+  try {
+    await client.query('BEGIN');
+    transactionOpen = true;
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('omnis-role-provisioning'))");
+    await provisionRolesInTransaction(
+      client,
+      passwords,
+      roleKeys,
+      expectedDatabaseName,
+      expectedSystemIdentifier,
+    );
+    await client.query('COMMIT');
+    transactionOpen = false;
+  } catch (error) {
+    if (transactionOpen) await client.query('ROLLBACK').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function provisionRolesInTransaction(
+  admin: PoolClient,
   passwords: Partial<Record<DatabaseRoleKey, string>>,
   roleKeys: readonly DatabaseRoleKey[],
   expectedDatabaseName?: string,
@@ -295,7 +325,7 @@ async function provisionRolesForTarget(
   `);
 }
 
-async function assertFreshRestrictedTarget(admin: Pool): Promise<void> {
+async function assertFreshRestrictedTarget(admin: PoolClient): Promise<void> {
   const roles = await admin.query<{ role_name: string }>(
     `SELECT rolname AS role_name
        FROM pg_roles
