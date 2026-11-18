@@ -11,7 +11,11 @@ This is an interface handoff, not a new runtime contract or an approval gate. Th
 
 The ordinary Run API is mock-only. Its `RunSchema` carries `runtimeKind: "mock"`, `synthetic: true`, and usage `{ quality: "unknown", inputTokens: null, outputTokens: null, cost: null }`. Run states are `queued`, `running`, `stopping`, `completed`, `cancelled`, `failed`, `interrupted`, and `unknown`.
 
-The synthetic connector harness is separately versioned as `omnis.synthetic-task-run.v1`. Its response reports `status` (`admitted`, `submitting`, `accepted`, `running`, `completed`, `failed`, `interrupted`, or `unknown`), `submitted`, correlation/request/attempt IDs, synthetic usage provenance, and response text only when completed. These two status sets describe different records; clients must not collapse them into one state machine.
+The synthetic connector harness uses version `omnis.synthetic-task-run.v1`, but is enabled only in the test harness (see Section 8). Its HTTP and internal attempt contracts are distinct:
+
+- `POST /api/v1/tasks/:taskId/synthetic-runs` accepts the versioned request with an `Idempotency-Key`; on admission it returns the canonical `RunSchema` directly, with HTTP `202` for a new run or `200` for same-identity recovery.
+- `GET /api/v1/tasks/:taskId/synthetic-runs/:authorizationId` returns `SyntheticTaskRunDetailSchema`: `version`, `taskId`, optional `run`, optional `attempt`, and `usage`.
+- Internal worker/store `SyntheticTaskRunResponseSchema` carries `status` (`admitted`, `submitting`, `accepted`, `running`, `completed`, `failed`, `interrupted`, or `unknown`), `submitted`, correlation/request/attempt IDs, synthetic usage provenance, and response text only when completed. This internal attempt status is not the ordinary Run status and is not the HTTP admission response.
 
 The ordinary Run paths are owner-authenticated and scoped to the task/run. The synthetic connector task-run paths described below are test-harness-only and are not available as product integration endpoints. Synthetic authorization is bound to the exact task, project and immutable profile version, request identity and prompt digest. One authorization permits at most one execution: a retry with the same request identity only recovers/reads that execution, while a different request identity is rejected. Raw prompts do not cross the broker boundary as part of its persisted audit event.
 
