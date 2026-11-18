@@ -174,8 +174,44 @@ describe('restricted database target preflight', () => {
       ),
       /omnis_restricted_dev/,
     );
-    assert.equal(queries.length, 1);
-    assert.match(queries[0]!, /current_database\(\)/);
+    assert.match(queries[0]!, /^BEGIN$/);
+    assert.ok(queries.some((query) => /current_database\(\)/.test(query)));
+    assert.equal(queries.at(-1), 'ROLLBACK');
+  });
+
+  it('rolls back injected provisioning failures on the checked-out connection', async () => {
+    const queries: string[] = [];
+    const pool = fakePool(async (sql) => {
+      queries.push(sql);
+      if (/ALTER ROLE omnis_migrator/.test(sql)) throw new Error('injected role write failure');
+      if (/quote_literal/.test(sql)) return { rows: [{ literal: "'x'" }] };
+      if (/current_database\(\)/.test(sql)) {
+        return {
+          rows: [
+            {
+              database_name: 'omnis_restricted_dev',
+              current_user: 'omnis',
+              is_superuser: true,
+              system_identifier: SYSTEM_IDENTIFIER,
+            },
+          ],
+        };
+      }
+      return { rows: [] };
+    });
+
+    await assert.rejects(
+      provisionRestrictedDatabaseRoles(
+        pool,
+        { migration: 'a'.repeat(64), runtime: 'b'.repeat(64) },
+        SYSTEM_IDENTIFIER,
+      ),
+      /injected role write failure/,
+    );
+    assert.equal(queries[0], 'BEGIN');
+    assert.ok(queries.some((query) => /pg_advisory_xact_lock/.test(query)));
+    assert.equal(queries.at(-1), 'ROLLBACK');
+    assert.equal(queries.includes('COMMIT'), false);
   });
 
   it('rejects a live role or privilege mismatch before provisioning SQL', async () => {
@@ -219,7 +255,9 @@ describe('restricted database target preflight', () => {
           SYSTEM_IDENTIFIER,
         ),
       );
-      assert.equal(queries.length, 1);
+      assert.equal(queries[0], 'BEGIN');
+      assert.equal(queries.at(-1), 'ROLLBACK');
+      assert.equal(queries.filter((query) => /current_database\(\)/.test(query)).length, 1);
     }
   });
 
@@ -404,5 +442,8 @@ function files(
 }
 
 function fakePool(query: (sql: string) => Promise<{ rows: unknown[]; rowCount?: number }>): Pool {
-  return { query } as unknown as Pool;
+  return {
+    query,
+    connect: async () => ({ query, release: () => undefined }),
+  } as unknown as Pool;
 }
