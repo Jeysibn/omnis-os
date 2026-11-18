@@ -24,7 +24,7 @@ esac
 node scripts/compose/verify-restricted-env.mjs \
   --compose-env "$compose_env_file" \
   --api-env "$api_env_file" \
-  --worker-env "$worker_env_file"
+  --worker-env "$worker_env_file" >&2
 
 bash scripts/compose/verify-docker-context.sh "$docker_context" "$docker_endpoint" || fail
 

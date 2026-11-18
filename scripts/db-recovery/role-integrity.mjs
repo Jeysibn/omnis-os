@@ -113,9 +113,20 @@ const expectedTimeoutSettings = {
 };
 
 export function assertRestoreRoleSecurity(roles) {
+  assertRoleSecurity(roles, false);
+}
+
+export function assertRestrictedRestoreRoleSecurity(roles) {
+  assertRoleSecurity(roles, true);
+}
+
+function assertRoleSecurity(roles, restricted) {
   if (!Array.isArray(roles)) throw new Error('PostgreSQL role security snapshot must be an array.');
 
-  for (const [name, expected] of Object.entries(expectedRoles)) {
+  for (const [name, legacy] of Object.entries(expectedRoles)) {
+    const inert = restricted && (name === 'omnis_authorizer' || name === 'omnis_launcher');
+    const expected = inert ? { ...legacy, login: false } : legacy;
+    const timeouts = inert ? {} : expectedTimeoutSettings[name];
     const actual = roles.find((role) => role?.name === name);
     if (!actual) throw new Error(`Required PostgreSQL role ${name} is missing.`);
     for (const [attribute, value] of Object.entries(expected)) {
@@ -123,10 +134,7 @@ export function assertRestoreRoleSecurity(roles) {
         throw new Error(`PostgreSQL role ${name} has unsafe ${attribute} attribute.`);
       }
     }
-    if (
-      expectedTimeoutSettings[name] &&
-      !sameSettingMap(actual.timeoutSettings, expectedTimeoutSettings[name])
-    ) {
+    if (timeouts && !sameSettingMap(actual.timeoutSettings, timeouts)) {
       throw new Error(`PostgreSQL role ${name} timeout policy is missing or unsafe.`);
     }
     if (!Array.isArray(actual.databaseTimeoutOverrides)) {

@@ -9,6 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertBackupSafe, metricsQuery, parseMetrics } from './metrics.mjs';
 import { aclSnapshotQuery, assertRuntimeAclPolicy } from './acl-integrity.mjs';
+import { finishSnapshotExport, startSnapshotExport } from './snapshot.mjs';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const composeArgs = createComposeArgs();
@@ -40,7 +41,7 @@ let createdOutput = false;
 let createdManifest = false;
 let exportedSnapshot;
 try {
-  const exporter = await startSnapshotExport(sourceDatabase);
+  const exporter = await exportLegacySnapshot(sourceDatabase);
   exportedSnapshot = exporter;
 
   const file = await open(
@@ -120,7 +121,7 @@ try {
   throw error;
 }
 
-async function startSnapshotExport(database) {
+function exportLegacySnapshot(database) {
   const child = spawn(
     '/usr/bin/docker',
     [
@@ -140,48 +141,7 @@ async function startSnapshotExport(database) {
     ],
     { cwd: repositoryRoot, env: process.env, stdio: ['pipe', 'pipe', 'pipe'] },
   );
-  let stderr = '';
-  child.stdin.on('error', () => undefined);
-  child.stderr?.on('data', (chunk) => {
-    if (stderr.length < 2_000) stderr += chunk.toString('utf8');
-  });
-  const closed = once(child, 'close');
-  child.stdin.write(
-    'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;\nSELECT pg_export_snapshot();\n',
-  );
-  const snapshot = await new Promise((resolve, reject) => {
-    let output = '';
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL');
-      reject(new Error('Timed out creating a PostgreSQL backup snapshot.'));
-    }, 10_000);
-    child.stdout.on('data', (chunk) => {
-      output += chunk.toString('utf8');
-      const candidate = output
-        .split(/\r?\n/)
-        .find((line) => /^[0-9A-F]+-[0-9A-F]+-[0-9A-F]+$/i.test(line.trim()));
-      if (candidate) {
-        clearTimeout(timer);
-        resolve(candidate.trim());
-      }
-    });
-    closed.then(([code]) => {
-      clearTimeout(timer);
-      reject(
-        new Error(
-          `PostgreSQL snapshot export failed with exit code ${code ?? 'unknown'} (${stderr.length ? 'details redacted' : 'no details'}).`,
-        ),
-      );
-    });
-  });
-  return { child, closed, snapshot };
-}
-
-async function finishSnapshotExport(exporter) {
-  if (exporter.child.exitCode !== null || exporter.child.signalCode !== null) return;
-  exporter.child.stdin.end('COMMIT;\n\\q\n');
-  const [code] = await exporter.closed;
-  if (code !== 0) throw new Error('Could not close the PostgreSQL snapshot transaction cleanly.');
+  return startSnapshotExport(child);
 }
 
 async function querySnapshotMetrics(database, snapshot) {
