@@ -333,6 +333,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Verify disposable PostgreSQL backup and restore
         run: pnpm integration:backup-restore
+      - name: Verify restricted PostgreSQL backup and isolated restore
+        run: node tests/integration/restricted-backup-restore-ci.mjs
 
   container-images:
     needs: validation_mode

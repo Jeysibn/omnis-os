@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { assertRestoreRoleSecurity } from './role-integrity.mjs';
+import {
+  assertRestrictedRestoreRoleSecurity,
+  assertRestoreRoleSecurity,
+} from './role-integrity.mjs';
 
 const safeRoles = [
   {
@@ -154,4 +157,16 @@ test('restore role security policy', async (suite) => {
       '30s';
     assert.throws(() => assertRestoreRoleSecurity(changed), /omnis_authorizer timeout policy/);
   });
+});
+
+test('restricted recovery requires inert authorizer and launcher principals', () => {
+  const roles = cloneSafeRoles();
+  for (const role of roles.slice(-2)) {
+    role.login = false;
+    role.timeoutSettings = {};
+  }
+  assert.doesNotThrow(() => assertRestrictedRestoreRoleSecurity(roles));
+  assert.throws(() => assertRestoreRoleSecurity(roles), /login/);
+  roles.at(-1).membershipCount = 1;
+  assert.throws(() => assertRestrictedRestoreRoleSecurity(roles), /membershipCount/);
 });

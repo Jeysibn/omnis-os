@@ -70,6 +70,8 @@ For diagnosis, use a restricted administrative connection and first capture the 
 
 ### PostgreSQL backup and isolated restore
 
+For the execution-disabled Compose profile, use the [restricted PostgreSQL recovery runbook](./RESTRICTED_POSTGRES_RECOVERY.md). The commands below cover the legacy profile.
+
 Use PostgreSQL custom-format logical dumps for local recovery. Keep the `.dump` and adjacent `.dump.manifest.json` outside the repository in an owner-only directory (`0700` directory, `0600` files). The manifest stores counts, migration IDs, sequence checks and record fingerprints; it contains no database password. Set `OMNIS_BACKUP_DATABASE` to the source database name when it is not `omnis`.
 
 ```sh
