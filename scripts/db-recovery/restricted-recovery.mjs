@@ -66,6 +66,7 @@ async function main(args) {
   stage = 'source database, cluster, connection role and quiescence';
   db.sql(sourceDatabase, 'SELECT 1', `(${sourceOwned}) AND (${noOtherClients})`);
   verifyRoles(db);
+  verifyControlFunctionAcl(db, sourceDatabase);
   const scratch = await mkdtemp(join(dirname(archive), '.omnis-recovery-'));
   const staged = join(scratch, 'archive.dump');
   const started = performance.now();
@@ -97,6 +98,18 @@ function verifyRoles(db) {
     ),
   );
   assertRestrictedRestoreRoleSecurity(roles);
+}
+
+function verifyControlFunctionAcl(db, database) {
+  db.sql(
+    database,
+    'SELECT 1',
+    `
+    has_function_privilege('omnis_migrator', 'pg_catalog.pg_control_system()', 'EXECUTE')
+    AND NOT has_function_privilege('omnis_runtime', 'pg_catalog.pg_control_system()', 'EXECUTE')
+    AND NOT has_function_privilege('omnis_authorizer', 'pg_catalog.pg_control_system()', 'EXECUTE')
+    AND NOT has_function_privilege('omnis_launcher', 'pg_catalog.pg_control_system()', 'EXECUTE')`,
+  );
 }
 
 function capture(db, database, snapshot) {
@@ -260,6 +273,29 @@ function databaseGrants(acl, database) {
   return grants.join('\n');
 }
 
+function restoreProvisionedAcl(database, source) {
+  // pg_dump omits system-schema ACLs and can omit explicit grants to the sequence owner.
+  const taskSequencePrivileges = ['SELECT', 'UPDATE'].filter((privilege) =>
+    source.acl.some(
+      (entry) =>
+        entry.objectType === 'sequence' &&
+        entry.schema === 'omnis' &&
+        entry.object === 'task_id_seq' &&
+        entry.grantee === 'omnis_migrator' &&
+        entry.privilege === privilege &&
+        !entry.grantable,
+    ),
+  );
+  const sequenceGrant = taskSequencePrivileges.length
+    ? `GRANT ${taskSequencePrivileges.join(', ')} ON SEQUENCE omnis.task_id_seq TO omnis_migrator;`
+    : '';
+  return `
+    ${databaseGrants(source.acl, database)}
+    REVOKE EXECUTE ON FUNCTION pg_catalog.pg_control_system() FROM PUBLIC;
+    GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO omnis_migrator;
+    ${sequenceGrant}`;
+}
+
 async function restore(db, staged, database, manifest) {
   const marker = `omnis-restricted-restore:${randomBytes(16).toString('hex')}`;
   const name = `"${database}"`;
@@ -300,8 +336,9 @@ async function restore(db, staged, database, manifest) {
     await readPrivateFile(staged, (file) => db.restore(database, file.fd));
 
     stage = 'restore verification';
-    db.sql(database, databaseGrants(manifest.source.acl, database), owned);
+    db.sql(database, restoreProvisionedAcl(database, manifest.source), owned);
     verifyRoles(db);
+    verifyControlFunctionAcl(db, database);
     if (!matchingState(manifest.source, capture(db, database))) {
       throw new Error('Restored history, sequence, migration, or ACL state differs.');
     }
