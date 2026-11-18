@@ -13,7 +13,7 @@ The ordinary Run API is mock-only. Its `RunSchema` carries `runtimeKind: "mock"`
 
 The synthetic connector harness is separately versioned as `omnis.synthetic-task-run.v1`. Its response reports `status` (`admitted`, `submitting`, `accepted`, `running`, `completed`, `failed`, `interrupted`, or `unknown`), `submitted`, correlation/request/attempt IDs, synthetic usage provenance, and response text only when completed. These two status sets describe different records; clients must not collapse them into one state machine.
 
-All of these paths are owner-authenticated and scoped to the task/run. Synthetic authorization is bound to the exact task, project and immutable profile version, request identity and prompt digest. Authorization is one-use; the server rejects replay or mismatched binding. Raw prompts do not cross the broker boundary as part of its persisted audit event.
+The ordinary Run paths are owner-authenticated and scoped to the task/run. The synthetic connector task-run paths described below are test-harness-only and are not available as product integration endpoints. Synthetic authorization is bound to the exact task, project and immutable profile version, request identity and prompt digest. One authorization permits at most one execution: a retry with the same request identity only recovers/reads that execution, while a different request identity is rejected. Raw prompts do not cross the broker boundary as part of its persisted audit event.
 
 ## 2. Run lifecycle and cancellation
 
@@ -79,7 +79,7 @@ These are requirements for future design, not fields that a client may assume to
 
 ## 8. Frontend handoff
 
-Claude #2 may integrate lifecycle display, mock/synthetic labeling, pending cancellation, unknown usage, persisted event replay, and unchanged owner result acceptance using the APIs and schemas in Sections 1–6. The current PR #137 implementation is directionally consistent with this boundary.
+Claude #2 may integrate lifecycle display, mock/synthetic labeling, pending cancellation, unknown usage, persisted Run-event replay, and unchanged owner result acceptance using the ordinary owner-facing Run/task APIs and schemas. The synthetic connector task-run endpoints and audit-history endpoint described in Sections 1–5 are enabled only for `NODE_ENV=test` with `OMNIS_SYNTHETIC_BROKER_TEST_MODE=1`; they are contract fixtures, not deployable product endpoints. The current PR #137 implementation is directionally consistent with the ordinary mock Run boundary.
 
 Claude #2 must not build or enable real-provider run controls, claim authentic provider provenance, present synthetic fixture metrics as provider usage, treat cancellation request as termination, or infer real-run gate availability. Those integrations wait for the future contract and security approvals in Section 7.
 
