@@ -33,6 +33,21 @@ test('required branch-protection check job IDs and full manual validation remain
   assert.match(workflow, /^permissions:\n {2}contents: read$/m);
 });
 
+test('full frontend browser validation is sharded behind the stable required check', () => {
+  assert.match(workflow, /^ {2}frontend-browser-shards:\n/m);
+  assert.match(workflow, /shard: \[1, 2, 3\]/);
+  assert.match(workflow, /playwright test --shard=\$\{\{ matrix\.shard \}\}\/3/);
+  assert.match(workflow, /^ {2}frontend-browser-targeted:\n/m);
+
+  const browserGateStart = workflow.indexOf('\n  frontend-browser:\n') + 1;
+  const browserGateEnd = workflow.indexOf('\n  checks-core:\n', browserGateStart);
+  const browserGate = workflow.slice(browserGateStart, browserGateEnd);
+  assert.match(browserGate, /if: always\(\)/);
+  assert.match(browserGate, /frontend-browser-shards\.result/);
+  assert.match(browserGate, /frontend-browser-targeted\.result/);
+  assert.match(browserGate, /full_suite: \$\{\{ needs\.validation_mode\.outputs\.full/);
+});
+
 test('restricted database CI receives only its dedicated credential export path', () => {
   const restrictedStepStart = workflow.indexOf(
     '- name: Verify restricted database bootstrap and migrations',
