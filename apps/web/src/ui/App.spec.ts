@@ -2605,6 +2605,26 @@ test('lifecycle notice is atomic, keyboard reachable and does not overflow at 36
   expect(overflow.box).toBeLessThanOrEqual(0);
 });
 
+test('refreshing during an active synthetic run restores the run, its events and lifecycle', async ({
+  page,
+  api,
+}) => {
+  api.configure({
+    runs: [makeRun('run-active', 'task-open', 'Review launch checklist', 'running')],
+  });
+  await openWorkspace(page, '#runs/run-active');
+  const rows = page.locator('.event-row');
+  await expect(rows.first()).toBeVisible();
+  const before = await rows.count();
+  await expect(page.locator('.run-lifecycle')).toContainText('The synthetic run is in progress.');
+  await page.reload();
+  await expect(page.locator('.inspector-summary .status-pill')).toContainText('Running');
+  await expect(page.locator('.run-lifecycle')).toContainText('The synthetic run is in progress.');
+  await expect(rows).toHaveCount(before);
+  await expect(page.locator('.runtime-kind')).toHaveText('SYNTHETIC MOCK');
+  await expect(page.locator('.run-lifecycle [data-cancellation="confirmed"]')).toHaveCount(0);
+});
+
 test('revisiting a terminal run replays history, ends the stream, and stays closed', async ({
   page,
   api,
