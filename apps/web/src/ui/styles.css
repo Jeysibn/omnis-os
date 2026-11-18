@@ -2631,3 +2631,29 @@ button:disabled {
 .accept-result-unavailable p {
   margin: 0 0 6px;
 }
+
+.run-lifecycle {
+  display: grid;
+  gap: 4px;
+  margin: 12px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line, currentColor);
+  border-radius: 8px;
+}
+.run-lifecycle p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.run-lifecycle-warning {
+  border-style: dashed;
+}
+.cancellation-state {
+  justify-self: start;
+  padding: 2px 8px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 0.8rem;
+}
+.cancellation-state[data-cancellation='unknown'] {
+  border-style: dashed;
+}

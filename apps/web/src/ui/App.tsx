@@ -54,6 +54,7 @@ import {
   type AcceptanceAvailability,
 } from './useAcceptanceAvailability.js';
 import { RunUsageReadout } from './RunUsageReadout.js';
+import { describeRunLifecycle, eventsForRun } from './runLifecycle.js';
 import {
   StaleSessionError,
   bindExpiryToSession,
@@ -2251,6 +2252,9 @@ function RunInspector({
   announcement: string;
 }) {
   const task = run ? tasks.find((item) => item.id === run.taskId) : null;
+  // Events from a previously selected run can still be in state while the stream effect catches up
+  // (or when its retry budget is spent). Only this run's events may drive what is shown.
+  const runEvents = eventsForRun(run, events);
   return (
     <aside className="panel run-inspector" aria-label="Run inspector">
       <div className="section-heading">
@@ -2314,6 +2318,12 @@ function RunInspector({
                 <strong>{formatDate(run.updatedAt)}</strong>
               </div>
             </div>
+            <RunLifecycleNotice lifecycle={describeRunLifecycle(run, runEvents)} />
+            {run.status === 'unknown' && (
+              <button type="button" className="secondary-button" onClick={onReconcile}>
+                Check state
+              </button>
+            )}
             {isActive(run.status) && (
               <button
                 className="stop-button"
@@ -2329,7 +2339,7 @@ function RunInspector({
           <div className="event-heading">
             <h3>Event trail</h3>
             <span>
-              {events.length} {events.length === 1 ? 'event' : 'events'}
+              {runEvents.length} {runEvents.length === 1 ? 'event' : 'events'}
             </span>
           </div>
           {reconcileError && (
@@ -2353,7 +2363,7 @@ function RunInspector({
               </button>
             </div>
           )}
-          {events.length ? (
+          {runEvents.length ? (
             <div
               className="event-scroll"
               tabIndex={0}
@@ -2361,7 +2371,7 @@ function RunInspector({
               aria-label={`Event history for ${run.taskTitle}`}
             >
               <ol className="event-list">
-                {events.map((event) => (
+                {runEvents.map((event) => (
                   <EventRow key={event.id} event={event} />
                 ))}
               </ol>
@@ -2415,6 +2425,25 @@ function RunInspector({
         </>
       )}
     </aside>
+  );
+}
+
+function RunLifecycleNotice({ lifecycle }: { lifecycle: ReturnType<typeof describeRunLifecycle> }) {
+  return (
+    <div
+      className={`run-lifecycle run-lifecycle-${lifecycle.tone}`}
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+    >
+      <strong>{lifecycle.label}</strong>
+      {lifecycle.cancellationLabel && (
+        <span className="cancellation-state" data-cancellation={lifecycle.cancellation}>
+          {lifecycle.cancellationLabel}
+        </span>
+      )}
+      <p>{lifecycle.detail}</p>
+    </div>
   );
 }
 
