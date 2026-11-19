@@ -80,6 +80,7 @@ import { DepartmentsWorkspace } from './departments/DepartmentsWorkspace.js';
 import { ProjectsWorkspace } from './projects/ProjectsWorkspace.js';
 import { parseProjectList } from './projects/data.js';
 import { AppHeader } from './shell/AppHeader.js';
+import { describeEventFeed } from './eventSource.js';
 import { SyntheticAuditHistory } from './SyntheticAuditHistory.js';
 import { TaskExecutionAssignmentEditor } from './TaskExecutionAssignmentEditor.js';
 import { SyntheticConnectorRunAction } from './SyntheticConnectorRunAction.js';
@@ -2363,6 +2364,7 @@ function RunInspector({
               </button>
             </div>
           )}
+          <EventFeedNote notice={describeEventFeed(run, streamState)} />
           {runEvents.length ? (
             <div
               className="event-scroll"
@@ -2475,6 +2477,14 @@ function EmptyState({
     </div>
   );
 }
+function EventFeedNote({ notice }: { notice: ReturnType<typeof describeEventFeed> }) {
+  return (
+    <p className={`event-feed-note event-feed-${notice.kind}`} data-event-feed={notice.kind}>
+      <strong>{notice.label}.</strong> {notice.detail}
+    </p>
+  );
+}
+
 function streamLabel(state: StreamState) {
   return {
     connecting: 'Connecting',
