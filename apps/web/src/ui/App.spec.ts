@@ -171,6 +171,8 @@ type FixtureOptions = {
   capabilityDelayMs?: number;
   /** Scripted native-EventSource scenario: deliver event 1, drop, then replay 1 and send 2. */
   eventReconnectScenario?: boolean;
+  /** Real SSE endpoint that delivers event 1 and then stays open (a connected, live stream). */
+  eventHeldOpen?: boolean;
   /** Synthetic connector authorization expiry (defaults to 20 minutes from now). */
   connectorExpiresAt?: string;
   /** How POST /connector-authorizations/:id/revoke behaves. Default: succeeds. */
@@ -206,7 +208,10 @@ const sseFrame = (event: RunEvent) =>
  * ends the response; connection 2 is held until released, then replays event 1 and sends event 2;
  * later connections stay idle. `cursors` holds each request's true `Last-Event-ID` ('' if absent).
  */
-async function startEventScenario(events: RunEvent[]): Promise<EventScenarioServer> {
+async function startEventScenario(
+  events: RunEvent[],
+  holdOpen = false,
+): Promise<EventScenarioServer> {
   const cursors: string[] = [];
   let release = () => {};
   const gate = new Promise<void>((resolve) => {
@@ -217,6 +222,7 @@ async function startEventScenario(events: RunEvent[]): Promise<EventScenarioServ
     cursors.push(Array.isArray(header) ? header.join(',') : (header ?? ''));
     const connection = cursors.length;
     response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+    if (holdOpen) return void response.write(`retry: 60000\n\n${sseFrame(events[0]!)}`);
     if (connection === 1) return void response.end(`retry: 100\n\n${sseFrame(events[0]!)}`);
     if (connection === 2) {
       void gate.then(() => response.end(`${sseFrame(events[0]!)}${sseFrame(events[1]!)}`));
@@ -1225,10 +1231,10 @@ function createMockApi(page: Page) {
       }
       const run = currentRuns.find((item) => item.id === eventMatch[1]);
       if (!run) return fulfillError(route, 404, 'not_found', 'Run not found.');
-      if (options.eventReconnectScenario) {
+      if (options.eventReconnectScenario || options.eventHeldOpen) {
         // Playwright routes never expose Chromium's native Last-Event-ID, so a real HTTP server
         // receives the browser's actual EventSource requests and records the true cursor.
-        scenario ??= await startEventScenario(makeEvents(run));
+        scenario ??= await startEventScenario(makeEvents(run), options.eventHeldOpen);
         return route.continue({ url: scenario.url });
       }
       const after = Number(headers['last-event-id'] ?? '0');
@@ -2461,6 +2467,18 @@ test('event stream retries with the last delivered event sequence', async ({ pag
   await expect(page.getByText('2 events')).toBeVisible();
   await page.getByRole('link', { name: 'Tasks' }).click();
   await expect(page.getByRole('heading', { name: 'Task list' })).toBeVisible();
+});
+
+test('event feed note says Live for a connected, actively open run', async ({ page, api }) => {
+  test.setTimeout(20_000);
+  api.configure({ eventHeldOpen: true });
+  await openWorkspace(page, '#runs/run-active');
+  await expect(page.getByText('1 event', { exact: true })).toBeVisible();
+  await expect(page.locator('.inspector-summary .status-pill')).toContainText('Queued');
+  await expect(page.locator('.stream-badge')).toContainText('Live stream');
+  const note = page.locator('[data-event-feed]');
+  await expect(note).toHaveAttribute('data-event-feed', 'live');
+  await expect(note).toContainText('Live.');
 });
 
 test('event feed note labels recorded history, live, and reconnecting states', async ({
