@@ -25,6 +25,8 @@ The current runtime authorization and host-boundary documents identify missing p
 | **Selected private app**              | OpenAI describes plan usage for “selected private apps/clients”; the selection is by OpenAI, not self-certification. Commercial SIWC availability is limited/selected.                                                                                                                                                                                     | No selection or approval for Omnis OS is evidenced.                                                                                                                                                                                                                                                                                                                                               | Not determinative; selection/approval is the gate.                                                                                         |
 | **Paid or remotely hosted app**       | OpenAI directs paid or remotely hosted apps to its interest process/waitlist. Under the November 4 plan-use terms, users must be able to use SIWC plan access without paying for or upgrading to a paid app.                                                                                                                                               | Current product is described as single-owner local, not paid or remotely hosted. Any future distribution or remote execution changes the eligibility analysis.                                                                                                                                                                                                                                    | A license alone does not satisfy this route; interest/approval and no-charge plan use are required.                                        |
 
+The November 4 Terms apply across these app categories. A license, private-app selection, or interest-process approval does not waive user control, local user-controlled token storage, authenticated-user use, or consent requirements.
+
 ### Runtime and consent fit
 
 - OpenAI's `ext_agent_host_id` identifies a host for usage attribution but is not an authentication credential; even a public-key-derived ID is not proof of private-key possession. Codex #3 must provide separate authenticated host/process identity and continuity evidence.
@@ -44,7 +46,7 @@ The current runtime authorization and host-boundary documents identify missing p
 
 ## Recommended first-operation shape (proposal, not implemented)
 
-If the owner chooses SIWC, the first real operation should be a single direct Responses API request from a dedicated connector process. Do not place the OAuth token in API or Worker memory, connector arguments, environment inherited by an agent/tool runtime, task workspace, database, event, log, or artifact. The credential broker should release a short-lived access token only to the connector's provider-call boundary, after atomically consuming the exact operation grant. The broker/connector must not be a general-purpose token proxy.
+If the owner chooses SIWC, the first real operation should be a single direct Responses API request from one dedicated credential-broker/connector process. For this first operation, the broker and connector are the same process: it completes the narrowly scoped provider call internally and never returns or hands a token to a separate connector. Do not place the OAuth token in API or Worker memory, process arguments, an environment inherited by an agent/tool runtime, task workspace, database, event, log, or artifact. The broker/connector must not expose a general-purpose token proxy.
 
 The grant and audit record should bind, at minimum:
 
@@ -70,10 +72,10 @@ Do not treat synthetic tests as acceptance evidence for the second column.
 
 ### Owner decisions
 
-1. Confirm whether the intended use is strictly a personal, single-owner, local Omnis OS project on a user-controlled environment. Confirm whether the Windows/WSL2 installation is company-managed and whether policy permits local SIWC token storage. If not user-controlled or managed, pause this path and ask OpenAI for applicability guidance.
+1. Confirm whether the intended use is strictly a personal, single-owner, local Omnis OS project on a user-controlled environment. Confirm whether the Windows/WSL2 installation is company-managed and whether policy and technical controls still permit local SIWC token storage under the user's control. Company management alone is not established as disqualifying, but it also does not establish user control; if the owner cannot confirm the Terms are met, pause this path and ask OpenAI for applicability guidance.
 2. Confirm the selected ChatGPT account/workspace has an eligible plan and plan-use permission. Business workspace usage requires administrator allowance. Separately consent to Omnis OS and the ChatGPT Plan scope through OpenAI's authorization UI; no CLI credentials may be reused.
 3. Approve exact read-only task, prompt, profile, model, maximum input/output, maximum duration, one-request concurrency, and any shared-plan usage/billing impact.
-4. Decide whether to pursue the separate open-source route (including an explicit license choice), OpenAI's interest process for a paid/remote offering, or separately billed provider use. A repo license is needed only if choosing open-source distribution, not for personal-local use.
+4. Decide whether to pursue the separate open-source route (including an explicit license choice), OpenAI's interest process for a paid/remote offering, or separately billed provider use. A repo license is needed only if choosing open-source distribution, not for personal-local use. None of these app categories or selections waives the SIWC Terms' user-control, local token-custody, authenticated-user, or consent requirements; if this host cannot meet them, SIWC is unavailable on this host.
 5. Approve a local credential-custody/revocation policy and identify the dedicated secret-broker owner. This does not authorize live OAuth or provider calls by itself.
 6. After independent platform acceptance, issue a separate exact-scope authorization for one real read-only run. No standing authorization is implied.
 
@@ -99,7 +101,7 @@ Do not treat synthetic tests as acceptance evidence for the second column.
 
 ## Recommendation
 
-SIWC personal/local use is the recommended eligibility path to investigate, and a repository license is **not** a prerequisite for that category. It is not ready for implementation until the owner confirms the machine/runtime is user-controlled and not managed for token-storage purposes, account/workspace plan eligibility, per-run background consent, and the platform credential boundary. If those conditions do not hold, choose the open-source route, obtain OpenAI selection through the interest process for private/paid/remote use, or explicitly authorize separately billed provider credentials. No live integration is enabled.
+SIWC personal/local use is the recommended eligibility path to investigate, and a repository license is **not** a prerequisite for that category. It is not ready for implementation until the owner confirms the machine/runtime is user-controlled and the token store meets the Terms, account/workspace plan eligibility, per-run background consent, and the platform credential boundary. If user control or credential custody cannot be established, changing the app category, adding a license, or receiving private-app selection does not resolve that blocker; stop SIWC on this host pending OpenAI clarification. The paid/remote interest process is relevant to app eligibility only and does not waive these Terms. Separately billed provider credentials remain a distinct owner decision and authorization path. No live integration is enabled.
 
 ## Sources
 
