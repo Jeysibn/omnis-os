@@ -1,7 +1,7 @@
 # P0-R2.1 B1 — Docker Daemon Identity Metadata Authorization Package
 
-**Status:** Preparation only — NOT AUTHORIZED / NOT EXECUTED.  
-**Target boundary:** Owner-designated Ubuntu WSL2; Docker-only topology.  
+**Status:** Preparation only — NOT AUTHORIZED / NOT EXECUTED.
+**Target boundary:** Owner-designated Ubuntu WSL2; Docker-only topology.
 **Purpose:** One read-only Docker daemon identity/metadata request to establish the daemon candidate for a later, separately authorized B2 design. This package authorizes no resource discovery or workload inspection.
 
 ## Exact proposed operation
@@ -24,14 +24,14 @@ The first command pins the configured endpoint to the exact local Unix socket `/
 
 Before authorization, the owner must supply or explicitly accept the expected exact values and comparison rules for:
 
-| Field | Required owner decision |
-|---|---|
-| Endpoint | Confirm exact local Unix socket endpoint and that it is the intended WSL2 daemon; remote/TCP/npipe endpoints are out of scope. |
-| Daemon ID | Supply an independently known expected ID or explicitly authorize recording the first observed ID as a candidate only. The latter does not prove prior ownership and cannot authorize resource actions. |
-| Server version | Exact value or approved version range and upgrade/change stop rule. |
-| OS type / architecture | Exact expected values. |
-| Docker root directory | Exact expected path class/value and change stop rule; path is metadata, not identity proof by itself. |
-| Stability | Whether any external known baseline exists and how the owner will validate that the response belongs to the intended daemon. No second API call is included to test stability. |
+| Field                  | Required owner decision                                                                                                                                                                                 |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Endpoint               | Confirm exact local Unix socket endpoint and that it is the intended WSL2 daemon; remote/TCP/npipe endpoints are out of scope.                                                                          |
+| Daemon ID              | Supply an independently known expected ID or explicitly authorize recording the first observed ID as a candidate only. The latter does not prove prior ownership and cannot authorize resource actions. |
+| Server version         | Exact value or approved version range and upgrade/change stop rule.                                                                                                                                     |
+| OS type / architecture | Exact expected values.                                                                                                                                                                                  |
+| Docker root directory  | Exact expected path class/value and change stop rule; path is metadata, not identity proof by itself.                                                                                                   |
+| Stability              | Whether any external known baseline exists and how the owner will validate that the response belongs to the intended daemon. No second API call is included to test stability.                          |
 
 Any omitted expectation is unresolved, not implicitly accepted. A remote endpoint, alternate socket path, or endpoint ambiguity is a stop; the pinned socket path must resolve to the intended local daemon under the separately approved target conditions. Field values are owner inputs and must not be fabricated from the Checkpoint A observations.
 

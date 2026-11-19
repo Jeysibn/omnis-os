@@ -1,7 +1,7 @@
 # P0-R2.1 Checkpoint A — Fresh-Run Evidence Procedure (Proposed)
 
-**Status:** Design only — NOT AUTHORIZED / NOT EXECUTED.  
-**Applies to:** Any future Checkpoint A rerun. It does not cure or replace the prior INCONCLUSIVE run.  
+**Status:** Design only — NOT AUTHORIZED / NOT EXECUTED.
+**Applies to:** Any future Checkpoint A rerun. It does not cure or replace the prior INCONCLUSIVE run.
 **Target boundary:** Existing owner-designated Ubuntu WSL2 only. No Docker daemon API, PostgreSQL, Windows, service, resource, ingress, or provider operations.
 
 ## Evidence review finding
