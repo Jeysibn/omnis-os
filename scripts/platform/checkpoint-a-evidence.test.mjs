@@ -168,6 +168,8 @@ test('partial status-report failure preserves manifest hashes and command identi
   assert.equal(result.runnerSha256, runnerSha256);
   assert.equal(result.events[0].commandId, 'C01');
   assert.equal(result.events[0].statusReport.exitStatus, null);
+  assert.equal(result.events[0].statusReportedAt, null);
+  assert.equal(result.events[0].statusReportedTick, null);
   assert.deepEqual(adapter.executed, ['C01']);
 });
 
@@ -204,6 +206,53 @@ test('verification fails closed for malformed or non-serializable evidence', asy
   circular.self = circular;
   circular.recordSha256 = 'a'.repeat(64);
   assert.equal(verifyCheckpointEvidence(circular), false);
+});
+
+test('rejects malformed executor completion without recording adapter values', async () => {
+  const adapter = syntheticAdapter();
+  adapter.execute = async (command) => {
+    adapter.executed.push(command.id);
+    return {
+      stdoutChunks: chunksFrom('RAW SYNTHETIC OUTPUT'),
+      completion: Promise.resolve({ exitStatus: { secret: 'untrusted' }, timedOut: false }),
+    };
+  };
+  const result = await captureCheckpointEvidence(manifest, adapter);
+  assert.equal(result.state, 'partial');
+  assert.equal(result.stopReason, 'command_completion_invalid');
+  assert.equal(result.events[0].exitStatus, null);
+  assert.equal(result.events[0].statusReport.exitStatus, null);
+  assert.ok(!JSON.stringify(result).includes('untrusted'));
+  assert.equal(verifyCheckpointEvidence(result), true);
+  assert.deepEqual(adapter.executed, ['C01']);
+});
+
+test('rejects malformed status report without recording adapter values', async () => {
+  const adapter = syntheticAdapter();
+  adapter.reportStatus = async () => ({ exitStatus: { secret: 'untrusted' } });
+  const result = await captureCheckpointEvidence(manifest, adapter);
+  assert.equal(result.state, 'partial');
+  assert.equal(result.stopReason, 'status_report_invalid');
+  assert.equal(result.events[0].statusReport.exitStatus, null);
+  assert.ok(!JSON.stringify(result).includes('untrusted'));
+  assert.equal(verifyCheckpointEvidence(result), true);
+  assert.deepEqual(adapter.executed, ['C01']);
+});
+
+test('does not claim an SR timestamp when command execution throws', async () => {
+  const adapter = syntheticAdapter();
+  adapter.execute = async (command) => {
+    adapter.executed.push(command.id);
+    throw new Error('synthetic execution failure');
+  };
+  const result = await captureCheckpointEvidence(manifest, adapter);
+  assert.equal(result.state, 'partial');
+  assert.equal(result.events[0].statusReportedAt, null);
+  assert.equal(result.events[0].statusReportedTick, null);
+  assert.equal(result.events[0].statusReport.exitStatus, null);
+  assert.ok(result.stoppedAt);
+  assert.equal(verifyCheckpointEvidence(result), true);
+  assert.deepEqual(adapter.executed, ['C01']);
 });
 
 test('rejects an oversized stream chunk before retaining it', async () => {

@@ -169,15 +169,24 @@ export async function captureCheckpointEvidence(manifest, adapter) {
       phase = 'command_completion';
       // completion must resolve only after the command has exited or its timeout cleanup finished.
       const outcome = await running?.completion;
-      if (!outcome || typeof outcome !== 'object') throw new Error('command_completion_missing');
-      commandExitStatus = outcome.exitStatus;
-      commandTimedOut = outcome.timedOut === true;
+      const normalizedOutcome = normalizeCompletion(outcome);
+      commandExitStatus = normalizedOutcome.valid ? normalizedOutcome.exitStatus : null;
+      commandTimedOut = normalizedOutcome.valid && normalizedOutcome.timedOut;
       commandFinishedAt = safeTimestamp(adapter.now);
       commandFinishedTick = safeMonotonicTick(adapter.monotonicNow);
       phase = 'status_report';
-      statusReport = await adapter.reportStatus(outcome.timedOut ? null : outcome.exitStatus);
+      const reported = await adapter.reportStatus(
+        normalizedOutcome.valid && !normalizedOutcome.timedOut
+          ? normalizedOutcome.exitStatus
+          : null,
+      );
+      const normalizedReport = normalizeStatusReport(reported);
+      statusReport = { exitStatus: normalizedReport.exitStatus };
       execution = {
-        ...outcome,
+        exitStatus: normalizedOutcome.exitStatus,
+        timedOut: normalizedOutcome.timedOut,
+        completionValid: normalizedOutcome.valid,
+        statusReportValid: normalizedReport.valid,
         stdoutBuffer: overflow || stdoutError ? null : stdout,
         overflow,
         stdoutError,
@@ -185,7 +194,6 @@ export async function captureCheckpointEvidence(manifest, adapter) {
     } catch {
       controller.abort();
       const stoppedAt = safeTimestamp(adapter.now);
-      const stoppedTick = safeMonotonicTick(adapter.monotonicNow);
       events.push(
         eventFailure(
           index,
@@ -195,8 +203,6 @@ export async function captureCheckpointEvidence(manifest, adapter) {
           commandStartedTick,
           commandFinishedTick,
           commandTimedOut ? null : commandExitStatus,
-          stoppedAt,
-          stoppedTick,
         ),
       );
       return makePartial('execution_or_status_report_error', stoppedAt, events, command.id, phase);
@@ -259,11 +265,13 @@ export async function captureCheckpointEvidence(manifest, adapter) {
     const exitStatus = timeout ? null : execution.exitStatus;
     const reportedStatus = statusReport?.exitStatus;
     const statusPairValid = timeout
-      ? reportedStatus === null
+      ? reportedStatus === null && execution.statusReportValid
       : Number.isInteger(exitStatus) &&
         exitStatus >= 0 &&
         exitStatus <= 255 &&
-        reportedStatus === exitStatus;
+        reportedStatus === exitStatus &&
+        execution.completionValid &&
+        execution.statusReportValid;
     const event = eventFor(
       index,
       command,
@@ -282,7 +290,11 @@ export async function captureCheckpointEvidence(manifest, adapter) {
 
     if (!statusPairValid) {
       return makePartial(
-        'status_report_mismatch',
+        !execution.completionValid
+          ? 'command_completion_invalid'
+          : !execution.statusReportValid
+            ? 'status_report_invalid'
+            : 'status_report_mismatch',
         finishedAt,
         events,
         command.id,
@@ -363,6 +375,43 @@ async function readBoundedChunks(chunks, abort) {
   return Buffer.concat(parts, byteCount);
 }
 
+function exactRecord(value, keys) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return false;
+  const ownKeys = Reflect.ownKeys(value);
+  if (ownKeys.length !== keys.length || ownKeys.some((key) => !keys.includes(key))) return false;
+  return keys.every((key) => {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor && Object.hasOwn(descriptor, 'value');
+  });
+}
+
+function normalizeCompletion(outcome) {
+  if (!exactRecord(outcome, ['exitStatus', 'timedOut'])) {
+    return { valid: false, exitStatus: null, timedOut: false };
+  }
+  const { exitStatus, timedOut } = outcome;
+  if (typeof timedOut !== 'boolean') return { valid: false, exitStatus: null, timedOut: false };
+  if (timedOut) {
+    return exitStatus === null
+      ? { valid: true, exitStatus: null, timedOut: true }
+      : { valid: false, exitStatus: null, timedOut: false };
+  }
+  return Number.isInteger(exitStatus) && exitStatus >= 0 && exitStatus <= 255
+    ? { valid: true, exitStatus, timedOut: false }
+    : { valid: false, exitStatus: null, timedOut: false };
+}
+
+function normalizeStatusReport(report) {
+  if (!exactRecord(report, ['exitStatus'])) return { valid: false, exitStatus: null };
+  const { exitStatus } = report;
+  return exitStatus === null ||
+    (Number.isInteger(exitStatus) && exitStatus >= 0 && exitStatus <= 255)
+    ? { valid: true, exitStatus }
+    : { valid: false, exitStatus: null };
+}
+
 function eventFor(
   index,
   command,
@@ -398,18 +447,16 @@ function eventFailure(
   startedTick,
   commandFinishedTick,
   exitStatus,
-  statusReportedAt,
-  statusReportedTick,
 ) {
   return eventFor(
     index,
     command,
     startedAt,
     commandFinishedAt,
-    statusReportedAt,
+    null,
     startedTick,
     commandFinishedTick,
-    statusReportedTick,
+    null,
     exitStatus,
     null,
   );
