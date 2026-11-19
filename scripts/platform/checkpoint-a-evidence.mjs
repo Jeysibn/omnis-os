@@ -1,0 +1,292 @@
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+const SELF = fileURLToPath(import.meta.url);
+const SHA256 = /^[a-f0-9]{64}$/;
+const COMMAND_ID = /^[A-Z][A-Z0-9-]{1,31}$/;
+const MAX_OUTPUT_BYTES = 16 * 1024;
+
+function sha256(value) {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function timestamp(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(value)) {
+    throw new TypeError('clock must return an ISO-8601 UTC timestamp with millisecond precision');
+  }
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed) || new Date(parsed).toISOString() !== value) {
+    throw new TypeError('clock returned an invalid timestamp');
+  }
+  return value;
+}
+
+function validateManifest(manifest) {
+  if (!manifest || !Array.isArray(manifest.commands) || manifest.commands.length === 0) {
+    throw new TypeError('manifest must contain at least one command');
+  }
+  const seen = new Set();
+  for (const command of manifest.commands) {
+    if (!command || typeof command !== 'object' || !COMMAND_ID.test(command.id ?? '')) {
+      throw new TypeError('manifest contains an invalid command ID');
+    }
+    if (seen.has(command.id)) throw new TypeError(`duplicate command ID: ${command.id}`);
+    seen.add(command.id);
+    if (typeof command.command !== 'string' || command.command.length === 0) {
+      throw new TypeError(`command ${command.id} has no frozen command text`);
+    }
+    if (
+      !Array.isArray(command.allowedClassifications) ||
+      command.allowedClassifications.length === 0 ||
+      command.allowedClassifications.some(
+        (value) => typeof value !== 'string' || value.length === 0,
+      ) ||
+      new Set(command.allowedClassifications).size !== command.allowedClassifications.length
+    ) {
+      throw new TypeError(`command ${command.id} has an invalid classification allowlist`);
+    }
+  }
+  if (
+    !SHA256.test(manifest.commandSourceSha256 ?? '') ||
+    sha256(JSON.stringify(manifest.commands)) !== manifest.commandSourceSha256
+  ) {
+    throw new Error('command source hash mismatch');
+  }
+  if (
+    !SHA256.test(manifest.runnerSha256 ?? '') ||
+    sha256(readFileSync(SELF)) !== manifest.runnerSha256
+  ) {
+    throw new Error('runner source hash mismatch');
+  }
+}
+
+/**
+ * Capture a redacted evidence summary using an injected executor.
+ * This module never spawns processes, reads host metadata, writes files, or logs output.
+ * The executor and classifier are trusted adapters; production wiring needs separate review.
+ */
+export async function captureCheckpointEvidence(manifest, adapter) {
+  validateManifest(manifest);
+  if (
+    !adapter ||
+    typeof adapter.execute !== 'function' ||
+    typeof adapter.reportStatus !== 'function' ||
+    typeof adapter.classify !== 'function' ||
+    typeof adapter.now !== 'function'
+  ) {
+    throw new TypeError('adapter must provide execute, reportStatus, classify, and now functions');
+  }
+
+  const startedAt = timestamp(adapter.now());
+  const events = [];
+  let previousTime = Date.parse(startedAt);
+
+  for (const command of manifest.commands) {
+    const commandStartedAt = timestamp(adapter.now());
+    if (Date.parse(commandStartedAt) < previousTime) {
+      return partial(
+        manifest,
+        'clock_regression',
+        startedAt,
+        commandStartedAt,
+        events,
+        command.id,
+        'before_command',
+      );
+    }
+
+    let execution;
+    let statusReport;
+    try {
+      execution = await adapter.execute(command);
+      // Keep this as the immediate next adapter operation after command completion.
+      statusReport = await adapter.reportStatus(execution?.exitStatus);
+    } catch {
+      const stoppedAt = safeTimestamp(adapter.now);
+      events.push({
+        commandId: command.id,
+        commandSha256: sha256(command.command),
+        startedAt: commandStartedAt,
+        finishedAt: stoppedAt,
+        exitStatus: null,
+        statusReport: { exitStatus: null },
+      });
+      return partial(
+        manifest,
+        'execution_or_status_report_error',
+        startedAt,
+        stoppedAt,
+        events,
+        command.id,
+        execution === undefined ? 'execution' : 'status_report',
+      );
+    }
+
+    let finishedAt;
+    try {
+      finishedAt = timestamp(adapter.now());
+    } catch {
+      events.push({
+        commandId: command.id,
+        commandSha256: sha256(command.command),
+        startedAt: commandStartedAt,
+        finishedAt: null,
+        exitStatus: Number.isInteger(execution?.exitStatus) ? execution.exitStatus : null,
+        statusReport: {
+          exitStatus: Number.isInteger(statusReport?.exitStatus) ? statusReport.exitStatus : null,
+        },
+      });
+      return partial(
+        manifest,
+        'clock_invalid_after_command',
+        startedAt,
+        null,
+        events,
+        command.id,
+        'timestamp',
+      );
+    }
+    if (Date.parse(finishedAt) < Date.parse(commandStartedAt)) {
+      return partial(
+        manifest,
+        'clock_regression',
+        startedAt,
+        finishedAt,
+        events,
+        command.id,
+        'after_command',
+      );
+    }
+    const validStatus =
+      Number.isInteger(execution?.exitStatus) &&
+      execution.exitStatus >= 0 &&
+      execution.exitStatus <= 255;
+    const validReportedStatus =
+      Number.isInteger(statusReport?.exitStatus) &&
+      statusReport.exitStatus >= 0 &&
+      statusReport.exitStatus <= 255;
+    const event = {
+      commandId: command.id,
+      commandSha256: sha256(command.command),
+      startedAt: commandStartedAt,
+      finishedAt,
+      exitStatus: validStatus ? execution.exitStatus : null,
+      statusReport: { exitStatus: validReportedStatus ? statusReport.exitStatus : null },
+    };
+    events.push(event);
+    previousTime = Date.parse(finishedAt);
+
+    if (!validStatus || !validReportedStatus || statusReport.exitStatus !== execution.exitStatus) {
+      return partial(
+        manifest,
+        'status_report_mismatch',
+        startedAt,
+        finishedAt,
+        events,
+        command.id,
+        'after_status_report',
+      );
+    }
+    if (execution.exitStatus !== 0)
+      return partial(
+        manifest,
+        'command_nonzero',
+        startedAt,
+        finishedAt,
+        events,
+        command.id,
+        'after_status_report',
+      );
+    if (typeof execution.stdout !== 'string')
+      return partial(
+        manifest,
+        'stdout_invalid',
+        startedAt,
+        finishedAt,
+        events,
+        command.id,
+        'classification',
+      );
+    if (Buffer.byteLength(execution.stdout, 'utf8') > MAX_OUTPUT_BYTES)
+      return partial(
+        manifest,
+        'stdout_too_large',
+        startedAt,
+        finishedAt,
+        events,
+        command.id,
+        'classification',
+      );
+
+    let classification;
+    try {
+      classification = adapter.classify(command, execution.stdout);
+    } catch {
+      return partial(
+        manifest,
+        'classification_error',
+        startedAt,
+        finishedAt,
+        events,
+        command.id,
+        'classification',
+      );
+    }
+    if (!command.allowedClassifications.includes(classification)) {
+      return partial(
+        manifest,
+        'classification_unapproved',
+        startedAt,
+        finishedAt,
+        events,
+        command.id,
+        'classification',
+      );
+    }
+    event.classification = classification;
+  }
+
+  const completedAt = timestamp(adapter.now());
+  if (Date.parse(completedAt) < previousTime) {
+    return partial(
+      manifest,
+      'clock_regression',
+      startedAt,
+      completedAt,
+      events,
+      null,
+      'final_timestamp',
+    );
+  }
+  return {
+    state: 'complete',
+    startedAt,
+    completedAt,
+    commandSourceSha256: manifest.commandSourceSha256,
+    runnerSha256: manifest.runnerSha256,
+    events,
+  };
+}
+
+function safeTimestamp(now) {
+  try {
+    return timestamp(now());
+  } catch {
+    return null;
+  }
+}
+
+function partial(manifest, stopReason, startedAt, stoppedAt, events, commandId, phase) {
+  return {
+    state: 'partial',
+    startedAt,
+    stoppedAt,
+    commandSourceSha256: manifest.commandSourceSha256,
+    runnerSha256: manifest.runnerSha256,
+    stopReason,
+    commandId,
+    phase,
+    events,
+  };
+}
