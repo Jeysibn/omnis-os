@@ -9,7 +9,7 @@
 After owner completion and exact-revision review, execute this single command once from the approved interactive Bash session:
 
 ```bash
-docker info --format '{{.ID}}|{{.ServerVersion}}|{{.OSType}}|{{.Architecture}}|{{.DockerRootDir}}'
+docker --host unix:///run/docker.sock info --format '{{.ID}}|{{.ServerVersion}}|{{.OSType}}|{{.Architecture}}|{{.DockerRootDir}}'
 ```
 
 Immediately run the single approved status reporter:
@@ -18,7 +18,7 @@ Immediately run the single approved status reporter:
 ( rc=$?; if (( rc == 0 )); then printf 'command_exit_status=0\n'; else printf 'command_exit_status=%s\n' "$rc"; fi; exit "$rc" )
 ```
 
-The first command requests only Docker daemon-reported ID, server version, OS type, architecture, and daemon root directory. The command source must remain frozen once its hash is recorded. No `docker inspect`, container/image/network/volume listing, context mutation, `ps`, logs, filesystem traversal, PostgreSQL query, or follow-up request is in scope. The daemon is the authority asserting these values; this is not cryptographic attestation against a compromised daemon.
+The first command pins the configured endpoint to the exact local Unix socket `/run/docker.sock`, overriding Docker CLI endpoint selection from context and environment. It calls the Docker `/info` API, whose full response is received by the local Docker CLI; the output template limits displayed and shareable evidence to the daemon-reported ID, server version, OS type, architecture, and daemon root directory, but does not limit fields returned by the API. The full response must remain transient in the private process/terminal and must never be captured into a transcript, log, screenshot, or durable file. The command source must remain frozen once its hash is recorded. No `docker inspect`, container/image/network/volume listing, context mutation, `ps`, logs, filesystem traversal, PostgreSQL query, or follow-up request is in scope. The daemon is the authority asserting these values; this is not cryptographic attestation against a compromised daemon.
 
 ## Expected identity — unresolved owner input
 
@@ -33,11 +33,11 @@ Before authorization, the owner must supply or explicitly accept the expected ex
 | Docker root directory | Exact expected path class/value and change stop rule; path is metadata, not identity proof by itself. |
 | Stability | Whether any external known baseline exists and how the owner will validate that the response belongs to the intended daemon. No second API call is included to test stability. |
 
-Any omitted expectation is unresolved, not implicitly accepted. Field values are owner inputs and must not be fabricated from the Checkpoint A observations.
+Any omitted expectation is unresolved, not implicitly accepted. A remote endpoint, alternate socket path, or endpoint ambiguity is a stop; the pinned socket path must resolve to the intended local daemon under the separately approved target conditions. Field values are owner inputs and must not be fabricated from the Checkpoint A observations.
 
 ## Preconditions and bounded scope
 
-The future exact grant must bind the SHA-256 of both this package and the frozen command source, command IDs, target distribution, operator, local endpoint, validity window, authenticated decision reference, current source version, private evidence destination/access/retention, redaction policy, recovery contact, and stop conditions. The owner must confirm interactive Bash status preservation and trusted command resolution immediately before execution. Use ordinary privilege only. Preserve raw output privately under owner control; publish only approved redacted classifications and the exit status.
+The future exact grant must bind the SHA-256 of both this package and the frozen command source, command IDs, target distribution, operator, pinned endpoint `unix:///run/docker.sock`, validity window, authenticated decision reference, current source version, private evidence destination/access/retention for the five displayed fields only, redaction policy, recovery contact, and stop conditions. The owner must explicitly accept that the Docker CLI transiently receives the full `/info` response. The owner must confirm interactive Bash status preservation and trusted command resolution immediately before execution. Use ordinary privilege only. Preserve raw output privately under owner control; publish only approved redacted classifications and the exit status.
 
 This request can identify a daemon candidate. It cannot establish that the daemon is uncompromised, owned by Omnis OS, or authorized to access any particular resource. It grants no B2 or Stage 1C permission.
 
