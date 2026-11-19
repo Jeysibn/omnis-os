@@ -2463,6 +2463,25 @@ test('event stream retries with the last delivered event sequence', async ({ pag
   await expect(page.getByRole('heading', { name: 'Task list' })).toBeVisible();
 });
 
+test('event feed note labels recorded history, live, and reconnecting states', async ({
+  page,
+  api,
+}) => {
+  test.setTimeout(30_000);
+  api.configure();
+  await openWorkspace(page, '#runs/run-old');
+  await expect(page.getByText('3 events')).toBeVisible();
+  await expect(page.locator('[data-event-feed]')).toHaveAttribute('data-event-feed', 'history');
+  await expect(page.locator('[data-event-feed]')).toContainText('Recorded history');
+
+  api.configure({ eventDisconnects: true });
+  await page.goto('/#runs/run-active');
+  await expect(page.locator('.stream-badge')).toContainText('Reconnecting');
+  const note = page.locator('[data-event-feed]');
+  await expect(note).not.toHaveAttribute('data-event-feed', 'live');
+  await expect(note).toContainText(/Recorded history|Not live/);
+});
+
 test('a session revoked while streaming returns to sign-in and stops reconnecting', async ({
   page,
   api,
