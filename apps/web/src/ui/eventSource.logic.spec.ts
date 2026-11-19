@@ -15,4 +15,11 @@ test.describe('event feed notice', () => {
     for (const status of ['completed', 'failed', 'cancelled', 'interrupted'] as const)
       expect(describeEventFeed({ status }, 'ended').kind).toBe('history');
   });
+  test('terminal runs are history even while the stream is not connected', () => {
+    for (const s of ['connecting', 'reconnecting', 'paused', 'closed'] as const) {
+      const n = describeEventFeed({ status: 'completed' }, s);
+      expect(n.kind).toBe('history');
+      expect(n.detail).toContain('not confirmed');
+    }
+  });
 });

@@ -16,7 +16,16 @@ export function describeEventFeed(
   run: Pick<Run, 'status'>,
   streamState: StreamStateLike,
 ): EventFeedNotice {
-  if (streamState === 'connected' && !terminal.includes(run.status))
+  if (terminal.includes(run.status))
+    return {
+      kind: 'history',
+      label: 'Recorded history',
+      detail:
+        streamState === 'ended' || streamState === 'connected'
+          ? 'Showing the persisted event trail for this run. No live events are expected.'
+          : 'This run is finished, so no new live events are expected. The event connection is not confirmed, so earlier events may still be loading.',
+    };
+  if (streamState === 'connected')
     return {
       kind: 'live',
       label: 'Live',
@@ -29,15 +38,9 @@ export function describeEventFeed(
       detail:
         'Showing recorded events. The live connection is not established, so newer events may be missing.',
     };
-  if (streamState === 'paused' || streamState === 'closed')
-    return {
-      kind: 'stale',
-      label: 'Not live',
-      detail: 'Showing recorded events only. They are not updating and may be out of date.',
-    };
   return {
-    kind: 'history',
-    label: 'Recorded history',
-    detail: 'Showing the persisted event trail for this run. No live events are expected.',
+    kind: 'stale',
+    label: 'Not live',
+    detail: 'Showing recorded events only. They are not updating and may be out of date.',
   };
 }
