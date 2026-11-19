@@ -1,9 +1,9 @@
 # AO-107 Codex #3 Handoff — SIWC Local Runtime Contract
 
-**Contract revision:** `omnis.ao107.local-runtime-handoff.v1`  
-**Owner:** Backend/Security (Codex #1)  
-**Status:** Proposed interface contract for platform review; no real provider, OAuth flow, credential store, or host integration is enabled.  
-**Boundary:** Codex #3 owns host isolation, identity establishment, egress, process registration, and termination evidence. This document does not alter Codex #3's platform-owned documents.
+- **Contract revision:** `omnis.ao107.local-runtime-handoff.v1`
+- **Owner:** Backend/Security (Codex #1)
+- **Status:** Proposed interface contract for platform review; no real provider, OAuth flow, credential store, or host integration is enabled.
+- **Boundary:** Codex #3 owns host isolation, identity establishment, egress, process registration, and termination evidence. This document does not alter Codex #3's platform-owned documents.
 
 ## Why this handoff exists
 
