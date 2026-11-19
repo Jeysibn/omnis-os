@@ -16,7 +16,13 @@ const commands = [
 const commandSourceSha256 = createHash('sha256').update(JSON.stringify(commands)).digest('hex');
 const manifest = { commands, commandSourceSha256, runnerSha256 };
 
-function syntheticAdapter({ failId, srStatus = 0, ambiguous = false } = {}) {
+function syntheticAdapter({
+  failId,
+  srStatus = 0,
+  ambiguous = false,
+  reportError = false,
+  output,
+} = {}) {
   let tick = 0;
   const executed = [];
   return {
@@ -25,13 +31,14 @@ function syntheticAdapter({ failId, srStatus = 0, ambiguous = false } = {}) {
     execute: async (command) => {
       executed.push(command.id);
       return {
-        stdout: `RAW SYNTHETIC OUTPUT ${command.id}`,
+        stdout: output ?? `RAW SYNTHETIC OUTPUT ${command.id}`,
         exitStatus: command.id === failId ? 1 : 0,
       };
     },
-    reportStatus: async (exitStatus) => ({
-      exitStatus: srStatus === 0 ? exitStatus : srStatus,
-    }),
+    reportStatus: async (exitStatus) => {
+      if (reportError) throw new Error('synthetic SR failure');
+      return { exitStatus: srStatus === 0 ? exitStatus : srStatus };
+    },
     classify: (command, stdout) => {
       assert.match(stdout, /^RAW SYNTHETIC OUTPUT /);
       return ambiguous ? 'unexpected' : command.id === 'C01' ? 'match' : 'mismatch';
@@ -101,4 +108,29 @@ test('rejects runner source hash mismatch before invoking the adapter', async ()
     /runner source hash mismatch/,
   );
   assert.deepEqual(adapter.executed, []);
+});
+
+test('partial status-report failure preserves manifest hashes and command identity', async () => {
+  const adapter = syntheticAdapter({ reportError: true });
+  const result = await captureCheckpointEvidence(manifest, adapter);
+  assert.equal(result.state, 'partial');
+  assert.equal(result.stopReason, 'execution_or_status_report_error');
+  assert.equal(result.commandId, 'C01');
+  assert.equal(result.phase, 'status_report');
+  assert.equal(result.commandSourceSha256, commandSourceSha256);
+  assert.equal(result.runnerSha256, runnerSha256);
+  assert.equal(result.events[0].commandId, 'C01');
+  assert.equal(result.events[0].statusReport.exitStatus, null);
+  assert.deepEqual(adapter.executed, ['C01']);
+});
+
+test('rejects oversized synthetic output without classifying it', async () => {
+  const adapter = syntheticAdapter({ output: 'x'.repeat(16 * 1024 + 1) });
+  const result = await captureCheckpointEvidence(manifest, adapter);
+  assert.equal(result.state, 'partial');
+  assert.equal(result.stopReason, 'stdout_too_large');
+  assert.equal(result.commandId, 'C01');
+  assert.equal('classification' in result.events[0], false);
+  assert.ok(!JSON.stringify(result).includes('x'.repeat(100)));
+  assert.deepEqual(adapter.executed, ['C01']);
 });
