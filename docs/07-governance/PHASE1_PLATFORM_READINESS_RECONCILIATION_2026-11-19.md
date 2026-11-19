@@ -14,9 +14,11 @@ The owner further reports raw host metadata was shared in ChatGPT, contrary to t
 
 Historical exceptions remain explicit and unremedied: A0 pre-execution authorization and status-reporting deviations; EP01 authorization chronology exception; C12 execution without established pre-execution authorization. None is retroactively approved or promoted to formal Checkpoint A evidence. EP01 `same_object` remains a point-in-time path observation, not daemon/resource ownership proof. C12 `none` on TCP 8080/5432 remains a point-in-time owner report for the stopped stack.
 
-**Closure path:** Preserve the current run as unaccepted; the formal verdict is inconclusive. The owner may provide contemporaneous, timestamped evidence already in existence that establishes the actual run interval, then make an explicit disposition for the raw-output handling deviation. If chronology evidence does not exist, do not reconstruct or infer it; close this run as unaccepted and require a separately reviewed fresh grant/run if Checkpoint A is still needed. Any exception decision must be explicit and separately reviewed; it cannot manufacture chronology or claim evidence-policy compliance.
+**Closure path:** Preserve the current run as unaccepted; the formal verdict is inconclusive. The owner may provide contemporaneous, timestamped evidence already in existence that establishes the actual run interval, then make an explicit disposition for the raw-output handling deviation. If chronology evidence does not exist, do not reconstruct or infer it; close this run as unaccepted and use the proposed [fresh-run evidence procedure](../06-delivery/P0_R2_1_CHECKPOINT_A_FRESH_RUN_PROCEDURE.md) for a separately reviewed grant/run if Checkpoint A is still needed. Any exception decision must be explicit and separately reviewed; it cannot manufacture chronology or claim evidence-policy compliance.
 
 ## B1 — bounded authorization package requirements (preparation only)
+
+The exact proposed one-query package is in [B1 daemon identity authorization package](../06-delivery/P0_R2_1_B1_DOCKER_DAEMON_IDENTITY_AUTHORIZATION_PACKAGE.md). It remains a draft and is not an execution grant.
 
 B1 is a distinct one-time Docker daemon identity/metadata operation. It remains **NOT AUTHORIZED**. A future exact-hash grant must bind:
 
@@ -49,7 +51,19 @@ Required before B2 execution: source-only design and interface tests; exact comm
 | Checkpoint A host metadata | Eight comparisons and SR=0 owner-reported; authorization timing unresolved and raw-output policy deviation reported. | Explicit evidence/deviation disposition; otherwise fresh exact grant. | Current run blocked; new target run requires authorization |
 | Real-provider boundary | No real-provider execution or credentials in scope. | Keep disabled pending separate policy/owner approval. | Not part of Stage 1C closure |
 
-Stage 1C and Phase 1 R1 remain blocked until each applicable gate has evidence, exact-revision independent review, and owner authorization for target operations. A successful source test is not target acceptance.
+### Source-only test plan and dependencies
+
+| Gate | Unprivileged tests / implementation evidence | Separate target test | Cross-workstream dependency |
+|---|---|---|---|
+| Host/container identity | Mock endpoint selector and strict daemon identity schema; reject missing/drifted fields and remote endpoint. | B1 one-query identity observation, then separately authorized container identity validation. | Owner supplies expected values; Codex #1 defines run/authorization identity fields. |
+| Windows ingress | Unit tests for trusted-proxy parsing, spoofed forwarding headers, and loopback-only policy fixtures. | Owner-authorized Windows-local forwarding and ingress provenance check. | Codex #1 API trust boundary; owner selects allowed ingress topology. |
+| Containment/termination | Existing mock lifecycle interface tests for cancellation, timeout, orphan and restart outcomes; add cases if gaps are found. | Target containment and termination experiment. | Codex #1 owns lifecycle/cancellation semantics; platform owns host enforcement. |
+| Egress | Static Compose/systemd policy checks and mock network-policy tests for default-deny, DNS and proxy bypass. | Owner-authorized egress verification on selected WSL2 target. | Codex #1 specifies provider/broker destination contract; owner approves destinations. |
+| Recovery | Synthetic backup/restore and failure-injection tests against disposable test data. | Separate restore/recovery exercise and measured RPO/RTO. | Codex #1 owns database consistency and recovery contracts; owner sets objectives. |
+| Resource ownership | Mock continuity ledger tests for immutable IDs, lineage, config drift, replay, revocation, daemon change, deletion/recreation, crash and stale writer. | B1/B2 target queries/actions under separate exact grants. | Codex #1 owns authorization/run IDs, lease and revocation contract; platform owns daemon/resource binding. |
+| Checkpoint A evidence | Synthetic runner tests for hash mismatch, per-command pairing, timestamps, redaction, truncation, clock anomaly and stop-on-first-failure. | Fresh Checkpoint A run under a separate owner grant. | Owner decides expectations, evidence custody and retention. |
+
+The tests above are proposed source-only work; no target execution is implied. Stage 1C and Phase 1 R1 remain blocked until each applicable gate has evidence, exact-revision independent review, and owner authorization for target operations. A successful source test is not target acceptance.
 
 ## Minimum next owner action
 
