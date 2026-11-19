@@ -2657,3 +2657,13 @@ button:disabled {
 .cancellation-state[data-cancellation='unknown'] {
   border-style: dashed;
 }
+
+.event-feed-note {
+  margin: 4px 0 8px;
+  font-size: 0.8125rem;
+  color: var(--text-muted, inherit);
+}
+.event-feed-stale {
+  border-left: 3px solid currentColor;
+  padding-left: 8px;
+}
