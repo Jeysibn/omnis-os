@@ -43,6 +43,7 @@ function authorityFor(initialGeneration = 41) {
   let generation = initialGeneration;
   let reservation = 0;
   let enrollment = 0;
+  const reservedAuthorizationIds = new Set();
   const usedChallenges = new Set();
   return {
     currentInstance: async () => ({ instanceId: `instance-${generation}`, generation }),
@@ -64,6 +65,17 @@ function authorityFor(initialGeneration = 41) {
     verifyResourceCreation: async ({ receipt, enrollment: active }) =>
       receipt === 'fresh-resource-receipt' && active.enrollmentId.startsWith('enrollment-new-'),
     reserveAction: async ({ authorizationId, enrollment: active, revocationGeneration }) => {
+      if (reservedAuthorizationIds.has(authorizationId)) {
+        return {
+          state: 'denied',
+          reason: 'already_reserved',
+          authorizationId,
+          enrollmentId: active.enrollmentId,
+          instanceGeneration: active.instanceGeneration,
+          revocationGeneration,
+        };
+      }
+      reservedAuthorizationIds.add(authorizationId);
       reservation += 1;
       return {
         reservationId: `reservation-${reservation}`,
@@ -160,6 +172,59 @@ test('a fresh grant for a newly enrolled resource dispatches exactly once', asyn
   const replay = await gate.admitAtBroker({ authorizationId: grant.authorizationId, dispatch });
   assert.deepEqual(replay, { state: 'denied', reason: 'already_reserved' });
   assert.equal(dispatches, 1);
+});
+
+test('shared authority permits exactly one reservation across restored runtime instances', async () => {
+  const authority = authorityFor();
+  authority.verifyOwnerEnrollment = async ({ challenge, instance }) => {
+    if (!['owner-session-a', 'owner-session-b'].includes(challenge)) return null;
+    return {
+      enrollmentId: 'enrollment-shared',
+      ownerPrincipalId: 'owner-1',
+      instanceGeneration: instance.generation,
+    };
+  };
+  authority.verifyResourceCreation = async ({ receipt, enrollment }) =>
+    receipt === 'fresh-resource-receipt' && enrollment.enrollmentId === 'enrollment-shared';
+  const gateA = createGate(restoredSnapshot(), authority);
+  const gateB = createGate(restoredSnapshot(), authority);
+  await Promise.all([
+    gateA.enroll({ challenge: 'owner-session-a' }),
+    gateB.enroll({ challenge: 'owner-session-b' }),
+  ]);
+  const work = {
+    authorizationId: 'auth-shared',
+    runId: 'run-shared',
+    attemptId: 'attempt-shared',
+    resourceId: 'container-shared',
+    approval: 'fresh-approval',
+    creationReceipt: 'fresh-resource-receipt',
+  };
+  const [grantA, grantB] = await Promise.all([
+    gateA.authorizeNewWork(work),
+    gateB.authorizeNewWork(work),
+  ]);
+  assert.equal(grantA.authorizationId, grantB.authorizationId);
+
+  let dispatches = 0;
+  const dispatch = async () => {
+    dispatches += 1;
+  };
+  const results = await Promise.all([
+    gateA.admitApi({ authorizationId: 'auth-shared', dispatch }),
+    gateB.admitAtBroker({ authorizationId: 'auth-shared', dispatch }),
+  ]);
+
+  assert.equal(results.filter((result) => result.state === 'completed').length, 1);
+  assert.deepEqual(
+    results.find((result) => result.state === 'denied'),
+    {
+      state: 'denied',
+      reason: 'already_reserved',
+    },
+  );
+  assert.equal(dispatches, 1);
+  assert.equal(authority.reservationCount(), 1);
 });
 
 test('an uncertain attempt stays unknown and is not resubmitted after fresh enrollment', async () => {

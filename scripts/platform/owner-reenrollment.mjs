@@ -273,7 +273,30 @@ export function createOfflineOwnerReenrollment({ snapshot, authority }) {
       return { state: 'unknown', attemptId: grant.attemptId };
     }
     if (
+      receipt?.state === 'denied' &&
+      receipt.reason === 'already_reserved' &&
+      receipt.authorizationId === grant.authorizationId &&
+      receipt.enrollmentId === activeEnrollment.enrollmentId &&
+      receipt.instanceGeneration === activeEnrollment.instanceGeneration &&
+      receipt.revocationGeneration === reservationState.revocationGeneration &&
+      typeof authority.verifyReservation === 'function'
+    ) {
+      let denialIsTrusted = false;
+      try {
+        denialIsTrusted =
+          (await authority.verifyReservation({ receipt, enrollment: activeEnrollment })) === true;
+      } catch {
+        // An unverified denial is not evidence that reservation failed.
+      }
+      if (denialIsTrusted) {
+        reservationState.state = 'denied';
+        return { state: 'denied', reason: 'already_reserved' };
+      }
+    }
+    if (
       !receipt ||
+      !requiredString(receipt.reservationId) ||
+      receipt.state !== undefined ||
       receipt.authorizationId !== grant.authorizationId ||
       receipt.enrollmentId !== activeEnrollment.enrollmentId ||
       receipt.instanceGeneration !== activeEnrollment.instanceGeneration ||
