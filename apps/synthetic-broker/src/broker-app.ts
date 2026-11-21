@@ -38,9 +38,13 @@ export function createSyntheticBrokerApp(input: {
   provider: Pick<FakeProviderClient, 'submit' | 'events'> & {
     cancel?: FakeProviderClient['cancel'];
   };
+  onSubmissionCall?: (requestId: string) => void;
 }) {
   const { callerToken, verificationKeys, authorizer, provider } = input;
   const brokerInstanceId = input.brokerInstanceId ?? randomUUID();
+  const recordSubmissionCall =
+    input.onSubmissionCall ??
+    ((requestId: string) => console.info(`synthetic_fake_broker_submission_call:${requestId}`));
 
   const busyAttempts = new Set<string>();
   let activeSubmissions = 0;
@@ -83,6 +87,7 @@ export function createSyntheticBrokerApp(input: {
     ) {
       return reply.code(403).send({ error: { code: 'request_binding_failed' } });
     }
+    if (!projectionOnly) recordSubmissionCall(input.requestId);
     if (!projectionOnly && busyAttempts.has(input.requestId))
       return reply.code(409).send({ error: { code: 'attempt_in_progress' } });
     if ((projectionOnly ? activeProjections : activeSubmissions) >= 1)

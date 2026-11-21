@@ -257,6 +257,8 @@ test('browser environment allowlists only explicit runtime and test values', () 
       frontendPort: 5174,
       ownerPassword: 'SYNTHETIC_OWNER_PASSWORD',
       lostAckRequestId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      revokeFirstRequestId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      freshGrantRequestId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
       cancellationRequestId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
     },
   );
@@ -273,11 +275,21 @@ test('browser environment allowlists only explicit runtime and test values', () 
       'OMNIS_TEST_FRONTEND_ORIGIN',
       'OMNIS_TEST_FRONTEND_PORT',
       'OMNIS_TEST_SYNTHETIC_LOST_ACK_REQUEST_ID',
+      'OMNIS_TEST_SYNTHETIC_REVOKED_FIRST_REQUEST_ID',
+      'OMNIS_TEST_SYNTHETIC_FRESH_GRANT_REQUEST_ID',
       'OMNIS_TEST_OWNER_PASSWORD',
       'PATH',
       'PLAYWRIGHT_BROWSERS_PATH',
       'TMPDIR',
     ].sort(),
+  );
+  assert.equal(
+    environment.OMNIS_TEST_SYNTHETIC_REVOKED_FIRST_REQUEST_ID,
+    'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+  );
+  assert.equal(
+    environment.OMNIS_TEST_SYNTHETIC_FRESH_GRANT_REQUEST_ID,
+    'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
   );
   const serialized = JSON.stringify(environment);
   for (const sentinel of [

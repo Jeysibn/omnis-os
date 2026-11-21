@@ -128,15 +128,35 @@ describe('synthetic fake-provider HTTP boundary', () => {
         headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
         body: JSON.stringify(payload),
       });
-    const accepted = await submit();
-    assert.equal(accepted.status, 200);
-    const acceptedBody = await accepted.json();
-    assert.equal(acceptedBody.attemptId, attemptId);
-    assert.equal(acceptedBody.event.status, 'accepted');
+    const submissionCalls: string[] = [];
+    const originalInfo = console.info;
+    console.info = (...values: unknown[]) => submissionCalls.push(values.join(' '));
+    let acceptedBody: {
+      attemptId: string;
+      providerSubmissionId: string;
+      event: { status: string };
+    };
+    try {
+      const accepted = await submit();
+      assert.equal(accepted.status, 200);
+      acceptedBody = (await accepted.json()) as typeof acceptedBody;
+      assert.equal(acceptedBody.attemptId, attemptId);
+      assert.equal(acceptedBody.event.status, 'accepted');
 
-    const repeated = await submit();
-    assert.equal(repeated.status, 200);
-    assert.deepEqual(await repeated.json(), acceptedBody);
+      const repeated = await submit();
+      assert.equal(repeated.status, 200);
+      assert.deepEqual(await repeated.json(), acceptedBody);
+    } finally {
+      console.info = originalInfo;
+    }
+    assert.equal(
+      submissionCalls.filter(
+        (value) =>
+          value === `synthetic_fake_provider_submission_call:${payload.envelope.claims.requestId}`,
+      ).length,
+      2,
+      'every valid fake-provider submission, including retries, must be observable',
+    );
 
     const reissuedEnvelope = signConnectorDecisionEnvelope(
       payload.envelope.claims,

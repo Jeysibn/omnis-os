@@ -8,6 +8,7 @@ import {
   startMockServices,
   stopProcess,
 } from './support/mock-services.mjs';
+import { runRevokedWorkerAdmissionScenario } from './support/revoked-worker-admission.mjs';
 
 const diagnosticsPath = process.env.OMNIS_TEST_DIAGNOSTICS_PATH;
 const startedAt = Date.now();
@@ -31,6 +32,8 @@ try {
   const frontendPort = await freePort();
   const frontendOrigin = `http://127.0.0.1:${frontendPort}`;
   const lostAckRequestId = randomUUID();
+  const revokeFirstRequestId = randomUUID();
+  const freshGrantRequestId = randomUUID();
   const cancellationRequestId = randomUUID();
   services = await startMockServices({
     origin: frontendOrigin,
@@ -52,6 +55,8 @@ try {
     ownerPassword: services.password,
     syntheticProjectId,
     lostAckRequestId,
+    revokeFirstRequestId,
+    freshGrantRequestId,
     cancellationRequestId,
   });
 
@@ -97,11 +102,66 @@ try {
   stages.push('broker-restart-reconciled-owner-cancellation');
   await brokerLostAckRecovery;
   stages.push('broker-restart-reconciled-lost-acknowledgement');
+  const lostAckBrokerCalls = services.syntheticBrokerCompose.brokerCallCount(lostAckRequestId);
+  const lostAckProviderCalls = services.syntheticBrokerCompose.assertProviderCallCount(
+    lostAckRequestId,
+    1,
+  );
+  process.stdout.write(
+    `Lost-ack restart counts: fake_broker_calls=${lostAckBrokerCalls}, fake_provider_calls=${lostAckProviderCalls}\n`,
+  );
+  const revokeFirstCounts = await services.auditPool.query(
+    `SELECT
+       (SELECT count(*)::int FROM omnis.connector_execution_attempts WHERE request_id = $1) AS attempts,
+       (SELECT count(*)::int FROM omnis.connector_authorization_audit
+          WHERE request_id = $1 AND event_type = 'connector.authorization_consumed') AS reservations`,
+    [revokeFirstRequestId],
+  );
+  if (revokeFirstCounts.rows[0]?.attempts !== 0 || revokeFirstCounts.rows[0]?.reservations !== 0) {
+    throw new Error('Revoke-first integration created a durable connector reservation.');
+  }
+  const revokeFirstBrokerCalls = services.syntheticBrokerCompose.assertBrokerCallCount(
+    revokeFirstRequestId,
+    0,
+  );
+  const fakeProviderCalls = services.syntheticBrokerCompose.assertProviderCallCount(
+    revokeFirstRequestId,
+    0,
+  );
+  process.stdout.write(
+    `Revoke-first API counts: reservations=${revokeFirstCounts.rows[0].reservations}, attempts=${revokeFirstCounts.rows[0].attempts}, fake_broker_calls=${revokeFirstBrokerCalls}, fake_provider_calls=${fakeProviderCalls}\n`,
+  );
+  const freshGrantCounts = await services.auditPool.query(
+    `SELECT
+       (SELECT count(*)::int FROM omnis.connector_execution_attempts WHERE request_id = $1) AS attempts,
+       (SELECT count(*)::int FROM omnis.connector_authorization_audit
+          WHERE request_id = $1 AND event_type = 'connector.authorization_consumed') AS reservations`,
+    [freshGrantRequestId],
+  );
+  if (freshGrantCounts.rows[0]?.attempts !== 1 || freshGrantCounts.rows[0]?.reservations !== 1) {
+    throw new Error('The fresh-grant control did not commit exactly one durable reservation.');
+  }
+  const freshGrantBrokerCalls = services.syntheticBrokerCompose.assertBrokerCallCount(
+    freshGrantRequestId,
+    1,
+  );
+  const freshGrantProviderCalls = services.syntheticBrokerCompose.assertProviderCallCount(
+    freshGrantRequestId,
+    1,
+  );
+  process.stdout.write(
+    `Fresh-grant control counts: reservations=${freshGrantCounts.rows[0].reservations}, attempts=${freshGrantCounts.rows[0].attempts}, fake_broker_calls=${freshGrantBrokerCalls}, fake_provider_calls=${freshGrantProviderCalls}\n`,
+  );
+  stages.push('revoke-first-zero-reservation-and-fake-provider-call');
 
   services.assertSensitiveValuesAbsentFromLogs();
   stages.push('synthetic-broker-credential-log-canaries-absent');
 
   stages.push('real-browser-standard-and-synthetic-run-smoke-passed');
+  await services.cleanup();
+  stages.push('primary-browser-harness-cleaned-before-isolated-worker-case');
+  await runRevokedWorkerAdmissionScenario();
+  stages.push('isolated-revoked-worker-admission-readback-complete');
 } catch (error) {
   const message = error instanceof Error ? error.message : 'Unknown integration smoke failure.';
   const fixtureStage = services?.syntheticBrokerFixture?.process?.capturedLogs

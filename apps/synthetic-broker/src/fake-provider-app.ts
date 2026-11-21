@@ -88,6 +88,7 @@ export function createSyntheticFakeProviderServer(input: {
         return send(response, 422, { error: 'decision_invalid' });
       }
       const { attemptId } = parsed.data;
+      console.info(`synthetic_fake_provider_submission_call:${requestId}`);
       const digest = createHash('sha256').update(body).digest('hex');
       const previous = submissions.get(attemptId);
       if (previous)
