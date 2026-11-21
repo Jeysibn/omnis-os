@@ -2,6 +2,8 @@
 
 **Status:** B2 execution BLOCKED. The code in this change is an offline policy seam with synthetic fixtures; it does not establish a trusted registrar, platform acceptance, or permission to access Docker. B1 remains NOT AUTHORIZED. Stage 1C remains NOT ACCEPTED. Checkpoint A remains INCONCLUSIVE, and its historical raw-output handling deviation remains recorded.
 
+The Checkpoint A runner’s source/evidence checksums detect byte changes but do not authenticate the producer, executor, clock, or execution environment. It has no live executor, and none is authorized here. This B2 work does not repeat or revise the historical Checkpoint A disposition.
+
 ## Contract alignment
 
 This design reads the merged backend contract `omnis.ao107.local-runtime-handoff.v1` from PR #147 and the versioned Issue #149 response `omnis.ao107.b2-resource-identity.v1`. The former binds owner consent, SIWC connection, host principal/generation, authenticated process role/instance, and exact provider operation. The latter extends the same attempt with the exact Docker resource and platform action. They are complementary; neither grants platform acceptance or authorizes an operation.
