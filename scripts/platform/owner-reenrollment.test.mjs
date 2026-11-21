@@ -518,3 +518,80 @@ test('a replayed enrollment challenge or stale registrar generation cannot enrol
   });
   assert.equal(staleGate.status(), 'QUARANTINED');
 });
+
+test('revocation after broker receipt leaves the attempt unknown and a second instance cannot requeue it', async () => {
+  const authority = authorityFor();
+  authority.verifyOwnerEnrollment = async ({ challenge, instance }) => {
+    if (!['owner-session-a', 'owner-session-b'].includes(challenge)) return null;
+    return {
+      enrollmentId: 'enrollment-shared',
+      ownerPrincipalId: 'owner-1',
+      instanceGeneration: instance.generation,
+    };
+  };
+  authority.verifyResourceCreation = async ({ receipt, enrollment }) =>
+    receipt === 'fresh-resource-receipt' && enrollment.enrollmentId === 'enrollment-shared';
+  const snapshotA = restoredSnapshot();
+  const snapshotB = restoredSnapshot();
+  snapshotA.queue = [{ authorizationId: 'auth-inflight' }];
+  snapshotB.queue = [{ authorizationId: 'auth-inflight' }];
+  const gateA = createGate(snapshotA, authority);
+  const gateB = createGate(snapshotB, authority);
+  await Promise.all([
+    gateA.enroll({ challenge: 'owner-session-a' }),
+    gateB.enroll({ challenge: 'owner-session-b' }),
+  ]);
+  const work = {
+    authorizationId: 'auth-inflight',
+    runId: 'run-inflight',
+    attemptId: 'attempt-inflight',
+    resourceId: 'container-inflight',
+    approval: 'fresh-approval',
+    creationReceipt: 'fresh-resource-receipt',
+  };
+  await Promise.all([gateA.authorizeNewWork(work), gateB.authorizeNewWork(work)]);
+
+  let brokerCalls = 0;
+  let signalBrokerReceived;
+  let releaseLostAcknowledgement;
+  const brokerReceived = new Promise((resolve) => {
+    signalBrokerReceived = resolve;
+  });
+  const firstDispatch = gateA.admitAtBroker({
+    authorizationId: work.authorizationId,
+    dispatch: async () => {
+      brokerCalls += 1;
+      signalBrokerReceived();
+      await new Promise((resolve) => {
+        releaseLostAcknowledgement = resolve;
+      });
+      throw new Error('synthetic lost acknowledgement after broker receipt');
+    },
+  });
+  await brokerReceived;
+  assert.equal(gateA.revoke({ authorizationId: work.authorizationId }), true);
+  releaseLostAcknowledgement();
+
+  assert.deepEqual(await firstDispatch, { state: 'unknown', attemptId: work.attemptId });
+  assert.deepEqual(gateA.attempt(work.attemptId), {
+    status: 'unknown',
+    acknowledgement: 'lost',
+  });
+  assert.deepEqual(
+    await gateB.processWorkerQueue({
+      dispatch: async () => {
+        brokerCalls += 1;
+      },
+    }),
+    { admitted: 0, denied: 1 },
+  );
+  assert.deepEqual(
+    await gateB.processWorkerQueue({
+      dispatch: async () => {
+        brokerCalls += 1;
+      },
+    }),
+    { admitted: 0, denied: 0 },
+  );
+  assert.equal(brokerCalls, 1);
+});
