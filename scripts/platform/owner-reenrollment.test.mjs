@@ -44,7 +44,13 @@ function authorityFor(initialGeneration = 41) {
   let reservation = 0;
   let enrollment = 0;
   const reservedAuthorizationIds = new Set();
+  const revocationGenerations = new Map();
+  const revokedAuthorizationIds = new Set();
   const usedChallenges = new Set();
+  const currentAuthorizationState = (authorizationId) => ({
+    revocationGeneration: revocationGenerations.get(authorizationId) ?? 0,
+    isRevoked: revokedAuthorizationIds.has(authorizationId),
+  });
   return {
     currentInstance: async () => ({ instanceId: `instance-${generation}`, generation }),
     advanceGeneration: (nextGeneration) => {
@@ -64,7 +70,31 @@ function authorityFor(initialGeneration = 41) {
       approval === 'fresh-approval' && active.ownerPrincipalId === 'owner-1',
     verifyResourceCreation: async ({ receipt, enrollment: active }) =>
       receipt === 'fresh-resource-receipt' && active.enrollmentId.startsWith('enrollment-new-'),
+    currentAuthorizationState: async ({ authorizationId }) =>
+      currentAuthorizationState(authorizationId),
+    revokeAuthorization: async ({ authorizationId }) => {
+      const state = currentAuthorizationState(authorizationId);
+      const revocationGeneration = state.revocationGeneration + 1;
+      revocationGenerations.set(authorizationId, revocationGeneration);
+      revokedAuthorizationIds.add(authorizationId);
+      return { state: 'revoked', authorizationId, revocationGeneration };
+    },
+    verifyRevocation: async () => true,
     reserveAction: async ({ authorizationId, enrollment: active, revocationGeneration }) => {
+      const authorizationState = currentAuthorizationState(authorizationId);
+      if (
+        authorizationState.isRevoked ||
+        authorizationState.revocationGeneration !== revocationGeneration
+      ) {
+        return {
+          state: 'denied',
+          reason: 'revoked',
+          authorizationId,
+          enrollmentId: active.enrollmentId,
+          instanceGeneration: active.instanceGeneration,
+          revocationGeneration: authorizationState.revocationGeneration,
+        };
+      }
       if (reservedAuthorizationIds.has(authorizationId)) {
         return {
           state: 'denied',
@@ -227,6 +257,64 @@ test('shared authority permits exactly one reservation across restored runtime i
   assert.equal(authority.reservationCount(), 1);
 });
 
+test('revocation on one instance blocks a different instance before first reservation', async () => {
+  const authority = authorityFor();
+  authority.verifyOwnerEnrollment = async ({ challenge, instance }) => {
+    if (!['owner-session-a', 'owner-session-b'].includes(challenge)) return null;
+    return {
+      enrollmentId: 'enrollment-shared',
+      ownerPrincipalId: 'owner-1',
+      instanceGeneration: instance.generation,
+    };
+  };
+  authority.verifyResourceCreation = async ({ receipt, enrollment }) =>
+    receipt === 'fresh-resource-receipt' && enrollment.enrollmentId === 'enrollment-shared';
+  const gateA = createGate(restoredSnapshot(), authority);
+  const gateB = createGate(restoredSnapshot(), authority);
+  await Promise.all([
+    gateA.enroll({ challenge: 'owner-session-a' }),
+    gateB.enroll({ challenge: 'owner-session-b' }),
+  ]);
+  const work = {
+    authorizationId: 'auth-revoked-before-reserve',
+    runId: 'run-revoked-before-reserve',
+    attemptId: 'attempt-revoked-before-reserve',
+    resourceId: 'container-revoked-before-reserve',
+    approval: 'fresh-approval',
+    creationReceipt: 'fresh-resource-receipt',
+  };
+  await Promise.all([gateA.authorizeNewWork(work), gateB.authorizeNewWork(work)]);
+
+  let signalReservationAttempt;
+  let continueReservation;
+  const reservationAttempted = new Promise((resolve) => {
+    signalReservationAttempt = resolve;
+  });
+  const originalReserve = authority.reserveAction;
+  authority.reserveAction = async (request) => {
+    signalReservationAttempt();
+    await new Promise((resolve) => {
+      continueReservation = resolve;
+    });
+    return originalReserve(request);
+  };
+
+  let dispatches = 0;
+  const admission = gateB.admitAtBroker({
+    authorizationId: work.authorizationId,
+    dispatch: async () => {
+      dispatches += 1;
+    },
+  });
+  await reservationAttempted;
+  assert.equal(authority.reservationCount(), 0);
+  assert.equal(await gateA.revoke({ authorizationId: work.authorizationId }), true);
+  continueReservation();
+  assert.deepEqual(await admission, { state: 'denied', reason: 'revoked' });
+  assert.equal(authority.reservationCount(), 0);
+  assert.equal(dispatches, 0);
+});
+
 test('an uncertain attempt stays unknown and is not resubmitted after fresh enrollment', async () => {
   const authority = authorityFor();
   const gate = createGate(restoredSnapshot(), authority);
@@ -256,7 +344,7 @@ test('revocation that wins before reservation produces zero broker dispatches', 
     approval: 'fresh-approval',
     creationReceipt: 'fresh-resource-receipt',
   });
-  assert.equal(gate.revoke({ authorizationId: grant.authorizationId }), true);
+  assert.equal(await gate.revoke({ authorizationId: grant.authorizationId }), true);
   let dispatches = 0;
 
   assert.deepEqual(
@@ -308,7 +396,7 @@ test('reservation that wins first is one-use and a lost acknowledgement remains 
   });
   await reservationStarted;
   assert.equal(authority.reservationCount(), 1);
-  assert.equal(gate.revoke({ authorizationId: grant.authorizationId }), true);
+  assert.equal(await gate.revoke({ authorizationId: grant.authorizationId }), true);
   releaseReservation();
 
   assert.deepEqual(await inFlight, { state: 'unknown', attemptId: grant.attemptId });
@@ -324,7 +412,7 @@ test('reservation that wins first is one-use and a lost acknowledgement remains 
         dispatches += 1;
       },
     }),
-    { state: 'denied', reason: 'revoked' },
+    { state: 'unknown', attemptId: grant.attemptId },
   );
   assert.equal(dispatches, 0);
   assert.equal(authority.reservationCount(), 1);
@@ -569,7 +657,7 @@ test('revocation after broker receipt leaves the attempt unknown and a second in
     },
   });
   await brokerReceived;
-  assert.equal(gateA.revoke({ authorizationId: work.authorizationId }), true);
+  assert.equal(await gateA.revoke({ authorizationId: work.authorizationId }), true);
   releaseLostAcknowledgement();
 
   assert.deepEqual(await firstDispatch, { state: 'unknown', attemptId: work.attemptId });

@@ -34,6 +34,7 @@ function validGrant(grant) {
     safeGeneration(grant.instanceGeneration) &&
     requiredString(grant.ownerPrincipalId) &&
     requiredString(grant.resourceId) &&
+    safeGeneration(grant.revocationGeneration) &&
     grant.status === 'approved'
   );
 }
@@ -66,7 +67,6 @@ export function createOfflineOwnerReenrollment({ snapshot, authority }) {
   const revokedAuthorizationIds = new Set();
   let activeEnrollment = null;
   let status = 'QUARANTINED';
-  let revocationGeneration = 0;
 
   function statusResult() {
     return status;
@@ -96,6 +96,59 @@ export function createOfflineOwnerReenrollment({ snapshot, authority }) {
       return 'instance_unverified';
     }
     return null;
+  }
+
+  async function currentAuthorizationState(authorizationId) {
+    if (typeof authority?.currentAuthorizationState !== 'function') return null;
+    try {
+      const state = await authority.currentAuthorizationState({ authorizationId });
+      if (
+        !state ||
+        !safeGeneration(state.revocationGeneration) ||
+        typeof state.isRevoked !== 'boolean'
+      ) {
+        return null;
+      }
+      return Object.freeze({
+        revocationGeneration: state.revocationGeneration,
+        isRevoked: state.isRevoked,
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  async function verifyReservationDenial(receipt, grant) {
+    if (
+      !receipt ||
+      receipt.state !== 'denied' ||
+      !['already_reserved', 'revoked'].includes(receipt.reason) ||
+      receipt.authorizationId !== grant.authorizationId ||
+      receipt.enrollmentId !== activeEnrollment?.enrollmentId ||
+      receipt.instanceGeneration !== activeEnrollment?.instanceGeneration ||
+      typeof authority?.verifyReservation !== 'function'
+    ) {
+      return false;
+    }
+    const currentState = await currentAuthorizationState(grant.authorizationId);
+    if (!currentState || receipt.revocationGeneration !== currentState.revocationGeneration) {
+      return false;
+    }
+    const consistent =
+      (receipt.reason === 'already_reserved' &&
+        !currentState.isRevoked &&
+        currentState.revocationGeneration === grant.revocationGeneration) ||
+      (receipt.reason === 'revoked' &&
+        (currentState.isRevoked ||
+          currentState.revocationGeneration !== grant.revocationGeneration));
+    if (!consistent) return false;
+    try {
+      return (
+        (await authority.verifyReservation({ receipt, enrollment: activeEnrollment })) === true
+      );
+    } catch {
+      return false;
+    }
   }
 
   async function enroll({ challenge }) {
@@ -170,6 +223,10 @@ export function createOfflineOwnerReenrollment({ snapshot, authority }) {
     ) {
       throw new Error('new owner approval and resource receipt required');
     }
+    const initialAuthorizationState = await currentAuthorizationState(authorizationId);
+    if (!initialAuthorizationState || initialAuthorizationState.isRevoked) {
+      throw new Error('fresh authorization state required');
+    }
 
     const approved =
       (await authority.verifyOwnerApproval({ approval, enrollment: activeEnrollment })) === true;
@@ -183,6 +240,15 @@ export function createOfflineOwnerReenrollment({ snapshot, authority }) {
     if (!resourceCreated) throw new Error('resource creation receipt is not current');
     const instanceFailureAfterApproval = await checkCurrentEnrollment();
     if (instanceFailureAfterApproval) throw new Error('current enrollment required');
+    const authorizationStateAfterApproval = await currentAuthorizationState(authorizationId);
+    if (
+      !authorizationStateAfterApproval ||
+      authorizationStateAfterApproval.isRevoked ||
+      authorizationStateAfterApproval.revocationGeneration !==
+        initialAuthorizationState.revocationGeneration
+    ) {
+      throw new Error('authorization changed during approval');
+    }
 
     const grant = Object.freeze({
       authorizationId,
@@ -192,6 +258,7 @@ export function createOfflineOwnerReenrollment({ snapshot, authority }) {
       instanceGeneration: activeEnrollment.instanceGeneration,
       ownerPrincipalId: activeEnrollment.ownerPrincipalId,
       resourceId,
+      revocationGeneration: authorizationStateAfterApproval.revocationGeneration,
       status: 'approved',
     });
     grants.set(authorizationId, grant);
@@ -223,12 +290,18 @@ export function createOfflineOwnerReenrollment({ snapshot, authority }) {
     ) {
       return { state: 'denied', reason: 'stale_grant' };
     }
-    if (revokedAuthorizationIds.has(authorizationId)) {
-      return { state: 'denied', reason: 'revoked' };
-    }
     const attempt = attempts.get(grant.attemptId);
     if (attempt?.status === 'unknown') {
       return { state: 'unknown', attemptId: grant.attemptId };
+    }
+    const authorizationState = await currentAuthorizationState(authorizationId);
+    if (!authorizationState) return { state: 'denied', reason: 'revocation_unverified' };
+    if (
+      revokedAuthorizationIds.has(authorizationId) ||
+      authorizationState.isRevoked ||
+      authorizationState.revocationGeneration !== grant.revocationGeneration
+    ) {
+      return { state: 'denied', reason: 'revoked' };
     }
     const resource = resources.get(grant.resourceId);
     if (
@@ -243,16 +316,13 @@ export function createOfflineOwnerReenrollment({ snapshot, authority }) {
     if (reservations.has(authorizationId)) {
       return { state: 'denied', reason: 'already_reserved' };
     }
-    if (
-      grant.revocationGeneration !== undefined &&
-      grant.revocationGeneration !== revocationGeneration
-    ) {
-      return { state: 'denied', reason: 'revoked' };
-    }
-
     // This local marker prevents concurrent/replayed calls. The injected platform
     // authority owns durable reservation and serialization with revocation.
-    const reservationState = { state: 'reserving', path, revocationGeneration };
+    const reservationState = {
+      state: 'reserving',
+      path,
+      revocationGeneration: grant.revocationGeneration,
+    };
     reservations.set(authorizationId, reservationState);
     let receipt;
     try {
@@ -272,26 +342,9 @@ export function createOfflineOwnerReenrollment({ snapshot, authority }) {
       });
       return { state: 'unknown', attemptId: grant.attemptId };
     }
-    if (
-      receipt?.state === 'denied' &&
-      receipt.reason === 'already_reserved' &&
-      receipt.authorizationId === grant.authorizationId &&
-      receipt.enrollmentId === activeEnrollment.enrollmentId &&
-      receipt.instanceGeneration === activeEnrollment.instanceGeneration &&
-      receipt.revocationGeneration === reservationState.revocationGeneration &&
-      typeof authority.verifyReservation === 'function'
-    ) {
-      let denialIsTrusted = false;
-      try {
-        denialIsTrusted =
-          (await authority.verifyReservation({ receipt, enrollment: activeEnrollment })) === true;
-      } catch {
-        // An unverified denial is not evidence that reservation failed.
-      }
-      if (denialIsTrusted) {
-        reservationState.state = 'denied';
-        return { state: 'denied', reason: 'already_reserved' };
-      }
+    if (await verifyReservationDenial(receipt, grant)) {
+      reservationState.state = 'denied';
+      return { state: 'denied', reason: receipt.reason };
     }
     if (
       !receipt ||
@@ -337,7 +390,13 @@ export function createOfflineOwnerReenrollment({ snapshot, authority }) {
       });
       return { state: 'unknown', attemptId: grant.attemptId };
     }
-    if (reservationState.revocationGeneration !== revocationGeneration) {
+    const currentAuthorizationStateAfterReservation =
+      await currentAuthorizationState(authorizationId);
+    if (
+      !currentAuthorizationStateAfterReservation ||
+      currentAuthorizationStateAfterReservation.isRevoked ||
+      currentAuthorizationStateAfterReservation.revocationGeneration !== grant.revocationGeneration
+    ) {
       reservationState.state = 'unknown';
       attempts.set(grant.attemptId, {
         attemptId: grant.attemptId,
@@ -388,10 +447,43 @@ export function createOfflineOwnerReenrollment({ snapshot, authority }) {
     return { admitted, denied };
   }
 
-  function revoke({ authorizationId }) {
-    if (!grants.has(authorizationId)) return false;
+  async function revoke({ authorizationId }) {
+    if (
+      !grants.has(authorizationId) ||
+      typeof authority?.revokeAuthorization !== 'function' ||
+      typeof authority?.verifyRevocation !== 'function'
+    ) {
+      return false;
+    }
+    const previousState = await currentAuthorizationState(authorizationId);
+    if (!previousState || previousState.isRevoked) return false;
+
+    let receipt;
+    try {
+      receipt = await authority.revokeAuthorization({ authorizationId });
+    } catch {
+      return false;
+    }
+    const currentState = await currentAuthorizationState(authorizationId);
+    if (
+      !receipt ||
+      receipt.state !== 'revoked' ||
+      receipt.authorizationId !== authorizationId ||
+      !safeGeneration(receipt.revocationGeneration) ||
+      receipt.revocationGeneration <= previousState.revocationGeneration ||
+      !currentState?.isRevoked ||
+      currentState.revocationGeneration !== receipt.revocationGeneration
+    ) {
+      return false;
+    }
+    let trusted = false;
+    try {
+      trusted = (await authority.verifyRevocation({ receipt })) === true;
+    } catch {
+      // An unverifiable receipt does not update the local fast-deny cache.
+    }
+    if (!trusted) return false;
     revokedAuthorizationIds.add(authorizationId);
-    revocationGeneration += 1;
     return true;
   }
 
