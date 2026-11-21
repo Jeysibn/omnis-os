@@ -3,6 +3,37 @@ const CONTRACT = 'omnis.ao107.b2-resource-identity.v1';
 const requiredString = (value) => typeof value === 'string' && value.length > 0;
 const safeGeneration = (value) => Number.isSafeInteger(value) && value >= 0;
 
+function immutableData(value, seen = new Set()) {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value !== 'object' || seen.has(value)) throw new TypeError('invalid data value');
+  if (!Array.isArray(value) && Object.getPrototypeOf(value) !== Object.prototype) {
+    throw new TypeError('only plain data objects are accepted');
+  }
+  seen.add(value);
+  if (Array.isArray(value)) {
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const copy = [];
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = descriptors[index];
+      if (!descriptor || !Object.hasOwn(descriptor, 'value')) {
+        throw new TypeError('accessor or sparse array is not accepted');
+      }
+      copy.push(immutableData(descriptor.value, seen));
+    }
+    seen.delete(value);
+    return Object.freeze(copy);
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const copy = Object.create(null);
+  for (const [key, descriptor] of Object.entries(descriptors)) {
+    if (!Object.hasOwn(descriptor, 'value')) throw new TypeError('accessor is not accepted');
+    copy[key] = immutableData(descriptor.value, seen);
+  }
+  seen.delete(value);
+  return Object.freeze(copy);
+}
+
 function validateGrant(grant) {
   if (!grant || grant.contractRevision !== CONTRACT) return false;
   for (const key of [
@@ -16,6 +47,7 @@ function validateGrant(grant) {
     'processRegistrationId',
     'resourceKind',
     'resourceObjectId',
+    'resourceBindingDigest',
     'resourceFingerprint',
     'canonicalizationVersion',
     'hashAlgorithm',
@@ -61,9 +93,12 @@ function sameBinding(grant, evidence) {
     'processGeneration',
     'resourceKind',
     'resourceObjectId',
+    'resourceBindingDigest',
     'resourceFingerprint',
     'canonicalizationVersion',
     'hashAlgorithm',
+    'resourceLeaseExpiresAt',
+    'policyRevision',
     'resourceLeaseId',
     'resourceLeaseGeneration',
     'authorizationRevocationGeneration',
@@ -104,11 +139,29 @@ function sameReservation(grant, receipt) {
     receipt.processGeneration === grant.processGeneration &&
     receipt.resourceKind === grant.resourceKind &&
     receipt.resourceObjectId === grant.resourceObjectId &&
+    receipt.resourceBindingDigest === grant.resourceBindingDigest &&
     receipt.resourceFingerprint === grant.resourceFingerprint &&
-    receipt.resourceLeaseId === grant.resourceLeaseId &&
-    receipt.resourceLeaseGeneration === grant.resourceLeaseGeneration &&
+    receipt.canonicalizationVersion === grant.canonicalizationVersion &&
+    receipt.hashAlgorithm === grant.hashAlgorithm &&
     receipt.resourceLeaseExpiresAt === grant.resourceLeaseExpiresAt &&
     receipt.policyRevision === grant.policyRevision &&
+    Array.isArray(receipt.parentBindings) &&
+    receipt.parentBindings.length === grant.parentBindings.length &&
+    receipt.parentBindings.every((parent, index) => {
+      const expected = grant.parentBindings[index];
+      return (
+        parent?.resourceKind === expected.resourceKind &&
+        parent?.resourceObjectId === expected.resourceObjectId &&
+        parent?.resourceFingerprint === expected.resourceFingerprint
+      );
+    }) &&
+    receipt.creationProvenance?.authorizationId === grant.authorizationId &&
+    receipt.creationProvenance?.runId === grant.runId &&
+    receipt.creationProvenance?.attemptId === grant.attemptId &&
+    receipt.creationProvenance?.resourceKind === grant.resourceKind &&
+    receipt.creationProvenance?.resourceObjectId === grant.resourceObjectId &&
+    receipt.resourceLeaseId === grant.resourceLeaseId &&
+    receipt.resourceLeaseGeneration === grant.resourceLeaseGeneration &&
     receipt.actionId === grant.actionId &&
     receipt.actionVerb === grant.actionVerb &&
     receipt.authorizationRevocationGeneration === grant.authorizationRevocationGeneration &&
@@ -121,11 +174,26 @@ function sameReservation(grant, receipt) {
  * Offline policy seam only. This module has no trust store, Docker access, process
  * execution, persistence, or production adapter. Production use requires an
  * independently reviewed platform registrar/action gate implementing the
- * authenticated evidence and linearized one-use reservation callbacks.
+ * authenticated evidence and linearized one-use reservation callbacks. The
+ * evidence verifier must authenticate the canonical resource-binding digest
+ * over identity, provenance, parents, lease, policy, action, and generations.
+ * The reservation callback must atomically revalidate fresh identity, trusted
+ * time, lease expiry, revocation generation, and one-use dispatch fencing before
+ * issuing a receipt bound to that same digest and exact action.
  */
 export async function admitB2ResourceAction({ grant, evidence, authority, perform }) {
-  if (!validateGrant(grant)) return { state: 'denied', reason: 'invalid_grant' };
-  if (!sameBinding(grant, evidence)) return { state: 'denied', reason: 'binding_mismatch' };
+  let grantSnapshot;
+  let evidenceSnapshot;
+  try {
+    grantSnapshot = immutableData(grant);
+    evidenceSnapshot = immutableData(evidence);
+  } catch {
+    return { state: 'denied', reason: 'invalid_data' };
+  }
+  if (!validateGrant(grantSnapshot)) return { state: 'denied', reason: 'invalid_grant' };
+  if (!sameBinding(grantSnapshot, evidenceSnapshot)) {
+    return { state: 'denied', reason: 'binding_mismatch' };
+  }
   if (
     !authority ||
     typeof authority.verifyEvidence !== 'function' ||
@@ -137,21 +205,34 @@ export async function admitB2ResourceAction({ grant, evidence, authority, perfor
   }
 
   try {
-    if ((await authority.verifyEvidence({ grant, evidence })) !== true) {
+    if (
+      (await authority.verifyEvidence({ grant: grantSnapshot, evidence: evidenceSnapshot })) !==
+      true
+    ) {
       return { state: 'denied', reason: 'evidence_unverified' };
     }
-    const reservation = await authority.reserveAction({ grant, evidence });
+    const reservation = immutableData(
+      await authority.reserveAction({ grant: grantSnapshot, evidence: evidenceSnapshot }),
+    );
     if (
-      !sameReservation(grant, reservation) ||
-      (await authority.verifyReservation({ grant, evidence, reservation })) !== true
+      !sameReservation(grantSnapshot, reservation) ||
+      (await authority.verifyReservation({
+        grant: grantSnapshot,
+        evidence: evidenceSnapshot,
+        reservation,
+      })) !== true
     ) {
       return { state: 'denied', reason: 'reservation_unverified' };
     }
-    const result = await perform({ grant, evidence, reservation });
+    const result = await perform({
+      grant: grantSnapshot,
+      evidence: evidenceSnapshot,
+      reservation,
+    });
     return { state: 'completed', reservationId: reservation.reservationId, result };
   } catch {
     // A lost/ambiguous dispatch result cannot authorize replay. The caller must
     // preserve this attempt as unknown and reconcile it using the same receipt.
-    return { state: 'unknown', attemptId: grant.attemptId };
+    return { state: 'unknown', attemptId: grantSnapshot.attemptId };
   }
 }

@@ -17,6 +17,7 @@ const grantFixture = () => ({
   processGeneration: 12,
   resourceKind: 'container',
   resourceObjectId: 'object-synthetic-1',
+  resourceBindingDigest: 'sha256:synthetic-binding-1',
   resourceFingerprint: 'sha256:synthetic-config-1',
   canonicalizationVersion: 'fixture-c14n-v1',
   hashAlgorithm: 'sha256',
@@ -48,9 +49,12 @@ function evidenceFor(grant) {
       processGeneration: grant.processGeneration,
       resourceKind: grant.resourceKind,
       resourceObjectId: grant.resourceObjectId,
+      resourceBindingDigest: grant.resourceBindingDigest,
       resourceFingerprint: grant.resourceFingerprint,
       canonicalizationVersion: grant.canonicalizationVersion,
       hashAlgorithm: grant.hashAlgorithm,
+      resourceLeaseExpiresAt: grant.resourceLeaseExpiresAt,
+      policyRevision: grant.policyRevision,
       parentBindings: grant.parentBindings.map((parent) => ({ ...parent })),
       creationProvenance: {
         authorizationId: grant.authorizationId,
@@ -84,11 +88,22 @@ function reservationFor(grant) {
     processGeneration: grant.processGeneration,
     resourceKind: grant.resourceKind,
     resourceObjectId: grant.resourceObjectId,
+    resourceBindingDigest: grant.resourceBindingDigest,
     resourceFingerprint: grant.resourceFingerprint,
-    resourceLeaseId: grant.resourceLeaseId,
-    resourceLeaseGeneration: grant.resourceLeaseGeneration,
+    canonicalizationVersion: grant.canonicalizationVersion,
+    hashAlgorithm: grant.hashAlgorithm,
     resourceLeaseExpiresAt: grant.resourceLeaseExpiresAt,
     policyRevision: grant.policyRevision,
+    parentBindings: grant.parentBindings.map((parent) => ({ ...parent })),
+    creationProvenance: {
+      authorizationId: grant.authorizationId,
+      runId: grant.runId,
+      attemptId: grant.attemptId,
+      resourceKind: grant.resourceKind,
+      resourceObjectId: grant.resourceObjectId,
+    },
+    resourceLeaseId: grant.resourceLeaseId,
+    resourceLeaseGeneration: grant.resourceLeaseGeneration,
     actionId: grant.actionId,
     actionVerb: grant.actionVerb,
     authorizationRevocationGeneration: grant.authorizationRevocationGeneration,
@@ -143,6 +158,36 @@ test('denies without trusted authorities and never calls the action', async () =
   assert.equal(calls, 0);
 });
 
+test('uses immutable snapshots across asynchronous authority callbacks', async () => {
+  const grant = grantFixture();
+  const evidence = evidenceFor(grant);
+  const receipt = reservationFor(grant);
+  const authority = authorityFor(grant, {
+    verifyEvidence: async ({ grant: snapshot }) => {
+      assert.equal(Object.isFrozen(snapshot), true);
+      grant.resourceObjectId = 'caller-mutated-object';
+      evidence.binding.resourceObjectId = 'evidence-mutated-object';
+      return true;
+    },
+    reserveAction: async () => receipt,
+  });
+  let actionCalls = 0;
+  const result = await admitB2ResourceAction({
+    grant,
+    evidence,
+    authority,
+    perform: async ({ grant: actionGrant, evidence: actionEvidence }) => {
+      actionCalls += 1;
+      assert.equal(actionGrant.resourceObjectId, 'object-synthetic-1');
+      assert.equal(actionEvidence.binding.resourceObjectId, 'object-synthetic-1');
+      assert.equal(Object.isFrozen(actionGrant), true);
+      return 'synthetic-result';
+    },
+  });
+  assert.equal(result.state, 'completed');
+  assert.equal(actionCalls, 1);
+});
+
 test('denies caller substitution, changed parentage, and missing creation lineage before authority calls', async () => {
   for (const mutate of [
     (evidence) => {
@@ -153,6 +198,12 @@ test('denies caller substitution, changed parentage, and missing creation lineag
     },
     (evidence) => {
       evidence.binding.creationProvenance.attemptId = 'other-attempt';
+    },
+    (evidence) => {
+      evidence.binding.resourceLeaseExpiresAt = '2099-02-01T00:00:00.000Z';
+    },
+    (evidence) => {
+      evidence.binding.policyRevision = 'substituted-policy';
     },
   ]) {
     const grant = grantFixture();
@@ -214,6 +265,15 @@ test('denies mismatched, replayed, or unauthenticated reservation receipts', asy
       receipt.authorizationRevocationGeneration -= 1;
     },
     (receipt) => {
+      receipt.parentBindings[0].resourceFingerprint = 'sha256:substituted-parent';
+    },
+    (receipt) => {
+      receipt.resourceLeaseExpiresAt = '2099-02-01T00:00:00.000Z';
+    },
+    (receipt) => {
+      receipt.policyRevision = 'substituted-policy';
+    },
+    (receipt) => {
       receipt.dispatchFenceGeneration = -1;
     },
   ]) {
@@ -261,5 +321,38 @@ test('preserves unknown after an ambiguous action and does not retry', async () 
     perform,
   });
   assert.deepEqual(result, { state: 'unknown', attemptId: grant.attemptId });
+  assert.equal(actionCalls, 1);
+});
+
+test('does not admit a replayed synthetic one-use reservation', async () => {
+  const grant = grantFixture();
+  const receipt = reservationFor(grant);
+  let verificationCount = 0;
+  const authority = authorityFor(grant, {
+    reserveAction: async () => receipt,
+    verifyReservation: async () => {
+      verificationCount += 1;
+      return verificationCount === 1;
+    },
+  });
+  let actionCalls = 0;
+  const perform = async () => {
+    actionCalls += 1;
+    return 'synthetic-result';
+  };
+  const first = await admitB2ResourceAction({
+    grant,
+    evidence: evidenceFor(grant),
+    authority,
+    perform,
+  });
+  const replay = await admitB2ResourceAction({
+    grant,
+    evidence: evidenceFor(grant),
+    authority,
+    perform,
+  });
+  assert.equal(first.state, 'completed');
+  assert.deepEqual(replay, { state: 'denied', reason: 'reservation_unverified' });
   assert.equal(actionCalls, 1);
 });
