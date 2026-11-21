@@ -221,11 +221,15 @@ function sameReservation(grant, receipt) {
  * execution, persistence, or production adapter. Production use requires an
  * independently reviewed platform registrar/action gate implementing the
  * authenticated evidence and linearized one-use reservation callbacks. The
+ * grant verifier must authenticate owner consent and exact operation scope,
+ * and check grant expiry against trusted time. The
  * evidence verifier must authenticate the canonical resource-binding digest
  * over identity, provenance, parents, lease, policy, action, and generations.
  * The reservation callback must atomically revalidate fresh identity, trusted
  * time, lease expiry, revocation generation, and one-use dispatch fencing before
- * issuing a receipt bound to that same digest and exact action.
+ * issuing a receipt bound to that same digest and exact action. A lost
+ * reservation acknowledgement may recover only the same reservation or deny;
+ * it must never mint a replacement reservation for the attempt.
  */
 export async function admitB2ResourceAction({ grant, evidence, authority, perform }) {
   let grantSnapshot;
@@ -248,6 +252,7 @@ export async function admitB2ResourceAction({ grant, evidence, authority, perfor
   }
   if (
     !authority ||
+    typeof authority.verifyGrant !== 'function' ||
     typeof authority.verifyEvidence !== 'function' ||
     typeof authority.reserveAction !== 'function' ||
     typeof authority.verifyReservation !== 'function' ||
@@ -255,6 +260,14 @@ export async function admitB2ResourceAction({ grant, evidence, authority, perfor
   ) {
     return { state: 'denied', reason: 'trusted_authority_unavailable' };
   }
+
+  let grantIsTrusted = false;
+  try {
+    grantIsTrusted = (await authority.verifyGrant({ grant: grantSnapshot })) === true;
+  } catch {
+    // A forged, expired, or unverifiable owner grant is denied before evidence lookup.
+  }
+  if (!grantIsTrusted) return { state: 'denied', reason: 'grant_unverified' };
 
   let evidenceIsTrusted = false;
   try {

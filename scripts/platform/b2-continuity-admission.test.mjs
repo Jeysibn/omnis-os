@@ -114,6 +114,7 @@ function reservationFor(grant) {
 
 function authorityFor(grant, overrides = {}) {
   return {
+    verifyGrant: async () => true,
     verifyEvidence: async () => true,
     reserveAction: async () => reservationFor(grant),
     verifyReservation: async () => true,
@@ -366,6 +367,9 @@ test('does not admit a replayed synthetic one-use reservation', async () => {
 test('pre-dispatch authority failures deny without claiming an unknown action outcome', async () => {
   for (const authority of [
     authorityFor(grantFixture(), {
+      verifyGrant: async () => false,
+    }),
+    authorityFor(grantFixture(), {
       verifyEvidence: async () => {
         throw new Error('synthetic verifier failure');
       },
@@ -394,6 +398,61 @@ test('pre-dispatch authority failures deny without claiming an unknown action ou
     assert.notEqual(result.state, 'unknown');
     assert.equal(actionCalls, 0);
   }
+});
+
+test('serializes concurrent duplicate attempts at the synthetic reservation gate', async () => {
+  const grant = grantFixture();
+  const receipt = reservationFor(grant);
+  let consumed = false;
+  const authority = authorityFor(grant, {
+    reserveAction: async () => {
+      if (consumed) throw new Error('synthetic one-use reservation already consumed');
+      consumed = true;
+      return receipt;
+    },
+  });
+  let actionCalls = 0;
+  const perform = async () => {
+    actionCalls += 1;
+    return 'synthetic-result';
+  };
+  const [first, duplicate] = await Promise.all([
+    admitB2ResourceAction({ grant, evidence: evidenceFor(grant), authority, perform }),
+    admitB2ResourceAction({ grant, evidence: evidenceFor(grant), authority, perform }),
+  ]);
+  assert.equal([first, duplicate].filter((result) => result.state === 'completed').length, 1);
+  assert.equal(actionCalls, 1);
+});
+
+test('a lost reservation acknowledgement cannot mint a replacement reservation', async () => {
+  const grant = grantFixture();
+  let reserveCalls = 0;
+  let reservationsMinted = 0;
+  const authority = authorityFor(grant, {
+    reserveAction: async () => {
+      reserveCalls += 1;
+      if (reserveCalls === 1) {
+        reservationsMinted += 1;
+        throw new Error('synthetic lost reservation acknowledgement');
+      }
+      throw new Error('synthetic same attempt remains fenced');
+    },
+  });
+  let actionCalls = 0;
+  for (let retry = 0; retry < 2; retry += 1) {
+    const result = await admitB2ResourceAction({
+      grant,
+      evidence: evidenceFor(grant),
+      authority,
+      perform: async () => {
+        actionCalls += 1;
+      },
+    });
+    assert.deepEqual(result, { state: 'denied', reason: 'reservation_unavailable' });
+  }
+  assert.equal(reserveCalls, 2);
+  assert.equal(reservationsMinted, 1);
+  assert.equal(actionCalls, 0);
 });
 
 test('rejects unknown fields before an authority or action can observe them', async () => {
