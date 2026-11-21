@@ -8,6 +8,8 @@ const frontendOrigin = process.env.OMNIS_TEST_FRONTEND_ORIGIN;
 const taskDetail = 'Verify that a synthetic task persists through the owner Tasks page and reload.';
 const syntheticProjectId = process.env.OMNIS_TEST_SYNTHETIC_PROJECT_ID;
 const lostAckRequestId = process.env.OMNIS_TEST_SYNTHETIC_LOST_ACK_REQUEST_ID;
+const revokeFirstRequestId = process.env.OMNIS_TEST_SYNTHETIC_REVOKED_FIRST_REQUEST_ID;
+const freshGrantRequestId = process.env.OMNIS_TEST_SYNTHETIC_FRESH_GRANT_REQUEST_ID;
 const cancellationRequestId = process.env.OMNIS_TEST_SYNTHETIC_CANCELLATION_REQUEST_ID;
 const composeJourneyResultPath = process.env.OMNIS_COMPOSE_JOURNEY_RESULT_PATH;
 const composeRecovery = process.env.OMNIS_COMPOSE_RECOVERY === '1';
@@ -662,13 +664,94 @@ test('owner sees an authorized synthetic broker Run, ordered events, result and 
   );
   expect(approved.status).toBe(200);
   expect(approved.body.status).toBe('authorized');
+  expect(freshGrantRequestId).toMatch(/^[0-9a-f-]{36}$/i);
+
+  // Revoke-first stops before the worker reservation and fake-broker boundary.
+  const revokeFirstAuthorizationResponse = await ownerRequest(
+    page,
+    '/api/v1/connector-authorizations',
+    {
+      method: 'POST',
+      idempotencyKey: randomUUID(),
+      body: authorizationInput,
+    },
+  );
+  expect(revokeFirstAuthorizationResponse.status).toBe(201);
+  const revokeFirstAuthorization = revokeFirstAuthorizationResponse.body;
+  const revokeFirstApproval = await ownerRequest(
+    page,
+    `/api/v1/connector-authorizations/${revokeFirstAuthorization.id}/decision`,
+    {
+      method: 'POST',
+      body: {
+        decision: 'approve',
+        promptDigestConfirmation: revokeFirstAuthorization.promptDigest,
+      },
+    },
+  );
+  expect(revokeFirstApproval.body.status).toBe('authorized');
+  const revokeFirstRevocation = await ownerRequest(
+    page,
+    `/api/v1/connector-authorizations/${revokeFirstAuthorization.id}/revoke`,
+    { method: 'POST' },
+  );
+  expect(revokeFirstRevocation.body.status).toBe('revoked');
+  expect(revokeFirstRevocation.body.consumedAt).toBeNull();
+  expect(revokeFirstRevocation.body.consumedRequestId).toBeNull();
+  expect(revokeFirstRequestId).toMatch(/^[0-9a-f-]{36}$/i);
+  const revokeFirstRequest = {
+    authorizationId: revokeFirstAuthorization.id,
+    request: {
+      projectId: authorizationInput.projectId,
+      projectRevision: authorizationInput.projectRevision,
+      taskId: authorizationInput.taskId,
+      taskRevision: authorizationInput.taskRevision,
+      agentId: authorizationInput.agentId,
+      profileVersion: authorizationInput.profileVersion,
+      connectorId: authorizationInput.connectorId,
+      connectorVersion: authorizationInput.connectorVersion,
+      providerId: authorizationInput.providerId,
+      modelId: authorizationInput.modelId,
+      operation: authorizationInput.operation,
+      capabilities: [],
+      limits,
+      promptDigest: revokeFirstAuthorization.promptDigest,
+    },
+    renderedRequest,
+  };
+  const revokeFirstDispatch = await ownerRequest(
+    page,
+    `/api/v1/tasks/${assigned.body.id}/synthetic-runs`,
+    {
+      method: 'POST',
+      idempotencyKey: revokeFirstRequestId,
+      body: revokeFirstRequest,
+    },
+  );
+  expect(revokeFirstDispatch.status).toBe(409);
+  expect(revokeFirstDispatch.body.error.code).toBe('authorization_mismatch');
+  const revokeFirstReplay = await ownerRequest(
+    page,
+    `/api/v1/tasks/${assigned.body.id}/synthetic-runs`,
+    {
+      method: 'POST',
+      idempotencyKey: revokeFirstRequestId,
+      body: revokeFirstRequest,
+    },
+  );
+  expect(revokeFirstReplay.status).toBe(409);
+  const revokeFirstDetail = await ownerRequest(
+    page,
+    `/api/v1/tasks/${assigned.body.id}/synthetic-runs/${revokeFirstAuthorization.id}`,
+  );
+  expect(revokeFirstDetail.status).toBe(404);
 
   const syntheticRun = await ownerRequest(
     page,
     `/api/v1/tasks/${assigned.body.id}/synthetic-runs`,
     {
       method: 'POST',
-      idempotencyKey: randomUUID(),
+      idempotencyKey: freshGrantRequestId,
       body: {
         authorizationId: authorization.id,
         request: {

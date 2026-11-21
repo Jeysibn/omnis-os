@@ -35,11 +35,12 @@ export async function startMockServices({
   enableSyntheticBrokerProcessTestMode = false,
   syntheticLostAckRequestId,
   syntheticCancellationRequestId,
+  databaseEnvironment = process.env,
 }) {
   if (enableSyntheticBrokerProcessTestMode && !enableSyntheticBrokerTestMode) {
     throw new Error('The synthetic broker process test requires the owner-authorized test mode.');
   }
-  const databaseConfig = validateTestDatabaseConfiguration(process.env, {
+  const databaseConfig = validateTestDatabaseConfiguration(databaseEnvironment, {
     requireAdmin: requireAuditPool,
     unixSocketDirectory: composeManagedApplication ? databaseSocketDirectory : undefined,
   });
@@ -82,7 +83,8 @@ export async function startMockServices({
     await queueGuardPool.end();
   }
 
-  const tempDirectory = await mkdtemp(join(tmpdir(), 'omnis-os-test-services-'));
+  // Keep AF_UNIX socket paths below the platform limit when TMPDIR is a long workspace path.
+  const tempDirectory = await mkdtemp(join(tmpdir(), 'svc-'));
   const workerEnvPath = join(tempDirectory, 'worker.env');
   const apiEnvPath = join(tempDirectory, 'api.env');
   const authorizerEnvPath = join(tempDirectory, 'authorizer.env');
@@ -618,6 +620,8 @@ export function buildBrowserEnvironment(
     ownerPassword,
     syntheticProjectId,
     lostAckRequestId,
+    revokeFirstRequestId,
+    freshGrantRequestId,
     cancellationRequestId,
   },
 ) {
@@ -653,6 +657,12 @@ export function buildBrowserEnvironment(
     OMNIS_TEST_OWNER_PASSWORD: ownerPassword,
     ...(syntheticProjectId ? { OMNIS_TEST_SYNTHETIC_PROJECT_ID: syntheticProjectId } : {}),
     ...(lostAckRequestId ? { OMNIS_TEST_SYNTHETIC_LOST_ACK_REQUEST_ID: lostAckRequestId } : {}),
+    ...(revokeFirstRequestId
+      ? { OMNIS_TEST_SYNTHETIC_REVOKED_FIRST_REQUEST_ID: revokeFirstRequestId }
+      : {}),
+    ...(freshGrantRequestId
+      ? { OMNIS_TEST_SYNTHETIC_FRESH_GRANT_REQUEST_ID: freshGrantRequestId }
+      : {}),
     ...(cancellationRequestId
       ? { OMNIS_TEST_SYNTHETIC_CANCELLATION_REQUEST_ID: cancellationRequestId }
       : {}),
@@ -1089,6 +1099,44 @@ async function startSyntheticBrokerCompose({
                 await delay(100);
               }
               throw new Error('Broker restart did not reconcile the owner cancellation.');
+            },
+            brokerCallCount(requestId) {
+              if (!/^[0-9a-f-]{36}$/i.test(requestId))
+                throw new Error('Fake-broker call assertion input is invalid.');
+              const logs = runCompose(['logs', 'broker-process']);
+              if (logs.error || logs.status !== 0)
+                throw new Error('Fake-broker call evidence could not be read.');
+              const marker = `synthetic_fake_broker_submission_call:${requestId}`;
+              return logs.stdout.split(marker).length - 1;
+            },
+            assertBrokerCallCount(requestId, expectedCount) {
+              if (!Number.isSafeInteger(expectedCount) || expectedCount < 0)
+                throw new Error('Fake-broker expected call count is invalid.');
+              const actualCount = this.brokerCallCount(requestId);
+              if (actualCount !== expectedCount)
+                throw new Error(
+                  `Fake-broker call count for the request was ${actualCount}, expected ${expectedCount}.`,
+                );
+              return actualCount;
+            },
+            assertProviderCallCount(requestId, expectedCount) {
+              if (
+                !/^[0-9a-f-]{36}$/i.test(requestId) ||
+                !Number.isSafeInteger(expectedCount) ||
+                expectedCount < 0
+              ) {
+                throw new Error('Fake-provider call assertion input is invalid.');
+              }
+              const logs = runCompose(['logs', 'fake-provider']);
+              if (logs.error || logs.status !== 0)
+                throw new Error('Fake-provider call evidence could not be read.');
+              const marker = `synthetic_fake_provider_submission_call:${requestId}`;
+              const actualCount = logs.stdout.split(marker).length - 1;
+              if (actualCount !== expectedCount)
+                throw new Error(
+                  `Fake-provider call count for the request was ${actualCount}, expected ${expectedCount}.`,
+                );
+              return actualCount;
             },
             close() {
               const stopped = runCompose(['down', '--volumes', '--remove-orphans']);
