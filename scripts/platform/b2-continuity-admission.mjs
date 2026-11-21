@@ -2,6 +2,86 @@ const CONTRACT = 'omnis.ao107.b2-resource-identity.v1';
 
 const requiredString = (value) => typeof value === 'string' && value.length > 0;
 const safeGeneration = (value) => Number.isSafeInteger(value) && value >= 0;
+const GRANT_KEYS = [
+  'contractRevision',
+  'authorizationId',
+  'runId',
+  'attemptId',
+  'ownerPrincipalId',
+  'ownerDecisionId',
+  'hostPrincipalId',
+  'hostGeneration',
+  'daemonRegistrationId',
+  'daemonRegistrationGeneration',
+  'processRegistrationId',
+  'processGeneration',
+  'resourceKind',
+  'resourceObjectId',
+  'resourceBindingDigest',
+  'resourceFingerprint',
+  'canonicalizationVersion',
+  'hashAlgorithm',
+  'parentBindings',
+  'resourceLeaseId',
+  'resourceLeaseGeneration',
+  'resourceLeaseExpiresAt',
+  'policyRevision',
+  'authorizationRevocationGeneration',
+  'actionId',
+  'actionVerb',
+  'expiresAt',
+];
+const BINDING_KEYS = [
+  'hostPrincipalId',
+  'hostGeneration',
+  'daemonRegistrationId',
+  'daemonRegistrationGeneration',
+  'processRegistrationId',
+  'processGeneration',
+  'resourceKind',
+  'resourceObjectId',
+  'resourceBindingDigest',
+  'resourceFingerprint',
+  'canonicalizationVersion',
+  'hashAlgorithm',
+  'parentBindings',
+  'resourceLeaseId',
+  'resourceLeaseGeneration',
+  'resourceLeaseExpiresAt',
+  'policyRevision',
+  'authorizationRevocationGeneration',
+  'actionId',
+  'actionVerb',
+];
+const PARENT_KEYS = ['resourceKind', 'resourceObjectId', 'resourceFingerprint'];
+const PROVENANCE_KEYS = [
+  'authorizationId',
+  'runId',
+  'attemptId',
+  'resourceKind',
+  'resourceObjectId',
+];
+const RESERVATION_KEYS = [
+  'contractRevision',
+  'reservationId',
+  'authorizationId',
+  'runId',
+  'attemptId',
+  ...BINDING_KEYS,
+  'creationProvenance',
+  'dispatchFenceGeneration',
+  'authenticationProof',
+];
+
+function exactKeys(value, keys) {
+  return (
+    value &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    Object.keys(value).length === keys.length &&
+    keys.every((key) => Object.hasOwn(value, key))
+  );
+}
 
 function immutableData(value, seen = new Set()) {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
@@ -34,8 +114,32 @@ function immutableData(value, seen = new Set()) {
   return Object.freeze(copy);
 }
 
+function validParents(parents) {
+  return (
+    Array.isArray(parents) &&
+    parents.every(
+      (parent) =>
+        exactKeys(parent, PARENT_KEYS) &&
+        requiredString(parent.resourceKind) &&
+        requiredString(parent.resourceObjectId) &&
+        requiredString(parent.resourceFingerprint),
+    )
+  );
+}
+
+function validProvenance(provenance, grant) {
+  return (
+    exactKeys(provenance, PROVENANCE_KEYS) &&
+    provenance.authorizationId === grant.authorizationId &&
+    provenance.runId === grant.runId &&
+    provenance.attemptId === grant.attemptId &&
+    provenance.resourceKind === grant.resourceKind &&
+    provenance.resourceObjectId === grant.resourceObjectId
+  );
+}
+
 function validateGrant(grant) {
-  if (!grant || grant.contractRevision !== CONTRACT) return false;
+  if (!exactKeys(grant, GRANT_KEYS) || grant.contractRevision !== CONTRACT) return false;
   for (const key of [
     'authorizationId',
     'runId',
@@ -69,104 +173,46 @@ function validateGrant(grant) {
   ]) {
     if (!safeGeneration(grant[key])) return false;
   }
-  return (
-    Array.isArray(grant.parentBindings) &&
-    grant.parentBindings.every(
-      (parent) =>
-        parent &&
-        requiredString(parent.resourceKind) &&
-        requiredString(parent.resourceObjectId) &&
-        requiredString(parent.resourceFingerprint),
-    )
-  );
+  return validParents(grant.parentBindings);
 }
 
 function sameBinding(grant, evidence) {
   const binding = evidence?.binding;
-  if (!binding) return false;
-  const keys = [
-    'hostPrincipalId',
-    'hostGeneration',
-    'daemonRegistrationId',
-    'daemonRegistrationGeneration',
-    'processRegistrationId',
-    'processGeneration',
-    'resourceKind',
-    'resourceObjectId',
-    'resourceBindingDigest',
-    'resourceFingerprint',
-    'canonicalizationVersion',
-    'hashAlgorithm',
-    'resourceLeaseExpiresAt',
-    'policyRevision',
-    'resourceLeaseId',
-    'resourceLeaseGeneration',
-    'authorizationRevocationGeneration',
-    'actionId',
-    'actionVerb',
-  ];
+  if (!exactKeys(binding, [...BINDING_KEYS, 'creationProvenance'])) return false;
   return (
-    keys.every((key) => binding[key] === grant[key]) &&
-    Array.isArray(binding.parentBindings) &&
-    binding.parentBindings.length === grant.parentBindings.length &&
-    binding.parentBindings.every((parent, index) => {
-      const expected = grant.parentBindings[index];
-      return (
-        parent?.resourceKind === expected.resourceKind &&
-        parent?.resourceObjectId === expected.resourceObjectId &&
-        parent?.resourceFingerprint === expected.resourceFingerprint
-      );
+    BINDING_KEYS.every((key) => {
+      if (key === 'parentBindings') return true;
+      return binding[key] === grant[key];
     }) &&
-    binding.creationProvenance?.authorizationId === grant.authorizationId &&
-    binding.creationProvenance?.runId === grant.runId &&
-    binding.creationProvenance?.attemptId === grant.attemptId &&
-    binding.creationProvenance?.resourceKind === grant.resourceKind &&
-    binding.creationProvenance?.resourceObjectId === grant.resourceObjectId
+    validParents(binding.parentBindings) &&
+    binding.parentBindings.length === grant.parentBindings.length &&
+    binding.parentBindings.every((parent, index) =>
+      PARENT_KEYS.every((key) => parent[key] === grant.parentBindings[index][key]),
+    ) &&
+    validProvenance(binding.creationProvenance, grant)
   );
 }
 
 function sameReservation(grant, receipt) {
   return (
-    receipt?.contractRevision === CONTRACT &&
+    exactKeys(receipt, RESERVATION_KEYS) &&
+    receipt.contractRevision === CONTRACT &&
+    requiredString(receipt.reservationId) &&
+    requiredString(receipt.authenticationProof) &&
     receipt.authorizationId === grant.authorizationId &&
     receipt.runId === grant.runId &&
     receipt.attemptId === grant.attemptId &&
-    receipt.hostPrincipalId === grant.hostPrincipalId &&
-    receipt.hostGeneration === grant.hostGeneration &&
-    receipt.daemonRegistrationId === grant.daemonRegistrationId &&
-    receipt.daemonRegistrationGeneration === grant.daemonRegistrationGeneration &&
-    receipt.processRegistrationId === grant.processRegistrationId &&
-    receipt.processGeneration === grant.processGeneration &&
-    receipt.resourceKind === grant.resourceKind &&
-    receipt.resourceObjectId === grant.resourceObjectId &&
-    receipt.resourceBindingDigest === grant.resourceBindingDigest &&
-    receipt.resourceFingerprint === grant.resourceFingerprint &&
-    receipt.canonicalizationVersion === grant.canonicalizationVersion &&
-    receipt.hashAlgorithm === grant.hashAlgorithm &&
-    receipt.resourceLeaseExpiresAt === grant.resourceLeaseExpiresAt &&
-    receipt.policyRevision === grant.policyRevision &&
-    Array.isArray(receipt.parentBindings) &&
-    receipt.parentBindings.length === grant.parentBindings.length &&
-    receipt.parentBindings.every((parent, index) => {
-      const expected = grant.parentBindings[index];
-      return (
-        parent?.resourceKind === expected.resourceKind &&
-        parent?.resourceObjectId === expected.resourceObjectId &&
-        parent?.resourceFingerprint === expected.resourceFingerprint
-      );
+    BINDING_KEYS.every((key) => {
+      if (key === 'parentBindings') return true;
+      return receipt[key] === grant[key];
     }) &&
-    receipt.creationProvenance?.authorizationId === grant.authorizationId &&
-    receipt.creationProvenance?.runId === grant.runId &&
-    receipt.creationProvenance?.attemptId === grant.attemptId &&
-    receipt.creationProvenance?.resourceKind === grant.resourceKind &&
-    receipt.creationProvenance?.resourceObjectId === grant.resourceObjectId &&
-    receipt.resourceLeaseId === grant.resourceLeaseId &&
-    receipt.resourceLeaseGeneration === grant.resourceLeaseGeneration &&
-    receipt.actionId === grant.actionId &&
-    receipt.actionVerb === grant.actionVerb &&
-    receipt.authorizationRevocationGeneration === grant.authorizationRevocationGeneration &&
-    safeGeneration(receipt.dispatchFenceGeneration) &&
-    requiredString(receipt.reservationId)
+    validParents(receipt.parentBindings) &&
+    receipt.parentBindings.length === grant.parentBindings.length &&
+    receipt.parentBindings.every((parent, index) =>
+      PARENT_KEYS.every((key) => parent[key] === grant.parentBindings[index][key]),
+    ) &&
+    validProvenance(receipt.creationProvenance, grant) &&
+    safeGeneration(receipt.dispatchFenceGeneration)
   );
 }
 
@@ -191,6 +237,12 @@ export async function admitB2ResourceAction({ grant, evidence, authority, perfor
     return { state: 'denied', reason: 'invalid_data' };
   }
   if (!validateGrant(grantSnapshot)) return { state: 'denied', reason: 'invalid_grant' };
+  if (
+    !exactKeys(evidenceSnapshot, ['binding', 'authenticationProof']) ||
+    !requiredString(evidenceSnapshot.authenticationProof)
+  ) {
+    return { state: 'denied', reason: 'invalid_evidence' };
+  }
   if (!sameBinding(grantSnapshot, evidenceSnapshot)) {
     return { state: 'denied', reason: 'binding_mismatch' };
   }
@@ -204,35 +256,51 @@ export async function admitB2ResourceAction({ grant, evidence, authority, perfor
     return { state: 'denied', reason: 'trusted_authority_unavailable' };
   }
 
+  let evidenceIsTrusted = false;
   try {
-    if (
-      (await authority.verifyEvidence({ grant: grantSnapshot, evidence: evidenceSnapshot })) !==
-      true
-    ) {
-      return { state: 'denied', reason: 'evidence_unverified' };
-    }
-    const reservation = immutableData(
+    evidenceIsTrusted =
+      (await authority.verifyEvidence({ grant: grantSnapshot, evidence: evidenceSnapshot })) ===
+      true;
+  } catch {
+    // Verification failure occurs before reservation or action dispatch.
+  }
+  if (!evidenceIsTrusted) return { state: 'denied', reason: 'evidence_unverified' };
+
+  let reservation;
+  try {
+    reservation = immutableData(
       await authority.reserveAction({ grant: grantSnapshot, evidence: evidenceSnapshot }),
     );
-    if (
-      !sameReservation(grantSnapshot, reservation) ||
+  } catch {
+    return { state: 'denied', reason: 'reservation_unavailable' };
+  }
+  if (!sameReservation(grantSnapshot, reservation)) {
+    return { state: 'denied', reason: 'reservation_unverified' };
+  }
+
+  let reservationIsTrusted = false;
+  try {
+    reservationIsTrusted =
       (await authority.verifyReservation({
         grant: grantSnapshot,
         evidence: evidenceSnapshot,
         reservation,
-      })) !== true
-    ) {
-      return { state: 'denied', reason: 'reservation_unverified' };
-    }
-    const result = await perform({
+      })) === true;
+  } catch {
+    // Receipt verification failure occurs before action dispatch.
+  }
+  if (!reservationIsTrusted) return { state: 'denied', reason: 'reservation_unverified' };
+
+  try {
+    await perform({
       grant: grantSnapshot,
-      evidence: evidenceSnapshot,
+      binding: evidenceSnapshot.binding,
       reservation,
     });
-    return { state: 'completed', reservationId: reservation.reservationId, result };
+    return { state: 'completed', reservationId: reservation.reservationId };
   } catch {
-    // A lost/ambiguous dispatch result cannot authorize replay. The caller must
-    // preserve this attempt as unknown and reconcile it using the same receipt.
+    // Only an exception after action invocation may have produced an effect.
+    // Preserve the same attempt as UNKNOWN; never automatically retry it.
     return { state: 'unknown', attemptId: grantSnapshot.attemptId };
   }
 }

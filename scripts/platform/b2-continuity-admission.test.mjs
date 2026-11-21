@@ -69,7 +69,7 @@ function evidenceFor(grant) {
       actionId: grant.actionId,
       actionVerb: grant.actionVerb,
     },
-    syntheticProof: 'test-fixture-only-not-attestation',
+    authenticationProof: 'synthetic-proof-fixture-only-not-attestation',
   };
 }
 
@@ -108,7 +108,7 @@ function reservationFor(grant) {
     actionVerb: grant.actionVerb,
     authorizationRevocationGeneration: grant.authorizationRevocationGeneration,
     dispatchFenceGeneration: 8,
-    syntheticProof: 'test-fixture-only-not-attestation',
+    authenticationProof: 'synthetic-reservation-fixture-only-not-attestation',
   };
 }
 
@@ -138,7 +138,6 @@ test('admits an exact synthetic resource binding after evidence and one-use rese
   assert.deepEqual(result, {
     state: 'completed',
     reservationId: 'reservation-synthetic-1',
-    result: 'synthetic-result',
   });
   assert.equal(calls, 1);
 });
@@ -176,10 +175,10 @@ test('uses immutable snapshots across asynchronous authority callbacks', async (
     grant,
     evidence,
     authority,
-    perform: async ({ grant: actionGrant, evidence: actionEvidence }) => {
+    perform: async ({ grant: actionGrant, binding: actionBinding }) => {
       actionCalls += 1;
       assert.equal(actionGrant.resourceObjectId, 'object-synthetic-1');
-      assert.equal(actionEvidence.binding.resourceObjectId, 'object-synthetic-1');
+      assert.equal(actionBinding.resourceObjectId, 'object-synthetic-1');
       assert.equal(Object.isFrozen(actionGrant), true);
       return 'synthetic-result';
     },
@@ -242,7 +241,10 @@ test('denies rollback, stale identity, expiry, or revocation evidence rejected b
     let actionCalls = 0;
     const result = await admitB2ResourceAction({
       grant,
-      evidence: { ...evidenceFor(grant), rejectedEvidence },
+      evidence: {
+        ...evidenceFor(grant),
+        authenticationProof: `synthetic-rejected-${rejectedEvidence}`,
+      },
       authority: authorityFor(grant, { verifyEvidence: async () => false }),
       perform: async () => {
         actionCalls += 1;
@@ -275,6 +277,9 @@ test('denies mismatched, replayed, or unauthenticated reservation receipts', asy
     },
     (receipt) => {
       receipt.dispatchFenceGeneration = -1;
+    },
+    (receipt) => {
+      receipt.rawMetadata = 'synthetic-unapproved-field';
     },
   ]) {
     const grant = grantFixture();
@@ -327,13 +332,14 @@ test('preserves unknown after an ambiguous action and does not retry', async () 
 test('does not admit a replayed synthetic one-use reservation', async () => {
   const grant = grantFixture();
   const receipt = reservationFor(grant);
-  let verificationCount = 0;
+  let reservationCount = 0;
   const authority = authorityFor(grant, {
-    reserveAction: async () => receipt,
-    verifyReservation: async () => {
-      verificationCount += 1;
-      return verificationCount === 1;
+    reserveAction: async () => {
+      reservationCount += 1;
+      if (reservationCount > 1) throw new Error('synthetic reservation already consumed');
+      return receipt;
     },
+    verifyReservation: async () => true,
   });
   let actionCalls = 0;
   const perform = async () => {
@@ -353,6 +359,76 @@ test('does not admit a replayed synthetic one-use reservation', async () => {
     perform,
   });
   assert.equal(first.state, 'completed');
-  assert.deepEqual(replay, { state: 'denied', reason: 'reservation_unverified' });
+  assert.deepEqual(replay, { state: 'denied', reason: 'reservation_unavailable' });
   assert.equal(actionCalls, 1);
+});
+
+test('pre-dispatch authority failures deny without claiming an unknown action outcome', async () => {
+  for (const authority of [
+    authorityFor(grantFixture(), {
+      verifyEvidence: async () => {
+        throw new Error('synthetic verifier failure');
+      },
+    }),
+    authorityFor(grantFixture(), {
+      reserveAction: async () => {
+        throw new Error('synthetic reservation failure');
+      },
+    }),
+    authorityFor(grantFixture(), {
+      verifyReservation: async () => {
+        throw new Error('synthetic receipt verification failure');
+      },
+    }),
+  ]) {
+    const grant = grantFixture();
+    let actionCalls = 0;
+    const result = await admitB2ResourceAction({
+      grant,
+      evidence: evidenceFor(grant),
+      authority,
+      perform: async () => {
+        actionCalls += 1;
+      },
+    });
+    assert.notEqual(result.state, 'unknown');
+    assert.equal(actionCalls, 0);
+  }
+});
+
+test('rejects unknown fields before an authority or action can observe them', async () => {
+  for (const mutate of [
+    ({ grant }) => {
+      grant.secret = 'synthetic-secret';
+    },
+    ({ evidence }) => {
+      evidence.rawMetadata = 'synthetic-raw';
+    },
+    ({ evidence }) => {
+      evidence.binding.unapproved = 'synthetic-field';
+    },
+  ]) {
+    const grant = grantFixture();
+    const evidence = evidenceFor(grant);
+    mutate({ grant, evidence });
+    let authorityCalls = 0;
+    let actionCalls = 0;
+    const authority = authorityFor(grant, {
+      verifyEvidence: async () => {
+        authorityCalls += 1;
+        return true;
+      },
+    });
+    const result = await admitB2ResourceAction({
+      grant,
+      evidence,
+      authority,
+      perform: async () => {
+        actionCalls += 1;
+      },
+    });
+    assert.equal(result.state, 'denied');
+    assert.equal(authorityCalls, 0);
+    assert.equal(actionCalls, 0);
+  }
 });
